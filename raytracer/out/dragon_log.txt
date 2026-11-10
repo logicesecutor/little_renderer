@@ -1,7 +1,0 @@
-loaded ../models/dragon_recon/dragon_vrip.ply: 871420 primitives in 0.7 s
-octree: 871420 primitives -> 903809 nodes, 790833 leaves, depth 10 (max 10), 5.15 refs/primitive, built in 851.9 ms
-wrote out/cornell_dragon.ppm in 411.1 s (0.45 M paths/s)
-loaded ../models/dragon_recon/dragon_vrip.ply: 871420 primitives in 0.5 s
-octree: 871420 primitives -> 903809 nodes, 790833 leaves, depth 10 (max 10), 5.15 refs/primitive, built in 570.1 ms
-wrote out/cornell_dragon_glass.ppm in 529.3 s (0.35 M paths/s)
-DONE

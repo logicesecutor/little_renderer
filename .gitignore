@@ -53,3 +53,10 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# little_renderer build outputs (make clean removes them)
+/build/
+/bin/
+# benchmark images
+/out/bench_*.ppm
+out/*

@@ -2,9 +2,9 @@
     "tasks": [
         {
             "type": "shell",
-            "label": "make: build renderer",
+            "label": "make: build engine, apps and examples",
             "command": "make",
-            "args": ["main"],
+            "args": ["all"],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
@@ -15,7 +15,7 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "Builds all .c files via the Makefile (the old single-file task cannot link several files)."
+            "detail": "Builds build/float/liblr.a and everything in bin/ via the Makefile (make DOUBLE=1 for double)."
         },
         {
             "type": "cppbuild",
