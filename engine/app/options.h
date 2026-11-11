@@ -38,7 +38,7 @@ typedef struct {
     double buoyancy;       // the cloud rises with this acceleration per unit density
     double vorticity;      // vorticity confinement strength
     int seed;              // where things start
-    int gif;               // sim: also make <out>.gif with tools/frames_to_gif.py (needs Pillow)
+    int gif;               // sim: also make <out>.gif with tools/frames_to_gif.py (uv, or python3 + Pillow)
 } SimOptions;
 
 #define AUTO_ACCEL_MIN_PRIMS 64   // "-accel auto": below this, brute force is fastest
@@ -63,6 +63,11 @@ typedef struct {
     // rasterizer
     RenderMode shading;    // wireframe, flat, gouraud or phong
     int raster_clouds;     // draw the media by raymarching (raster/volume_march.h), default on
+    int gpu;               // view: use the GPU (gpu/): 0 off, 1 on (default in a web browser), 2 offscreen
+    int gpu_fluid;         // view -sim on with the GPU: step the air there too (default 1)
+    int gpu_raster;        // view with the GPU: the rasterizer's triangles are drawn there (default 1)
+    int gpu_trace;         // view with the GPU: it path traces too, while the scene stands still
+                           // (1 / 0; -1 = automatic: yes unless the GPU is a software one)
     MarchParams march;     // -march (steps), -lightres
 
     // scene

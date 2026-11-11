@@ -44,6 +44,31 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p);
 // p->eye, p->mode (TEXTURED acts as PHONG) and p->cull_backfaces. Does NOT clear fb.
 void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p);
 
+// ---- what render_scene draws, piece by piece ------------------------------------------
+// For other rasterizers of the same Scene (the GPU's, gpu/raster_gpu.c): the same
+// triangles, the same lamp, the same material model, so that they draw the same image.
+
+#define RENDER_SCENE_AMBIENT 0.08f
+#define RENDER_SCENE_LAMP 0.70f       // weight of the point light
+#define RENDER_SCENE_FILL 0.22f       // weight of the light from the camera
+#define RENDER_SPHERE_STACKS 16
+#define RENDER_SPHERE_SLICES 32
+// a sphere is a latitude / longitude grid; every cell is 2 triangles, 1 at the poles
+#define RENDER_SPHERE_TRIS (2 * RENDER_SPHERE_STACKS * RENDER_SPHERE_SLICES - 2 * RENDER_SPHERE_SLICES)
+
+// triangles a primitive is drawn with: 2 for a quad, RENDER_SPHERE_TRIS for a sphere
+int render_prim_tri_count(const Primitive *p);
+// Triangle `sub` of a primitive: its world-space corners and, if wn is not NULL, its vertex
+// normals (*has_n = 0 when it has none: use the face normal) and the point where flat
+// shading is evaluated (a quad's center, so that both halves get one color).
+void render_prim_triangle(const Primitive *p, int sub, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at);
+// the point light standing in for the scene's lamp
+Vec3 render_scene_light(const Scene *s);
+// how a material is drawn: brightness k = AMBIENT + LAMP * max(n.l, 0) + FILL * n.eye (n
+// turned towards the eye), color = base * k + spec_k * (n.h)^spec_exp; `constant`: just base
+typedef struct { Vec3 base; real spec_k, spec_exp; int constant; } RenderMaterial;
+RenderMaterial render_scene_material(const Material *m);
+
 const char *render_mode_name(RenderMode mode);
 int render_mode_from_name(const char *name);   // -1 if unknown
 

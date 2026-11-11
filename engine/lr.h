@@ -1,7 +1,8 @@
 // lr.h - little_renderer: a rendering engine written from scratch in C.
 // Include this one header and link with liblr.a (see SDK.md):
 //
-//   cc -Iengine my_app.c build/float/liblr.a -lm -lX11 -fopenmp
+//   cc -Iengine my_app.c build/float/liblr.a -lm -lX11 -fopenmp      (Linux)
+//   cc -Iengine my_app.c build/float/liblr.a -lm -lgdi32 -fopenmp    (Windows, MSYS2)
 //
 // Layers (each one only uses the layers above it):
 //   core/      math, random numbers, images, camera, meshes, scenes,

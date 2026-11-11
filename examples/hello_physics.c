@@ -3,7 +3,13 @@
 //
 //   make bin/hello_physics && bin/hello_physics     -> out/hello_physics/frame_NN.ppm
 #include <stdio.h>
+#ifdef _WIN32
+#include <direct.h>
+#define make_dir(p) _mkdir(p)
+#else
 #include <sys/stat.h>
+#define make_dir(p) mkdir((p), 0755)
+#endif
 #include "lr.h"
 #include "app/frame.h"   // frame_render_rt: one path traced image
 
@@ -31,8 +37,8 @@ int main(void){
     Camera cam = camera_make(scene.cam_from, scene.cam_at, scene.cam_up, scene.cam_vfov_deg, 1);
     TraceParams tp = trace_default_params();
     Image img = image_create(200, 200);
-    mkdir("out", 0755);
-    mkdir("out/hello_physics", 0755);
+    make_dir("out");
+    make_dir("out/hello_physics");
     for (int f = 0; f < 30; f++){
         for (int k = 0; k < 2; k++) phys_step(&pw, 1.0 / 60);   // 30 frames per second
         phys_sync_scene(&pw, &scene);                           // move the sphere primitive

@@ -1,4 +1,5 @@
 #include "app/options.h"
+#include "gpu/gpu.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@ void options_usage(Program prog, FILE *f){
         "                             blast: an explosion in the cloud at 1 s     (drop)\n"
         "  -frames n                  frames to render                          (120)\n"
         "  -fps n                     frames per second                         (30)\n"
-        "  -gif on|off                also write <-o>.gif (python3 + Pillow)    (on)\n");
+        "  -gif on|off                also write <-o>.gif (uv, or python3 + Pillow) (on)\n");
     if (sim || view) fprintf(f,
         "%s"
         "  -balls n / -boxes n / -balloons n   how many of each                (5 / 3 / 3)\n"
@@ -40,7 +41,14 @@ void options_usage(Program prog, FILE *f){
         "  -shading phong|gouraud|flat|wireframe   rasterizer shading       (phong)\n"
         "  -rastercloud on|off        rasterizer: draw clouds and fog by raymarching (on)\n"
         "  -march n / -lightres n     raymarching: max steps per ray / light grid size (128 / 48)\n"
-        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n", view ? "2" : "1");
+        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n"
+        "  -gpu on|off|offscreen      render (rasterizer, path tracer, clouds) and simulate the air on the GPU\n"
+        "                             (WebGPU; on when the build has it: make web, or make deps natively);\n"
+        "                             offscreen: the GPU draws into a texture read back to the canvas\n"
+        "  -gpufluid on|off           with -sim on and the GPU: the air and the cloud are simulated there too\n"
+        "  -gpuraster on|off          with the GPU: the rasterizer's triangles are drawn there too\n"
+        "  -gputrace on|off           with the GPU: it path traces too, while the scene stands still\n"
+        "                             (default: on, off for a software GPU, which is slower than the CPU at it)\n", view ? "2" : "1");
     else if (sim) fprintf(f,
         "backend\n"
         "  -backend rt|raster         path tracer, or rasterizer (raymarched cloud: fast) (rt)\n"
@@ -147,6 +155,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->photons = 1;
     o->shading = MODE_PHONG;
     o->raster_clouds = 1;
+    o->gpu = gpu_available();              // the GPU whenever the build has one (make deps, make web)
+    o->gpu_fluid = 1;
+    o->gpu_raster = 1;
+    o->gpu_trace = -1;                     // decided when the GPU is known
     o->march = march_default_params();
     o->scene.kind = SCENE_BOXES;
     o->scene.obj_path = "models/torus.obj";
@@ -210,6 +222,27 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-march"))   o->march.max_steps = atoi(v);
         else if (!strcmp(a, "-lightres")) o->march.light_res = atoi(v);
         else if (!strcmp(a, "-marchscale")){ o->march.scale = atoi(v); march_scale_set = 1; }
+        else if (!strcmp(a, "-gpu")){
+            if (!strcmp(v, "on")) o->gpu = 1;
+            else if (!strcmp(v, "off")) o->gpu = 0;
+            else if (!strcmp(v, "offscreen")) o->gpu = 2;
+            else fail(prog, "expected on, off or offscreen after -gpu, got", v);
+        }
+        else if (!strcmp(a, "-gpufluid")){
+            if (!strcmp(v, "on")) o->gpu_fluid = 1;
+            else if (!strcmp(v, "off")) o->gpu_fluid = 0;
+            else fail(prog, "expected on or off after -gpufluid, got", v);
+        }
+        else if (!strcmp(a, "-gpuraster")){
+            if (!strcmp(v, "on")) o->gpu_raster = 1;
+            else if (!strcmp(v, "off")) o->gpu_raster = 0;
+            else fail(prog, "expected on or off after -gpuraster, got", v);
+        }
+        else if (!strcmp(a, "-gputrace")){
+            if (!strcmp(v, "on")) o->gpu_trace = 1;
+            else if (!strcmp(v, "off")) o->gpu_trace = 0;
+            else fail(prog, "expected on or off after -gputrace, got", v);
+        }
         else if (!strcmp(a, "-rastercloud")){
             if (!strcmp(v, "on")) o->raster_clouds = 1;
             else if (!strcmp(v, "off")) o->raster_clouds = 0;

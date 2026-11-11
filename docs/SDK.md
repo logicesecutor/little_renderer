@@ -9,7 +9,8 @@ and links `liblr.a`; that is all. The two apps in `apps/` and the four programs 
 | `make` | `build/float/liblr.a` | `bin/` | `float` (default: faster, half the memory) |
 | `make DOUBLE=1` | `build/double/liblr.a` | `bin/double/` | `double` (compiled with `-DLR_DOUBLE`) |
 
-Include path `-Iengine`, header `lr.h`, link `-lm -lX11` (X11 only matters if you open a
+Include path `-Iengine`, header `lr.h`, link `-lm -lX11` on Linux, `-lm -lgdi32` on
+Windows (MSYS2) (X11 only matters if you open a
 window, but the library contains the window code, so link it anyway), and `-fopenmp`:
 the library itself uses OpenMP (the rasterizer and the option parser), so it must be
 linked, unless the library was built with `make SINGLE=1`.
@@ -52,7 +53,8 @@ Rules of thumb:
 | `core/` | everything both backends share | `lrmath.h`, `rng.h`, `image.h`, `texture.h`, `camera.h`, `mesh.h`, `scene.h` |
 | `raster/` | the rasterizer | `raster.h`, `render.h` |
 | `rt/` | the path tracer | `intersect.h`, `octree.h`, `bvh.h`, `accel.h`, `tracer.h` |
-| `platform/` | the window | `window.h` |
+| `platform/` | the window (X11, Win32, an HTML canvas) | `window.h` |
+| `gpu/` | the GPU backend (WebGPU; not in `lr.h`) | `gpu.h`, `view_gpu.h`, `fluid_gpu.h` |
 | `app/` | the command line of `render` and `view` (not in `lr.h`) | `app/options.h` |
 
 The usual program: build a `Scene` (core), then draw it with `render_scene` (raster) or
@@ -236,20 +238,23 @@ To show a path traced `Image`, convert each pixel with `image_pack_srgb` into
 | `core/volume.h` | `Volume` (density grid + `sigma_t`, `albedo`, `g`), `volume_create`, `volume_free`, `volume_update`, `volume_density` (trilinear), `volume_voxel_center`, `phase_hg`; `CloudParams`, `cloud_default_params`, `Cloud`, `cloud_init`, `cloud_density`, `volume_make_cloud`, `volume_new_cloud`, `volume_add_cloud` (a cloud into part of a bigger grid); `Volume.version` (changes at every `volume_update`) |
 | `core/scene.h` | `Material`, `MatType` (`MAT_DIFFUSE`, `MAT_MIRROR`, `MAT_GLASS`, `MAT_LIGHT`), `Primitive`, `Aabb`, `make_sphere`, `make_quad`, `primitive_bounds`, `Triangle`, `triangle_bounds`, `scene_add_triangle`, `scene_num_shapes`, `scene_shape_bounds`, `scene_shape_material`, `Scene`, `SceneOptions`, `scene_cornell_box`, `scene_add_material`, `scene_add_prim`, `scene_add_mesh`, `scene_load_mesh`, `scene_light_center`, `scene_add_volume`, `scene_free` |
 | `raster/raster.h` | `draw_line` (Bresenham), `draw_triangle` (edge functions, z-test, perspective-correct varyings), `draw_line_rows` / `draw_triangle_rows` (the same, limited to some rows, so threads can share a framebuffer), `ScreenVert`, `FragShader`, the `V_*` varying slots |
-| `raster/render.h` | `RenderMode`, `RenderParams`, `render_default_params`, `render_params_camera`, `render_mesh`, `render_scene`, `render_mode_name`, `render_mode_from_name` |
+| `raster/render.h` | `RenderMode`, `RenderParams`, `render_default_params`, `render_params_camera`, `render_mesh`, `render_scene`, `render_mode_name`, `render_mode_from_name`; what `render_scene` draws, for other rasterizers: `render_prim_tri_count`, `render_prim_triangle`, `render_scene_light`, `render_scene_material`, `RENDER_SCENE_*` |
 | `raster/volume_march.h` | `MarchParams` (`max_steps`, `step_voxels`, `light_res`, `ambient`, `octaves`, `brightness`, `scale`), `march_default_params`, `RasterVolumes`, `raster_volumes_create`, `raster_draw_volumes(rv, fb, scene, params, march)`, `raster_volumes_timing`, `raster_volumes_free` |
 | `rt/intersect.h` | `Hit` (shading normal `n`, geometric normal `ng`), `aabb_hit` (slab test), `intersect_primitive`, `intersect_shape` |
 | `rt/octree.h`, `rt/bvh.h` | the two acceleration structures (normally used through `scene_set_accel`): `octree_build`, `octree_intersect`, `octree_auto_depth`, `bvh_build`, `bvh_intersect` |
-| `rt/accel.h` | `AccelKind`, `AccelParams`, `accel_default_params`, `scene_set_accel`, `scene_accel_kind`, `accel_name`, `scene_accel_stats`, `scene_intersect`, `scene_occluded` |
+| `rt/accel.h` | `AccelKind`, `AccelParams`, `accel_default_params`, `scene_set_accel`, `scene_accel_kind`, `scene_bvh`, `accel_name`, `scene_accel_stats`, `scene_intersect`, `scene_occluded` |
 | `rt/medium.h` | `medium_sample_distance` (delta tracking), `medium_transmittance` (ratio tracking), both on the majorant grid; `scene_medium_collision`, `scene_medium_transmittance` (all media of a scene); `medium_sample_phase` (Henyey-Greenstein) |
 | `rt/tracer.h` | `TraceParams` (`max_depth`, `mis`, `skip_caustics`), `trace_default_params`, `trace_path_ex(scene, ray, rng, params)`, `trace_path(scene, ray, rng, max_bounces)` (defaults: MIS on): linear RGB radiance of one path; `light_trace_caustics(scene, cam, w, h, photons, params, seed, image)`: adds the light-traced caustics (RAYTRACER.md 5.14) |
-| `platform/window.h` | `LrWindow`, `LrEvent`, `window_open`, `window_poll`, `window_present`, `window_set_title`, `window_close`, the `LR_KEY_*` codes |
+| `platform/window.h` | `LrWindow`, `LrEvent`, `window_open`, `window_poll`, `window_present`, `window_set_title`, `window_close`, the `LR_KEY_*` codes, `window_native` (the OS handles, for a GPU to draw in the window) |
 | `phys/rigid.h` | `Body`, `BodyShape`, `Contact`, `RigidWorld`, `rigid_init`, `rigid_free`, `rigid_set_room`, `rigid_add_sphere`, `rigid_add_box`, `rigid_step`, `body_inv_inertia_world`, `body_point_velocity`, `body_contains`, `body_apply_impulse`, `rigid_kinetic_energy`, `rigid_momentum` |
 | `phys/fluid.h` | `Fluid` (MAC grid, parameters: `wind`, `wind_rate`, `buoyancy`, `vorticity`, `dissipation`, `pressure_cycles`, `open`), `FLUID_OPEN_*`, `fluid_create(bounds, cell, density_volume)`, `fluid_free`, `fluid_step`, `fluid_velocity`, `fluid_add_impulse`, `fluid_add_expansion`, `fluid_clear_solids`, `fluid_kinetic_energy`, `fluid_total_density` |
 | `phys/poisson.h` | `Poisson`, `poisson_init`, `poisson_setup`, `poisson_solve` (multigrid V-cycles), `poisson_residual`, `poisson_free` |
-| `phys/world.h` | `PhysWorld` (a `RigidWorld` + a `Fluid`, coupled), `phys_init`, `phys_free`, `phys_step`, `phys_blast`, `phys_air_force`, `phys_air_velocity_around`, `phys_add_to_scene`, `phys_sync_scene` |
+| `phys/world.h` | `PhysWorld` (a `RigidWorld` + a `Fluid`, coupled), `phys_init`, `phys_free`, `phys_step`, `phys_blast`, `phys_air_force`, `phys_air_velocity_around`, `phys_add_to_scene`, `phys_sync_scene`; `air_step` / `air_around`: the hooks that let the air be stepped elsewhere (the GPU) |
+| `gpu/gpu.h` | `Gpu`, `GpuState`, `gpu_create(canvas or NULL for offscreen, w, h)`, `gpu_state` (poll until `GPU_READY`; `GPU_FAILED` also when the device is lost later), `gpu_message`, `gpu_offscreen`, `gpu_software`, `gpu_destroy`; `gpu_available` (does this build have a GPU backend); natively `gpu_create_window(display, window, w, h)` (the handles from `window_native`), `gpu_poll` (run the callbacks that are ready) and `gpu_wait` (block until the GPU is done). Without a GPU backend (native builds for now) `gpu_state` is always `GPU_FAILED`. |
+| `gpu/view_gpu.h` | `GpuView`, `gpu_view_create`, `gpu_view_present(view, fb, scene, raster params, march params, volumes)`: shows the framebuffer and raymarches the scene's media over it; `gpu_view_present_scene` (the scene rasterized on the GPU, same parameters as `render_scene`); path tracing: `GpuTraceParams`, `gpu_view_trace_start`, `gpu_view_trace_more` (every frame), `gpu_view_trace_passes`, `gpu_view_trace_busy`, `gpu_view_trace_read` (the samples back at full precision), `gpu_view_present_traced`; `gpu_view_capture` (an asynchronous readback), `gpu_view_destroy` |
+| `gpu/fluid_gpu.h` | `GpuFluid`, `gpu_fluid_create(gpu, physworld)`: from then on `phys_step` steps the air on the GPU; `gpu_fluid_attach_view` (the view draws the cloud from the GPU), `gpu_fluid_sync_cloud` (the cloud back into the CPU's `Volume`), `gpu_fluid_pending`, `gpu_fluid_set_wait` (offline: every step runs), `gpu_fluid_destroy`. See WEB.md. |
 | `app/options.h` | the command-line layer of `render` / `view` / `sim`: `options_parse`, `options_setup_scene`, `options_usage`, `options_print_command`. Include it yourself to give your app the same options. |
-| `app/frame.h`, `app/simdemo.h` | `frame_render_rt` (a whole path traced image); the physics demos (`sim_setup`, `sim_step`, ...) |
+| `app/frame.h`, `app/simdemo.h`, `app/gpu_frame.h` | `frame_render_rt` (a whole path traced image); `gpu_frame_open`, `gpu_frame_trace`, `gpu_frame_raster` (whole images on a GPU without a window, read back); the physics demos (`sim_setup`, `sim_step`, ...) |
 
 How each part works: [RAYTRACER.md](RAYTRACER.md), [RASTERIZER.md](RASTERIZER.md),
 [VOLUMES.md](VOLUMES.md) and [PHYSICS.md](PHYSICS.md) (which also shows how to use the
@@ -261,7 +266,7 @@ physics in your program, as `examples/hello_physics.c` does).
 
 - No shared library (`.so`) and no `make install`. Copy `engine/` (headers) and the `.a`
   file, or add the repository as a git submodule.
-- Linux/X11 only for the window (`platform/window.c`, the one file to port). The rest is
-  plain C, but the mesh loader uses POSIX `getline`, which native Windows compilers lack.
-  Under WSL2 everything runs unchanged (on Windows 11 the window appears directly through
-  WSLg).
+- Windows works natively with MSYS2's gcc (`platform/window_win32.c`, USAGE.md section
+  2.1), link with `-lm -lgdi32` instead of `-lm -lX11`. Visual Studio (MSVC) is not
+  supported: the code uses OpenMP 3 tasks and gcc builtins. No macOS window yet (one more
+  `platform/` file).

@@ -19,7 +19,7 @@
 #include "phys/fluid.h"
 #include "phys/rigid.h"
 
-typedef struct {
+typedef struct PhysWorld {
     RigidWorld rigid;
     Fluid *fluid;            // the air, or NULL (bodies only). Owned: phys_free frees it.
     real air_density;        // g / cm^3 (0.0012, air at 20 C)
@@ -28,6 +28,14 @@ typedef struct {
     int substeps;            // rigid-body steps per phys_step (stiffer contacts)
     real time;               // seconds simulated
     double ms_rigid, ms_fluid;   // timings of the last step
+    // The air can be stepped elsewhere, e.g. on the GPU (gpu/fluid_gpu.h). When air_step is
+    // set, phys_step calls it instead of marking the obstacles and stepping pw->fluid on the
+    // CPU, and the drag reads air_around: the air velocity around each body (what
+    // phys_air_velocity_around computes on the CPU), kept up to date by whoever steps the air.
+    void (*air_step)(void *user, struct PhysWorld *pw, real dt);
+    void *air_user;
+    Vec3 *air_around;
+    int nair_around;
 } PhysWorld;
 
 // gravity, defaults, no fluid; then set pw->fluid = fluid_create(...) if wanted

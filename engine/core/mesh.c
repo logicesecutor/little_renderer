@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L   // getline
 #include "core/mesh.h"
 
 #include <ctype.h>
@@ -67,10 +66,33 @@ static void add_polygon(Mesh *m, Caps *cap, int (*corners)[3], int nc){
     }
 }
 
+// One line of any length into *line (grown as needed), like POSIX getline (which Windows
+// does not have). Returns its length, or -1 at the end of the file.
+static long read_line(char **line, size_t *cap, FILE *f){
+    size_t n = 0;
+    if (!*line || *cap < 128){
+        char *p = realloc(*line, 128);
+        if (!p) return -1;
+        *line = p;
+        *cap = 128;
+    }
+    for (;;){
+        if (!fgets(*line + n, (int)(*cap - n), f)) break;
+        n += strlen(*line + n);
+        if (n > 0 && (*line)[n - 1] == '\n') break;
+        if (n + 1 < *cap) continue;            // no newline, but the buffer is not full: end of file next
+        char *p = realloc(*line, *cap * 2);
+        if (!p) return -1;
+        *line = p;
+        *cap *= 2;
+    }
+    return n > 0 ? (long)n : -1;
+}
+
 static int read_obj(FILE *fp, Mesh *m, Caps *cap){
     char *line = NULL;
     size_t linecap = 0;
-    while (getline(&line, &linecap, fp) > 0){
+    while (read_line(&line, &linecap, fp) > 0){
         double x, y, z;   // parse in double, store as real
         if (line[0] == 'v' && line[1] == ' '){
             if (sscanf(line + 2, "%lf %lf %lf", &x, &y, &z) == 3) PUSH(m->v, m->nv, cap->v, vec3(x, y, z));
@@ -110,8 +132,8 @@ static int read_ply(FILE *f, Mesh *m, Caps *cap){
     int nprops = 0, ix = -1, iy = -1, iz = -1, ascii = 0;
     int in_vertex = 0;
 
-    if (getline(&line, &linecap, f) <= 0 || strncmp(line, "ply", 3) != 0){ free(line); return -1; }
-    while (getline(&line, &linecap, f) > 0){
+    if (read_line(&line, &linecap, f) <= 0 || strncmp(line, "ply", 3) != 0){ free(line); return -1; }
+    while (read_line(&line, &linecap, f) > 0){
         char name[64];
         long count;
         if (!strncmp(line, "format ascii", 12)) ascii = 1;
@@ -134,7 +156,7 @@ static int read_ply(FILE *f, Mesh *m, Caps *cap){
         return -1;
     }
 
-    for (long i = 0; i < nverts && getline(&line, &linecap, f) > 0; i++){
+    for (long i = 0; i < nverts && read_line(&line, &linecap, f) > 0; i++){
         double val[3] = {0, 0, 0};
         char *p = line;
         for (int k = 0; k < nprops; k++){
@@ -145,7 +167,7 @@ static int read_ply(FILE *f, Mesh *m, Caps *cap){
         }
         PUSH(m->v, m->nv, cap->v, vec3(val[0], val[1], val[2]));
     }
-    for (long i = 0; i < nfaces && getline(&line, &linecap, f) > 0; i++){
+    for (long i = 0; i < nfaces && read_line(&line, &linecap, f) > 0; i++){
         char *p = line;
         long n = strtol(p, &p, 10);
         if (n < 3 || n > 64) continue;

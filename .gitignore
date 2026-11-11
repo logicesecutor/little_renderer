@@ -57,6 +57,9 @@ dkms.conf
 # little_renderer build outputs (make clean removes them)
 /build/
 /bin/
+/web/build/
+# make deps (the native GPU's library)
+/third_party/
 # benchmark images
 /out/bench_*.ppm
 out/*

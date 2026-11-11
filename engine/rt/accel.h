@@ -23,6 +23,8 @@ AccelParams accel_default_params(void);   // {automatic, 4, 16, SAH}
 // in s->accel (scene_free frees it). Call it again after adding primitives.
 void scene_set_accel(Scene *s, AccelKind kind, const AccelParams *p);
 AccelKind scene_accel_kind(const Scene *s);
+// the scene's BVH when that is its current structure, else NULL (the GPU path tracer copies it)
+const Bvh *scene_bvh(const Scene *s);
 const char *accel_name(AccelKind kind);
 // one line of statistics about the current structure, e.g. for printing
 void scene_accel_stats(const Scene *s, char *buf, int len);

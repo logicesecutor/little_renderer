@@ -7,7 +7,7 @@ as the path tracer (RAYTRACER.md), in milliseconds instead of seconds, with loca
 only. Commands and options: [USAGE.md](USAGE.md). Using it as a library: [SDK.md](SDK.md).
 
 ```sh
-make models                              # cube/sphere/torus .obj into models/ (python3, once)
+make models                              # cube/sphere/torus .obj into models/ (uv or python3, once)
 make demo                                # bin/raster_milestones: one image per milestone into out/*.ppm
 bin/render -backend raster               # the Cornell box, rasterized -> out/cornell_boxes_raster.ppm
 bin/view -backend raster                 # fly through it in real time (V cycles the shading)

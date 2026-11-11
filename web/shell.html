@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>little_renderer</title>
+<style>
+  :root { color-scheme: dark; --bg: #111214; --fg: #e8e6e3; --dim: #9a9894; --line: #2a2b2e; --accent: #e0b25a; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  #title { color: var(--dim); font: 12px/1.4 ui-monospace, monospace; min-height: 1.4em; overflow-wrap: anywhere; }
+  #stage { margin: 12px 0; display: flex; justify-content: center; }
+  canvas { max-width: 100%; height: auto; outline: 1px solid var(--line); background: #000; image-rendering: pixelated; }
+  canvas:focus { outline-color: var(--accent); }
+  #status { color: var(--accent); }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  nav a { color: var(--fg); text-decoration: none; border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; }
+  nav a:hover { border-color: var(--accent); }
+  details { margin-top: 10px; }
+  pre { background: #0b0c0d; border: 1px solid var(--line); padding: 8px; max-height: 220px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+  code { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>little_renderer <span id="status">loading...</span></h1>
+  <div id="title"></div>
+  <div id="stage"><canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas></div>
+  <nav>
+    <a href="?">Cornell box</a>
+    <a href="?scene=cloud">cloud</a>
+    <a href="?scene=spheres&cloud=on&fog=0.002">spheres + cloud + fog</a>
+    <a href="?sim=on">physics: drop</a>
+    <a href="?sim=on&demo=blast">physics: blast</a>
+    <a href="?scene=mesh&obj=models/dragon_recon/dragon_vrip_res2.ply&rot=-35">dragon</a>
+    <a href="?backend=rt&n=320">path tracer</a>
+  </nav>
+  <div>Click the image, then: <code>WASD</code> move, <code>E/Q</code> up/down, drag to look,
+    <code>M</code> mode, <code>V</code> shading, <code>H</code> help. Physics: <code>Space</code> pause,
+    <code>K</code> explosion, <code>N</code> a ball, <code>T</code> restart.
+    Any option of <code>bin/view</code> goes in the address: <code>?scene=cloud&amp;n=480&amp;backend=raster</code>.</div>
+  <details><summary>console</summary><pre id="log"></pre></details>
+</main>
+<script>
+  // ?scene=cloud&n=480  ->  view -scene cloud -n 480 (the same options as bin/view).
+  // Everything inside a function: the Emscripten script below declares its own globals.
+  var Module = (() => {
+    const lrArgs = [];
+    for (const [k, v] of new URLSearchParams(location.search)) { lrArgs.push('-' + k); if (v !== '') lrArgs.push(v); }
+    const lrLog = document.getElementById('log');
+    const lrPrint = (t) => { lrLog.textContent += t + '\n'; lrLog.scrollTop = lrLog.scrollHeight; console.log(t); };
+    return {
+      arguments: lrArgs,
+      canvas: document.getElementById('canvas'),
+      print: lrPrint,
+      printErr: lrPrint,
+      setStatus: (t) => { document.getElementById('status').textContent = t; },
+      onRuntimeInitialized: () => { document.getElementById('status').textContent = ''; document.getElementById('canvas').focus(); },
+    };
+  })();
+  window.onerror = (m) => { document.getElementById('status').textContent = 'error: ' + m; };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

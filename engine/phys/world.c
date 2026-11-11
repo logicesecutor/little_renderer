@@ -34,6 +34,7 @@ static real bound_radius(const Body *b){
 
 Vec3 phys_air_velocity_around(const PhysWorld *pw, int i){
     if (!pw->fluid) return vec3(0, 0, 0);
+    if (pw->air_step) return i < pw->nair_around ? pw->air_around[i] : vec3(0, 0, 0);
     const Body *b = &pw->rigid.bodies[i];
     // just outside the cells the body covers: there the air is free
     real r = (b->shape == BODY_SPHERE ? b->half.x : (b->half.x + b->half.y + b->half.z) / 3) * 1.15f + pw->fluid->h;
@@ -133,7 +134,8 @@ void phys_step(PhysWorld *pw, real dt){
     }
     if (fs != forces) free(fs);
     double t1 = now_ms();
-    if (pw->fluid){
+    if (pw->fluid && pw->air_step) pw->air_step(pw->air_user, pw, dt);
+    else if (pw->fluid){
         mark_solids(pw);
         fluid_step(pw->fluid, dt);
     }

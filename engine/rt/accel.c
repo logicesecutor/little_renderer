@@ -48,6 +48,11 @@ AccelKind scene_accel_kind(const Scene *s){
     return a ? a->kind : ACCEL_NONE;
 }
 
+const Bvh *scene_bvh(const Scene *s){
+    const RtAccel *a = s->accel;
+    return a && a->kind == ACCEL_BVH ? &a->bvh : NULL;
+}
+
 const char *accel_name(AccelKind kind){
     return kind == ACCEL_OCTREE ? "octree" : (kind == ACCEL_BVH ? "bvh" : "none");
 }

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pillow"]
+# ///
 """frames_to_gif.py - the frames of bin/sim (or any folder of frame_NNNN.ppm) into a GIF.
 
-    python3 tools/frames_to_gif.py out/sim out/sim.gif 30
+    uv run tools/frames_to_gif.py out/sim out/sim.gif 30       (uv installs Pillow by itself)
+    python3 tools/frames_to_gif.py out/sim out/sim.gif 30      (needs: pip install pillow)
 
-Needs Pillow (pip install pillow). Every frame gets its own 256-color palette (adaptive,
-with dithering), which suits the smooth gradients of the path traced images.
+Every frame gets its own 256-color palette (adaptive, with dithering), which suits the
+smooth gradients of the path traced images.
 """
 import glob
 import os

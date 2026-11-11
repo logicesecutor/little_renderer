@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """Writes a few test models (cube, sphere, torus) as .obj files into ./models.
 
 Only a development helper: it exists because the renderer needs something to draw.

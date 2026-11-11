@@ -89,6 +89,34 @@ static Vec3 ambient_estimate(const Scene *s, const Lamp *l){
     return r;
 }
 
+// ---- shared with the GPU raymarcher (gpu/view_gpu.c) ----------------------------------------
+
+void march_light_dims(const Volume *v, int light_res, int dims[3]){
+    // no finer than the medium itself
+    Vec3 size = v_sub(v->bounds.hi, v->bounds.lo);
+    real big = r_fmax(size.x, r_fmax(size.y, size.z));
+    int n[3] = {(int)(light_res * size.x / big + 0.5f), (int)(light_res * size.y / big + 0.5f),
+                (int)(light_res * size.z / big + 0.5f)};
+    int vn[3] = {v->nx, v->ny, v->nz};
+    for (int k = 0; k < 3; k++){
+        if (n[k] > vn[k]) n[k] = vn[k];
+        if (n[k] < 2) n[k] = 2;
+        dims[k] = n[k];
+    }
+}
+
+MarchLamp march_lamp(const Scene *s){
+    Lamp l = scene_lamp(s);
+    MarchLamp m = {l.pos, l.normal, l.radiance, l.area};
+    return m;
+}
+
+Vec3 march_ambient(const Scene *s, const MarchParams *mp){
+    if (mp && mp->ambient >= 0) return vec3(mp->ambient, mp->ambient, mp->ambient);
+    Lamp l = scene_lamp(s);
+    return ambient_estimate(s, &l);
+}
+
 // ---- ray against a box ---------------------------------------------------------------------
 
 static int ray_box(Vec3 o, Vec3 inv_d, Aabb b, real *t0, real *t1){
@@ -190,17 +218,10 @@ static void build_grids(RasterVolumes *rv, const Scene *s, const Lamp *l, int li
     for (int k = 0; k < s->nvolumes; k++){
         const Volume *v = s->volumes[k];
         LightGrid *g = &rv->grid[k];
-        // no finer than the medium itself
+        int dims[3];
+        march_light_dims(v, light_res, dims);
+        int nx = dims[0], ny = dims[1], nz = dims[2];
         Vec3 size = v_sub(v->bounds.hi, v->bounds.lo);
-        real big = r_fmax(size.x, r_fmax(size.y, size.z));
-        int nx = (int)(light_res * size.x / big + 0.5f), ny = (int)(light_res * size.y / big + 0.5f),
-            nz = (int)(light_res * size.z / big + 0.5f);
-        if (nx > v->nx) nx = v->nx;
-        if (ny > v->ny) ny = v->ny;
-        if (nz > v->nz) nz = v->nz;
-        if (nx < 2) nx = 2;
-        if (ny < 2) ny = 2;
-        if (nz < 2) nz = 2;
         if (g->nx * g->ny * g->nz != nx * ny * nz || !g->tau){
             free(g->tau);
             g->tau = calloc((size_t)nx * ny * nz, sizeof(float));

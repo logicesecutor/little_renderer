@@ -8,6 +8,7 @@
 #include <omp.h>
 #endif
 
+#include "app/gpu_frame.h"
 #include "app/options.h"
 #include "lr.h"
 
@@ -120,6 +121,52 @@ static int render_rt(const Options *opt, const Scene *scene){
     return err;
 }
 
+// The same image on the GPU (-gpu on, the default when the build has one). -1: the GPU is not
+// there or cannot hold the scene, and the CPU renders it instead.
+static int render_gpu(const Options *opt, Scene *scene){
+    const int W = opt->width, H = opt->height;
+    Gpu *g;
+    GpuView *v;
+    if (gpu_frame_open(W, H, &g, &v)) return -1;
+    RenderParams p = render_params_camera(scene->cam_from, scene->cam_at, scene->cam_up, scene->cam_vfov_deg, W, H);
+    p.mode = opt->shading;
+    int err = 0;
+    double t0 = now_s();
+    if (opt->backend == BACKEND_RASTER){
+        printf("rasterizing %dx%d on the GPU (%s), %s shading\n", W, H, gpu_message(g), render_mode_name(p.mode));
+        Framebuffer *fb = fb_create(W, H);
+        if (!fb || gpu_frame_raster(g, v, scene, &p, &opt->march, opt->raster_clouds && scene->nvolumes > 0, fb)){
+            fb_destroy(fb);
+            gpu_frame_close(g, v);
+            return -1;
+        }
+        err = fb_save_ppm(fb, opt->out);
+        if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
+        else printf("wrote %s in %.1f ms (the first frame on a GPU includes making its pipelines)\n", opt->out, (now_s() - t0) * 1000.0);
+        fb_destroy(fb);
+    } else {
+        printf("path tracing %dx%d on the GPU (%s), %d samples/pixel, max %d bounces%s%s\n", W, H, gpu_message(g), opt->spp,
+               opt->max_depth, opt->clamp > 0 ? ", clamped" : "", opt->mis ? ", MIS" : "");
+        if (opt->caustics_lt)
+            printf("  caustics: path traced (the CPU's light tracing makes them sharp sooner: -gpu off)\n");
+        scene_set_accel(scene, ACCEL_BVH, &opt->ap);              // the GPU traces the same BVH
+        Camera cam = camera_make(scene->cam_from, scene->cam_at, scene->cam_up, scene->cam_vfov_deg, (real)W / H);
+        Image img = image_create(W, H);
+        if (gpu_frame_trace(g, v, scene, &cam, &p, &opt->march, opt->spp, opt->max_depth, opt->mis, (real)opt->clamp, &img, 1)){
+            image_free(&img);
+            gpu_frame_close(g, v);
+            return -1;
+        }
+        double secs = now_s() - t0;
+        err = image_write_ppm(&img, opt->out);
+        if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
+        else printf("wrote %s in %.2f s (%.1f M paths/s)\n", opt->out, secs, (double)W * H * opt->spp / secs / 1e6);
+        image_free(&img);
+    }
+    gpu_frame_close(g, v);
+    return err;
+}
+
 int main(int argc, char **argv){
     Options opt;
     options_parse(&opt, PROG_RENDER, argc, argv);
@@ -127,7 +174,8 @@ int main(int argc, char **argv){
     static Scene scene;   // static: zero-initialised, as scene_cornell_box expects
     if (options_setup_scene(&opt, &scene) != 0) return 1;
 
-    int err = opt.backend == BACKEND_RASTER ? render_raster(&opt, &scene) : render_rt(&opt, &scene);
+    int err = opt.gpu ? render_gpu(&opt, &scene) : -1;
+    if (err < 0) err = opt.backend == BACKEND_RASTER ? render_raster(&opt, &scene) : render_rt(&opt, &scene);
     scene_free(&scene);
     return err;
 }

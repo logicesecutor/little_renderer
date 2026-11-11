@@ -443,11 +443,11 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p){
 // glass are faked with a darker base and a sharp highlight. Good enough to frame a shot
 // before path tracing it.
 
-#define SCENE_AMBIENT 0.08f
-#define SCENE_LAMP 0.70f       // weight of the point light
-#define SCENE_FILL 0.22f       // weight of the light from the camera
-#define SPHERE_STACKS 16
-#define SPHERE_SLICES 32
+#define SCENE_AMBIENT RENDER_SCENE_AMBIENT
+#define SCENE_LAMP RENDER_SCENE_LAMP
+#define SCENE_FILL RENDER_SCENE_FILL
+#define SPHERE_STACKS RENDER_SPHERE_STACKS
+#define SPHERE_SLICES RENDER_SPHERE_SLICES
 
 typedef struct {
     Vec3 base;            // material color
@@ -507,7 +507,7 @@ static Vec3 sphere_dir(int i, int j){
 
 // A sphere is a latitude / longitude grid of SPHERE_STACKS x SPHERE_SLICES cells. Every cell
 // is 2 triangles, except at the poles, where one of the two would have zero area.
-#define SPHERE_TRIS (2 * SPHERE_STACKS * SPHERE_SLICES - 2 * SPHERE_SLICES)
+#define SPHERE_TRIS RENDER_SPHERE_TRIS
 
 // triangle k of a sphere -> cell (y, x) and which half (upper = the one touching row y)
 static void sphere_cell(int k, int *y, int *x, int *upper){
@@ -542,9 +542,10 @@ typedef struct {
     FragShader shader[MAX_MATS];
 } SceneJob;
 
-static int prim_tri_count(const Primitive *p){
+int render_prim_tri_count(const Primitive *p){
     return p->type == PRIM_QUAD ? 2 : SPHERE_TRIS;
 }
+#define prim_tri_count render_prim_tri_count
 
 // triangle i -> (primitive, which of its triangles)
 static void scene_tri_of(const SceneJob *sj, int i, int *prim, int *sub){
@@ -574,7 +575,10 @@ static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n,
         *flat_at = v_scale(v_add(v_add(wp[0], wp[1]), wp[2]), 1.0f / 3.0f);
         return;
     }
-    const Primitive *pr = &s->prims[prim];
+    render_prim_triangle(&s->prims[prim], sub, wp, wn, has_n, flat_at);
+}
+
+void render_prim_triangle(const Primitive *pr, int sub, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at){
     if (pr->type == PRIM_QUAD){
         Vec3 a = pr->q, b = v_add(pr->q, pr->u), c = v_add(b, pr->v), d = v_add(pr->q, pr->v);
         wp[0] = a;
@@ -631,6 +635,30 @@ static void scene_vertices(const TriJob *j, int i, ClipVert *cv, FragShader *sha
     *wire = sh->flat_color;
 }
 
+// the point light: at the lamp's center, moved off the lamp's plane by half the lamp's
+// size on the side it shines to (an area light lights the wall around it a little, a
+// point light on that wall would not)
+Vec3 render_scene_light(const Scene *s){
+    Vec3 light_pos = scene_light_center(s);
+    if (s->light >= 0 && s->light < s->nprims){
+        const Primitive *l = &s->prims[s->light];
+        light_pos = v_add(light_pos, v_scale(l->normal, 0.5f * r_sqrt(l->area)));
+    }
+    return light_pos;
+}
+
+RenderMaterial render_scene_material(const Material *mt){
+    RenderMaterial rm = {mt->albedo, 0, 1, 0};
+    if (mt->type == MAT_LIGHT){
+        real mx = v_max(mt->emission);               // show the light's color at full brightness
+        rm.base = mx > 0 ? v_scale(mt->emission, 1.0f / mx) : mt->emission;
+        rm.constant = 1;
+    }
+    if (mt->type == MAT_MIRROR){ rm.base = v_scale(mt->albedo, 0.45f); rm.spec_k = 0.7f; rm.spec_exp = 80; }
+    if (mt->type == MAT_GLASS){  rm.base = v_scale(mt->albedo, 0.25f); rm.spec_k = 0.9f; rm.spec_exp = 120; }
+    return rm;
+}
+
 void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
     srgb_lut_init();
     RenderMode mode = p->mode == MODE_TEXTURED ? MODE_PHONG : p->mode;
@@ -638,33 +666,19 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
     SceneJob *sj = xmalloc(sizeof(*sj));
     sj->s = s;
 
-    // the point light: at the lamp's center, moved off the lamp's plane by half the lamp's
-    // size on the side it shines to (an area light lights the wall around it a little, a
-    // point light on that wall would not)
-    Vec3 light_pos = scene_light_center(s);
-    if (s->light >= 0 && s->light < s->nprims){
-        const Primitive *l = &s->prims[s->light];
-        light_pos = v_add(light_pos, v_scale(l->normal, 0.5f * r_sqrt(l->area)));
-    }
+    Vec3 light_pos = render_scene_light(s);
 
     // one shading context per material
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
         const Material *mt = &s->mats[m];
         SceneShading *sh = &sj->sh[m];
+        RenderMaterial rm = render_scene_material(mt);
         sh->eye = p->eye;
         sh->light_pos = light_pos;
-        sh->spec_k = 0;
-        sh->spec_exp = 1;
-        if (mt->type == MAT_LIGHT){
-            real mx = v_max(mt->emission);           // show the light's color at full brightness
-            sh->base = mx > 0 ? v_scale(mt->emission, 1.0f / mx) : mt->emission;
-            sj->shader[m] = shade_constant;
-        } else {
-            sh->base = mt->albedo;
-            if (mt->type == MAT_MIRROR){ sh->base = v_scale(mt->albedo, 0.45f); sh->spec_k = 0.7f; sh->spec_exp = 80; }
-            if (mt->type == MAT_GLASS){  sh->base = v_scale(mt->albedo, 0.25f); sh->spec_k = 0.9f; sh->spec_exp = 120; }
-            sj->shader[m] = mode == MODE_PHONG ? shade_scene_phong : shade_scene_light;
-        }
+        sh->base = rm.base;
+        sh->spec_k = rm.spec_k;
+        sh->spec_exp = rm.spec_exp;
+        sj->shader[m] = rm.constant ? shade_constant : (mode == MODE_PHONG ? shade_scene_phong : shade_scene_light);
         sh->flat_color = image_pack_srgb(sh->base);
     }
 

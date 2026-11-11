@@ -18,7 +18,7 @@ for `models/` and write into `out/` relative to it.
 | `bin/hello_rt`, `bin/hello_raster`, `bin/custom_scene` | `examples/` | small programs using the library (see `SDK.md`); write into `out/` |
 | `bin/test_medium` | `examples/test_medium.c` | unit test of the volume sampling (`make test`) |
 | `bin/test_physics` | `examples/test_physics.c` | the physics against known answers (`make test`) |
-| `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.ppm` into an animated GIF (needs Pillow) |
+| `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.ppm` into an animated GIF (Pillow: `uv run` brings it, see 2.1) |
 | `tools/gen_models.py` | `tools/` | writes the test models (cube, sphere, torus, dense torus) |
 
 Everything is written from scratch in C. The only libraries are `libm`, `libX11` (for the
@@ -51,12 +51,14 @@ Every program prints its options with `-h`. PPM images open in GIMP, Eye of GNOM
 
 ## 2. Building (one `Makefile` in the top folder)
 
+The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.1).
+
 | command | what it does |
 |---|---|
 | `make` or `make all` | the library, the three apps, all examples |
 | `make lib` | only `build/float/liblr.a` |
 | `make apps` / `make examples` | only the three programs / only the examples |
-| `make bin/render` (or any `bin/...`) | just that one program (and the library) |
+| `make bin/render` (or any `bin/...`) | just that one program (and the library); on Windows `make bin/render.exe` |
 | `make check-layers` | checks that `core` includes nothing else and `raster`, `rt`, `phys`, `platform` only `core` |
 | `make models` | runs `tools/gen_models.py` |
 | `make dragon-download` | downloads the Stanford dragon into `models/dragon_recon/` |
@@ -104,6 +106,59 @@ What gets built:
 | `build/float/liblr.a` | `engine/*/*.c` (headers next to them; include `engine/lr.h`) |
 | `bin/render`, `bin/view`, `bin/sim` | `apps/*.c` + the library |
 | `bin/hello_raster`, `bin/hello_rt`, `bin/custom_scene`, `bin/raster_milestones`, `bin/test_medium`, `bin/test_physics`, `bin/hello_physics` | `examples/*.c` + the library |
+
+---
+
+### 2.1 Windows (MSYS2)
+
+The engine builds natively on Windows with MSYS2's gcc: same Makefile, same commands. The window is plain Win32 (`engine/platform/window_win32.c`); programs get a
+`.exe` (`bin/render.exe`, ...), and you can still type `bin/render` in the MSYS2 shell.
+
+1. Install MSYS2 (msys2.org), then in its terminal, once:
+   `pacman -S --needed mingw-w64-ucrt-x86_64-gcc make`
+2. Open the **MSYS2 UCRT64** shell (not "MSYS2 MSYS"), go to the folder and build:
+   ```sh
+   cd /f/Projects/little_renderer       # F:\Projects\little_renderer
+   make
+   make models                          # test models (with uv, see below)
+   bin/view                             # the window
+   make test
+   ```
+3. Python tools (`make models`, the GIF of `bin/sim`, `make gif`) run through **uv**
+   when it is installed: `uv run tools/frames_to_gif.py ...` reads the script's header
+   (PEP 723) and installs Pillow into a cached environment by itself. Without uv they use
+   `python3` (then `pip install pillow`). uv installs itself into `%USERPROFILE%\.local\bin`,
+   which the MSYS2 shell does not have in its PATH; the Makefile and `bin/sim` look there
+   anyway. To type `uv` yourself in that shell, add it to the PATH
+   (`export PATH="$PATH:$(cygpath -u "$USERPROFILE")/.local/bin"`, e.g. in `~/.bashrc`),
+   or start MSYS2 with `MSYS2_PATH_TYPE=inherit`.
+
+Visual Studio (MSVC) is not supported: the code needs OpenMP 3 (tasks in the BVH build)
+and gcc builtins. A `.ppm` opens in GIMP or IrfanView on Windows.
+
+### 2.2 The GPU (natively: make deps)
+
+```sh
+make deps      # once: wgpu-native (a WebGPU library) into third_party/wgpu
+make           # every build now uses the GPU when one is found; NOGPU=1 to build without
+```
+
+`bin/view`, `bin/render` and `bin/sim` then rasterize, path trace and simulate the air on
+the GPU. `-gpu off` runs everything on the CPU. `make deps-clean` removes the library.
+Details and measurements are in docs/WEB.md, section 3.
+
+### 2.3 Web browser (Emscripten, WebGPU)
+
+`bin/view` also runs in a browser, on the GPU (docs/WEB.md has everything):
+
+```sh
+source /f/Tools/emsdk/emsdk_env.sh      # once per shell (Linux: ~/emsdk/emsdk_env.sh)
+make web                                # -> web/build/
+make serve                              # then open http://localhost:8000
+make webtest                            # the GPU air against the CPU's: web/build/test_gpu_fluid.html
+```
+
+The options go in the address: `http://localhost:8000/?scene=cloud&backend=raster`.
 
 ---
 
@@ -216,6 +271,10 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-movespp n` | samples per pixel of each low-resolution frame while moving | 1 |
 | `-speed units` | movement speed in scene units per second | 300 |
 | `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks) | 0 = never |
+| `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
+| `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
+| `-gpuraster on\|off` | with the GPU: rasterize the scene there | on |
+| `-gputrace on\|off` | with the GPU: path trace there (while the scene stands still) | on, off for a software GPU |
 
 ### 3.1 Physics (`sim`, and `view -sim on`)
 
@@ -236,7 +295,7 @@ carries, `-fog` adds haze, the camera options work as usual.
 | `-physseed n` | where things start | 1 |
 | `-frames n` | `sim`: frames to render | 120 |
 | `-fps n` | `sim`: frames per second of the animation (the physics steps are at most 1/60 s) | 30 |
-| `-gif on\|off` | `sim`: also write `<-o>.gif` (python3 + Pillow) | on |
+| `-gif on\|off` | `sim`: also write `<-o>.gif` (with `uv run`, else python3 + Pillow) | on |
 | `-o folder` | `sim`: where the frames go (`frame_0000.ppm` ...) | `out/sim` |
 
 `sim`'s image defaults are smaller than `render`'s: `-n 320 -s 32`, `-caustics pt`.
@@ -391,7 +450,7 @@ bin/view -sim on -fluidres 48 -cloudres 128 # the offline grids (slower)
 bin/sim -backend raster                   # the drop demo in ~40 s, cloud raymarched
 bin/render -scene cloud -backend raster   # the raymarched cloud vs ...
 bin/render -scene cloud                   # ... the path traced one
-python3 tools/frames_to_gif.py out/sim out/sim.gif 30   # (re)make the GIF
+make gif FRAMES_DIR=out/sim FPS=30        # (re)make the GIF (uv run tools/frames_to_gif.py ...)
 ```
 
 **Use fewer cores** (to keep the computer responsive): `-threads 4`.
@@ -459,6 +518,8 @@ the render time of each shading mode. For the rasterizer in real time, use
 
 | problem | cause / fix |
 |---|---|
+| `make: gcc: No such file or directory` (Windows) | open the **MSYS2 UCRT64** shell, not "MSYS2 MSYS"; install gcc: `pacman -S mingw-w64-ucrt-x86_64-gcc make` |
+| `could not make the GIF` | install uv (docs.astral.sh/uv), or `pip install pillow` for python3; the frames are in the folder anyway |
 | `cannot open X display` | run `bin/view` from a terminal inside your desktop, or `export DISPLAY=:0` |
 | `could not load models/torus.obj` | run `make models`, and run the programs from the top folder (or pass `-obj`) |
 | `could not write out/...` | run from the top folder, or create the folder: `mkdir -p out` |
@@ -467,7 +528,9 @@ the render time of each shading mode. For the rasterizer in real time, use
 | image too dark with small `-d` | fewer bounces = less indirect light; use the default 50 |
 | `view` feels slow on big models | hybrid: the rasterizer draws the full dragon at ~12 fps on 8 threads; use a smaller window (`-n 400`), a decimated model (`dragon_vrip_res2.ply`), or press `M` for `rt` mode (1/4-resolution preview) |
 | everything is black | the camera is outside the box looking away; press `R` in `view`, or check `-cam`/`-look` |
-| `could not make the GIF` | `pip install pillow`; the frames are in the folder anyway |
 | `view -sim on` is slow / jerky | the physics takes ~30 ms per step at the viewer's defaults: `-fluidres 24 -cloudres 64`, a smaller window, or `Space` to pause and look |
 | the raymarched cloud looks banded or blocky | more steps (`-march 256`), full resolution (`-marchscale 1`), a finer light grid (`-lightres 96`) |
+| the browser build: `GPU not used`, `GPU lost`, a black canvas | docs/WEB.md, section 5 |
+| `GPU not used (no GPU adapter ...)` natively | no Vulkan / Direct3D 12 driver for the GPU: update the GPU driver; `-gpu off` meanwhile |
+| Windows link: many `.drectve ... unrecognized` warnings | harmless (old binutils); `pacman -Syu` in MSYS2 updates them |
 | linker errors / garbage after changing `DOUBLE` | apps and library must use the same precision; the Makefile keeps them in separate folders, so use `bin/double/...` for `DOUBLE=1` |

@@ -4,7 +4,11 @@ A small rendering engine written from scratch in plain C, with two backends that
 same scene: a **rasterizer** (fast, local lighting) and a physically based **path tracer**
 (slow, global illumination), plus a **physics engine** (rigid bodies, and the air that
 carries a volumetric cloud). One static library, one header, apps and examples on top.
-The only dependencies are `libm`, `libX11` (only for the window) and optionally OpenMP.
+The only dependencies are `libm`, the window system (`libX11` on Linux, Win32 on Windows)
+and optionally OpenMP. It builds with gcc on Linux and with MSYS2's gcc on Windows
+(docs/USAGE.md, section 2.1), and with Emscripten for **web browsers**. Everywhere it can
+also run on the **GPU** through WebGPU: in the browser by itself, natively after `make deps`
+(docs/WEB.md).
 
 ## Layout
 
@@ -21,7 +25,9 @@ little_renderer/
 │   │                          participating media: clouds)
 │   ├── phys/                  physics: rigid bodies, the air (stable fluids, multigrid),
 │   │                          the cloud it carries, the coupling between them
-│   ├── platform/              the window (X11)
+│   ├── gpu/                   the GPU backend (WebGPU, shaders in WGSL): rasterizer, path
+│   │                          tracer, clouds raymarched, the air and the cloud simulated
+│   ├── platform/              the window: X11, Win32, or an HTML canvas
 │   └── app/                   what the programs share: options, the physics demos, frames
 ├── apps/
 │   ├── render.c               offline: one image into a PPM, -backend rt|raster -> bin/render
@@ -34,14 +40,17 @@ little_renderer/
 │   ├── raster_milestones.c    the rasterizer step by step           -> bin/raster_milestones
 │   ├── hello_physics.c        a ball falling through a cloud        -> bin/hello_physics
 │   ├── test_medium.c          checks the cloud sampling (make test) -> bin/test_medium
-│   └── test_physics.c         checks the physics (make test)        -> bin/test_physics
+│   ├── test_physics.c         checks the physics (make test)        -> bin/test_physics
+│   └── test_gpu_fluid.c       the GPU air against the CPU's (make webtest, in a browser)
 ├── docs/
 │   ├── USAGE.md               every command, option, key and tunable constant
 │   ├── SDK.md                 how to use the engine in your own program
 │   ├── RAYTRACER.md           how the path tracer works (code + maths)
 │   ├── VOLUMES.md             volumetric clouds: physics, algorithms, next steps
 │   ├── PHYSICS.md             the physics engine: rigid bodies, air, coupling (code + maths)
-│   └── RASTERIZER.md          how the rasterizer works (files + milestones)
+│   ├── RASTERIZER.md          how the rasterizer works (files + milestones)
+│   └── WEB.md                 the engine in a browser, and on the GPU
+├── web/                       shell.html (the page around the program); make web -> web/build/
 ├── tools/                     gen_models.py (test models), frames_to_gif.py (animations)
 ├── models/                    .obj test models + the Stanford dragon
 ├── out/                       rendered images
@@ -50,12 +59,12 @@ little_renderer/
 
 Each layer only uses the ones above it in this list: `core` uses nothing, `raster`, `rt`,
 `phys` and `platform` use only `core`, and the backends and the physics never include each
-other (`make check-layers` verifies it).
+other; `gpu` may use `core`, `raster`, `rt` and `phys` (`make check-layers` verifies it).
 
 ## Quick start
 
 ```sh
-make models                    # test models into models/ (needs python3, once)
+make models                    # test models into models/ (needs uv or python3, once)
 make                           # the library, both apps, the examples
 bin/view                       # fly around the Cornell box (WASD + mouse, M = mode, Esc quits)
 bin/render                     # path trace it to out/cornell_boxes.ppm
@@ -66,6 +75,8 @@ bin/view -sim on               # the same, live (Space pause, K explosion, N ano
 bin/sim -backend raster        # the whole animation in ~40 s: rasterized, cloud raymarched
 bin/hello_rt                   # the 40-line SDK example -> out/hello_rt.ppm
 make DOUBLE=1                  # the same in double precision, into bin/double/
+make deps && make              # the GPU natively (WebGPU through wgpu-native, docs/WEB.md)
+make web && make serve         # in a browser, on the GPU: http://localhost:8000 (docs/WEB.md)
 ```
 
 Every program prints its options with `-h`. All commands and options are in

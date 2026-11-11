@@ -9,7 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define make_dir(p) _mkdir(p)
+#else
 #include <sys/stat.h>
+#define make_dir(p) mkdir((p), 0755)
+#endif
 #include <time.h>
 
 #include "lr.h"
@@ -155,7 +161,7 @@ int main(int argc, char **argv){
     const char *model_path = argc > 1 ? argv[1] : "models/torus.obj";
     const char *tex_path = argc > 2 ? argv[2] : NULL;
 
-    mkdir(OUT_DIR, 0755);   // fine if it already exists
+    make_dir(OUT_DIR);   // fine if it already exists
 
     printf("milestones 0, 1, 3, 5:\n");
     demo_gradient();

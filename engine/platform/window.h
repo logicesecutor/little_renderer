@@ -1,9 +1,12 @@
-// window.h - the only file that talks to the operating system's windowing (X11 / Xlib).
+// window.h - the only part that talks to the operating system's windowing: X11 / Xlib in
+// window.c (Linux), Win32 in window_win32.c (Windows), an HTML canvas in window_web.c (web
+// browsers, Emscripten); each compiles to nothing on the others.
 // A fixed-size window that shows a Framebuffer and reports keyboard and mouse events.
-// Porting the engine to another platform (Win32, Cocoa, SDL...) means rewriting window.c.
+// Porting the engine to another platform (Cocoa, SDL...) means writing one more such file.
 #ifndef LR_WINDOW_H
 #define LR_WINDOW_H
 
+#include <stdint.h>
 #include "core/image.h"
 
 typedef struct LrWindow LrWindow;   // opaque
@@ -39,6 +42,10 @@ int window_poll(LrWindow *win, LrEvent *ev);
 // Shows the framebuffer (its size must match the window).
 void window_present(LrWindow *win, const Framebuffer *fb);
 void window_set_title(LrWindow *win, const char *title);
+// The operating system's handles of the window, for a GPU to draw in it (gpu_create_window):
+// X11: the Display * and the Window; Win32: the HINSTANCE and the HWND. 0 in a browser
+// (the GPU draws on the canvas there).
+int window_native(LrWindow *win, void **display, uintptr_t *window);
 void window_close(LrWindow *win);
 
 #endif

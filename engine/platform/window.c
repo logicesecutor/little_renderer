@@ -1,3 +1,6 @@
+// window.c - the window on Linux (and other X11 systems): plain Xlib. On Windows,
+// window_win32.c is compiled instead, in a browser window_web.c (this file is then empty).
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include "platform/window.h"
 
 #include <X11/XKBlib.h>
@@ -144,6 +147,13 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     XFlush(w->dpy);
 }
 
+int window_native(LrWindow *w, void **display, uintptr_t *window){
+    if (!w) return 0;
+    *display = w->dpy;
+    *window = (uintptr_t)w->win;
+    return 1;
+}
+
 void window_set_title(LrWindow *w, const char *title){
     XStoreName(w->dpy, w->win, title);
 }
@@ -157,3 +167,5 @@ void window_close(LrWindow *w){
     XCloseDisplay(w->dpy);
     free(w);
 }
+
+#endif   // !_WIN32 && !__EMSCRIPTEN__

@@ -240,6 +240,7 @@ void sim_free(Sim *sim){
 
 void sim_status(const Sim *sim, char *buf, int len){
     const PhysWorld *pw = &sim->pw;
-    snprintf(buf, (size_t)len, "t %.2f s | %d bodies, %d contacts | rigid %.1f ms, air %.1f ms",
-             (double)pw->time, pw->rigid.nbodies, pw->rigid.ncontacts, pw->ms_rigid, pw->ms_fluid);
+    snprintf(buf, (size_t)len, "t %.2f s | %d bodies, %d contacts | rigid %.1f ms, air %.1f ms%s",
+             (double)pw->time, pw->rigid.nbodies, pw->rigid.ncontacts, pw->ms_rigid, pw->ms_fluid,
+             pw->air_step ? " (on the GPU)" : "");
 }

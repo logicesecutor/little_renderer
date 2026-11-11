@@ -88,7 +88,7 @@ static inline Vec3 v_reflect(Vec3 d, Vec3 n){ return v_sub(d, v_scale(n, 2.0 * v
 static inline Vec3 v_refract(Vec3 d, Vec3 n, real eta){
     real cos_i = r_fmin(v_dot(v_neg(d), n), 1.0);
     Vec3 perp = v_scale(v_add(d, v_scale(n, cos_i)), eta);            // part parallel to the surface
-    Vec3 para = v_scale(n, -r_sqrt(r_fabs(1.0 - v_dot(perp, perp))));  // part along -n
+    Vec3 para = v_scale(n, -r_sqrt(r_fabs((real)1 - v_dot(perp, perp))));  // part along -n
     return v_add(perp, para);
 }
 

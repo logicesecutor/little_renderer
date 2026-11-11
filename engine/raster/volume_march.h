@@ -55,4 +55,12 @@ void raster_draw_volumes(RasterVolumes *rv, Framebuffer *fb, const Scene *s, con
 // timings of the last call (milliseconds): light grids (0 when reused), marching
 void raster_volumes_timing(const RasterVolumes *rv, double *ms_light, double *ms_march);
 
+// The pieces of the lighting model, shared with the GPU raymarcher (gpu/view_gpu.c) so that
+// both draw the same cloud.
+struct Volume;
+typedef struct { Vec3 pos, normal, radiance; real area; } MarchLamp;   // normal 0 = all sides
+MarchLamp march_lamp(const Scene *s);
+Vec3 march_ambient(const Scene *s, const MarchParams *mp);              // the walls' light
+void march_light_dims(const struct Volume *v, int light_res, int dims[3]);
+
 #endif

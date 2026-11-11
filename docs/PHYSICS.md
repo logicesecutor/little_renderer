@@ -29,7 +29,7 @@ bin/test_physics                      # the checks against known answers (also `
 | `app/frame.h/.c` | one path traced frame (apps layer) |
 | `apps/sim.c` | the offline simulation + rendering program |
 | `examples/test_physics.c` | the tests |
-| `tools/frames_to_gif.py` | frames → animated GIF (Pillow) |
+| `tools/frames_to_gif.py` | frames → animated GIF (Pillow; `uv run` installs it by itself) |
 
 `phys/` only includes `core/` (`make check-layers` checks it): the physics knows nothing
 about the renderers. The renderers know nothing about the physics either; the only meeting
