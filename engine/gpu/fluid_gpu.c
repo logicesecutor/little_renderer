@@ -153,12 +153,15 @@ fn fixed_face(ax: i32, q: vec3i) -> vec2f {
 );
 
 /* the cells inside each body become obstacles moving with it (mark_solids in world.c);
-   a body is 6 vec4: position (w: 0 sphere, 1 box), its 3 axes (w: half sizes), velocity
-   (w: bounding radius), angular velocity (w: radius of the drag samples) */
+   a body is 6 vec4: position (w: 0 sphere, 1 box, 2 + k a mesh body whose cells are bits
+   k.. of occ: 48^3 over [-half, half] of its own frame, phys/convex.h), its 3 axes (w: half
+   sizes), velocity (w: bounding radius), angular velocity (w: radius of the drag samples) */
 static const char *K_MARK = WGSL(
 @group(0) @binding(1) var<storage, read> bodies: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> solid: array<u32>;
 @group(0) @binding(3) var<storage, read_write> svel: array<vec4f>;
+@group(0) @binding(4) var<storage, read> occ: array<u32>;
+const OCC = 48;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let id = tid(gid, nw);
@@ -175,6 +178,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
         var inside = false;
         if (pos.w < 0.5) {
             inside = dot(d, d) <= bodies[o + 1u].w * bodies[o + 1u].w;
+        } else if (pos.w > 1.5) {
+            let half = vec3f(bodies[o + 1u].w, bodies[o + 2u].w, bodies[o + 3u].w);
+            let l = vec3f(dot(bodies[o + 1u].xyz, d), dot(bodies[o + 2u].xyz, d), dot(bodies[o + 3u].xyz, d));
+            let q = vec3i(floor((l + half) / (2.0 * half) * f32(OCC)));
+            if (all(q >= vec3i(0)) && all(q < vec3i(OCC))) {
+                let i = u32((q.z * OCC + q.y) * OCC + q.x) + u32(pos.w - 2.0 + 0.5) * 1024u;   /* in units of 32 words */
+                inside = ((occ[i >> 5u] >> (i & 31u)) & 1u) != 0u;
+            }
         } else {
             inside = abs(dot(bodies[o + 1u].xyz, d)) <= bodies[o + 1u].w && abs(dot(bodies[o + 2u].xyz, d)) <= bodies[o + 2u].w &&
                      abs(dot(bodies[o + 3u].xyz, d)) <= bodies[o + 3u].w;
@@ -648,7 +659,7 @@ enum { K_MARK_, K_BOUND_, K_FORCES_, K_VA_, K_VB_, K_VC_, K_VD_, K_ADV_, K_DIV_,
 // what each kernel is made of: its bindings, its body, and the pieces it needs
 enum { NEED_VEL = 1, NEED_SOLID = 2, NEED_FIXED = 4, NEED_D0 = 8, NEED_D0MM = 16, NEED_D1 = 32, NEED_NSUM = 64, LEVEL = 128 };
 static const struct { const char *name, *types; const char **body; int needs; } KERNELS[NK] = {
-    {"air: obstacles",    "URWW",     &K_MARK, 0},
+    {"air: obstacles",    "URWWR",    &K_MARK, 0},
     {"air: walls",        "UWWWRR",   &K_BOUND, NEED_SOLID | NEED_FIXED},
     {"air: forces",       "UWWWR",    &K_FORCES, 0},
     {"air: vorticity 1",  "URRRW",    &K_VA, 0},
@@ -689,6 +700,9 @@ struct GpuFluid {
     WGPUBuffer dens, d0, d1;
     WGPUBuffer bodies, around;    // per body: 6 vec4 in, 1 vec4 out
     size_t bodies_cap, around_cap;
+    WGPUBuffer occ;               // the mesh bodies' shapes: which cells they fill
+    size_t occ_cap;
+    int nocc;                     // shapes uploaded
     int nb_bodies;                // bodies the bind groups below were made for
     WGPUBindGroup bg[NK];         // the fluid kernels' bind groups (MARK and SAMP follow the bodies)
     GLevel lv[POISSON_MAX_LEVELS];
@@ -808,16 +822,24 @@ static void make_bind_groups(GpuFluid *gf){
 }
 
 // the bodies' buffers can grow: their bind groups follow
-static void reserve_bodies(GpuFluid *gf, int n){
+_Static_assert(OCC_RES == 48 && OCC_WORDS % 32 == 0, "K_MARK's OCC, and its offsets in units of 32 words");
+
+static void reserve_bodies(GpuFluid *gf, const RigidWorld *rw){
     Gpu *g = gf->g;
+    int n = rw->nbodies;
     int grown = gpu_buffer_reserve(g, &gf->bodies, &gf->bodies_cap, (size_t)(n > 0 ? n : 1) * 96,
                                    WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "bodies");
     grown |= gpu_buffer_reserve(g, &gf->around, &gf->around_cap, (size_t)(n > 0 ? n : 1) * 16,
                                 WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc, "air around bodies");
+    grown |= gpu_buffer_reserve(g, &gf->occ, &gf->occ_cap, (size_t)(rw->ngeoms > 0 ? rw->ngeoms : 1) * OCC_WORDS * 4,
+                                WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "mesh bodies' cells");
+    if (grown) gf->nocc = 0;
+    for (; gf->nocc < rw->ngeoms; gf->nocc++)          // shapes never change once made
+        wgpuQueueWriteBuffer(g->queue, gf->occ, (uint64_t)gf->nocc * OCC_WORDS * 4, rw->geoms[gf->nocc]->occ, OCC_WORDS * 4);
     if (!grown && gf->bg[K_MARK_]) return;
     if (gf->bg[K_MARK_]) wgpuBindGroupRelease(gf->bg[K_MARK_]);
     if (gf->bg[K_SAMP_]) wgpuBindGroupRelease(gf->bg[K_SAMP_]);
-    BG(K_MARK_, gf->fp, gf->bodies, gf->solid, gf->svel);
+    BG(K_MARK_, gf->fp, gf->bodies, gf->solid, gf->svel, gf->occ);
     BG(K_SAMP_, gf->fp, gf->u, gf->v, gf->w, gf->bodies, gf->around);
 }
 
@@ -842,7 +864,7 @@ static void level_params(GpuFluid *gf, int k){
 
 static void free_all(GpuFluid *gf){
     WGPUBuffer bufs[] = {gf->fp, gf->u, gf->v, gf->w, gf->tu, gf->tv, gf->tw, gf->p, gf->div, gf->solid, gf->svel, gf->cvel,
-                         gf->omg, gf->frc, gf->dens, gf->d0, gf->d1, gf->bodies, gf->around, gf->around_rb, gf->dens_rb};
+                         gf->omg, gf->frc, gf->dens, gf->d0, gf->d1, gf->bodies, gf->around, gf->around_rb, gf->dens_rb, gf->occ};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
     for (int k = 0; k < gf->nlevels; k++){
         GLevel *l = &gf->lv[k];
@@ -915,7 +937,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
         level_params(gf, k);
     }
     make_bind_groups(gf);
-    reserve_bodies(gf, pw->rigid.nbodies);
+    reserve_bodies(gf, &pw->rigid);
     for (int i = 0; i < 4; i++) if (!live[i]){ live[i] = gf; break; }
     pw->air_step = air_step;
     pw->air_user = gf;
@@ -1035,7 +1057,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     const int nb = pw->rigid.nbodies;
 
     // the bodies
-    reserve_bodies(gf, nb);
+    reserve_bodies(gf, &pw->rigid);
     if (nb > 0){
         float *bd = realloc(gf->body_data, (size_t)nb * 96);
         if (!bd) return;
@@ -1047,7 +1069,10 @@ static void air_step(void *user, PhysWorld *pw, real dt){
             int sphere = b->shape == BODY_SPHERE;
             real bound = sphere ? b->half.x : v_len(b->half);
             real shell = (sphere ? b->half.x : (b->half.x + b->half.y + b->half.z) / 3) * 1.15f + f->h;
-            v4(o, b->pos, sphere ? 0.0f : 1.0f);
+            float kind = sphere ? 0.0f : 1.0f;
+            for (int k = 0; b->g && k < pw->rigid.ngeoms; k++)
+                if (pw->rigid.geoms[k] == b->g) kind = 2.0f + (float)k * (OCC_WORDS / 32);   // in 32-word units
+            v4(o, b->pos, kind);
             v4(o + 4, sphere ? vec3(1, 0, 0) : mat3_col(r, 0), (float)b->half.x);
             v4(o + 8, sphere ? vec3(0, 1, 0) : mat3_col(r, 1), (float)b->half.y);
             v4(o + 12, sphere ? vec3(0, 0, 1) : mat3_col(r, 2), (float)b->half.z);

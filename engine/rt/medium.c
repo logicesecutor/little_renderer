@@ -193,7 +193,12 @@ real scene_medium_transmittance(const Scene *s, const Ray *ray, real tmin, real 
 // Henyey-Greenstein sampling: invert its cumulative distribution in cos(theta), then pick
 // the azimuth uniformly around d.
 Vec3 medium_sample_phase(Vec3 d, real g, Rng *rng){
-    real xi = rng_real(rng), cos_t;
+    real xi = rng_real(rng);
+    return medium_sample_phase_u(d, g, xi, rng_real(rng));
+}
+
+Vec3 medium_sample_phase_u(Vec3 d, real g, real xi, real u_phi){
+    real cos_t;
     if (r_fabs(g) < 1e-3f){
         cos_t = 1.0f - 2.0f * xi;                    // isotropic
     } else {
@@ -202,7 +207,7 @@ Vec3 medium_sample_phase(Vec3 d, real g, Rng *rng){
     }
     cos_t = cos_t < -1 ? -1 : (cos_t > 1 ? 1 : cos_t);
     real sin_t = r_sqrt(1.0f - cos_t * cos_t);
-    real phi = 2.0f * (real)PI * rng_real(rng);
+    real phi = 2.0f * (real)PI * u_phi;
     Vec3 t, b;
     onb_from_normal(d, &t, &b);
     return v_add(v_add(v_scale(t, sin_t * r_cos(phi)), v_scale(b, sin_t * r_sin(phi))), v_scale(d, cos_t));

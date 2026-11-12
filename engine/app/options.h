@@ -33,6 +33,8 @@ typedef struct {
     int frames;            // sim: frames to render
     double fps;            // sim: frames per second (the physics runs at the same rate, substepped)
     int balls, boxes, balloons;
+    int meshes;            // copies of -obj as moving bodies (their convex hulls)
+    int collider;          // -obj also stands in the room, fixed: its triangles collide
     Vec3 wind;             // the breeze the air drifts towards, units / s
     int fluid_res;         // air cells along the room's side
     double buoyancy;       // the cloud rises with this acceleration per unit density
@@ -57,6 +59,7 @@ typedef struct {
 
     // path tracer estimators
     int mis;               // multiple importance sampling (NEE vs bounce), default on
+    int sampler;           // 1 = Sobol + blue noise (core/sampler.h), 0 = plain random numbers
     int caustics_lt;       // caustics by light tracing (render only), default on
     double photons;        // light paths per camera path for -caustics lt
 
@@ -65,10 +68,12 @@ typedef struct {
     int raster_clouds;     // draw the media by raymarching (raster/volume_march.h), default on
     int gpu;               // view: use the GPU (gpu/): 0 off, 1 on (default in a web browser), 2 offscreen
     int gpu_fluid;         // view -sim on with the GPU: step the air there too (default 1)
+    int gpu_rigid;         // -sim with the GPU: step the rigid bodies there too (default 1)
     int gpu_raster;        // view with the GPU: the rasterizer's triangles are drawn there (default 1)
     int gpu_trace;         // view with the GPU: it path traces too (in rt mode every frame, moving or not)
                            // (1 / 0; -1 = automatic: yes unless the GPU is a software one)
     int denoise;           // GPU path tracing: denoise the image (view and sim 1, render 0)
+    int wavefront;         // GPU path tracing: the wavefront kernels (1) or the single kernel (0)
     MarchParams march;     // -march (steps), -lightres
 
     // scene
@@ -92,6 +97,7 @@ typedef struct {
     double autoquit;       // quit after this many seconds (0 = never); for tests/benchmarks
     double orbit;          // view: the camera swings by itself (+-25 degrees, this many per second)
     int history;           // view, GPU path tracing while moving: samples kept per pixel (0 = none)
+    int photon_cache;      // view, GPU light-traced caustics while moving: from a photon cache
 
     // physics (sim, and view -sim on)
     SimOptions sim;

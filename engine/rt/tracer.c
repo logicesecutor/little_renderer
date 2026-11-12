@@ -5,6 +5,7 @@
 #include "core/volume.h"
 #include "rt/accel.h"
 #include "rt/medium.h"
+#include "core/sampler.h"
 
 // Ray offsets that keep a new ray from re-hitting the surface it starts on ("acne").
 // float has ~7 significant digits: at 555 units one step of float is ~6e-5, so the float
@@ -46,12 +47,14 @@ static inline real light_pdf(const Primitive *light, real dist2, real cos_light)
 // 1 / area" into "probability per unit solid angle", as the rendering equation needs.
 // With MIS the result is weighted against the chance that the cosine-distributed bounce
 // (pdf cos(theta_surface) / pi) would have found the same point.
-static Vec3 sample_direct_light(const Scene *s, const Hit *h, Vec3 albedo, int mis, Rng *rng){
+// (ua, ub: where on the lamp, in [0, 1)^2. The callers pass the pair's second number as ua:
+// the code before the sampler drew both inside one call's arguments, which gcc evaluates
+// last to first, and with the sampler off the images stay those of before, bit for bit.)
+static Vec3 sample_direct_light(const Scene *s, const Hit *h, Vec3 albedo, int mis, real ua, real ub, Rng *rng){
     const Primitive *light = &s->prims[s->light];
     Vec3 le = s->mats[light->material].emission;
 
-    Vec3 xl = v_add(light->q, v_add(v_scale(light->u, rng_real(rng)),
-                                    v_scale(light->v, rng_real(rng))));
+    Vec3 xl = v_add(light->q, v_add(v_scale(light->u, ua), v_scale(light->v, ub)));
     Vec3 to_light = v_sub(xl, h->p);
     real dist2 = v_dot(to_light, to_light);
     real dist = r_sqrt(dist2);
@@ -76,12 +79,11 @@ static Vec3 sample_direct_light(const Scene *s, const Hit *h, Vec3 albedo, int m
 // the light is dimmed by the medium between p and the lamp (the cloud's self-shadowing):
 //
 //   L_direct = phase(d, wi) * Le * T(p <-> light) * cos(theta_light) * area / dist^2
-static Vec3 sample_light_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int mis, Rng *rng){
+static Vec3 sample_light_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int mis, real ua, real ub, Rng *rng){
     const Primitive *light = &s->prims[s->light];
     Vec3 le = s->mats[light->material].emission;
 
-    Vec3 xl = v_add(light->q, v_add(v_scale(light->u, rng_real(rng)),
-                                    v_scale(light->v, rng_real(rng))));
+    Vec3 xl = v_add(light->q, v_add(v_scale(light->u, ua), v_scale(light->v, ub)));
     Vec3 to_light = v_sub(xl, p);
     real dist2 = v_dot(to_light, to_light);
     real dist = r_sqrt(dist2);
@@ -111,16 +113,16 @@ static real schlick(real cos_i, real eta){
 
 // Russian roulette: after a few bounces, stop dim paths at random and boost the survivors
 // by 1/p. On average the result is unchanged (unbiased) but much cheaper. Returns 0 to stop.
-static int russian_roulette(Vec3 *throughput, int depth, Rng *rng){
+static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
     if (depth < RR_START) return 1;
     real p = r_fmin(v_max(*throughput), 0.95);
-    if (rng_real(rng) >= p) return 0;
+    if (sampler_1d(sm, SAMPLE_MISC(depth), 0) >= p) return 0;
     *throughput = v_scale(*throughput, 1.0 / p);
     return 1;
 }
 
 TraceParams trace_default_params(void){
-    TraceParams p = {50, 1, 0};
+    TraceParams p = {50, 1, 0, 1};
     return p;
 }
 
@@ -138,6 +140,12 @@ enum {
 };
 
 Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
+    Sampler sm = sampler_make(rng, 0, 0, 0, 0, 0);      // no pixel, no sequence: all from rng
+    return trace_path_sampled(s, ray, &sm, tp);
+}
+
+Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *tp){
+    Rng *rng = sm->rng;
     const int max_depth = tp->max_depth, mis = tp->mis;
     Vec3 radiance = vec3(0, 0, 0);    // what we have collected so far
     Vec3 throughput = vec3(1, 1, 1);  // how much of the light found from here on reaches the camera
@@ -166,27 +174,31 @@ Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
             // a real collision scatters with probability sigma_s / sigma_t = albedo (else absorbed)
             throughput = v_mul(throughput, vol->albedo);
             // 1. light arriving straight from the lamp, through the cloud
-            radiance = v_add(radiance, v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, rng)));
+            real la, lb;
+            sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
+            radiance = v_add(radiance, v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, lb, la, rng)));
             // 2. continue in a direction drawn from the phase function. Its pdf equals the
             //    phase function, so the weight phase / pdf is 1: throughput is unchanged.
-            Vec3 nd = medium_sample_phase(ray.d, vol->g, rng);
+            real da, db;
+            sampler_2d(sm, SAMPLE_DIR(depth), &da, &db);
+            Vec3 nd = medium_sample_phase_u(ray.d, vol->g, da, db);
             bounce_pdf = phase_hg(v_dot(ray.d, nd), vol->g);
             ray.o = p;
             ray.d = nd;
             emit = mis ? EMIT_MIS : EMIT_NONE;
             caustic_chain = 0;
-            if (!russian_roulette(&throughput, depth, rng)) break;
+            if (!russian_roulette(&throughput, depth, sm)) break;
             continue;
         }
         if (!found) break;                    // escaped: the background is black
 
-        const Material *m = &s->mats[scene_shape_material(s, h.prim)];
+        const Material *m = &s->mats[hit_material(s, &h)];
 
         if (m->type == MAT_LIGHT){
             if (h.front_face && !(caustic_chain && caustic_spec)){
                 if (emit == EMIT_FULL){
                     radiance = v_add(radiance, v_mul(throughput, m->emission));
-                } else if (emit == EMIT_MIS && h.prim == s->light){
+                } else if (emit == EMIT_MIS && h.inst < 0 && h.prim == s->light){
                     // the bounce found the lamp: weight against next event estimation
                     const Primitive *l = &s->prims[s->light];
                     real cos_light = -v_dot(l->normal, ray.d);
@@ -209,10 +221,13 @@ Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
         switch (m->type){
         case MAT_DIFFUSE:
             // 1. light arriving straight from the lamp
-            radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, m->albedo, mis, rng)));
+            real la, lb, da, db;
+            sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
+            radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, m->albedo, mis, lb, la, rng)));
             // 2. continue the path in a cosine-distributed direction. With pdf = cos/pi and
             //    BRDF = albedo/pi, the weight  BRDF * cos / pdf  is simply the albedo.
-            next = sample_cosine_hemisphere(h.n, rng);
+            sampler_2d(sm, SAMPLE_DIR(depth), &da, &db);
+            next = sample_cosine_hemisphere_u(h.n, da, db);
             bounce_pdf = v_dot(h.n, next) / PI;
             throughput = v_mul(throughput, m->albedo);
             emit = mis ? EMIT_MIS : EMIT_NONE;
@@ -232,7 +247,7 @@ Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
             real cos_i = r_fmin(v_dot(v_neg(d), h.n), 1.0);
             real sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
             // total internal reflection, or reflect with probability = Fresnel reflectance
-            if (sin_t2 > 1.0 || rng_real(rng) < schlick(cos_i, eta)) next = v_reflect(d, h.n);
+            if (sin_t2 > 1.0 || sampler_1d(sm, SAMPLE_MISC(depth), 1) < schlick(cos_i, eta)) next = v_reflect(d, h.n);
             else next = v_refract(d, h.n, eta);
             throughput = v_mul(throughput, m->albedo);
             emit = EMIT_FULL;
@@ -244,7 +259,7 @@ Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
             next = d;   // not reached
         }
 
-        if (!russian_roulette(&throughput, depth, rng)) break;
+        if (!russian_roulette(&throughput, depth, sm)) break;
 
         ray.o = h.p;
         ray.d = (media || mis) ? v_norm(next) : next;
@@ -329,7 +344,7 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                 // a scattering event in a medium: that path is the path tracer's job
                 if (media && scene_medium_collision(s, &ray, 0, found ? hit.t : 1e30, &rng, &ts, &which)) break;
                 if (!found) break;
-                const Material *m = &s->mats[scene_shape_material(s, hit.prim)];
+                const Material *m = &s->mats[hit_material(s, &hit)];
                 if (m->type == MAT_LIGHT) break;
 
                 if (m->type == MAT_DIFFUSE){

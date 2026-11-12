@@ -581,6 +581,39 @@ is scrambled by a xorshift and a data-dependent rotation. It is tiny and fast, a
 - **thread independence**: no shared state, no locks, and the result does not depend on
   which thread rendered which row.
 
+**The sampler** (`core/sampler.h`, `-sampler sobol`, the default): the numbers a path uses
+most come from a low-discrepancy sequence instead, the same on the CPU and the GPU
+(`gpu/trace_gpu.c` has the functions in WGSL, with the same results):
+
+- **Dimension pairs:** pair 0 is the camera jitter; each of the first 4 bounces takes
+  three pairs: the lamp point, the new direction (or the phase function's), and the
+  Russian roulette plus the glass choice. Deeper bounces, and the variable number of
+  numbers a medium takes while tracking, come from the PCG32 generator.
+- **The sequence:** each pair is the 2D Sobol sequence, a (0,2)-sequence (every 2^k
+  consecutive points fall one per cell of a 2^(k/2) × 2^(k/2) grid). It is Owen-scrambled
+  with Burley's hash (2020), and the order of its points is shuffled the same way. That is
+  random, yet still stratified, and every pair is scrambled differently.
+- **Blue noise:** the pixels of a 64×64 tile share the sequence, each shifted by its value
+  in a blue-noise mask (a Cranley-Patterson rotation, Georgiev and Fajardo 2016).
+  Neighbouring pixels thus get well separated samples, and the error is fine-grained.
+- **The mask** is made at startup by void-and-cluster (Ulichney 1993): points are added
+  one by one in the largest gap, measured by a wrapping Gaussian. It takes ~50 ms.
+- **The sample index:** a pixel's sample number on the CPU. On the GPU, a counter that
+  starts each image at a multiple of 2^16 and goes on counting while things move, so the
+  samples a pixel keeps from frame to frame (WEB.md 2.5) never repeat.
+
+Measured (512×512 against 4096 spp; RMSE, plain random → sampler): the box 13.9 → 12.2
+at 4 spp, 4.8 → 3.5 at 64 (1.35×); the glass spheres and the cloud 1.04–1.06×. Those two
+are dominated by caustic fireflies and by tracking in the cloud, which the sequence does
+not cover. With direct light only, at 1 spp, the share of the error at low frequencies
+(below 1/8 of the sampling rate) falls from 4–5% to 0.5–2%: the noise is blue. In the
+viewer while moving: spheres 13.0 → 9.5, cloud 12.5 → 8.2 (denoised 8.0 → 7.8 and
+6.2 → 5.5).
+
+`-sampler random` brings back plain PCG32, drawing in exactly the old order:
+`-sampler random -mis off -caustics pt` gives the images of before bit for bit (checked
+against the previous version).
+
 ### 5.11 The octree
 
 **The problem.** Without acceleration every ray, including every shadow ray, tests every
@@ -761,6 +794,16 @@ $$C = C_{trav} + \frac{A_L}{A}\,N_L\,C_{isect} + \frac{A_R}{A}\,N_R\,C_{isect}$$
    so step 1 costs nothing.
 4. Shadow rays (`any_hit = 1`) return at the first hit.
 
+**4-wide** (`-bvhwidth 4`, the default; `bvh_make_wide`). After the build, the binary tree
+is collapsed into nodes of 4 children: a node takes its two children, then again and
+again replaces the inner child with the largest box by that child's two children. The 4
+child boxes are stored side by side (`BvhWideNode`: lo x of the 4, lo y of the 4, ...),
+so one step of a ray tests 4 boxes in a loop the compiler turns into SIMD, and the tree
+is half as deep. The hit children go on the stack farthest first, leaves included, so the
+nearest is always next. The dragon (table below, 320x320, 8 threads): 1.87 → 3.38 M paths
+per second, the same image. The GPU keeps the binary tree: in its kernel the 4-wide one
+measured 5-10% slower (docs/PERFORMANCE.md).
+
 **Octree vs. BVH on the dragon** (871,420 primitives, 300x300, 32 spp):
 
 | | octree | BVH (SAH) | BVH (middle) |
@@ -935,7 +978,8 @@ traced reference; the image means agree to 4 digits in all cases):
 glass sphere (paths the camera sees through glass, a job for full bidirectional path
 tracing). The glass dragon: −22% RMSE. `-photons x` changes the number of light paths
 (default: one per camera path). The viewer path traces caustics (light tracing would need
-its own progressive buffer); `-caustics pt -mis off` reproduces the old images bit for bit.
+its own progressive buffer); `-caustics pt -mis off -sampler random` reproduces the old images bit for bit.
+The GPU has the same light tracer (and, for real time, a photon cache): WEB.md 2.6.
 
 ---
 

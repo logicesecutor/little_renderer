@@ -13,9 +13,27 @@
 #define LR_RIGID_H
 
 #include "core/lrmath.h"
-#include "core/scene.h"   // Aabb
+#include "core/scene.h"   // Aabb, Triangle, Xform
+#include "phys/convex.h"
 
-typedef enum { BODY_SPHERE, BODY_BOX } BodyShape;
+// BODY_HULL: a mesh's convex hull, moving; BODY_MESH: a mesh's triangles, fixed (a static
+// collider: spheres, boxes and hulls rest on it and bounce off it, the air flows around it)
+typedef enum { BODY_SPHERE, BODY_BOX, BODY_HULL, BODY_MESH } BodyShape;
+
+// the shape of mesh bodies (rigid_geom_hull, rigid_geom_mesh), shared by all bodies made
+// from it. Its own frame ("body frame") has the centre of mass at the origin and the
+// principal axes of inertia as axes (a mesh collider: the centre of its box, the mesh's axes).
+typedef struct RigidGeom {
+    BodyShape kind;          // BODY_HULL or BODY_MESH
+    Convex hull;             // BODY_HULL: the hull, body frame
+    MeshTree tree;           // BODY_MESH: the triangles, body frame
+    Vec3 half;               // the shape fits in [-half, half] (body frame)
+    real volume;             // BODY_HULL: the hull's
+    Vec3 inertia;            // BODY_HULL: principal moments, density 1
+    Mat3 frame;              // its axes in the mesh's own frame (columns)
+    Vec3 com;                // its origin in the mesh's own frame
+    uint32_t *occ;           // which cells of an OCC_RES^3 grid over [-half, half] it fills (the air)
+} RigidGeom;
 
 typedef struct {
     BodyShape shape;
@@ -31,6 +49,9 @@ typedef struct {
     Vec3 force, torque;      // external forces for the next step (cleared by rigid_step)
     int material;            // scene material used to draw it
     int prim;                // first scene primitive that shows it (see phys/world.h), -1 = none
+    int inst;                // or the scene instance that shows it, -1 = none
+    const RigidGeom *g;      // BODY_HULL, BODY_MESH: its shape
+    int dirty;               // changed by the CPU (new, pushed, moved): a GPU copy must take it again
 } Body;
 
 typedef struct {
@@ -56,6 +77,8 @@ typedef struct {
     Contact *prev;           // of the step before: their impulses "warm start" the solver
     int nprev, cap_prev;
     int warm_start;          // 1 (default): start each contact from last step's impulse
+    RigidGeom **geoms;       // the shapes of mesh bodies (owned)
+    int ngeoms, cap_geoms;
 } RigidWorld;
 
 void rigid_init(RigidWorld *w);   // gravity 981 down, no room, 16 iterations
@@ -65,6 +88,18 @@ void rigid_set_room(RigidWorld *w, Aabb room);
 // density in g / cm^3 (scene units: cm). Return the body's index.
 int rigid_add_sphere(RigidWorld *w, Vec3 center, real radius, real density);
 int rigid_add_box(RigidWorld *w, Vec3 center, Vec3 half, Quat rot, real density);
+
+// Mesh bodies. A shape from a mesh (its own frame, as a SceneMesh holds it): the convex
+// hull of its vertices (at most max_verts corners, 0 = 48), or its triangles. Return the
+// shape's index, -1 if it failed (a flat mesh has no hull).
+int rigid_geom_hull(RigidWorld *w, const Triangle *tris, int ntris, int max_verts);
+int rigid_geom_mesh(RigidWorld *w, const Triangle *tris, int ntris);
+// a moving body of a hull shape, the mesh placed by `place` (rotation and translation,
+// no scale) at the start; and a fixed mesh collider
+int rigid_add_hull_body(RigidWorld *w, int geom, Xform place, real density);
+int rigid_add_mesh_collider(RigidWorld *w, int geom, Xform place);
+// where a mesh body puts its mesh now (mesh frame -> world): for drawing it
+Xform body_mesh_xform(const Body *b);
 
 // world-frame inverse inertia R * I^-1 * R^T
 Mat3 body_inv_inertia_world(const Body *b);

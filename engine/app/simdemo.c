@@ -108,7 +108,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
         int n = so2->balls + so2->boxes;
         int nb = 0, nx = 0;
         for (int k = 0; k < n; k++){
-            double t = 0.25 + 0.4 * k;
+            double t = 0.25 + (n > 50 ? 20.0 / n : 0.4) * k;   // many: all of them within 20 s
             int want_box = (k % 3 == 2 && nx < so2->boxes) || nb >= so2->balls;
             if (want_box){
                 Vec3 half = vec3(rnd(sim, 22, 38), rnd(sim, 22, 38), rnd(sim, 22, 38));
@@ -162,6 +162,35 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
         sim->blast_speed = 1100;
         sim->blast_impulse = 50000;
     }
+    // meshes: the model standing in the room (fixed, its triangles collide, the air flows
+    // around it), and copies of it falling as convex hulls
+    if ((so2->collider || so2->meshes > 0) && o->scene.obj_path){
+        Material mm = {o->scene.mesh_mat, o->scene.mesh_mat == MAT_DIFFUSE ? vec3(0.80, 0.55, 0.25) : vec3(0.95, 0.95, 0.95),
+                       vec3(0, 0, 0), o->scene.mesh_mat == MAT_GLASS ? 1.5f : 1.0f};
+        int mat = scene_add_material(s, mm);
+        if (so2->collider){
+            int mesh = scene_load_mesh_object(s, o->scene.obj_path, mat, 260);
+            int g = mesh >= 0 ? rigid_geom_mesh(&pw->rigid, s->meshes[mesh].tris, s->meshes[mesh].ntris) : -1;
+            if (g < 0){ fprintf(stderr, "could not make a collider of %s\n", o->scene.obj_path); return 1; }
+            int b = rigid_add_mesh_collider(&pw->rigid, g, xform_rot_y(vec3(278, 0, 250), o->scene.rot_deg, 1));
+            phys_add_mesh_to_scene(pw, b, s, mesh, -1);
+        }
+        if (so2->meshes > 0){
+            int mesh = scene_load_mesh_object(s, o->scene.obj_path, mat, 120);
+            int g = mesh >= 0 ? rigid_geom_hull(&pw->rigid, s->meshes[mesh].tris, s->meshes[mesh].ntris, 0) : -1;
+            if (g < 0){ fprintf(stderr, "could not make a convex hull of %s\n", o->scene.obj_path); return 1; }
+            for (int k = 0; k < so2->meshes; k++){
+                int drop = o->sim.demo == SIM_DROP;
+                Spawn *p = new_spawn(sim, drop ? 0.45 + 0.4 * k : 0, BODY_HULL, spot(sim, 90, drop ? 420 : 0.5f),
+                                     pw->rigid.geoms[g]->half, 0.8f, -1);
+                if (!p) break;
+                p->geom = g;
+                p->mesh = mesh;
+                p->rot = drop ? random_rot(sim) : quat_axis_angle(vec3(0, 1, 0), rnd(sim, 0, (real)PI));
+                if (drop) p->vel = vec3(rnd(sim, -60, 60), 0, rnd(sim, -60, 60));
+            }
+        }
+    }
     sort_spawns(sim);
     // things placed at t = 0 must not overlap: push later ones up until they are clear
     for (int i = 0; i < sim->nspawns; i++){
@@ -189,13 +218,18 @@ static void spawn_due(Sim *sim, Scene *s){
     PhysWorld *pw = &sim->pw;
     while (sim->next_spawn < sim->nspawns && sim->spawns[sim->next_spawn].t <= pw->time + 1e-9){
         const Spawn *p = &sim->spawns[sim->next_spawn++];
-        int i = p->shape == BODY_SPHERE ? rigid_add_sphere(&pw->rigid, p->pos, p->half.x, p->density)
-                                        : rigid_add_box(&pw->rigid, p->pos, p->half, p->rot, p->density);
+        int i;
+        if (p->shape == BODY_HULL){
+            i = rigid_add_hull_body(&pw->rigid, p->geom, xform_make(p->pos, quat_to_mat3(p->rot).m, 1), p->density);
+            if (i < 0) continue;
+        } else i = p->shape == BODY_SPHERE ? rigid_add_sphere(&pw->rigid, p->pos, p->half.x, p->density)
+                                           : rigid_add_box(&pw->rigid, p->pos, p->half, p->rot, p->density);
         Body *b = &pw->rigid.bodies[i];
         b->vel = p->vel;
         b->restitution = p->restitution;
         b->friction = p->friction;
-        phys_add_to_scene(pw, i, s, p->material);
+        if (p->shape == BODY_HULL) phys_add_mesh_to_scene(pw, i, s, p->mesh, p->material);
+        else phys_add_to_scene(pw, i, s, p->material);
     }
 }
 
@@ -240,7 +274,7 @@ void sim_free(Sim *sim){
 
 void sim_status(const Sim *sim, char *buf, int len){
     const PhysWorld *pw = &sim->pw;
-    snprintf(buf, (size_t)len, "t %.2f s | %d bodies, %d contacts | rigid %.1f ms, air %.1f ms%s",
-             (double)pw->time, pw->rigid.nbodies, pw->rigid.ncontacts, pw->ms_rigid, pw->ms_fluid,
-             pw->air_step ? " (on the GPU)" : "");
+    snprintf(buf, (size_t)len, "t %.2f s | %d bodies, %d contacts | rigid %.1f ms%s, air %.1f ms%s",
+             (double)pw->time, pw->rigid.nbodies, pw->rigid.ncontacts, pw->ms_rigid, pw->rigid_step ? " (GPU)" : "",
+             pw->ms_fluid, pw->air_step ? " (on the GPU)" : "");
 }

@@ -165,6 +165,15 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     memset(&want, 0, sizeof(want));
     want = lim;
     dd.requiredLimits = &want;
+#ifndef __EMSCRIPTEN__
+    // timed passes (gpu_timer): only when asked, natively
+    static const WGPUFeatureName ts = WGPUFeatureName_TimestampQuery;
+    if (getenv("LR_GPU_TIMING") && wgpuAdapterHasFeature(adapter, ts)){
+        dd.requiredFeatureCount = 1;
+        dd.requiredFeatures = &ts;
+        g->timestamps = 1;
+    }
+#endif
     g->max_storage = lim.maxStorageBufferBindingSize < lim.maxBufferSize ? lim.maxStorageBufferBindingSize : lim.maxBufferSize;
     dd.uncapturedErrorCallbackInfo.callback = on_error;
     dd.uncapturedErrorCallbackInfo.userdata1 = g;
@@ -350,11 +359,13 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
     WGPUBindGroupLayoutEntry e[16];
     memset(e, 0, sizeof(e));
     int n = 0;
-    for (; types[n] && n < 16; n++){
-        e[n].binding = (uint32_t)n;
+    for (int i = 0; types[i] && i < 16; i++){
+        if (types[i] == '-') continue;          // no binding with this number
+        e[n].binding = (uint32_t)i;
         e[n].visibility = stage;
-        e[n].buffer.type = types[n] == 'U' ? WGPUBufferBindingType_Uniform
-                         : types[n] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
+        e[n].buffer.type = types[i] == 'U' ? WGPUBufferBindingType_Uniform
+                         : types[i] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
+        n++;
     }
     WGPUBindGroupLayoutDescriptor d;
     memset(&d, 0, sizeof(d));
@@ -382,18 +393,149 @@ WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, con
     return p;
 }
 
+// ---- GPU time per stage ----
+struct GpuTimer {
+    Gpu *g;
+    WGPUQuerySet qs;
+    WGPUBuffer resolve, readback;
+    int cap, used, stages;
+    int *stage_of;               // the stage of each pass of this round
+    int *pending_stage;          // and of the round being read back
+    double *pass_units, *pending_units;   // the work each pass did (gpu_timer_units), per round
+    double *units;               // per stage: the work summed (of the passes that were timed)
+    int pending, npending;
+    WGPUPassTimestampWrites tw;
+    double *ns;                  // per stage: the GPU time summed
+    long *calls;
+    long rounds;
+};
+
+GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
+    if (!g || !g->timestamps || passes <= 0) return NULL;
+    GpuTimer *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->g = g;
+    t->cap = passes;
+    t->stages = stages;
+    t->stage_of = calloc((size_t)passes, sizeof(int));
+    t->pending_stage = calloc((size_t)passes, sizeof(int));
+    t->pass_units = calloc((size_t)passes, sizeof(double));
+    t->pending_units = calloc((size_t)passes, sizeof(double));
+    t->units = calloc((size_t)stages, sizeof(double));
+    t->ns = calloc((size_t)stages, sizeof(double));
+    t->calls = calloc((size_t)stages, sizeof(long));
+    WGPUQuerySetDescriptor qd;
+    memset(&qd, 0, sizeof(qd));
+    qd.type = WGPUQueryType_Timestamp;
+    qd.count = (uint32_t)(2 * passes);
+    t->qs = wgpuDeviceCreateQuerySet(g->device, &qd);
+    t->resolve = gpu_buffer(g, "timer: resolve", (size_t)passes * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+    t->readback = gpu_buffer(g, "timer: readback", (size_t)passes * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    return t;
+}
+
+const WGPUPassTimestampWrites *gpu_timer_next(GpuTimer *t, int stage){
+    if (!t || t->used >= t->cap || t->pending) return NULL;
+    memset(&t->tw, 0, sizeof(t->tw));
+    t->tw.querySet = t->qs;
+    t->tw.beginningOfPassWriteIndex = (uint32_t)(2 * t->used);
+    t->tw.endOfPassWriteIndex = (uint32_t)(2 * t->used + 1);
+    t->pass_units[t->used] = 0;
+    t->stage_of[t->used++] = stage;
+    return &t->tw;
+}
+
+static void on_times(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
+    (void)msg; (void)u2;
+    GpuTimer *t = u1;
+    if (status != WGPUMapAsyncStatus_Success) return;
+    const uint64_t *ts = wgpuBufferGetConstMappedRange(t->readback, 0, (size_t)t->npending * 16);
+    if (ts){
+        for (int i = 0; i < t->npending; i++){
+            int s = t->pending_stage[i];
+            if (s < 0 || s >= t->stages || ts[2 * i + 1] < ts[2 * i]) continue;
+            t->ns[s] += (double)(ts[2 * i + 1] - ts[2 * i]);      // nanoseconds
+            t->units[s] += t->pending_units[i];
+            t->calls[s]++;
+        }
+        t->rounds++;
+    }
+    wgpuBufferUnmap(t->readback);
+    t->pending = 0;
+}
+
+void gpu_timer_finish(GpuTimer *t, WGPUCommandEncoder enc){
+    if (!t || t->pending || t->used == 0) return;
+    wgpuCommandEncoderResolveQuerySet(enc, t->qs, 0, (uint32_t)(2 * t->used), t->resolve, 0);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, t->resolve, 0, t->readback, 0, (size_t)t->used * 16);
+    memcpy(t->pending_stage, t->stage_of, (size_t)t->used * sizeof(int));
+    memcpy(t->pending_units, t->pass_units, (size_t)t->used * sizeof(double));
+    t->npending = t->used;
+    t->used = 0;
+    t->pending = 1;      // the map is asked for once the commands are submitted: gpu_timer_map
+}
+
+// (called after the submit that carries the resolve)
+static void timer_map(GpuTimer *t){
+    WGPUBufferMapCallbackInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.mode = WGPUCallbackMode_AllowSpontaneous;
+    mi.callback = on_times;
+    mi.userdata1 = t;
+    wgpuBufferMapAsync(t->readback, WGPUMapMode_Read, 0, (size_t)t->npending * 16, mi);
+}
+
+void gpu_timer_units(GpuTimer *t, double units){
+    if (t && t->used > 0) t->pass_units[t->used - 1] += units;
+}
+
+double gpu_timer_ms_per_unit(GpuTimer *t, int stage){
+    if (!t || stage < 0 || stage >= t->stages) return 0;
+    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    return t->units[stage] > 0 ? t->ns[stage] / t->units[stage] / 1e6 : 0;
+}
+
+void gpu_timer_submitted(GpuTimer *t){
+    if (t && t->pending == 1){ t->pending = 2; timer_map(t); }
+}
+
+void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
+    if (!t) return;
+    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    if (t->rounds == 0) return;
+    double total = 0;
+    for (int s = 0; s < t->stages; s++) total += t->ns[s];
+    printf("GPU time per round, %s (%ld rounds): %.3f ms\n", title, t->rounds, total / t->rounds / 1e6);
+    for (int s = 0; s < t->stages; s++)
+        if (t->calls[s]) printf("  %-34s %8.3f ms  (%ld passes per round)\n", names[s], t->ns[s] / t->rounds / 1e6, t->calls[s] / t->rounds);
+}
+
+void gpu_timer_destroy(GpuTimer *t){
+    if (!t) return;
+    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    if (t->qs) wgpuQuerySetRelease(t->qs);      // (wgpu-native has no wgpuQuerySetDestroy)
+    if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
+    if (t->readback){ wgpuBufferDestroy(t->readback); wgpuBufferRelease(t->readback); }
+    free(t->stage_of); free(t->pending_stage); free(t->ns); free(t->calls);
+    free(t->pass_units); free(t->pending_units); free(t->units);
+    free(t);
+}
+
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){
     WGPUBindGroupEntry e[16];
     memset(e, 0, sizeof(e));
+    int m = 0;
     for (int i = 0; i < n && i < 16; i++){
-        e[i].binding = (uint32_t)i;
-        e[i].buffer = bufs[i];
-        e[i].size = WGPU_WHOLE_SIZE;
+        if (!bufs[i]) continue;                  // a number the layout skips ('-')
+        e[m].binding = (uint32_t)i;
+        e[m].buffer = bufs[i];
+        e[m].size = WGPU_WHOLE_SIZE;
+        m++;
     }
     WGPUBindGroupDescriptor d;
     memset(&d, 0, sizeof(d));
     d.layout = bgl;
-    d.entryCount = (size_t)(n < 16 ? n : 16);
+    d.entryCount = (size_t)m;
     d.entries = e;
     return wgpuDeviceCreateBindGroup(g->device, &d);
 }

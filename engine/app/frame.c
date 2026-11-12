@@ -15,8 +15,11 @@ void frame_render_rt(const Scene *s, const Camera *cam, Image *img, int spp, con
             rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL) ^ (seed * 0xD1B54A32D192ED03ULL), pixel);
             Vec3 sum = vec3(0, 0, 0);
             for (int k = 0; k < spp; k++){
-                real u = (x + rng_real(&rng)) / W, v = (y + rng_real(&rng)) / H;
-                Vec3 c = trace_path_ex(s, camera_ray(cam, u, v), &rng, tp);
+                Sampler sm = sampler_make(&rng, x, y, (uint32_t)k, (uint32_t)seed * 0x9e3779b9u, tp->sampler);
+                real jx, jy;
+                sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
+                real u = (x + jx) / W, v = (y + jy) / H;
+                Vec3 c = trace_path_sampled(s, camera_ray(cam, u, v), &sm, tp);
                 if (!(c.x == c.x && c.y == c.y && c.z == c.z)) continue;   // skip NaNs
                 if (clamp > 0 && v_max(c) > clamp) c = v_scale(c, clamp / v_max(c));
                 sum = v_add(sum, c);

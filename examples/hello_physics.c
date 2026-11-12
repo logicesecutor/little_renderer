@@ -41,8 +41,8 @@ int main(void){
     make_dir("out/hello_physics");
     for (int f = 0; f < 30; f++){
         for (int k = 0; k < 2; k++) phys_step(&pw, 1.0 / 60);   // 30 frames per second
-        phys_sync_scene(&pw, &scene);                           // move the sphere primitive
-        scene_set_accel(&scene, ACCEL_NONE, NULL);              // (a few primitives: none)
+        phys_sync_scene(&pw, &scene);                           // move the ball's instance
+        scene_update_instances(&scene, NULL);                   // the path tracer follows it
         frame_render_rt(&scene, &cam, &img, 16, &tp, 0, 0, (uint64_t)f);
         char path[64];
         snprintf(path, sizeof(path), "out/hello_physics/frame_%02d.ppm", f);

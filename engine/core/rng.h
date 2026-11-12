@@ -48,14 +48,17 @@ static inline void onb_from_normal(Vec3 n, Vec3 *t, Vec3 *b){
 
 // Direction on the hemisphere around n with probability density cos(theta) / pi.
 // (Malley's method: pick a uniform point on the unit disk, lift it onto the hemisphere.)
-static inline Vec3 sample_cosine_hemisphere(Vec3 n, Rng *r){
-    real u1 = rng_real(r), u2 = rng_real(r);
+static inline Vec3 sample_cosine_hemisphere_u(Vec3 n, real u1, real u2){
     real phi = 2.0 * PI * u1;
     real rad = r_sqrt(u2);
     real x = rad * r_cos(phi), y = rad * r_sin(phi), z = r_sqrt(r_fmax(0.0, 1.0 - u2));
     Vec3 t, b;
     onb_from_normal(n, &t, &b);
     return v_add(v_add(v_scale(t, x), v_scale(b, y)), v_scale(n, z));
+}
+static inline Vec3 sample_cosine_hemisphere(Vec3 n, Rng *r){
+    real u1 = rng_real(r), u2 = rng_real(r);
+    return sample_cosine_hemisphere_u(n, u1, u2);
 }
 
 #endif

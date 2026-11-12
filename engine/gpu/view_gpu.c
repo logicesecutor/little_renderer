@@ -21,6 +21,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
+void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     (void)v; (void)s; (void)p; (void)mp; (void)volumes;
     return 0;
@@ -439,6 +440,7 @@ typedef struct {
 struct GpuView {
     Gpu *g;
     int w, h;
+    int wavefront;           // gpu_view_trace_wavefront
     WGPUBuffer frame_u, sel_u[GPU_MAX_VOLUMES];
     WGPUBuffer dens, bricks, light, color, depth;
     size_t dens_cap, bricks_cap, light_cap;
@@ -464,6 +466,7 @@ struct GpuView {
     int t_done, t_done_next;    // finished; and what that becomes when the running band ends
     int t_inflight;             // a band is running
     int t_bands;                // bands finished since the image started
+    uint32_t t_index;           // the sample (of the sequence: core/sampler.h) the next pass takes
     // the denoiser (created when first used), and the band count of the image it holds
     GpuDenoise *den;
     int den_failed, denoise, den_bands;
@@ -997,14 +1000,23 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 // The path tracer's image to show or read back: the samples, or with the denoiser on, the
 // denoised image (made again only when a band finished since).
 static WGPUBuffer traced_image(GpuView *v, WGPUCommandEncoder enc){
-    WGPUBuffer samples = gpu_trace_accum(v->trace);
-    if (!v->denoise || v->den_failed || !gpu_trace_guided(v->trace)) return samples;
-    if (!v->den && !(v->den = gpu_denoise_create(v->g, v->w, v->h))){ v->den_failed = 1; return samples; }
-    if (v->den_bands != v->t_bands){
-        gpu_denoise_encode(v->den, enc, samples);
-        v->den_bands = v->t_bands;
+    WGPUBuffer samples = gpu_trace_accum(v->trace), base = samples;
+    if (v->denoise && !v->den_failed && gpu_trace_guided(v->trace)){
+        if (!v->den && !(v->den = gpu_denoise_create(v->g, v->w, v->h))) v->den_failed = 1;
+        else {
+            if (v->den_bands != v->t_bands){
+                gpu_denoise_encode(v->den, enc, samples);
+                v->den_bands = v->t_bands;
+            }
+            base = gpu_denoise_output(v->den);
+        }
     }
-    return gpu_denoise_output(v->den);
+    // the caustics on top (after the denoiser: they stay sharp): light traced, and while that
+    // has few passes (or things move) the photon cache's
+    if (gpu_trace_caustics_on(v->trace, &v->tparams) &&
+        (gpu_trace_caustic_passes(v->trace) > 0 || (v->tparams.photon_cache && gpu_trace_photon_paths(v->trace) > 0)))
+        return gpu_trace_resolve(v->trace, enc, base, v->tparams.photon_cache);
+    return base;
 }
 
 // the GPU rasterizer's frame (and, with traced = 1, the path tracer's samples over it), composited
@@ -1045,10 +1057,15 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
         v->trace_failed = 1;
         return 0;
     }
+    gpu_trace_set_wavefront(v->trace, v->wavefront);
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
     v->t_prep = 1;
     v->t_y = 0;
+    // a new image starts its samples at a multiple of 2^16: the first n of them are then as
+    // evenly spread as the sequence allows (while things move, the count just goes on, so
+    // the samples a pixel keeps from frame to frame are never the same twice)
+    v->t_index = (v->t_index + 0xffffu) & ~0xffffu;
     v->t_passes = v->t_done = v->t_done_next = 0;
     v->t_bands = 0;
     v->den_bands = -1;
@@ -1110,6 +1127,8 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     if (v->t_prep){
         gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0, nvol,
                               v->frame_u, v->dens, v->bricks, v->vstat);
+        gpu_trace_caustics_clear(v->trace, enc);
+        if (v->t_prep == 1) gpu_trace_photons_clear(v->trace, enc);   // a new scene or view: the cache too
         v->t_prep = 0;
     }
     // a band of rows, or (the band being the whole image) several passes
@@ -1125,9 +1144,24 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     }
     v->t_sub_rows = rows;
     v->t_sub_reps = reps;
-    gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->frame_u, v->dens, v->bricks, v->vstat);
+    gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+    // the caustics: while things move, one pass of light paths into the photon cache, which
+    // fades a little each time (what moved fades out); still, a pass ending with this band
+    // brings as many passes of the (exact) light tracer, and while that has few the cache
+    // goes on filling
+    if (gpu_trace_caustics_on(v->trace, &v->tparams)){
+        if (v->t_live && v->tparams.photon_cache){
+            gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 0.9, v->frame_u, v->dens, v->bricks, v->vstat);
+        } else if (v->t_y + rows >= v->h){
+            gpu_trace_light(v->trace, enc, s, &v->tparams, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+            if (v->tparams.photon_cache && gpu_trace_caustic_passes(v->trace) < 32)
+                gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 1.0, v->frame_u, v->dens, v->bricks, v->vstat);
+        }
+    }
+    gpu_trace_before_submit(v->trace, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
+    gpu_trace_after_submit(v->trace);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     v->t_inflight = 1;
@@ -1142,6 +1176,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     if (v->t_y >= v->h){
         v->t_y = 0;
         v->t_passes += reps;
+        v->t_index += (uint32_t)reps;
         double now = gpu_now_ms();
         v->t_pass_ms = (now - v->t_pass_t0) / reps;
         v->t_pass_t0 = now;
@@ -1189,6 +1224,12 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
 // a whole pass, as the GPU took for the last band (submission to completion, scaled to the
 // whole image); before any band, the time between passes
 double gpu_view_trace_pass_ms(const GpuView *v){ return !v ? 0 : v->t_gpu_pass_ms > 0 ? v->t_gpu_pass_ms : v->t_pass_ms; }
+
+void gpu_view_trace_wavefront(GpuView *v, int on){
+    if (!v) return;
+    v->wavefront = on;
+    gpu_trace_set_wavefront(v->trace, on);
+}
 
 int gpu_view_trace_denoise(GpuView *v, int on){
     if (!v) return 0;

@@ -154,6 +154,12 @@ static Material diffuse(real r, real g, real b){
 }
 
 // rotate around the vertical (y) axis
+static Material mesh_material(MatType t){
+    if (t == MAT_MIRROR) return (Material){MAT_MIRROR, vec3(0.95, 0.95, 0.95), vec3(0, 0, 0), 1.0};
+    if (t == MAT_GLASS) return (Material){MAT_GLASS, vec3(1, 1, 1), vec3(0, 0, 0), 1.5};
+    return diffuse(0.80, 0.55, 0.25);                       // warm orange
+}
+
 static Vec3 rotate_y(Vec3 p, real deg){
     real a = deg * PI / 180.0;
     real c = r_cos(a), s = r_sin(a);
@@ -201,15 +207,33 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         Material glass  = {MAT_GLASS,  vec3(1, 1, 1),          vec3(0, 0, 0), 1.5};
         scene_add_prim(s, make_sphere(vec3(370, 100, 370), 100, scene_add_material(s, mirror)));
         scene_add_prim(s, make_sphere(vec3(185, 100, 170), 100, scene_add_material(s, glass)));
-    } else if (opt->kind == SCENE_MESH){
-        Material m = diffuse(0.80, 0.55, 0.25);                       // warm orange
-        if (opt->mesh_mat == MAT_MIRROR) m = (Material){MAT_MIRROR, vec3(0.95, 0.95, 0.95), vec3(0, 0, 0), 1.0};
-        if (opt->mesh_mat == MAT_GLASS)  m = (Material){MAT_GLASS,  vec3(1, 1, 1),          vec3(0, 0, 0), 1.5};
+    } else if (opt->kind == SCENE_MESH && opt->instances <= 0){
         // largest side 330 units, standing on the floor in the middle of the box
-        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, m), 330.0, vec3(278, 0, 278), opt->rot_deg);
+        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, mesh_material(opt->mesh_mat)), 330.0,
+                                vec3(278, 0, 278), opt->rot_deg);
         if (n < 0){
             fprintf(stderr, "could not load %s\n", opt->obj_path);
             return 1;
+        }
+    }
+    if (opt->instances > 0){
+        // one mesh, opt->instances instances of it in a row on the floor, each turned a little
+        // more (SCENE_SPHERES: in the free corners first, beside the spheres; SCENE_MESH: one,
+        // as its model)
+        int n = opt->instances;
+        int sph = opt->kind == SCENE_SPHERES;
+        real size = sph ? 180.0f : 330.0f;
+        if (size > 520.0f / n) size = 520.0f / n;
+        int mesh = scene_load_mesh_object(s, opt->obj_path, scene_add_material(s, mesh_material(opt->mesh_mat)), size);
+        if (mesh < 0){
+            fprintf(stderr, "could not load %s\n", opt->obj_path);
+            return 1;
+        }
+        static const real corner[4][2] = {{420, 140}, {140, 420}, {90, 110}, {460, 470}};
+        for (int i = 0; i < n; i++){
+            Vec3 at = vec3(555.0f * (i + 0.5f) / n, 0, 278.0f);
+            if (sph) at = i < 4 ? vec3(corner[i][0], 0, corner[i][1]) : vec3(555.0f * (i + 0.5f) / n, 0, 500.0f);
+            scene_add_instance(s, mesh, xform_rot_y(at, opt->rot_deg + 35.0f * i, 1), -1);
         }
     }
 
@@ -260,7 +284,177 @@ int scene_add_volume(Scene *s, Volume *v){
     return s->nvolumes++;
 }
 
+// ---- instances ---------------------------------------------------------------------------
+
+Xform xform_identity(void){
+    Xform x;
+    memset(&x, 0, sizeof(x));
+    x.m[0][0] = x.m[1][1] = x.m[2][2] = 1;
+    return x;
+}
+
+Xform xform_make(Vec3 t, const real r[3][3], real scale){
+    Xform x;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) x.m[i][j] = r[i][j] * scale;
+    x.m[0][3] = t.x; x.m[1][3] = t.y; x.m[2][3] = t.z;
+    return x;
+}
+
+Xform xform_rot_y(Vec3 t, real deg, real scale){
+    real a = deg * (real)PI / 180, c = r_cos(a), sn = r_sin(a);
+    real r[3][3] = {{c, 0, sn}, {0, 1, 0}, {-sn, 0, c}};
+    return xform_make(t, r, scale);
+}
+
+Xform xform_inverse(const Xform *x){
+    const real (*m)[4] = x->m;
+    real det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+               m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+               m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    real id = det != 0 ? 1 / det : 0;
+    Xform r;
+    r.m[0][0] = (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * id;
+    r.m[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * id;
+    r.m[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * id;
+    r.m[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * id;
+    r.m[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * id;
+    r.m[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * id;
+    r.m[2][0] = (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * id;
+    r.m[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * id;
+    r.m[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * id;
+    for (int i = 0; i < 3; i++)
+        r.m[i][3] = -(r.m[i][0] * m[0][3] + r.m[i][1] * m[1][3] + r.m[i][2] * m[2][3]);
+    return r;
+}
+
+Aabb xform_box(const Xform *x, Aabb b){
+    Aabb o = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+    for (int c = 0; c < 8; c++){
+        Vec3 p = vec3(c & 1 ? b.hi.x : b.lo.x, c & 2 ? b.hi.y : b.lo.y, c & 4 ? b.hi.z : b.lo.z);
+        grow_box(&o, xform_point(x, p));
+    }
+    return o;
+}
+
+static void mesh_bounds(SceneMesh *m){
+    m->box = (Aabb){vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+    for (int i = 0; i < m->ntris; i++){
+        const Triangle *t = &m->tris[i];
+        grow_box(&m->box, t->q);
+        grow_box(&m->box, v_add(t->q, t->u));
+        grow_box(&m->box, v_add(t->q, t->v));
+    }
+}
+
+int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
+    s->meshes = grow(s->meshes, &s->cap_meshes, s->nmeshes + 1, sizeof(SceneMesh));
+    SceneMesh *m = &s->meshes[s->nmeshes];
+    memset(m, 0, sizeof(*m));
+    m->normals = malloc((size_t)(src->nvn ? src->nvn : 1) * sizeof(Vec3));
+    m->tris = malloc((size_t)(src->nf ? src->nf : 1) * sizeof(Triangle));
+    if (!m->normals || !m->tris){ perror("malloc"); exit(1); }
+    for (int i = 0; i < src->nvn; i++) m->normals[i] = v_norm(src->vn[i]);
+    m->nnormals = src->nvn;
+    for (int i = 0; i < src->nf; i++){
+        const Face *f = &src->f[i];
+        Triangle *t = &m->tris[i];
+        Vec3 a = src->v[f->v[0]], b = src->v[f->v[1]], c = src->v[f->v[2]];
+        t->q = a; t->u = v_sub(b, a); t->v = v_sub(c, a);
+        int has_n = f->n[0] >= 0 && f->n[1] >= 0 && f->n[2] >= 0;
+        for (int k = 0; k < 3; k++) t->n[k] = has_n ? f->n[k] : -1;
+        t->material = material;
+    }
+    m->ntris = src->nf;
+    m->version = 1;
+    mesh_bounds(m);
+    return s->nmeshes++;
+}
+
+int scene_load_mesh_object(Scene *s, const char *path, int material, real size){
+    Mesh *m = mesh_load(path);
+    if (!m) return -1;
+    mesh_place(m, size, vec3(0, 0, 0), 0);
+    int id = scene_add_mesh_object(s, m, material);
+    mesh_destroy(m);
+    return id;
+}
+
+int scene_add_instance(Scene *s, int mesh, Xform xf, int material){
+    s->insts = grow(s->insts, &s->cap_insts, s->ninsts + 1, sizeof(Instance));
+    Instance *in = &s->insts[s->ninsts];
+    in->mesh = mesh;
+    in->material = material;
+    s->ninsts++;
+    scene_move_instance(s, s->ninsts - 1, xf);
+    return s->ninsts - 1;
+}
+
+void scene_move_instance(Scene *s, int i, Xform xf){
+    Instance *in = &s->insts[i];
+    in->xf = xf;
+    in->inv = xform_inverse(&xf);
+    if (in->mesh >= 0) in->box = xform_box(&xf, s->meshes[in->mesh].box);
+    else if (in->mesh == INST_BOX) in->box = xform_box(&xf, (Aabb){vec3(-1, -1, -1), vec3(1, 1, 1)});
+    else {                                    // a sphere: its centre +- its radius
+        Vec3 c = vec3(xf.m[0][3], xf.m[1][3], xf.m[2][3]);
+        real r = 0;
+        for (int j = 0; j < 3; j++) r = r_fmax(r, v_len(vec3(xf.m[0][j], xf.m[1][j], xf.m[2][j])));
+        in->box = (Aabb){v_sub(c, vec3(r, r, r)), v_add(c, vec3(r, r, r))};
+    }
+    s->inst_version++;
+}
+
+Primitive unit_box_face(int f, int material){
+    Vec3 e[3] = {vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1)};
+    int k = f / 2;
+    real side = f & 1 ? 1 : -1;
+    Vec3 u = v_scale(e[(k + 1) % 3], 2), v = v_scale(e[(k + 2) % 3], 2);
+    Vec3 q = v_sub(v_scale(e[k], side), v_scale(v_add(u, v), 0.5f));
+    return side > 0 ? make_quad(q, u, v, material) : make_quad(q, v, u, material);
+}
+
+Primitive instance_shape_prim(const Instance *in, int part){
+    const Xform *x = &in->xf;
+    if (in->mesh == INST_SPHERE){
+        real r = 0;
+        for (int j = 0; j < 3; j++) r = r_fmax(r, v_len(vec3(x->m[0][j], x->m[1][j], x->m[2][j])));
+        return make_sphere(vec3(x->m[0][3], x->m[1][3], x->m[2][3]), r, in->material);
+    }
+    Primitive f = unit_box_face(part, in->material);
+    return make_quad(xform_point(x, f.q), xform_dir(x, f.u), xform_dir(x, f.v), in->material);
+}
+
+Xform xform_axes(Mat3 r, Vec3 scale, Vec3 t){
+    Xform x;
+    real sc[3] = {scale.x, scale.y, scale.z};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) x.m[i][j] = r.m[i][j] * sc[j];
+    x.m[0][3] = t.x; x.m[1][3] = t.y; x.m[2][3] = t.z;
+    return x;
+}
+
+void scene_mesh_changed(Scene *s, int mesh){
+    SceneMesh *m = &s->meshes[mesh];
+    mesh_bounds(m);
+    m->version++;
+    for (int i = 0; i < s->ninsts; i++)
+        if (s->insts[i].mesh == mesh) s->insts[i].box = xform_box(&s->insts[i].xf, m->box);
+}
+
 void scene_free(Scene *s){
+    for (int i = 0; i < s->nmeshes; i++){
+        SceneMesh *m = &s->meshes[i];
+        if (m->bvh && m->bvh_free) m->bvh_free(m->bvh);
+        free(m->tris);
+        free(m->normals);
+    }
+    free(s->meshes);
+    s->meshes = NULL;
+    s->nmeshes = s->cap_meshes = 0;
+    free(s->insts);
+    s->insts = NULL;
+    s->ninsts = s->cap_insts = 0;
     for (int i = 0; i < s->nvolumes; i++) volume_free(s->volumes[i]);
     s->nvolumes = 0;
     if (s->accel && s->accel_free) s->accel_free(s->accel);

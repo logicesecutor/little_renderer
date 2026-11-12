@@ -11,14 +11,19 @@ static Aabb box_empty(void){
     return b;
 }
 
+// (plain comparisons, not fmin / fmax: the boxes have no NaN, and these are the builder's
+// innermost loop: a library call each made the build 3x slower)
+static inline real mn(real a, real b){ return a < b ? a : b; }
+static inline real mx(real a, real b){ return a > b ? a : b; }
+
 static void box_add_box(Aabb *b, const Aabb *o){
-    b->lo = vec3(r_fmin(b->lo.x, o->lo.x), r_fmin(b->lo.y, o->lo.y), r_fmin(b->lo.z, o->lo.z));
-    b->hi = vec3(r_fmax(b->hi.x, o->hi.x), r_fmax(b->hi.y, o->hi.y), r_fmax(b->hi.z, o->hi.z));
+    b->lo.x = mn(b->lo.x, o->lo.x); b->lo.y = mn(b->lo.y, o->lo.y); b->lo.z = mn(b->lo.z, o->lo.z);
+    b->hi.x = mx(b->hi.x, o->hi.x); b->hi.y = mx(b->hi.y, o->hi.y); b->hi.z = mx(b->hi.z, o->hi.z);
 }
 
 static void box_add_point(Aabb *b, Vec3 p){
-    b->lo = vec3(r_fmin(b->lo.x, p.x), r_fmin(b->lo.y, p.y), r_fmin(b->lo.z, p.z));
-    b->hi = vec3(r_fmax(b->hi.x, p.x), r_fmax(b->hi.y, p.y), r_fmax(b->hi.z, p.z));
+    b->lo.x = mn(b->lo.x, p.x); b->lo.y = mn(b->lo.y, p.y); b->lo.z = mn(b->lo.z, p.z);
+    b->hi.x = mx(b->hi.x, p.x); b->hi.y = mx(b->hi.y, p.y); b->hi.z = mx(b->hi.z, p.z);
 }
 
 static real box_area(const Aabb *b){
@@ -78,9 +83,10 @@ static real sah_split(const Bvh *b, const BuildInfo *bi, int start, int count,
         int bin_n[MAX_BINS] = {0};
         Aabb bin_box[MAX_BINS];
         for (int k = 0; k < nb; k++) bin_box[k] = box_empty();
+        const real scale = nb / extent;
         for (int i = start; i < start + count; i++){
             int p = b->refs[i];
-            int k = (int)(nb * (comp(bi->centroid[p], axis) - lo) / extent);
+            int k = (int)((comp(bi->centroid[p], axis) - lo) * scale);
             if (k >= nb) k = nb - 1;
             bin_n[k]++;
             box_add_box(&bin_box[k], &bi->box[p]);
@@ -183,7 +189,7 @@ static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth){
 // exactly as if one thread had built the whole tree, so the tree, the statistics and the
 // images do not depend on the number of threads.
 
-#define BVH_PAR_MIN 32768
+#define BVH_PAR_MIN 1024
 
 typedef struct Sub Sub;
 struct Sub {
@@ -264,8 +270,7 @@ static int flatten(Bvh *b, Sub *sb, int depth){
     return root;
 }
 
-void bvh_build(Bvh *b, const Scene *s, int max_leaf, int bins, BvhSplit split){
-    int nprims = scene_num_shapes(s);
+static void build_over(Bvh *b, const Scene *s, const Aabb *boxes, int nprims, int max_leaf, int bins, BvhSplit split){
     memset(b, 0, sizeof(*b));
     b->max_leaf = max_leaf < 1 ? 1 : max_leaf;
     b->bins = bins;
@@ -281,7 +286,7 @@ void bvh_build(Bvh *b, const Scene *s, int max_leaf, int bins, BvhSplit split){
 #pragma omp parallel for schedule(static)
 #endif
     for (int i = 0; i < nprims; i++){
-        bi.box[i] = scene_shape_bounds(s, i);
+        bi.box[i] = boxes ? boxes[i] : scene_shape_bounds(s, i);
         bi.centroid[i] = v_scale(v_add(bi.box[i].lo, bi.box[i].hi), 0.5);
         b->refs[i] = i;
     }
@@ -302,10 +307,160 @@ void bvh_build(Bvh *b, const Scene *s, int max_leaf, int bins, BvhSplit split){
     free(bi.centroid);
 }
 
+void bvh_build(Bvh *b, const Scene *s, int max_leaf, int bins, BvhSplit split){
+    build_over(b, s, NULL, scene_num_shapes(s), max_leaf, bins, split);
+}
+
+void bvh_build_boxes(Bvh *b, const Aabb *boxes, int n, int max_leaf, int bins, BvhSplit split){
+    build_over(b, NULL, boxes, n, max_leaf, bins, split);
+}
+
 void bvh_free(Bvh *b){
     free(b->nodes);
     free(b->refs);
+    free(b->wide);
     memset(b, 0, sizeof(*b));
+}
+
+// ---- refit ----------------------------------------------------------------------------
+
+real bvh_cost(const Bvh *b){
+    if (b->nnodes == 0) return 0;
+    real root = box_area(&b->nodes[0].box), sum = 0;
+    for (int i = 0; i < b->nnodes; i++) sum += box_area(&b->nodes[i].box);
+    return root > 0 ? sum / root : 0;
+}
+
+real bvh_refit_boxes(Bvh *b, const Aabb *boxes){
+    // preorder: a node's children come after it, so from the last node back every child is
+    // done before its parent
+    for (int i = b->nnodes - 1; i >= 0; i--){
+        BvhNode *n = &b->nodes[i];
+        Aabb box = box_empty();
+        if (n->count > 0) for (int k = 0; k < n->count; k++) box_add_box(&box, &boxes[b->refs[n->start + k]]);
+        else { box = b->nodes[n->left].box; box_add_box(&box, &b->nodes[n->right].box); }
+        n->box = box;
+    }
+    if (b->wide) bvh_make_wide(b);
+    return bvh_cost(b);
+}
+
+// ---- the 4-wide tree -------------------------------------------------------------------
+
+static int new_wide(Bvh *b){
+    if (b->nwide >= b->wide_cap){
+        b->wide_cap = b->wide_cap ? b->wide_cap * 2 : 256;
+        b->wide = realloc(b->wide, (size_t)b->wide_cap * sizeof(BvhWideNode));
+        if (!b->wide){ perror("realloc"); exit(1); }
+    }
+    return b->nwide++;
+}
+
+// the wide node for binary node `node` (an inner node, or a leaf when it is the root)
+static int collapse(Bvh *b, int node){
+    int w = new_wide(b);
+    int kids[4], n = 0;
+    const BvhNode *bn = &b->nodes[node];
+    if (bn->count > 0) kids[n++] = node;                  // a tree that is one leaf
+    else { kids[n++] = bn->left; kids[n++] = bn->right; }
+    while (n < 4){
+        int best = -1;
+        real area = -1;
+        for (int k = 0; k < n; k++){
+            const BvhNode *c = &b->nodes[kids[k]];
+            real a = box_area(&c->box);
+            if (c->count == 0 && a > area){ area = a; best = k; }
+        }
+        if (best < 0) break;                              // only leaves left
+        const BvhNode *c = &b->nodes[kids[best]];
+        kids[best] = c->left;
+        kids[n++] = c->right;
+    }
+    int child[4], count[4];
+    for (int k = 0; k < 4; k++){
+        if (k >= n){ child[k] = 0; count[k] = -1; continue; }
+        const BvhNode *c = &b->nodes[kids[k]];
+        if (c->count > 0){ child[k] = c->start; count[k] = c->count; }
+        else { child[k] = collapse(b, kids[k]); count[k] = 0; }      // (may move b->wide)
+    }
+    BvhWideNode *o = &b->wide[w];
+    for (int k = 0; k < 4; k++){
+        Aabb box = k < n ? b->nodes[kids[k]].box : box_empty();
+        o->b[0][k] = box.lo.x; o->b[1][k] = box.lo.y; o->b[2][k] = box.lo.z;
+        o->b[3][k] = box.hi.x; o->b[4][k] = box.hi.y; o->b[5][k] = box.hi.z;
+        o->child[k] = child[k];
+        o->count[k] = count[k];
+    }
+    return w;
+}
+
+void bvh_make_wide(Bvh *b){
+    free(b->wide);
+    b->wide = NULL;
+    b->nwide = b->wide_cap = 0;
+    if (b->nnodes > 0) collapse(b, 0);
+}
+
+// a ray against the wide tree: the 4 boxes of a node at once, the hit children visited
+// nearest first (leaves are entries of the stack too, so they wait their turn as well)
+static int wide_intersect(const Bvh *b, const Scene *s, const Ray *ray, real tmin, real tmax, Hit *h, int any_hit){
+    const real ox = ray->o.x, oy = ray->o.y, oz = ray->o.z;
+    const real ix = 1.0 / ray->d.x, iy = 1.0 / ray->d.y, iz = 1.0 / ray->d.z;
+    // per axis, which of a box's planes the ray meets first
+    const int nx = ix < 0 ? 3 : 0, ny = iy < 0 ? 4 : 1, nz = iz < 0 ? 5 : 2;
+    const int fx = 3 - nx, fy = 5 - ny, fz = 7 - nz;
+    struct { int node, count; real t; } stack[4 * BVH_MAX_DEPTH + 8];
+    int sp = 0, found = 0;
+    real best = tmax;
+    stack[sp].node = 0; stack[sp].count = 0; stack[sp].t = tmin; sp++;
+    while (sp > 0){
+        sp--;
+        if (stack[sp].t > best) continue;
+        if (stack[sp].count > 0){                          // a leaf
+            const int start = stack[sp].node, count = stack[sp].count;
+            for (int k = 0; k < count; k++){
+                int id = b->refs[start + k];
+                Hit tmp;
+                if (intersect_shape(s, id, ray, tmin, best, &tmp)){
+                    tmp.prim = id;
+                    *h = tmp;
+                    best = tmp.t;
+                    found = 1;
+                    if (any_hit) return 1;
+                }
+            }
+            continue;
+        }
+        const BvhWideNode *n = &b->wide[stack[sp].node];
+        real tn[4];
+        int hit[4];
+        for (int k = 0; k < 4; k++){                       // (vectorized: 4 lanes)
+            real a = (n->b[nx][k] - ox) * ix, c = (n->b[fx][k] - ox) * ix;
+            real lo = a > tmin ? a : tmin, hi = c < best ? c : best;
+            a = (n->b[ny][k] - oy) * iy; c = (n->b[fy][k] - oy) * iy;
+            lo = a > lo ? a : lo; hi = c < hi ? c : hi;
+            a = (n->b[nz][k] - oz) * iz; c = (n->b[fz][k] - oz) * iz;
+            lo = a > lo ? a : lo; hi = c < hi ? c : hi;
+            tn[k] = lo;
+            hit[k] = lo <= hi;
+        }
+        // the hit children, farthest first onto the stack (so the nearest comes off first)
+        int order[4], m = 0;
+        for (int k = 0; k < 4; k++){
+            if (!hit[k] || n->count[k] < 0) continue;
+            int j = m++;
+            while (j > 0 && tn[order[j - 1]] < tn[k]){ order[j] = order[j - 1]; j--; }
+            order[j] = k;
+        }
+        for (int q = 0; q < m; q++){
+            int k = order[q];
+            stack[sp].node = n->child[k];
+            stack[sp].count = n->count[k];
+            stack[sp].t = tn[k];
+            sp++;
+        }
+    }
+    return found;
 }
 
 // ---- traversal ----------------------------------------------------------------------
@@ -313,6 +468,7 @@ void bvh_free(Bvh *b){
 int bvh_intersect(const Bvh *b, const Scene *s, const Ray *ray,
                   real tmin, real tmax, Hit *h, int any_hit){
     if (b->nnodes == 0) return 0;
+    if (b->wide) return wide_intersect(b, s, ray, tmin, tmax, h, any_hit);
     Vec3 inv_d = vec3(1.0 / ray->d.x, 1.0 / ray->d.y, 1.0 / ray->d.z);
 
     // explicit stack of (node, distance at which the ray enters its box)

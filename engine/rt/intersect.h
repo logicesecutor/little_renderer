@@ -11,8 +11,15 @@ typedef struct {
     Vec3 n;          // unit shading normal, flipped so it always faces the incoming ray
     Vec3 ng;         // unit geometric normal, on the same side as n (smooth meshes: n != ng)
     int front_face;  // 1 if the ray hit the side the geometric normal points to
-    int prim;        // shape id of what was hit (core/scene.h: primitives, then triangles)
+    int prim;        // shape id of what was hit (core/scene.h: primitives, then triangles);
+                     // for an instance: the triangle's index in its mesh
+    int inst;        // the instance hit, or -1 (scene_intersect sets it)
 } Hit;
+
+// the material of what was hit
+static inline int hit_material(const Scene *s, const Hit *h){
+    return h->inst >= 0 ? scene_instance_material(s, h->inst, h->prim) : scene_shape_material(s, h->prim);
+}
 
 // Slab test, used by both acceleration structures. Along each axis the ray is between the
 // box's two planes for t in [(lo - o) / d, (hi - o) / d] (swapped when d < 0); it is inside

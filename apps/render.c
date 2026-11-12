@@ -61,6 +61,7 @@ static int render_rt(const Options *opt, const Scene *scene){
     tp.max_depth = opt->max_depth;
     tp.mis = opt->mis;
     tp.skip_caustics = opt->caustics_lt;     // light tracing adds them below
+    tp.sampler = opt->sampler;
     printf("path tracing %dx%d, %d samples/pixel, max %d bounces, %d thread(s)%s%s%s\n",
            W, H, spp, opt->max_depth, threads, opt->clamp > 0 ? ", clamped" : "",
            opt->mis ? ", MIS" : "", opt->caustics_lt ? ", caustics by light tracing" : "");
@@ -82,9 +83,12 @@ static int render_rt(const Options *opt, const Scene *scene){
             Vec3 sum = vec3(0, 0, 0);
             for (int s = 0; s < spp; s++){
                 // a random point inside the pixel: averaging them gives anti-aliasing for free
-                real u = (x + rng_real(&rng)) / W;
-                real v = (y + rng_real(&rng)) / H;
-                Vec3 c = trace_path_ex(scene, camera_ray(&cam, u, v), &rng, &tp);
+                Sampler sm = sampler_make(&rng, x, y, (uint32_t)s, 0, tp.sampler);
+                real jx, jy;
+                sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
+                real u = (x + jx) / W;
+                real v = (y + jy) / H;
+                Vec3 c = trace_path_sampled(scene, camera_ray(&cam, u, v), &sm, &tp);
                 if (!(c.x == c.x && c.y == c.y && c.z == c.z)) continue;   // skip NaNs
                 // optional firefly clamp: caps one sample's brightness. Removes speckles
                 // but also removes some real energy (biased), so it is off by default.
@@ -147,15 +151,17 @@ static int render_gpu(const Options *opt, Scene *scene){
     } else {
         printf("path tracing %dx%d on the GPU (%s), %d samples/pixel, max %d bounces%s%s\n", W, H, gpu_message(g), opt->spp,
                opt->max_depth, opt->clamp > 0 ? ", clamped" : "", opt->mis ? ", MIS" : "");
-        if (opt->caustics_lt)
-            printf("  caustics: path traced (the CPU's light tracing makes them sharp sooner: -gpu off)\n");
+        if (opt->caustics_lt) printf("  caustics: light traced on the GPU, %g light paths per pixel and sample\n", opt->photons);
+        gpu_view_trace_wavefront(v, opt->wavefront);
+        if (opt->wavefront) printf("  wavefront: one step of all paths at a time\n");
         if (opt->denoise && !gpu_view_trace_denoise(v, 1))
             printf("  not denoised: this GPU's buffers are too small for the denoiser at %dx%d\n", W, H);
         else if (opt->denoise) printf("  denoised (-denoise off for the unbiased image)\n");
         scene_set_accel(scene, ACCEL_BVH, &opt->ap);              // the GPU traces the same BVH
         Camera cam = camera_make(scene->cam_from, scene->cam_at, scene->cam_up, scene->cam_vfov_deg, (real)W / H);
         Image img = image_create(W, H);
-        if (gpu_frame_trace(g, v, scene, &cam, &p, &opt->march, opt->spp, opt->max_depth, opt->mis, (real)opt->clamp, &img, 1)){
+        if (gpu_frame_trace(g, v, scene, &cam, &p, &opt->march, opt->spp, opt->max_depth, opt->mis, (real)opt->clamp, opt->sampler,
+                            opt->caustics_lt ? (real)opt->photons : 0, &img, 1)){
             image_free(&img);
             gpu_frame_close(g, v);
             return -1;

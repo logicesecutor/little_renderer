@@ -186,12 +186,163 @@ static void test_fluid(void){
     fluid_free(e);
 }
 
+// ---- mesh bodies (phys/convex.h) ----
+
+// the 12 triangles of a box (half sizes h), turned by r and moved to c, in a growing array
+static int box_tris(Triangle *t, Vec3 h, Mat3 r, Vec3 c){
+    Vec3 p[8];
+    for (int i = 0; i < 8; i++)
+        p[i] = v_add(c, mat3_mul_vec(r, vec3((i & 1) ? h.x : -h.x, (i & 2) ? h.y : -h.y, (i & 4) ? h.z : -h.z)));
+    static const int q[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+    int n = 0;
+    for (int f = 0; f < 6; f++){
+        Vec3 a = p[q[f][0]], b = p[q[f][1]], cc = p[q[f][2]], d = p[q[f][3]];
+        t[n].q = a; t[n].u = v_sub(b, a); t[n].v = v_sub(cc, a); t[n].n[0] = -1; t[n].material = 0; n++;
+        t[n].q = a; t[n].u = v_sub(cc, a); t[n].v = v_sub(d, a); t[n].n[0] = -1; t[n].material = 0; n++;
+    }
+    return n;
+}
+
+// a torus around the y axis (radii R, r), nu x nv quads
+static int torus_tris(Triangle *t, real R, real r, int nu, int nv){
+    int n = 0;
+    for (int i = 0; i < nu; i++)
+        for (int j = 0; j < nv; j++){
+            Vec3 p[4];
+            for (int k = 0; k < 4; k++){
+                real u = (i + (k == 1 || k == 2)) * 2 * (real)PI / nu, v = (j + (k >= 2)) * 2 * (real)PI / nv;
+                p[k] = vec3((R + r * r_cos(v)) * r_cos(u), r * r_sin(v), (R + r * r_cos(v)) * r_sin(u));
+            }
+            t[n].q = p[0]; t[n].u = v_sub(p[1], p[0]); t[n].v = v_sub(p[2], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
+            t[n].q = p[0]; t[n].u = v_sub(p[2], p[0]); t[n].v = v_sub(p[3], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
+        }
+    return n;
+}
+
+static void test_hulls(void){
+    printf("mesh bodies: hulls (mass, landing, stacking), a mesh collider, the air's view of them\n");
+    static Triangle tri[4096];
+    // a box mesh, turned and moved in its own frame: the hull's mass and axes must undo that
+    Mat3 turn = quat_to_mat3(quat_axis_angle(v_norm(vec3(0.2, 0.4, 1)), 0.6));
+    Vec3 h = vec3(50, 20, 35);
+    int n = box_tris(tri, h, turn, vec3(10, 30, -5));
+    RigidWorld w;
+    rigid_init(&w);
+    rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    int g = rigid_geom_hull(&w, tri, n, 0);
+    check("hull made", g >= 0, 1, 0);
+    if (g < 0){ rigid_free(&w); return; }
+    const RigidGeom *G = w.geoms[g];
+    check("hull volume / box volume", G->volume / (8 * h.x * h.y * h.z), 1, 1e-3);
+    check("hull centre of mass (moved by 10,30,-5)", v_len(v_sub(G->com, vec3(10, 30, -5))), 0, 1e-2);
+    // principal moments of a box with density 1: m/3 (b^2 + c^2)
+    real m = 8 * h.x * h.y * h.z, mo[3] = {m / 3 * (h.y * h.y + h.z * h.z), m / 3 * (h.x * h.x + h.z * h.z), m / 3 * (h.x * h.x + h.y * h.y)};
+    real got[3] = {G->inertia.x, G->inertia.y, G->inertia.z}, err = 0;
+    for (int i = 0; i < 3; i++){
+        real best = 1e30f;
+        for (int k = 0; k < 3; k++) best = r_fmin(best, r_fabs(got[i] - mo[k]) / mo[k]);
+        err = r_fmax(err, best);
+    }
+    check("principal moments vs the box's (worst rel. error)", err, 0, 2e-3);
+    // it falls tilted and lands on a face, like a box would
+    Xform place = xform_make(vec3(278, 300, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0.3, 0.5), 0.9)).m, 1);
+    int b = rigid_add_hull_body(&w, g, place, 1);
+    for (int k = 0; k < 4 * 240 * 3; k++) rigid_step(&w, 1.0 / 960);
+    real y = w.bodies[b].pos.y;
+    real best = r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35)));
+    check("hull at rest: centre height - nearest half size", best, 0, 1.5);
+    // a second one, dropped flat on top of it
+    Vec3 top = w.bodies[b].pos;
+    Mat3 rb = quat_to_mat3(w.bodies[b].rot);
+    Xform on = body_mesh_xform(&w.bodies[b]);
+    on.m[1][3] += 2 * y + 1;
+    int b2 = rigid_add_hull_body(&w, g, on, 1);
+    (void)rb;
+    for (int k = 0; k < 4 * 240 * 3; k++) rigid_step(&w, 1.0 / 960);
+    check("second hull rests on the first: height difference", w.bodies[b2].pos.y - w.bodies[b].pos.y, 2 * y, 1.5);
+    check("second hull drift sideways", r_fabs(w.bodies[b2].pos.x - top.x) + r_fabs(w.bodies[b2].pos.z - top.z), 0, 2);
+    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    // the air: the hull's cells inside it
+    int inside = 0, tot = 0;
+    for (int k = 0; k < 2000; k++){
+        Vec3 p = vec3((k * 37 % 101) / 100.0f - 0.5f, (k * 53 % 103) / 102.0f - 0.5f, (k * 71 % 107) / 106.0f - 0.5f);
+        Vec3 lp = vec3(p.x * 2 * h.x * 0.9f, p.y * 2 * h.y * 0.9f, p.z * 2 * h.z * 0.9f);   // inside the box, a bit in
+        Vec3 wp = xform_point(&place, v_add(mat3_mul_vec(turn, lp), vec3(10, 30, -5)));
+        (void)wp;
+        Body probe = w.bodies[b];
+        Xform xf = body_mesh_xform(&probe);
+        inside += body_contains(&probe, xform_point(&xf, v_add(mat3_mul_vec(turn, lp), vec3(10, 30, -5))));
+        tot++;
+    }
+    check("points of the mesh inside the body (air cells)", (double)inside / tot, 1, 0.02);
+    rigid_free(&w);
+
+    // a torus: its hull is a puck that lands flat (centre at the tube radius)
+    rigid_init(&w);
+    rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    n = torus_tris(tri, 60, 20, 32, 16);
+    g = rigid_geom_hull(&w, tri, n, 0);
+    b = rigid_add_hull_body(&w, g, xform_make(vec3(278, 200, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0, 0.3), 0.5)).m, 1), 1);
+    for (int k = 0; k < 4 * 240 * 4; k++) rigid_step(&w, 1.0 / 960);
+    check("torus hull lands flat: centre height", w.bodies[b].pos.y, 20, 1.5);
+    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    rigid_free(&w);
+
+    // a fixed mesh (a block of 12 triangles, top at y = 100) with a ball and a hull on it,
+    // and a torus mesh: its inside as the air sees it has the torus's volume
+    rigid_init(&w);
+    rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    n = box_tris(tri, vec3(120, 50, 120), mat3_identity(), vec3(0, 50, 0));
+    int gm = rigid_geom_mesh(&w, tri, n);
+    rigid_add_mesh_collider(&w, gm, xform_make(vec3(278, 0, 278), mat3_identity().m, 1));
+    int s = rigid_add_sphere(&w, vec3(220, 300, 278), 25, 1);
+    n = box_tris(tri, vec3(30, 20, 30), mat3_identity(), vec3(0, 0, 0));
+    g = rigid_geom_hull(&w, tri, n, 0);
+    int hb = rigid_add_hull_body(&w, g, xform_make(vec3(330, 250, 300), quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), 0.4)).m, 1), 1);
+    int bx = rigid_add_box(&w, vec3(278, 400, 220), vec3(20, 20, 20), quat_identity(), 1);
+    for (int k = 0; k < 4 * 240 * 4; k++) rigid_step(&w, 1.0 / 960);
+    check("ball on the mesh: centre height", w.bodies[s].pos.y, 125, 1.5);
+    check("hull on the mesh: centre height", w.bodies[hb].pos.y, 120, 1.5);
+    check("box on the mesh: centre height", w.bodies[bx].pos.y, 120, 1.5);
+    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    rigid_free(&w);
+
+    rigid_init(&w);
+    n = torus_tris(tri, 60, 20, 48, 24);
+    gm = rigid_geom_mesh(&w, tri, n);
+    const RigidGeom *T = w.geoms[gm];
+    int cells = 0;
+    for (int i = 0; i < OCC_WORDS; i++) cells += __builtin_popcount(T->occ[i]);
+    real cell = 8 * T->half.x * T->half.y * T->half.z / (OCC_RES * OCC_RES * OCC_RES);
+    check("torus inside / 2 pi^2 R r^2", cells * cell / (2 * PI * PI * 60 * 400), 1, 0.05);
+    rigid_free(&w);
+
+    // two hulls collide in empty space: momentum is kept
+    rigid_init(&w);
+    w.gravity = vec3(0, 0, 0);
+    w.angular_damping = 0;
+    n = box_tris(tri, vec3(30, 20, 25), turn, vec3(0, 0, 0));
+    g = rigid_geom_hull(&w, tri, n, 0);
+    int a1 = rigid_add_hull_body(&w, g, xform_make(vec3(0, 0, 0), mat3_identity().m, 1), 1);
+    int a2 = rigid_add_hull_body(&w, g, xform_make(vec3(120, 15, 5), turn.m, 1), 2);
+    w.bodies[a1].vel = vec3(200, 0, 0);
+    w.bodies[a2].vel = vec3(-100, 0, 0);
+    Vec3 p0 = rigid_momentum(&w);
+    for (int k = 0; k < 960; k++) rigid_step(&w, 1.0 / 960);
+    Vec3 p1 = rigid_momentum(&w);
+    real scale = v_len(p0) + 1e-6f;
+    check("hulls: momentum change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
+    check("hulls: they met (first one slowed down)", w.bodies[a1].vel.x < 150, 1, 0);
+    rigid_free(&w);
+}
+
 int main(void){
     test_free_fall();
     test_bounce();
     test_momentum();
     test_stack();
     test_box_lands_flat();
+    test_hulls();
     test_fluid();
     if (failures){ printf("%d FAILED\n", failures); return 1; }
     printf("all physics tests passed\n");

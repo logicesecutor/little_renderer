@@ -37,6 +37,20 @@ struct RU {
 @group(0) @binding(0) var<uniform> U: RU;
 @group(0) @binding(1) var<storage, read> vpos: array<vec4f>;
 @group(0) @binding(2) var<storage, read> vnrm: array<vec4f>;
+/* where a draw's triangles are: record 0 the world itself, then one per instance (the
+   draw's first instance): object -> world rows, the inverse's rows (normals), material */
+struct IX { r0: vec4f, r1: vec4f, r2: vec4f, i0: vec4f, i1: vec4f, i2: vec4f, m: vec4u };
+@group(0) @binding(3) var<storage, read> ix: array<IX>;
+fn to_world(k: u32, p: vec3f) -> vec3f {
+    let x = ix[k];
+    let q = vec4f(p, 1.0);
+    return vec3f(dot(x.r0, q), dot(x.r1, q), dot(x.r2, q));
+}
+fn normal_to_world(k: u32, n: vec3f) -> vec3f {
+    let x = ix[k];
+    return normalize(n.x * x.i0.xyz + n.y * x.i1.xyz + n.z * x.i2.xyz);
+}
+fn mat_of(k: u32, code: u32) -> u32 { return select(code & 15u, ix[k].m.x & 15u, ix[k].m.x != 0xffffffffu); }
 
 struct VO {
     @builtin(position) pos: vec4f,
@@ -68,22 +82,22 @@ fn to_srgb(c0: vec3f) -> vec3f {
 }
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32) -> VO {
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> VO {
     let t = (vi / 3u) * 3u;
-    let p0 = vpos[t].xyz;
-    let p1 = vpos[t + 1u].xyz;
-    let p2 = vpos[t + 2u].xyz;
+    let p0 = to_world(k, vpos[t].xyz);
+    let p1 = to_world(k, vpos[t + 1u].xyz);
+    let p2 = to_world(k, vpos[t + 2u].xyz);
     let code = u32(vpos[vi].w);
     let mode = u32(U.eye.w);
     let face_n = normalize(cross(p1 - p0, p2 - p0));
     var n = face_n;
-    if ((code & 64u) != 0u && mode != 1u) { n = vnrm[vi].xyz; }
-    let p = vpos[vi].xyz;
+    if ((code & 64u) != 0u && mode != 1u) { n = normal_to_world(k, vnrm[vi].xyz); }
+    let p = to_world(k, vpos[vi].xyz);
     var o: VO;
     o.pos = clip_of(p);
     o.wp = p;
     o.n = n;
-    o.mat = code & 15u;
+    o.mat = mat_of(k, code);
     o.light = 0.0;
     if (mode == 1u) {
         let flag = (code >> 4u) & 3u;
@@ -126,14 +140,14 @@ struct WO {
     @location(0) @interpolate(flat) mat: u32,
 };
 @vertex
-fn vs_wire(@builtin(vertex_index) vi: u32) -> WO {
+fn vs_wire(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> WO {
     let tri = vi / 6u;
     let e = (vi % 6u) / 2u;
     let corner = (e + (vi & 1u)) % 3u;
     let q = vpos[tri * 3u + corner];
     var o: WO;
-    o.pos = clip_of(q.xyz);
-    o.mat = u32(q.w) & 15u;
+    o.pos = clip_of(to_world(k, q.xyz));
+    o.mat = mat_of(k, u32(q.w));
     return o;
 }
 @fragment
@@ -162,6 +176,11 @@ struct GpuRaster {
     WGPUBindGroupLayout bgl;
     WGPURenderPipeline fill[2], wire;      // fill[1]: back faces culled
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
+    WGPUBuffer ix;                         // the draws' transforms: the world, the instances
+    size_t ix_cap;
+    struct { Geo geo; const Triangle *tris; int ntris; unsigned version; } *mg;   // the scene's meshes
+    int nmg;
+    Geo unit[2];                           // the unit sphere and box (shape instances: the physics' bodies)
     // what is on the GPU now
     Primitive *prim_copy;
     int nprim_copy;
@@ -244,7 +263,7 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->color = wgpuTextureCreateView(r->color_tex, NULL);
     r->depth = wgpuTextureCreateView(r->depth_tex, NULL);
     r->uni = gpu_buffer(g, "scene", sizeof(GRU), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URR");
+    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRR");
     WGPUShaderModule m = gpu_shader(g, "scene", SHADER);
     r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);
     r->fill[1] = make_pipeline(g, m, r->bgl, 0, 1);
@@ -268,6 +287,14 @@ static int tmp_reserve(GpuRaster *r, size_t verts){
     return 1;
 }
 
+static void geo_bind(GpuRaster *r, Geo *geo){
+    if (geo->bg) wgpuBindGroupRelease(geo->bg);
+    geo->bg = NULL;
+    if (!geo->pos || !r->ix) return;
+    WGPUBuffer b[4] = {r->uni, geo->pos, geo->nrm, r->ix};
+    geo->bg = gpu_bind(r->g, r->bgl, b, 4);
+}
+
 // room for `verts` vertices in a set; its bind group follows the buffers
 static void geo_reserve(GpuRaster *r, Geo *geo, size_t verts, const char *label){
     Gpu *g = r->g;
@@ -275,9 +302,43 @@ static void geo_reserve(GpuRaster *r, Geo *geo, size_t verts, const char *label)
     int grown = gpu_buffer_reserve(g, &geo->pos, &geo->pos_cap, verts * 16, st, label);
     grown |= gpu_buffer_reserve(g, &geo->nrm, &geo->nrm_cap, verts * 16, st, label);
     if (!grown && geo->bg) return;
-    if (geo->bg) wgpuBindGroupRelease(geo->bg);
-    WGPUBuffer b[3] = {r->uni, geo->pos, geo->nrm};
-    geo->bg = gpu_bind(g, r->bgl, b, 3);
+    geo_bind(r, geo);
+}
+
+// primitives as triangles into tmp_pos / tmp_nrm (from vertex nv on); returns the new count
+static size_t prims_to_tris(GpuRaster *r, const Primitive *pr, int n, size_t nv){
+    for (int i = 0; i < n; i++){
+        int nt = render_prim_tri_count(&pr[i]);
+        for (int sub = 0; sub < nt; sub++){
+            Vec3 wp[3], wn[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, flat_at;
+            int has_n = 0;
+            render_prim_triangle(&pr[i], sub, wp, wn, &has_n, &flat_at);
+            int flag = pr[i].type == PRIM_QUAD ? (sub == 0 ? 1 : 2) : 0;
+            float code = (float)((pr[i].material & 15) + 16 * flag + 64 * (has_n != 0));
+            for (int k = 0; k < 3; k++, nv++){
+                put(r->tmp_pos + 4 * nv, wp[k], code);
+                put(r->tmp_nrm + 4 * nv, wn[k], 0);
+            }
+        }
+    }
+    return nv;
+}
+
+// the unit sphere and the unit box, once: shape instances are drawn as them, moved
+static int upload_unit_shapes(GpuRaster *r){
+    if (r->unit[0].nverts && r->unit[1].nverts) return 1;
+    Primitive faces[6];
+    for (int f = 0; f < 6; f++) faces[f] = unit_box_face(f, 0);
+    Primitive sphere = make_sphere(vec3(0, 0, 0), 1, 0);
+    if (!tmp_reserve(r, (size_t)RENDER_SPHERE_TRIS * 3 + 64)) return 0;
+    for (int k = 0; k < 2; k++){
+        size_t nv = prims_to_tris(r, k == 0 ? &sphere : faces, k == 0 ? 1 : 6, 0);
+        geo_reserve(r, &r->unit[k], nv, k == 0 ? "unit sphere" : "unit box");
+        wgpuQueueWriteBuffer(r->g->queue, r->unit[k].pos, 0, r->tmp_pos, nv * 16);
+        wgpuQueueWriteBuffer(r->g->queue, r->unit[k].nrm, 0, r->tmp_nrm, nv * 16);
+        r->unit[k].nverts = (uint32_t)nv;
+    }
+    return 1;
 }
 
 // the spheres and quads: few, and they move (the physics), so they are compared with what
@@ -319,10 +380,9 @@ static int upload_prims(GpuRaster *r, const Scene *s){
     return 1;
 }
 
-// the mesh triangles: many, and they stay where they are: uploaded once
-static int upload_mesh(GpuRaster *r, const Scene *s){
-    if (r->mesh_tris == s->tris && r->mesh_ntris == s->ntris && r->mesh_normals == s->normals) return 1;
-    size_t nv = (size_t)s->ntris * 3;
+// triangles into a set (as they are: the world's, or a mesh's in its own space)
+static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, const Vec3 *normals, const char *label){
+    size_t nv = (size_t)ntris * 3;
     if (nv * 16 > r->g->max_storage){
         fprintf(stderr, "GPU: the mesh needs a %.0f MB buffer, this GPU allows %.0f MB: the CPU rasterizes\n",
                 (double)nv * 16 / 1048576, (double)r->g->max_storage / 1048576);
@@ -330,33 +390,83 @@ static int upload_mesh(GpuRaster *r, const Scene *s){
     }
     if (nv){
         if (!tmp_reserve(r, (size_t)CHUNK_TRIS * 3)) return 0;
-        geo_reserve(r, &r->mesh, nv, "scene mesh");
-        for (int first = 0; first < s->ntris; first += CHUNK_TRIS){
-            int n = s->ntris - first < CHUNK_TRIS ? s->ntris - first : CHUNK_TRIS;
+        geo_reserve(r, geo, nv, label);
+        for (int first = 0; first < ntris; first += CHUNK_TRIS){
+            int n = ntris - first < CHUNK_TRIS ? ntris - first : CHUNK_TRIS;
             for (int i = 0; i < n; i++){
-                const Triangle *t = &s->tris[first + i];
+                const Triangle *t = &tris[first + i];
                 int has_n = t->n[0] >= 0;
                 float code = (float)((t->material & 15) + 64 * has_n);
                 Vec3 wp[3] = {t->q, v_add(t->q, t->u), v_add(t->q, t->v)};
                 for (int k = 0; k < 3; k++){
                     put(r->tmp_pos + 4 * (3 * (size_t)i + k), wp[k], code);
-                    put(r->tmp_nrm + 4 * (3 * (size_t)i + k), has_n ? s->normals[t->n[k]] : vec3(0, 0, 0), 0);
+                    put(r->tmp_nrm + 4 * (3 * (size_t)i + k), has_n ? normals[t->n[k]] : vec3(0, 0, 0), 0);
                 }
             }
-            wgpuQueueWriteBuffer(r->g->queue, r->mesh.pos, (uint64_t)first * 48, r->tmp_pos, (size_t)n * 48);
-            wgpuQueueWriteBuffer(r->g->queue, r->mesh.nrm, (uint64_t)first * 48, r->tmp_nrm, (size_t)n * 48);
+            wgpuQueueWriteBuffer(r->g->queue, geo->pos, (uint64_t)first * 48, r->tmp_pos, (size_t)n * 48);
+            wgpuQueueWriteBuffer(r->g->queue, geo->nrm, (uint64_t)first * 48, r->tmp_nrm, (size_t)n * 48);
         }
     }
-    r->mesh.nverts = (uint32_t)nv;
+    geo->nverts = (uint32_t)nv;
+    return 1;
+}
+
+// the world's mesh triangles: many, and they stay where they are: uploaded once
+static int upload_mesh(GpuRaster *r, const Scene *s){
+    if (r->mesh_tris == s->tris && r->mesh_ntris == s->ntris && r->mesh_normals == s->normals) return 1;
+    if (!upload_tris(r, &r->mesh, s->tris, s->ntris, s->normals, "scene mesh")) return 0;
     r->mesh_tris = s->tris;
     r->mesh_normals = s->normals;
     r->mesh_ntris = s->ntris;
     return 1;
 }
 
+// the transforms (record 0: the world as it is; then the instances), and the meshes' own
+// triangles (again when a dynamic one changed)
+static int upload_instances(GpuRaster *r, const Scene *s){
+    const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    size_t n = 1 + (size_t)s->ninsts;
+    float *rec = calloc(n, 112);
+    if (!rec) return 0;
+    for (size_t i = 0; i < n; i++){
+        Xform xf = i ? s->insts[i - 1].xf : xform_identity(), inv = i ? s->insts[i - 1].inv : xform_identity();
+        float *o = rec + 28 * i;
+        for (int a = 0; a < 3; a++)
+            for (int k = 0; k < 4; k++){ o[4 * a + k] = (float)xf.m[a][k]; o[12 + 4 * a + k] = (float)inv.m[a][k]; }
+        uint32_t m = i && s->insts[i - 1].material >= 0 ? (uint32_t)s->insts[i - 1].material : 0xffffffffu;
+        memcpy(o + 24, &m, 4);
+    }
+    if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")){
+        geo_bind(r, &r->prims);
+        geo_bind(r, &r->mesh);
+        for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
+        geo_bind(r, &r->unit[0]);
+        geo_bind(r, &r->unit[1]);
+    }
+    wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, rec, n * 112);
+    free(rec);
+    if (s->nmeshes > r->nmg){
+        void *mg = realloc(r->mg, (size_t)s->nmeshes * sizeof(r->mg[0]));
+        if (!mg) return 0;
+        r->mg = mg;
+        memset(r->mg + r->nmg, 0, (size_t)(s->nmeshes - r->nmg) * sizeof(r->mg[0]));
+        r->nmg = s->nmeshes;
+    }
+    for (int m = 0; m < s->nmeshes; m++){
+        const SceneMesh *sm = &s->meshes[m];
+        if (r->mg[m].geo.nverts && r->mg[m].tris == sm->tris && r->mg[m].ntris == sm->ntris && r->mg[m].version == sm->version)
+            continue;
+        if (!upload_tris(r, &r->mg[m].geo, sm->tris, sm->ntris, sm->normals, "instanced mesh")) return 0;
+        r->mg[m].tris = sm->tris;
+        r->mg[m].ntris = sm->ntris;
+        r->mg[m].version = sm->version;
+    }
+    return 1;
+}
+
 int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p){
     Gpu *g = r->g;
-    if (!upload_prims(r, s) || !upload_mesh(r, s)) return 0;
+    if (!upload_instances(r, s) || !upload_unit_shapes(r) || !upload_prims(r, s) || !upload_mesh(r, s)) return 0;
     RenderMode mode = p->mode == MODE_TEXTURED ? MODE_PHONG : p->mode;
 
     GRU U;
@@ -398,9 +508,17 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     wgpuRenderPassEncoderSetPipeline(pass, wire ? r->wire : r->fill[p->cull_backfaces != 0]);
     Geo *sets[2] = {&r->prims, &r->mesh};
     for (int k = 0; k < 2; k++){
-        if (!sets[k]->nverts) continue;
+        if (!sets[k]->nverts || !sets[k]->bg) continue;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, sets[k]->bg, 0, NULL);
         wgpuRenderPassEncoderDraw(pass, wire ? sets[k]->nverts * 2 : sets[k]->nverts, 1, 0, 0);
+    }
+    // the instances: their mesh's triangles, moved by their record (the draw's first instance)
+    for (int i = 0; i < s->ninsts; i++){
+        int mesh = s->insts[i].mesh;
+        Geo *geo = mesh >= 0 ? &r->mg[mesh].geo : &r->unit[mesh == INST_SPHERE ? 0 : 1];
+        if (!geo->nverts || !geo->bg) continue;
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
+        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, 1, 0, (uint32_t)i + 1);
     }
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
@@ -409,12 +527,15 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
 
 void gpu_raster_destroy(GpuRaster *r){
     if (!r) return;
-    Geo *sets[2] = {&r->prims, &r->mesh};
-    for (int k = 0; k < 2; k++){
-        if (sets[k]->bg) wgpuBindGroupRelease(sets[k]->bg);
-        if (sets[k]->pos){ wgpuBufferDestroy(sets[k]->pos); wgpuBufferRelease(sets[k]->pos); }
-        if (sets[k]->nrm){ wgpuBufferDestroy(sets[k]->nrm); wgpuBufferRelease(sets[k]->nrm); }
+    int nsets = 4 + r->nmg;
+    for (int k = 0; k < nsets; k++){
+        Geo *geo = k == 0 ? &r->prims : (k == 1 ? &r->mesh : (k < 4 ? &r->unit[k - 2] : &r->mg[k - 4].geo));
+        if (geo->bg) wgpuBindGroupRelease(geo->bg);
+        if (geo->pos){ wgpuBufferDestroy(geo->pos); wgpuBufferRelease(geo->pos); }
+        if (geo->nrm){ wgpuBufferDestroy(geo->nrm); wgpuBufferRelease(geo->nrm); }
     }
+    free(r->mg);
+    if (r->ix){ wgpuBufferDestroy(r->ix); wgpuBufferRelease(r->ix); }
     if (r->fill[0]) wgpuRenderPipelineRelease(r->fill[0]);
     if (r->fill[1]) wgpuRenderPipelineRelease(r->fill[1]);
     if (r->wire) wgpuRenderPipelineRelease(r->wire);

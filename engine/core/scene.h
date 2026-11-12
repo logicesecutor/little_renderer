@@ -65,6 +65,63 @@ Primitive make_quad(Vec3 q, Vec3 u, Vec3 v, int material);
 Aabb primitive_bounds(const Primitive *prim);
 Aabb triangle_bounds(const Triangle *t);
 
+// ---- instances: meshes placed in the world by a transform ------------------------------
+// A SceneMesh holds triangles in its own (object) space, with its own vertex normals; an
+// Instance places one in the world by an affine transform, and may override its material.
+// Instances of one mesh share its triangles and its BVH (rt/accel.c builds it, and the GPU
+// path tracer its copy). Moving an instance only changes its transform (and the top-level
+// structure over the instances, rebuilt every frame on the GPU). A mesh whose triangles
+// change (dynamic, e.g. a cloth) gets its BVH rebuilt when its version changes. Shape ids
+// (above) do not cover instances: a hit on one has Hit.inst >= 0 and Hit.prim = the
+// triangle's index in its mesh.
+typedef struct { real m[3][4]; } Xform;   // world = m * (object, 1): rotation/scale, then translation
+Xform xform_identity(void);
+// scale, then rotate by r (3 x 3, row-major), then translate by t
+Xform xform_make(Vec3 t, const real r[3][3], real scale);
+Xform xform_rot_y(Vec3 t, real deg, real scale);
+Xform xform_inverse(const Xform *x);
+static inline Vec3 xform_point(const Xform *x, Vec3 p){
+    return vec3(x->m[0][0] * p.x + x->m[0][1] * p.y + x->m[0][2] * p.z + x->m[0][3],
+                x->m[1][0] * p.x + x->m[1][1] * p.y + x->m[1][2] * p.z + x->m[1][3],
+                x->m[2][0] * p.x + x->m[2][1] * p.y + x->m[2][2] * p.z + x->m[2][3]);
+}
+static inline Vec3 xform_dir(const Xform *x, Vec3 d){
+    return vec3(x->m[0][0] * d.x + x->m[0][1] * d.y + x->m[0][2] * d.z,
+                x->m[1][0] * d.x + x->m[1][1] * d.y + x->m[1][2] * d.z,
+                x->m[2][0] * d.x + x->m[2][1] * d.y + x->m[2][2] * d.z);
+}
+// a normal of the object, in the world: by the inverse transpose (inv = the inverse transform)
+static inline Vec3 xform_normal(const Xform *inv, Vec3 n){
+    return v_norm(vec3(inv->m[0][0] * n.x + inv->m[1][0] * n.y + inv->m[2][0] * n.z,
+                       inv->m[0][1] * n.x + inv->m[1][1] * n.y + inv->m[2][1] * n.z,
+                       inv->m[0][2] * n.x + inv->m[1][2] * n.y + inv->m[2][2] * n.z));
+}
+Aabb xform_box(const Xform *x, Aabb b);   // the world box around a transformed box
+
+typedef struct {
+    Triangle *tris; int ntris;      // object space; Triangle.n indexes this mesh's normals
+    Vec3 *normals; int nnormals;
+    Aabb box;                       // object-space bounds
+    int dynamic;                    // its triangles change: bump version after changing them
+    unsigned version;
+    void *bvh;                      // the path tracer's BVH of it (rt/accel.c), built when needed
+    void (*bvh_free)(void *bvh);
+    unsigned bvh_version;           // the version it was built for
+} SceneMesh;
+
+// An instance is a mesh, or one of two exact shapes in their own space: the unit sphere
+// (radius 1 at the origin) or the unit box [-1, 1]^3, placed (and sized) by the transform.
+// The physics' balls and boxes are shape instances: moving one changes only its transform.
+#define INST_SPHERE (-1)
+#define INST_BOX    (-2)
+
+typedef struct {
+    int mesh;                       // index into Scene.meshes, or INST_SPHERE / INST_BOX
+    Xform xf, inv;                  // object -> world, and back
+    int material;                   // >= 0: instead of the triangles' own (shapes: required)
+    Aabb box;                       // world bounds (scene_move_instance updates it)
+} Instance;
+
 // SCENE_EMPTY: just the room and the lamp (e.g. for a physics simulation to fill)
 typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY } SceneKind;
 
@@ -81,6 +138,9 @@ typedef struct {
     const struct CloudParams *cloud;
     // > 0: the box is filled with a uniform fog of this extinction (per unit)
     real fog;
+    // > 0: also this many instances of obj_path (one mesh, mesh_mat), in a row on the floor
+    // (any scene; SCENE_MESH then puts its model in as an instance too)
+    int instances;
 } SceneOptions;
 
 typedef struct Scene {
@@ -104,6 +164,13 @@ typedef struct Scene {
     struct Volume *volumes[MAX_VOLUMES];
     int nvolumes;
 
+    // instanced meshes (see above)
+    SceneMesh *meshes;
+    int nmeshes, cap_meshes;
+    Instance *insts;
+    int ninsts, cap_insts;
+    unsigned inst_version;  // changes whenever an instance is added or moved
+
     // Acceleration structure, owned by the backend that built it (the path tracer's
     // scene_set_accel). scene_free calls accel_free. Rebuild it after adding geometry.
     void *accel;
@@ -121,6 +188,29 @@ int scene_add_triangle(Scene *s, Vec3 a, Vec3 b, Vec3 c, const Vec3 *normals, in
 int scene_add_mesh(Scene *s, const Mesh *m, int material);
 // mesh_load + mesh_place + scene_add_mesh. Returns the triangles added, or -1.
 int scene_load_mesh(Scene *s, const char *path, int material, real size, Vec3 base, real rot_y_deg);
+// A new SceneMesh from a loaded mesh (copied; its triangles get `material`). Returns its index.
+int scene_add_mesh_object(Scene *s, const Mesh *m, int material);
+// mesh_load, scaled so its largest side is `size`, its bottom centre at the origin. -1 on failure.
+int scene_load_mesh_object(Scene *s, const char *path, int material, real size);
+// An instance of mesh `mesh` (material -1: the triangles' own), or of a shape (mesh =
+// INST_SPHERE or INST_BOX, material >= 0). Returns its index.
+int scene_add_instance(Scene *s, int mesh, Xform xf, int material);
+// rotation r (columns: the shape's axes), scaled per axis, then moved to t: a box of half
+// sizes `half`, or a sphere of radius r (scale r, r, r)
+Xform xform_axes(Mat3 r, Vec3 scale, Vec3 t);
+// a shape instance as world-space primitives: the sphere (part 0), or face `part` (0..5) of
+// the box as a quad (u x v outwards) - what the rasterizers draw
+Primitive instance_shape_prim(const Instance *in, int part);
+// the unit box's face k (0..5) in its own space, u x v outwards
+Primitive unit_box_face(int k, int material);
+void scene_move_instance(Scene *s, int inst, Xform xf);
+// after changing a dynamic mesh's triangles: its bounds, and a new version (its BVHs rebuild)
+void scene_mesh_changed(Scene *s, int mesh);
+// the material of an instance's triangle
+static inline int scene_instance_material(const Scene *s, int inst, int tri){
+    const Instance *in = &s->insts[inst];
+    return in->material >= 0 || in->mesh < 0 ? in->material : s->meshes[in->mesh].tris[tri].material;
+}
 Vec3 scene_light_center(const Scene *s);            // center of the light quad
 
 // shapes = primitives followed by triangles (see above)

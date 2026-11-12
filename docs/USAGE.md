@@ -192,10 +192,12 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-s samples` | render: light paths per pixel. view: stop refining after this many | 128 (view: 4096) | noise falls like 1/√s: 4× the samples = half the grain |
 | `-d bounces` | maximum bounces per path | 50 | 3–5 is fast but darker (less indirect light); Russian roulette ends most paths early anyway |
 | `-clamp max` | caps the brightness of a single sample | 0 (off) | `-clamp 4` removes fireflies (glass, mirrors) but darkens caustics: biased |
+| `-wavefront on\|off` | path tracing on the GPU: small kernels, each doing one step (extend, shade, shadow rays) of all paths at once, instead of one kernel per path. The same image; slower on today's scenes (docs/PERFORMANCE.md R1), kept for heavier shading. Native builds only for now | off |
 | `-denoise on\|off` | path tracing on the GPU: the image is denoised (an edge-avoiding filter guided by each pixel's noise, normal, distance and albedo: WEB.md 2.4) | `view`, `sim`: on; `render`: off | at 4–16 samples it looks like 256–1024; it blurs a little and is slightly biased (±1%), so a final `render` stays unbiased unless asked; the CPU path tracer does not denoise |
 | `-threads n` | CPU threads, for both backends | 0 = all cores | same as the `OMP_NUM_THREADS` environment variable; the image is the same for any value |
+| `-sampler sobol\|random` | where a path's random numbers come from: the Sobol sequence, Owen-scrambled, shifted per pixel by blue noise; or plain PCG32 (RAYTRACER.md 5.10) | sobol | sobol: less noise for the same samples (up to 1.35×, more while moving in the viewer), and finer-grained noise |
 | `-mis on\|off` | multiple importance sampling of the lamp: direct sampling and bounces both count, weighted | on | helps near the lamp and in fog; `off` = the old estimator |
-| `-caustics lt\|pt` | caustics by light tracing (traced from the lamp and connected to the camera) or by path tracing alone | `render`: lt, `view`: pt | lt removes most fireflies of glass and mirrors, unbiased (RAYTRACER.md 5.14); `-mis off -caustics pt` reproduces the old images bit for bit |
+| `-caustics lt\|pt` | caustics by light tracing (traced from the lamp and connected to the camera) or by path tracing alone; on the GPU too (WEB.md 2.6) | `render`, `view`: lt (the CPU viewer: pt), `sim`: pt | lt removes most fireflies of glass and mirrors, unbiased (RAYTRACER.md 5.14); `-mis off -caustics pt -sampler random` reproduces the old images bit for bit |
 | `-photons x` | light paths per camera path for `-caustics lt` | 1 | more = smoother caustics, slower |
 | `-o file` | render: output PPM. view: prefix for screenshots (`<prefix>_001.ppm`, ...) | `out/cornell_<scene>.ppm`, `..._raster.ppm` for the rasterizer (view: `out/view`) | the folder must exist (`make` targets create `out/`) |
 
@@ -211,6 +213,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-obj file` | the model for `-scene mesh`: `.obj`, or ASCII `.ply` (binary PLY is not supported) | `models/torus.obj` |
 | `-mat diffuse\|mirror\|glass` | material of the model | diffuse (warm orange) |
 | `-rot degrees` | turns the model around the vertical axis | 0 |
+| `-instances n` | n instances of the model (one mesh placed n times by transforms) in any scene: in a row (`-scene spheres`: beside the spheres first); on the GPU too (WEB.md 2.7) | 0: the model as world triangles, `-scene mesh` only |
 
 The model is always scaled so its largest side is 330 units (the box is 555), centered,
 and stood on the floor. Files without normals get smooth normals computed automatically.
@@ -258,11 +261,12 @@ y = 554. The easiest way to get numbers is to fly there in `view` and press **C*
 | `-bvhleaf n` | BVH: max primitives per leaf (SAH may stop earlier) | 4 |
 | `-bvhbins n` | BVH: buckets per axis when evaluating SAH splits (2..256) | 16 |
 | `-bvhsplit sah\|middle` | BVH: surface area heuristic, or cut the longest axis in the middle | sah |
+| `-bvhwidth 2\|4` | BVH: children per node for the CPU path tracer; 4 = half as deep, 4 boxes tested per step (the dragon 1.9x faster). The GPU uses the binary tree, faster there (`LR_GPU_WIDE=1` to try the 4-wide one) | 4 |
 
 The three structures give the same image (bit for bit in the double build); only the
 speed changes (`make bench`, `make bench-dragon`). The program prints the build
 statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in parallel
-(the dragon in about 1 s on 8 threads), and gives the same tree for any number of threads.
+(the dragon in about 0.25 s on 8 threads), and gives the same tree for any number of threads.
 
 ### view only
 
@@ -272,10 +276,12 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-movespp n` | samples per pixel of each low-resolution frame while moving | 1 |
 | `-speed units` | movement speed in scene units per second | 300 |
 | `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks); prints the frame rate, and with `-orbit` the `render` command of the screenshot's camera | 0 = never |
+| `-photoncache on\|off` | GPU light-traced caustics while moving: from a world-space photon cache (on), or traced exactly every frame (off) | on |
 | `-orbit deg/s` | the camera swings by itself, ±25° around the point it looks at, at this speed: benchmarks and tests of the image while moving | 0 = off |
 | `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); 12 at most while the physics runs; 0 = start over on every move | 32 |
 | `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
+| `-gpurigid on\|off` | with `-sim on` (and `sim`) and the GPU: simulate the rigid bodies there (PHYSICS.md 1.4) | on |
 | `-gpuraster on\|off` | with the GPU: rasterize the scene there | on |
 | `-gputrace on\|off` | with the GPU: path trace there; in `rt` mode every frame, while the camera or the physics move too (reprojected and denoised: WEB.md 2.5) | on, off for a software GPU |
 
@@ -290,7 +296,9 @@ carries, `-fog` adds haze, the camera options work as usual.
 | `-sim on\|off` | `view` only: run the physics demo live | off |
 | `-demo drop` | balls and boxes fall through the cloud one after another, balloons rise through it | ✓ |
 | `-demo blast` | everything rests on the floor under the cloud; an explosion at t = 1 s | |
-| `-balls n`, `-boxes n`, `-balloons n` | how many of each | 5, 3, 3 |
+| `-balls n`, `-boxes n`, `-balloons n` | how many of each (4096 bodies in all at most); in the drop demo one appears every 0.4 s, or, with more than 50, all of them within 20 s | 5, 3, 3 |
+| `-meshes n` | n copies of the model (`-obj`, 120 units) fall too (`-demo blast`: rest on the floor), as their convex hulls (PHYSICS.md 1.2b); `-mat` their material | 0 |
+| `-collider on\|off` | the model (`-obj`, 260 units, turned by `-rot`) stands in the middle of the room, fixed: things bounce off and rest on its triangles, the air flows around it | off |
 | `-wind x,y,z` | the air drifts towards this velocity (units/s). The room is closed but for its front, so a wind mostly swirls | 0,0,0 |
 | `-fluidres n` | air cells along the room's side (8..256); cost grows with n³ | 48 (view: 32, and `-cloudres` 96) |
 | `-buoyancy a` | the cloud rises with acceleration a × density (units/s²); try 100 | 0 |
@@ -308,6 +316,20 @@ whole animation in about 40 s, a quick look before the 20-minute path traced ver
 and one physics step of up to 1/30 s per frame; the hybrid mode rasterizes while the
 simulation runs and path traces when it is paused; in `rt` mode the preview resolution
 is 1/2 (`-preview`) and `-movespp 2` gives less grain per frame.
+With the GPU the bodies are simulated there (`-gpurigid`), so hundreds of them cost the
+CPU nothing: `bin/view -sim on -backend raster -balls 400 -boxes 200 -balloons 0` stays at the
+screen's frame rate (164 frames/s on an RTX 3070; 142 with `-gpurigid off`). Set
+`LR_GPU_TIMING=1` to have the GPU passes timed (WEB.md 3).
+
+Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed):
+
+| variable | effect |
+|---|---|
+| `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
+| `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
+| `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary) |
+| `LR_GPU_TLAS=lbvh` | the GPU builds the top level over the instances itself every frame (default: it takes the CPU's SAH tree) |
+| `LR_TLAS_REFIT=1` | the top level is refit while the instances only move, instead of rebuilt |
 
 ---
 

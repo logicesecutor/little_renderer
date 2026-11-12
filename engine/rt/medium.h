@@ -35,5 +35,6 @@ real scene_medium_transmittance(const Scene *s, const Ray *ray, real tmin, real 
 // A new direction after scattering, for a ray that was travelling along d (unit length),
 // drawn with probability density phase_hg(dot(d, new), g).
 Vec3 medium_sample_phase(Vec3 d, real g, Rng *rng);
+Vec3 medium_sample_phase_u(Vec3 d, real g, real xi, real u_phi);   // the same from 2 given numbers
 
 #endif

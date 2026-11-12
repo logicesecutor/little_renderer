@@ -10,7 +10,7 @@
 #include "core/scene.h"
 #include "phys/world.h"
 
-#define SIM_MAX_SPAWNS 64
+#define SIM_MAX_SPAWNS 4096
 
 // a body that enters the simulation at time t
 typedef struct {
@@ -20,6 +20,7 @@ typedef struct {
     Quat rot;
     real density, restitution, friction;
     int material;
+    int geom, mesh;          // BODY_HULL: its shape (RigidWorld.geoms), the scene mesh drawn
 } Spawn;
 
 typedef struct {

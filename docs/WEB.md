@@ -61,7 +61,7 @@ errors); the title line under the heading is the window title of `bin/view`.
 | the path tracer (`-gputrace on`) | the light transport of `trace_path_ex` (NEE + MIS, mirror, glass, Russian roulette, media by delta and ratio tracking) in one compute kernel over the scene's BVH (`gpu/trace_gpu.c`) | `trace_path_ex` |
 | the air and the cloud of `-sim on` (`-gpufluid on`) | every kernel of `fluid_step`: obstacles, walls, forces, vorticity, advection, the multigrid pressure solve, MacCormack for the cloud | `fluid_step` |
 | showing a CPU frame | the framebuffer is uploaded and drawn by one full-screen pass | `putImageData` on a 2D canvas |
-| rigid bodies | | yes |
+| rigid bodies of `-sim on` (`-gpurigid on`) | forces, pairs, contacts (balls, boxes, hulls, fixed meshes, walls), the contact solver with mass splitting (2.8) | `rigid_step` |
 
 Measured at 640×640 in Chrome on an NVIDIA Ampere GPU: the path tracer takes 6 ms per pass
 (one sample per pixel) on the Cornell box, 10 ms on the 100k-triangle dragon, 20 ms with
@@ -82,6 +82,7 @@ kernel is slower than the CPU's own code, so `-gputrace` is off by default there
 | `-gpu offscreen` | WebGPU draws into a texture that is read back and shown on a 2D canvas: one frame of latency, but works in browsers that can compute with WebGPU and not show it (some headless ones) | |
 | `-gpu off` | the CPU does everything | builds without a GPU library |
 | `-gpufluid on\|off` | with `-sim on`: the air and the cloud are simulated on the GPU | on |
+| `-gpurigid on\|off` | with `-sim on`: the rigid bodies are simulated on the GPU (2.8) | on |
 | `-gpuraster on\|off` | the rasterizer's triangles are drawn on the GPU | on |
 | `-gputrace on\|off` | the GPU path traces; in `rt` mode every frame, the camera and the physics moving or not (2.5) | on, off for a software GPU |
 
@@ -199,8 +200,9 @@ no outside denoiser is used.
   denoiser smooths the result. A band of samples never waits for another: on a GPU too slow
   for a whole pass per frame, the bands go on round the image, and a move waits until the
   running band ends, so the frame shows the last image together with its own camera.
-- The physics changes the geometry every step: the scene's BVH is rebuilt on the CPU
-  (`scene_set_accel`) and uploaded; the cloud stays on the GPU (`-gpufluid`).
+- The physics moves its bodies every step: they are instances (2.7), so only their
+  transforms are uploaded and the top level rebuilt; the scene's own BVH stays. The cloud
+  stays on the GPU (`-gpufluid`), and so do the bodies (`-gpurigid`, 2.8).
 
 Measured on an RTX 3070 (Windows, native), with the camera swinging at 15°/s
 (`-orbit 15`); RMSE in 8-bit levels against 1024 spp at the screenshot's camera, 400×400:
@@ -221,6 +223,103 @@ physics demo (`-sim on`, 11 bodies, air and cloud on the GPU) 50 frames/s, 35 at
 Try it: `bin/view -backend rt -scene spheres`, `bin/view -backend rt -sim on`, or in a
 browser `?backend=rt&sim=on`. In `hybrid` mode (the default) the rasterizer still draws while
 the camera moves, and the path tracer takes over once it settles.
+
+### 2.6 Caustics on the GPU (`-caustics lt`, `-photoncache`)
+
+- **The light tracer** (`ltrace` in `trace_gpu.c`) is `light_trace_caustics` of
+  `rt/tracer.c` as a compute kernel, one thread per light path. A path leaves the lamp,
+  passes mirrors and glass, and each diffuse surface it reaches is connected to the camera
+  and added to its pixel. The sums are 64-bit 32.32 fixed point made of two `u32` atomics
+  with a carry (WGSL has no 64-bit atomics), so the image does not depend on the order the
+  threads add in.
+- **No double counting:** the path tracer leaves out exactly those paths (`skip_caustics`).
+  The caustics are added after the denoiser, so they stay sharp. One pass of light paths
+  (`-photons` per pixel, 1 by default) follows each pass of the path tracer.
+- **Measured** (the spheres, 400×400, RMSE against 8192 spp): 64 spp path traced 11.8,
+  light traced on the GPU 5.0 (the CPU's 5.0), for 0.32 s instead of 0.24 s. The mean is
+  within 0.1%. `render`, `view` (and `bin/sim -caustics lt`) light-trace them by default
+  on the GPU; the CPU viewer still path traces them.
+- **The photon cache** (`view`, while moving): light paths leave their power at every
+  diffuse surface they reach, in a world-space hash grid. Each slot holds 3 × 64-bit sums,
+  a photon count and its cell's key. Cells are claimed with an atomic compare-exchange and
+  linear probing, so two places never share a slot.
+- **Cell sizes:** cells are the scene's size / 256, ×4 and ×16, per main normal axis. A
+  pixel that sees a diffuse surface directly reads, bilinearly along that surface, the
+  finest size holding at least 16 photons (adaptive density estimation). The grid fades by
+  0.9 each frame something moves, so what moved fades out.
+- **Standing still,** the exact light tracer takes over (weight P/(P+8) after P passes),
+  and the image converges to the unbiased one.
+- **While moving** (`-orbit 15`, raw / denoised RMSE): photon cache 6.5 / 6.7, exact light
+  tracer each frame 9.0 / 8.9, path traced caustics (`-caustics pt`) 8.8 / 6.0. The cache
+  gives by far the best raw frame; once denoised, path traced caustics come out ~10% ahead,
+  because the denoiser smooths them, while the cache's cells keep a little bias (a few %
+  near the lamp, a slightly blurred caustic). `-photoncache off` traces the exact caustics
+  every frame instead.
+
+### 2.7 Instances: meshes that move (`-instances n`)
+
+A mesh can be kept in its own space and placed in the world by transforms (SDK.md, section
+3); `-instances n` puts n copies of the model in any scene (`-scene spheres`: beside the
+spheres). Moving one changes only its transform, never its triangles.
+
+- **The CPU path tracer** has a BVH per mesh; a ray is moved into an instance's space when
+  it meets the instance's world box (`intersect_instances` in `rt/accel.c`).
+- **The GPU path tracer** keeps everything in its existing buffers (no new bindings):
+  `nodes` = [the meshes' BVHs | the top level | the world's BVH], `aux` = [their leaves'
+  shape ids | the top level's | the vertex normals | the world's], and after the
+  primitives two records per instance (its inverse and forward transforms, its mesh's BVH
+  root, material, world box). A ray walks the world's BVH, then the top-level BVH over the
+  instances, moving into each instance it reaches.
+- **The top level is built on the GPU every frame**, by a linear BVH builder (Karras 2012,
+  `BUILD` in `trace_gpu.c`): 30-bit Morton codes of the box centres, a bitonic sort (one
+  dispatch per step), the hierarchy from the codes' common prefixes (each internal node
+  independently), then the boxes from the leaves up, one pass per tree level. The same
+  builder rebuilds a dynamic mesh's BVH after its triangles changed (`scene_mesh_changed`),
+  in place of the CPU's; that one is bit-identical in the image (only how fast rays find
+  the triangles changes).
+- **One traversal loop** walks all of it: a stack entry is a node and the instance whose
+  space it is in, the ray is moved into an instance's space when its entries come up. So the
+  hit tests exist once in the compiled kernel: written as two nested walks, the browser's
+  first compile of the path tracer (D3D12 on Windows) took ~50 s; as one loop, ~15 s (then
+  it is cached), and the instanced dragon traces 20% faster natively.
+- **The GPU rasterizer** draws each instance as its mesh's triangles (uploaded once) with
+  the transform picked by the draw's first instance.
+- **Physics** (PHYSICS.md 1.2b): `bin/sim -obj <model> -meshes n -collider on` drops convex
+  hulls of the model on a fixed copy of it; they are instances, so every frame only their
+  transforms move to the GPU. The GPU air sees them through each shape's 48³ occupancy
+  bits, uploaded once (the obstacle kernel's 5th binding).
+- **Measured** (RTX 3070, `view -orbit 15`, 400²): the dragon as an instance 119 frames/s,
+  as world triangles 131. Against the CPU: the same images (RMSE 2.6–3.0 at 64 spp, equal
+  means; 40 instances too).
+- **Shapes as instances.** An instance can also be the unit sphere (`INST_SPHERE`) or the
+  unit box [−1, 1]³ (`INST_BOX`), scaled, turned and moved by its transform: every ball
+  and box of the physics is one (PHYSICS.md 4.1). The path tracers hit them exactly (the
+  GPU's top-level leaf recognises the two shapes by their kind and tests them in the
+  instance's space, no BVH below); the rasterizers draw a tessellated unit sphere and box,
+  uploaded once. The CPU path tracer has a top-level BVH over the instances too
+  (binned SAH, rebuilt by `scene_update_instances` when they moved). With 64 bodies the
+  rasterized `view -sim on` went from 21 to 6 ms per frame (before, every body's primitives
+  were tessellated again each frame), and the GPU scene upload from 0.16 to 0.02 ms.
+
+### 2.8 Rigid bodies on the GPU (`-gpurigid`, on by default)
+
+With the GPU, the physics' bodies are stepped there as well as the air (`gpu/rigid_gpu.c`,
+PHYSICS.md 1.4): about 15 compute passes per substep (pairs, contacts of balls, boxes,
+hulls and fixed meshes, the contact solver with mass splitting), the state kept on the GPU
+and read back a step late, so the CPU never waits for it in the viewer. `-gpurigid off`
+keeps them on the CPU. In the browser it runs as natively (the dragons button too).
+
+| | CPU | GPU (RTX 3070) |
+|---|---|---|
+| 1024 bodies, one 1/60 s step | 17.9 ms | 1.7 ms |
+| `view -sim on`, 600 bodies, raster | 142 frames/s (19 ms of physics on the CPU) | 164 (the screen's limit; 0.6 ms) |
+| `sim -demo blast`, 300 bodies, physics of the film | 3.4 s | 1.7 s |
+
+A note for writing WGSL kernels that browsers accept (Tint is stricter than wgpu-native's
+naga): a `workgroupBarrier` must be in uniform control flow, so a loop whose count lives in
+workgroup memory reads it with `workgroupUniformLoad`; an array or matrix indexed by a
+variable must be a `var`, not a `let`; and a kernel may bind at most 8 storage buffers, so
+the layouts skip the bindings a kernel does not use (`-` in `gpu_layout`).
 
 ## 3. The GPU natively (Windows, Linux)
 
@@ -256,6 +355,21 @@ Natively there is no browser to deliver the GPU's callbacks, so the engine does 
 blocks until the GPU is done (`bin/render` and `bin/sim`, which wait for their images;
 `bin/sim` also makes every air step run, `gpu_fluid_set_wait`, so a film does not depend on
 the GPU's speed). With `-gpu off`, or if no GPU is found, everything runs on the CPU.
+
+**The path tracer's kernel and its memory.** What one GPU thread keeps (its registers and
+local arrays) decides how many threads the GPU can run at once. The BVH walk's stack was
+three arrays of 64 entries (node, instance, distance); it is now one array of 40 node
+entries (entering an instance pushes an EXIT mark and the mesh's root, since instances are
+never nested; no distance is kept, the children's boxes are tested against the closest hit
+anyway). That alone made every scene 2-5x faster on an RTX 3070 (docs/PERFORMANCE.md).
+`-wavefront on` splits the tracer into small kernels per bounce (extend, shade, shadow
+rays); it gives the same image but is slower here, and it is not yet tried in browsers.
+
+To see where the GPU's time goes, set `LR_GPU_TIMING=1` before starting a native program:
+it asks the adapter for timestamp queries, and the GPU rigid bodies print the time of each
+of their passes when they are freed (the `GpuTimer` in `gpu/gpu_internal.h`: one query per
+pass, read back without waiting, averaged over the run). Browsers hide timestamps by
+default, so it is native only.
 
 Two notes:
 - **One rasterized image:** the CPU is faster than the GPU for `bin/render -backend raster`,

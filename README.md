@@ -39,6 +39,7 @@ little_renderer/
 │   ├── custom_scene.c         your own objects, both backends       -> bin/custom_scene
 │   ├── raster_milestones.c    the rasterizer step by step           -> bin/raster_milestones
 │   ├── hello_physics.c        a ball falling through a cloud        -> bin/hello_physics
+│   ├── mesh_rain.c            endless random meshes, fps in the title -> bin/mesh_rain
 │   ├── test_medium.c          checks the cloud sampling (make test) -> bin/test_medium
 │   ├── test_physics.c         checks the physics (make test)        -> bin/test_physics
 │   └── test_gpu_fluid.c       the GPU air against the CPU's (make webtest, in a browser)
@@ -49,7 +50,8 @@ little_renderer/
 │   ├── VOLUMES.md             volumetric clouds: physics, algorithms, next steps
 │   ├── PHYSICS.md             the physics engine: rigid bodies, air, coupling (code + maths)
 │   ├── RASTERIZER.md          how the rasterizer works (files + milestones)
-│   └── WEB.md                 the engine in a browser, and on the GPU
+│   ├── WEB.md                 the engine in a browser, and on the GPU
+│   └── PERFORMANCE.md         ideas and plans for speed, how to measure, what was measured
 ├── web/                       shell.html (the page around the program); make web -> web/build/
 ├── tools/                     gen_models.py (test models), frames_to_gif.py (animations)
 ├── models/                    .obj test models + the Stanford dragon

@@ -538,6 +538,8 @@ typedef struct {
     const Scene *s;
     TriRun *runs;
     int nruns;
+    int world_tris;                 // triangles of the primitives and the world mesh; then
+    int *inst_first;                // the instances': instance i's first triangle
     SceneShading sh[MAX_MATS];      // one shading context per material
     FragShader shader[MAX_MATS];
 } SceneJob;
@@ -560,12 +562,58 @@ static void scene_tri_of(const SceneJob *sj, int i, int *prim, int *sub){
     *sub = rel % r->per_prim;
 }
 
+static int inst_tri_count(const Scene *s, const Instance *in){
+    return in->mesh >= 0 ? s->meshes[in->mesh].ntris : (in->mesh == INST_SPHERE ? SPHERE_TRIS : 12);
+}
+
+// triangle i (past the world's) -> (instance, its mesh's triangle)
+static void inst_tri_of(const SceneJob *sj, int i, int *inst, int *tri){
+    int lo = 0, hi = sj->s->ninsts - 1;
+    while (lo < hi){
+        int mid = (lo + hi + 1) / 2;
+        if (sj->inst_first[mid] <= i) lo = mid; else hi = mid - 1;
+    }
+    *inst = lo;
+    *tri = i - sj->inst_first[lo];
+}
+
+static int scene_tri_material(const SceneJob *sj, int i){
+    if (i >= sj->world_tris){
+        int inst, tri;
+        inst_tri_of(sj, i, &inst, &tri);
+        return scene_instance_material(sj->s, inst, tri);
+    }
+    int prim, sub;
+    scene_tri_of(sj, i, &prim, &sub);
+    return scene_shape_material(sj->s, prim);
+}
+
 // Triangle i of the scene: world-space corners, and (if wn is not NULL) vertex normals
 // (*has_n = 0 when it has none) and the point flat shading is evaluated at.
 static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at){
+    const Scene *s = sj->s;
+    if (i >= sj->world_tris){                     // an instance's triangle, moved into the world
+        int inst, tri;
+        inst_tri_of(sj, i, &inst, &tri);
+        const Instance *in = &s->insts[inst];
+        if (in->mesh < 0){                        // a ball or a box: its primitives in the world
+            Primitive pr = instance_shape_prim(in, in->mesh == INST_SPHERE ? 0 : tri / 2);
+            render_prim_triangle(&pr, in->mesh == INST_SPHERE ? tri : tri % 2, wp, wn, has_n, flat_at);
+            return;
+        }
+        const SceneMesh *m = &s->meshes[in->mesh];
+        const Triangle *t = &m->tris[tri];
+        wp[0] = xform_point(&in->xf, t->q);
+        wp[1] = xform_point(&in->xf, v_add(t->q, t->u));
+        wp[2] = xform_point(&in->xf, v_add(t->q, t->v));
+        if (!wn) return;
+        *has_n = t->n[0] >= 0;
+        if (*has_n) for (int k = 0; k < 3; k++) wn[k] = xform_normal(&in->inv, m->normals[t->n[k]]);
+        *flat_at = v_scale(v_add(v_add(wp[0], wp[1]), wp[2]), 1.0f / 3.0f);
+        return;
+    }
     int prim, sub;
     scene_tri_of(sj, i, &prim, &sub);
-    const Scene *s = sj->s;
     if (prim >= s->nprims){                       // a mesh triangle
         const Triangle *t = &s->tris[prim - s->nprims];
         wp[0] = t->q; wp[1] = v_add(t->q, t->u); wp[2] = v_add(t->q, t->v);
@@ -610,9 +658,7 @@ static void scene_corners(const TriJob *j, int i, Vec3 *wp){
 // world-space triangle (+ optional vertex normals) -> clip space
 static void scene_vertices(const TriJob *j, int i, ClipVert *cv, FragShader *shader, const void **ctx, uint32_t *wire){
     const SceneJob *sj = j->data;
-    int prim, sub;
-    scene_tri_of(sj, i, &prim, &sub);
-    int mat = scene_shape_material(sj->s, prim);
+    int mat = scene_tri_material(sj, i);
     const SceneShading *sh = &sj->sh[mat];
     Vec3 wp[3], wn[3], flat_at;
     int has_n;
@@ -699,6 +745,12 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
         sj->runs[sj->nruns++] = (TriRun){ntri, s->nprims, 1};
         ntri += s->ntris;
     }
+    sj->world_tris = ntri;
+    sj->inst_first = xmalloc((size_t)(s->ninsts ? s->ninsts : 1) * sizeof(int));
+    for (int i = 0; i < s->ninsts; i++){
+        sj->inst_first[i] = ntri;
+        ntri += inst_tri_count(s, &s->insts[i]);
+    }
 
     TriJob j;
     j.ntri = ntri;
@@ -711,5 +763,6 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
     draw_triangles(fb, &j);
 
     free(sj->runs);
+    free(sj->inst_first);
     free(sj);
 }

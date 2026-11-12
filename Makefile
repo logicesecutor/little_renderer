@@ -75,7 +75,8 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/hello_physics)
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/hello_physics \
+                              $(BIN)/mesh_rain)
 
 all: lib apps examples
 lib: $(LIB)
@@ -170,9 +171,10 @@ view-dragon: $(BIN)/view$(EXE)
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
 # unit test of the participating-medium sampling (exact answers, see examples/test_medium.c)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_physics$(EXE)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
 	$(BIN)/test_medium
 	$(BIN)/test_physics
+	$(BIN)/test_gpu_rigid
 
 # volumetric cloud in the box (docs/VOLUMES.md): a clean image, and an animation as frames
 cloud: $(BIN)/render$(EXE)

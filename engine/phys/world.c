@@ -128,10 +128,11 @@ void phys_step(PhysWorld *pw, real dt){
     int steps = pw->substeps > 0 ? pw->substeps : 1;
     real h = dt / steps;
     for (int i = 0; i < n; i++) fs[i] = v_add(drag_force(pw, i, h), buoyancy_force(pw, i));
-    for (int s = 0; s < steps; s++){
-        for (int i = 0; i < n; i++) w->bodies[i].force = v_add(w->bodies[i].force, fs[i]);
-        rigid_step(w, h);
-    }
+    if (!pw->rigid_step || !pw->rigid_step(pw->rigid_user, pw, dt, steps, fs))
+        for (int s = 0; s < steps; s++){
+            for (int i = 0; i < n; i++) w->bodies[i].force = v_add(w->bodies[i].force, fs[i]);
+            rigid_step(w, h);
+        }
     if (fs != forces) free(fs);
     double t1 = now_ms();
     if (pw->fluid && pw->air_step) pw->air_step(pw->air_user, pw, dt);
@@ -163,6 +164,7 @@ void phys_blast(PhysWorld *pw, Vec3 center, real radius, real speed, real impuls
         real dv = impulse * frontal_area(b, dir) * fall * b->inv_mass;
         if (dv > speed * fall) dv = speed * fall;
         b->vel = v_add(b->vel, v_scale(dir, dv));
+        b->dirty = 1;
         // a little spin, as the push is never exactly through the center of mass
         Vec3 off = v_cross(dir, vec3(0.3f, 1, 0.2f));
         b->angvel = v_add(b->angvel, v_scale(off, dv * 0.5f / (bound_radius(b) + 1)));
@@ -190,9 +192,31 @@ static void box_quads(const Body *b, int material, Primitive *out){
     }
 }
 
+int phys_add_mesh_to_scene(PhysWorld *pw, int i, Scene *s, int mesh, int material){
+    Body *b = &pw->rigid.bodies[i];
+    if (!b->g || mesh < 0 || mesh >= s->nmeshes) return -1;
+    b->material = material;
+    b->inst = scene_add_instance(s, mesh, body_mesh_xform(b), material);
+    return b->inst;
+}
+
+// where a ball or a box puts its unit shape (scene.h: INST_SPHERE, INST_BOX)
+static Xform shape_xform(const Body *b){
+    return xform_axes(quat_to_mat3(b->rot), b->half, b->pos);
+}
+
 int phys_add_to_scene(PhysWorld *pw, int i, Scene *s, int material){
     Body *b = &pw->rigid.bodies[i];
     b->material = material;
+    if (b->g) return -1;                // a mesh body: phys_add_mesh_to_scene
+    b->inst = scene_add_instance(s, b->shape == BODY_SPHERE ? INST_SPHERE : INST_BOX, shape_xform(b), material);
+    return b->inst;
+}
+
+int phys_add_to_scene_prims(PhysWorld *pw, int i, Scene *s, int material){
+    Body *b = &pw->rigid.bodies[i];
+    b->material = material;
+    if (b->g) return -1;
     if (b->shape == BODY_SPHERE){
         b->prim = scene_add_prim(s, make_sphere(b->pos, b->half.x, material));
     } else {
@@ -207,6 +231,8 @@ int phys_add_to_scene(PhysWorld *pw, int i, Scene *s, int material){
 void phys_sync_scene(const PhysWorld *pw, Scene *s){
     for (int i = 0; i < pw->rigid.nbodies; i++){
         const Body *b = &pw->rigid.bodies[i];
+        if (b->inst >= 0 && b->inv_mass > 0 && b->inst < s->ninsts)
+            scene_move_instance(s, b->inst, b->g ? body_mesh_xform(b) : shape_xform(b));
         if (b->prim < 0) continue;
         if (b->shape == BODY_SPHERE){
             s->prims[b->prim] = make_sphere(b->pos, b->half.x, b->material);

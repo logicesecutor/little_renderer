@@ -25,6 +25,8 @@ void options_usage(Program prog, FILE *f){
     if (sim || view) fprintf(f,
         "%s"
         "  -balls n / -boxes n / -balloons n   how many of each                (5 / 3 / 3)\n"
+        "  -meshes n                  n copies of the model (-obj) fall too, as convex hulls (0)\n"
+        "  -collider on|off           the model stands in the room, its triangles collide (off)\n"
         "  -wind x,y,z                the air drifts towards this velocity, units / s (0,0,0)\n"
         "                             (the room is closed but for its front: a wind mostly swirls)\n"
         "  -fluidres n                air cells along the room's side           (48; view: 32)\n"
@@ -46,6 +48,7 @@ void options_usage(Program prog, FILE *f){
         "                             (WebGPU; on when the build has it: make web, or make deps natively);\n"
         "                             offscreen: the GPU draws into a texture read back to the canvas\n"
         "  -gpufluid on|off           with -sim on and the GPU: the air and the cloud are simulated there too\n"
+        "  -gpurigid on|off           with -sim on and the GPU: the balls and boxes are simulated there too\n"
         "  -gpuraster on|off          with the GPU: the rasterizer's triangles are drawn there too\n"
         "  -gputrace on|off           with the GPU: it path traces too (in rt mode every frame, while the\n"
         "                             camera or the physics move: each frame reprojected and denoised)\n"
@@ -73,8 +76,10 @@ void options_usage(Program prog, FILE *f){
         "  -d bounces                 maximum bounces per light path           (50)\n"
         "  -clamp max                 firefly clamp, 0 = off (biased if on)    (0)\n"
         "  -denoise on|off            path tracing on the GPU: denoise the image (%s)\n"
+        "  -wavefront on|off          path tracing on the GPU: small kernels, one step of all paths at a time (off)\n"
         "  -threads n                 CPU threads, 0 = all cores               (0)\n"
         "  -mis on|off                multiple importance sampling of the lamp (on)\n"
+        "  -sampler sobol|random      a path's random numbers: Sobol with blue noise, or plain (sobol)\n"
         "  -caustics lt|pt            caustics by light tracing or by path tracing (%s)\n"
         "  -photons x                 light paths per camera path for -caustics lt (1)\n"
         "  -o file                    %s (%s)\n"
@@ -84,6 +89,7 @@ void options_usage(Program prog, FILE *f){
         "  -obj file.obj|file.ply     model for -scene mesh (ASCII .ply)       (models/torus.obj)\n"
         "  -mat diffuse|mirror|glass  material of the model                    (diffuse)\n"
         "  -rot degrees               turn the model around the vertical axis  (0)\n"
+        "  -instances n               n instances of the model (one mesh) in any scene (0)\n"
         "\n"
         "cloud (path tracer; -scene cloud, or -cloud on to add it to any scene)\n"
         "  -cloud on|off              a volumetric cloud floating in the box   (off)\n"
@@ -106,12 +112,13 @@ void options_usage(Program prog, FILE *f){
         "  -octdepth n                octree max depth, 0 = automatic          (0)\n"
         "  -bvhleaf n                 BVH: max primitives per leaf             (4)\n"
         "  -bvhbins n                 BVH: SAH buckets per axis                (16)\n"
+        "  -bvhwidth 2|4              BVH: children per node (4: half as deep, 4 boxes per step) (4)\n"
         "  -bvhsplit sah|middle       BVH: how nodes are split                 (sah)\n",
         view ? "640" : (sim ? "320" : "400"),
         view ? "stop refining after this many samples per pixel" : "samples (light paths) per pixel  ",
         view ? "4096" : (sim ? "32" : "128"),
         prog == PROG_RENDER ? "off" : "on",
-        view ? "pt; lt is render only" : (sim ? "pt" : "lt"),
+        view ? "lt; on the CPU: pt" : (sim ? "pt" : "lt"),
         view ? "screenshot prefix (key P)  " : (sim ? "folder for the frames      " : "output PPM file            "),
         view ? "out/view" : (sim ? "out/sim" : "out/cornell_<scene>[_raster].ppm"),
         AUTO_ACCEL_MIN_PRIMS);
@@ -158,12 +165,14 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->spp = prog == PROG_VIEW ? 4096 : (prog == PROG_SIM ? 32 : 128);
     o->max_depth = 50;
     o->mis = 1;
-    o->caustics_lt = prog == PROG_RENDER;
+    o->sampler = 1;
+    o->caustics_lt = prog != PROG_SIM;     // (the CPU viewer path traces them whatever this says)
     o->photons = 1;
     o->shading = MODE_PHONG;
     o->raster_clouds = 1;
     o->gpu = gpu_available();              // the GPU whenever the build has one (make deps, make web)
     o->gpu_fluid = 1;
+    o->gpu_rigid = 1;
     o->gpu_raster = 1;
     o->gpu_trace = -1;                     // decided when the GPU is known
     o->denoise = prog != PROG_RENDER;      // a still image is the unbiased one unless asked
@@ -215,12 +224,19 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-octdepth")) o->ap.oct_depth = atoi(v);
         else if (!strcmp(a, "-bvhleaf")) o->ap.bvh_leaf = atoi(v);
         else if (!strcmp(a, "-bvhbins")) o->ap.bvh_bins = atoi(v);
+        else if (!strcmp(a, "-bvhwidth")) o->ap.bvh_width = atoi(v);
         else if (!strcmp(a, "-preview")) o->preview = atoi(v);
         else if (!strcmp(a, "-movespp")) o->move_spp = atoi(v);
         else if (!strcmp(a, "-speed"))   o->speed = atof(v);
         else if (!strcmp(a, "-autoquit")) o->autoquit = atof(v);
         else if (!strcmp(a, "-orbit")) o->orbit = atof(v);
         else if (!strcmp(a, "-history")) o->history = atoi(v);
+        else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
+        else if (!strcmp(a, "-photoncache")){
+            if (!strcmp(v, "on")) o->photon_cache = 1;
+            else if (!strcmp(v, "off")) o->photon_cache = 0;
+            else fail(prog, "expected on or off after -photoncache, got", v);
+        }
         else if (!strcmp(a, "-density")) o->cloud.sigma_t = atof(v);
         else if (!strcmp(a, "-albedo"))  o->cloud.albedo = parse_color(prog, v);
         else if (!strcmp(a, "-g"))       o->cloud.g = atof(v);
@@ -239,6 +255,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             else if (!strcmp(v, "offscreen")) o->gpu = 2;
             else fail(prog, "expected on, off or offscreen after -gpu, got", v);
         }
+        else if (!strcmp(a, "-gpurigid")){
+            if (!strcmp(v, "on")) o->gpu_rigid = 1;
+            else if (!strcmp(v, "off")) o->gpu_rigid = 0;
+            else fail(prog, "expected on or off after -gpurigid, got", v);
+        }
         else if (!strcmp(a, "-gpufluid")){
             if (!strcmp(v, "on")) o->gpu_fluid = 1;
             else if (!strcmp(v, "off")) o->gpu_fluid = 0;
@@ -253,6 +274,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             if (!strcmp(v, "on")) o->gpu_trace = 1;
             else if (!strcmp(v, "off")) o->gpu_trace = 0;
             else fail(prog, "expected on or off after -gputrace, got", v);
+        }
+        else if (!strcmp(a, "-wavefront")){
+            if (!strcmp(v, "on")) o->wavefront = 1;
+            else if (!strcmp(v, "off")) o->wavefront = 0;
+            else fail(prog, "expected on or off after -wavefront, got", v);
         }
         else if (!strcmp(a, "-denoise")){
             if (!strcmp(v, "on")) o->denoise = 1;
@@ -274,6 +300,12 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-buoyancy")) o->sim.buoyancy = atof(v);
         else if (!strcmp(a, "-vorticity")) o->sim.vorticity = atof(v);
         else if (!strcmp(a, "-physseed")) o->sim.seed = atoi(v);
+        else if (!strcmp(a, "-meshes"))  o->sim.meshes = atoi(v);
+        else if (!strcmp(a, "-collider")){
+            if (!strcmp(v, "on")) o->sim.collider = 1;
+            else if (!strcmp(v, "off")) o->sim.collider = 0;
+            else fail(prog, "-collider takes on or off", v);
+        }
         else if (!strcmp(a, "-sim") && prog == PROG_VIEW){
             if (!strcmp(v, "on")) o->sim.on = 1;
             else if (!strcmp(v, "off")) o->sim.on = 0;
@@ -286,6 +318,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             if (!strcmp(v, "drop")) o->sim.demo = SIM_DROP;
             else if (!strcmp(v, "blast")) o->sim.demo = SIM_BLAST;
             else fail(prog, "unknown demo", v);
+        }
+        else if (!strcmp(a, "-sampler")){
+            if (!strcmp(v, "sobol")) o->sampler = 1;
+            else if (!strcmp(v, "random")) o->sampler = 0;
+            else fail(prog, "expected sobol or random after -sampler, got", v);
         }
         else if (!strcmp(a, "-mis")){
             if (!strcmp(v, "on")) o->mis = 1;
@@ -341,6 +378,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->max_depth <= 0) fail(prog, "bounces must be positive", "-d");
     if (o->clamp < 0) fail(prog, "clamp must be >= 0", "-clamp");
     if (o->ap.bvh_leaf < 1 || o->ap.bvh_bins < 2) fail(prog, "need -bvhleaf >= 1 and -bvhbins >= 2", "");
+    if (o->ap.bvh_width != 2 && o->ap.bvh_width != 4) fail(prog, "-bvhwidth is 2 or 4", "");
     if (o->preview < 1) o->preview = 1;
     if (o->move_spp < 1) o->move_spp = 1;
     if (o->cloud.sigma_t < 0) fail(prog, "density must be >= 0", "-density");
@@ -350,16 +388,13 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->march.light_res < 2 || o->march.light_res > 512) fail(prog, "light grid resolution must be 2..512", "-lightres");
     if (o->march.scale != 1 && o->march.scale != 2) fail(prog, "expected 1 or 2 after", "-marchscale");
     if (prog == PROG_VIEW && !march_scale_set) o->march.scale = 2;   // real time: half resolution
-    if (prog == PROG_VIEW && o->caustics_lt){
-        fprintf(stderr, "note: the viewer path traces caustics (-caustics lt is for render)\n");
-        o->caustics_lt = 0;
-    }
     if (o->cloud.g <= -1 || o->cloud.g >= 1) fail(prog, "g must be between -1 and 1 (exclusive)", "-g");
     if (o->cloud.resolution < 4 || o->cloud.resolution > 1024) fail(prog, "cloud resolution must be 4..1024", "-cloudres");
     if (o->sim.on){
         if (o->sim.frames < 1 || o->sim.fps <= 0) fail(prog, "need -frames >= 1 and -fps > 0", "");
         if (o->sim.fluid_res < 8 || o->sim.fluid_res > 256) fail(prog, "fluid resolution must be 8..256", "-fluidres");
-        if (o->sim.balls < 0 || o->sim.boxes < 0 || o->sim.balloons < 0) fail(prog, "counts must be >= 0", "-balls/-boxes/-balloons");
+        if (o->sim.balls < 0 || o->sim.boxes < 0 || o->sim.balloons < 0 || o->sim.meshes < 0)
+            fail(prog, "counts must be >= 0", "-balls/-boxes/-balloons/-meshes");
         (void)backend_set;   // view -sim: hybrid (raster + raymarched cloud while it runs)
         // live: coarser air and cloud, so that a physics step fits in a frame
         if (prog == PROG_VIEW && !fluidres_set) o->sim.fluid_res = 32;
@@ -386,7 +421,8 @@ int options_setup_scene(const Options *o, Scene *s){
     SceneOptions so = o->scene;
     so.cloud = (o->use_cloud || so.kind == SCENE_CLOUD) ? &o->cloud : NULL;
     if (scene_cornell_box(s, &so) != 0) return 1;
-    if (o->scene.kind == SCENE_MESH) printf("loaded %s: %d triangles\n", o->scene.obj_path, s->ntris);
+    if (s->ninsts > 0 && s->nmeshes > 0) printf("loaded %s: %d triangles, %d instances of it\n", o->scene.obj_path, s->meshes[0].ntris, s->ninsts);
+    else if (o->scene.kind == SCENE_MESH) printf("loaded %s: %d triangles\n", o->scene.obj_path, s->ntris);
     for (int i = 0; i < s->nvolumes; i++){
         const Volume *v = s->volumes[i];
         printf("medium %d: %dx%dx%d voxels, extinction %g, albedo %g,%g,%g, g %g%s\n", i, v->nx, v->ny, v->nz,
@@ -410,7 +446,8 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty"};
     static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
     fprintf(f, "bin/render -scene %s", scenes[o->scene.kind]);
-    if (o->scene.kind == SCENE_MESH){
+    if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
+    if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
         fprintf(f, " -obj %s", o->scene.obj_path);
         if (o->scene.mesh_mat != MAT_DIFFUSE) fprintf(f, " -mat %s", mats[o->scene.mesh_mat]);
         if (o->scene.rot_deg != 0) fprintf(f, " -rot %g", (double)o->scene.rot_deg);
@@ -435,6 +472,7 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     fprintf(f, " -s 512");
     if (o->max_depth != 50) fprintf(f, " -d %d", o->max_depth);
     if (!o->mis) fprintf(f, " -mis off");
+    if (!o->sampler) fprintf(f, " -sampler random");
     if (o->clamp > 0) fprintf(f, " -clamp %g", o->clamp);
     fprintf(f, " -o out/from_viewer.ppm\n");
 }

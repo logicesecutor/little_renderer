@@ -37,6 +37,7 @@
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
 #include "gpu/fluid_gpu.h"
+#include "gpu/rigid_gpu.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -124,10 +125,12 @@ static void accum_reset(Accum *a, int scale){
 }
 
 // one new sample for every pixel in rows [y0, y1) of the internal image
-static void render_rows(const Scene *s, const Camera *cam, Accum *a, int y0, int y1, int max_depth, int mis, real clamp){
+static void render_rows(const Scene *s, const Camera *cam, Accum *a, int y0, int y1, int max_depth, int mis, real clamp,
+                        int sampler){
     TraceParams tp = trace_default_params();
     tp.max_depth = max_depth;
     tp.mis = mis;
+    tp.sampler = sampler;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
@@ -137,9 +140,12 @@ static void render_rows(const Scene *s, const Camera *cam, Accum *a, int y0, int
             // seed from (pixel, sample number): every sample of every pixel is different
             Rng rng;
             rng_seed(&rng, ((uint64_t)k * 0x9E3779B97F4A7C15ULL) ^ ((uint64_t)a->count[k] * 0xD1B54A32D192ED03ULL), (uint64_t)k);
-            real u = (x + rng_real(&rng)) / a->rw;
-            real v = (y + rng_real(&rng)) / a->rh;
-            Vec3 c = trace_path_ex(s, camera_ray(cam, u, v), &rng, &tp);
+            Sampler sm = sampler_make(&rng, x, y, (uint32_t)a->count[k], 0, tp.sampler);
+            real jx, jy;
+            sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
+            real u = (x + jx) / a->rw;
+            real v = (y + jy) / a->rh;
+            Vec3 c = trace_path_sampled(s, camera_ray(cam, u, v), &sm, &tp);
             if (!(c.x == c.x && c.y == c.y && c.z == c.z)) c = vec3(0, 0, 0);
             if (clamp > 0 && v_max(c) > clamp) c = v_scale(c, clamp / v_max(c));
             a->sum[k] = v_add(a->sum[k], c);
@@ -246,6 +252,22 @@ static int raster_dirty = 1;           // rasterizer: draw a new frame
 static int showing_raster = 1;         // what the window shows right now
 static double t_start, t_prev, last_present, last_title, last_change;
 static long frames;          // frames shown (for -autoquit's frame rate)
+
+// where a frame's time goes on the CPU (printed by -autoquit), after the first second
+enum { PROF_SIM, PROF_ACCEL, PROF_MOVE, PROF_MORE, PROF_WAIT, PROF_RASTER, PROF_PRESENT, PROF_FRAME, PROF_N };
+static double prof[PROF_N];
+static long prof_frames;
+static int prof_on;
+#define PROF(k, stmt) do { double p0_ = now_s(); stmt; if (prof_on) prof[k] += now_s() - p0_; } while (0)
+static void prof_print(void){
+    if (prof_frames <= 0) return;
+    double s = 1000.0 / prof_frames, known = 0;
+    for (int k = 0; k < PROF_FRAME; k++) known += prof[k];
+    printf("per frame, CPU ms: physics %.2f | scene trees %.2f | GPU scene update %.2f | trace submit %.2f | "
+           "waiting for the GPU %.2f | raster %.2f | present %.2f | other %.2f | total %.2f (%ld frames)\n",
+           prof[PROF_SIM] * s, prof[PROF_ACCEL] * s, prof[PROF_MOVE] * s, prof[PROF_MORE] * s, prof[PROF_WAIT] * s,
+           prof[PROF_RASTER] * s, prof[PROF_PRESENT] * s, (prof[PROF_FRAME] - known) * s, prof[PROF_FRAME] * s, prof_frames);
+}
 static double pass_t0, pass_ms, raster_ms;
 static int sim_paused = 0, sim_moved = 0;
 static double sim_last;
@@ -253,6 +275,21 @@ static double sim_last;
 static Gpu *gpu;
 static GpuView *gview;
 static GpuFluid *gfluid;     // -sim on: the air and the cloud stepped on the GPU
+static GpuRigid *grigid;     // -sim on: the balls and boxes stepped on the GPU
+
+// -sim on with the GPU: the air and the bodies go there (again, after a restart)
+static void gpu_sim_start(void){
+    if (!gview || !o.sim.on) return;
+    if (o.gpu_fluid && !gfluid && (gfluid = gpu_fluid_create(gpu, &sim.pw)))
+        gpu_fluid_attach_view(gfluid, gview);
+    if (o.gpu_rigid && !grigid) grigid = gpu_rigid_create(gpu, &sim.pw);
+}
+static void gpu_sim_stop(void){
+    gpu_fluid_destroy(gfluid);
+    gfluid = NULL;
+    gpu_rigid_destroy(grigid);
+    grigid = NULL;
+}
 static int gpu_scene;        // the raster frame being shown is drawn by the GPU rasterizer (fb is not)
 static int gpu_tracing;      // the path traced image being made is the GPU's (acc is not used)
 static Camera gpu_cam;       // and its camera, and bounces
@@ -370,7 +407,7 @@ static void idle(int ms){
 // A new path traced image on the GPU, for the camera as it is now. 0 = this GPU cannot hold
 // the scene: the CPU path traces from now on.
 static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
-    GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp};
+    GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
     if (!gpu_view_trace_start(gview, &scene, &tp)){
         o.gpu_trace = 0;
         gpu_tracing = 0;
@@ -405,10 +442,12 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
     } else if ((gpu_scene_moved || memcmp(cam, &gpu_cam, sizeof(*cam)) != 0) && !gpu_view_trace_busy(gview)){
         // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
         // last image as it is, with the raster of its own camera, not a newer one)
-        GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp};
+        GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
         int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
         gpu_scene_moved = 0;
-        if (!gpu_view_trace_move(gview, &scene, &tp, keep)){
+        int moved;
+        PROF(PROF_MOVE, moved = gpu_view_trace_move(gview, &scene, &tp, keep));
+        if (!moved){
             o.gpu_trace = 0;
             gpu_tracing = 0;
             return 0;
@@ -420,17 +459,18 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
         force_present = 1;
     }
     reset = 0;
-    if (gpu_view_trace_passes(gview) < o.spp) gpu_view_trace_more(gview, &scene, &last_rp, &o.march);
+    if (gpu_view_trace_passes(gview) < o.spp) PROF(PROF_MORE, gpu_view_trace_more(gview, &scene, &last_rp, &o.march));
     else idle(10);
     // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
     // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band.
-    if (gpu_view_trace_busy(gview)) gpu_wait(gpu);
+    if (gpu_view_trace_busy(gview)) PROF(PROF_WAIT, gpu_wait(gpu));
     pass_ms = gpu_view_trace_pass_ms(gview);
     return 1;
 }
 
 // one iteration: input, camera, physics, render, show. 0 = quit.
 static int frame(void){
+    const double frame_t0 = now_s();
     // ---- 0. the GPU starts asynchronously: wait for it (or fall back to the CPU)
     if (gpu && !gview){
         GpuState gs = gpu_state(gpu);
@@ -444,15 +484,15 @@ static int frame(void){
             printf("GPU: frames shown and clouds raymarched on %s%s\n", gpu_message(gpu),
                    gpu_offscreen(gpu) ? " (offscreen, read back to the canvas)" : "");
             gpu_view_trace_denoise(gview, o.denoise);
+            gpu_view_trace_wavefront(gview, o.wavefront);
             if (o.gpu_trace < 0){
                 o.gpu_trace = !gpu_software(gpu);
                 if (!o.gpu_trace) printf("GPU: a software GPU: the CPU path traces (faster here; -gputrace on to try it anyway)\n");
             }
-            if (o.sim.on && o.gpu_fluid && (gfluid = gpu_fluid_create(gpu, &sim.pw))){
-                gpu_fluid_attach_view(gfluid, gview);
-                printf("GPU: the air (%dx%dx%d cells) and the cloud are simulated there\n",
-                       sim.pw.fluid->nx, sim.pw.fluid->ny, sim.pw.fluid->nz);
-            }
+            gpu_sim_start();
+            if (gfluid) printf("GPU: the air (%dx%dx%d cells) and the cloud are simulated there\n",
+                               sim.pw.fluid->nx, sim.pw.fluid->ny, sim.pw.fluid->nz);
+            if (grigid) printf("GPU: the balls and boxes are simulated there\n");
         }
         force_present = raster_dirty = 1;
     } else if (gview && gpu_state(gpu) == GPU_FAILED){
@@ -463,8 +503,7 @@ static int frame(void){
 #else
         fprintf(stderr, "GPU lost (%s): the CPU draws everything from now on\n", gpu_message(gpu));
 #endif
-        gpu_fluid_destroy(gfluid);   // the air goes back to the CPU
-        gfluid = NULL;
+        gpu_sim_stop();              // the air and the bodies go back to the CPU
         gpu_scene = gpu_tracing = 0;
         reset = 1;
         gpu_view_destroy(gview);
@@ -565,11 +604,13 @@ static int frame(void){
             case 'n': if (o.sim.on) sim_drop_ball(&sim, &scene); break;
             case 't':
                 if (o.sim.on){
+                    gpu_sim_stop();
                     sim_free(&sim);
                     scene_free(&scene);
                     memset(&scene, 0, sizeof(scene));
                     if (sim_setup(&sim, &o, &scene) != 0) return 0;
                     sim.max_dt = 1.0 / 30;
+                    gpu_sim_start();
                     sim_step(&sim, &scene, 0);
                     scene_set_accel(&scene, accel, &o.ap);
                     changed = 1;
@@ -641,8 +682,8 @@ static int frame(void){
         sim_last = t;
         sim_moved = 0;
         if (!sim_paused && sdt > 0){
-            sim_step(&sim, &scene, sdt);
-            scene_set_accel(&scene, accel, &o.ap);
+            PROF(PROF_SIM, sim_step(&sim, &scene, sdt));
+            PROF(PROF_ACCEL, scene_update_instances(&scene, &o.ap));   // the bodies are instances: the world stays
             sim_moved = 1;
             raster_dirty = 1;
         }
@@ -676,6 +717,7 @@ static int frame(void){
             last_rp = p;
             frame_volumes = o.raster_clouds && gview && scene.nvolumes > 0;
             raster_ms = (now_s() - r0) * 1000.0;
+            if (prof_on) prof[PROF_RASTER] += raster_ms / 1000.0;
             raster_dirty = 0;
             force_present = 1;
         } else {
@@ -693,7 +735,7 @@ static int frame(void){
         int sc = preview_on ? preview : 1;
         accum_reset(&acc, sc);
         pass_t0 = now_s();
-        for (int i = 0; i < o.move_spp; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp);
+        for (int i = 0; i < o.move_spp; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp, o.sampler);
         acc.passes = o.move_spp;
         pass_ms = (now_s() - pass_t0) * 1000.0;
         ema_update(&ema, &acc, fb, changed);
@@ -709,7 +751,7 @@ static int frame(void){
         pass_t0 = now_s();
         if (changed){
             int n = sc > 1 ? o.move_spp : 1;          // -movespp: less grain, slower
-            for (int i = 0; i < n; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp);
+            for (int i = 0; i < n; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp, o.sampler);
             acc.passes = n;
             pass_ms = (now_s() - pass_t0) * 1000.0;
             pass_t0 = now_s();
@@ -721,7 +763,7 @@ static int frame(void){
         // calm: refine at full resolution, a band of rows at a time (~20 ms each)
         double b0 = now_s();
         int y1 = acc.band_y + band < acc.rh ? acc.band_y + band : acc.rh;
-        render_rows(&scene, &cam, &acc, acc.band_y, y1, max_depth, o.mis, (real)o.clamp);
+        render_rows(&scene, &cam, &acc, acc.band_y, y1, max_depth, o.mis, (real)o.clamp, o.sampler);
         double bt = now_s() - b0;
         if (bt < 0.010 && band < acc.rh) band *= 2;
         else if (bt > 0.040 && band > 1) band /= 2;
@@ -744,6 +786,7 @@ static int frame(void){
     const int gpu_passes = gpu_traced ? gpu_view_trace_passes(gview) : 0;
     int refining = !use_raster && !sim_moved &&     // bands land on screen ~30x per second
                    (gpu_traced ? gpu_passes < o.spp || gpu_passes != gpu_shown_passes : acc.passes < o.spp);
+    double present0 = now_s();
     if (force_present || (refining && tn - last_present > 0.033)){
         if (!use_raster && !sim_moved && !gpu_traced) accum_to_fb(&acc, fb);
         if (gview){
@@ -773,6 +816,12 @@ static int frame(void){
         frames++;
         force_present = gpu_frame_owed;
     }
+    if (prof_on){
+        prof[PROF_PRESENT] += now_s() - present0;
+        prof[PROF_FRAME] += now_s() - frame_t0;
+        prof_frames++;
+    }
+    prof_on = now_s() - t_start > 1.0;
     if (tn - last_title > 0.5){
         char title[512];
         if (use_raster)
@@ -819,6 +868,7 @@ static int frame(void){
             if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s\n", st); }
             else if (showing_raster) printf("raster frame on the GPU\n");
             else printf("%d samples/pixel on the GPU, last pass %.1f ms\n", gpu_view_trace_passes(gview), pass_ms);
+            prof_print();
             if (o.orbit != 0){      // the camera of the screenshot, to render it again
                 Options cur = o;
                 cur.max_depth = max_depth;
@@ -836,6 +886,7 @@ static int frame(void){
         if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s, last pass %.0f ms\n", st, pass_ms); }
         else if (showing_raster) printf("last raster frame %.1f ms\n", raster_ms);
         else printf("%d samples/pixel, last pass %.0f ms\n", acc.passes, pass_ms);
+        prof_print();
         save_view(&acc, fb, showing_raster, shading, o.out, &shot_no);
         running = 0;
     }
@@ -859,7 +910,7 @@ static void shutdown_viewer(void){
     free(acc.count);
     free(ema.px);
     raster_volumes_free(rvol);
-    gpu_fluid_destroy(gfluid);
+    gpu_sim_stop();
     gpu_view_destroy(gview);
     gpu_destroy(gpu);
     fb_destroy(gfb);

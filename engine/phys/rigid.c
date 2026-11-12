@@ -9,6 +9,8 @@
 #define CONTACT_SLOP 0.5f        // overlap (units) left alone, so resting contacts do not jitter
 #define BAUMGARTE 0.2f           // fraction of the remaining overlap removed per step
 #define BOUNCE_THRESHOLD 60.0f   // approach speeds below this (units / s) do not bounce
+#define MAX_HULL_VERTS 64        // corners of a hull (rigid_geom_hull)
+#define MAX_HULL_FACES 128
 
 // ---- bodies -----------------------------------------------------------------------------
 
@@ -24,6 +26,14 @@ void rigid_init(RigidWorld *w){
 }
 
 void rigid_free(RigidWorld *w){
+    for (int i = 0; i < w->ngeoms; i++){
+        RigidGeom *g = w->geoms[i];
+        convex_free(&g->hull);
+        mesh_tree_free(&g->tree);
+        free(g->occ);
+        free(g);
+    }
+    free(w->geoms);
     free(w->bodies);
     free(w->contacts);
     free(w->prev);
@@ -56,6 +66,8 @@ static Body body_base(Vec3 pos, real volume, real density){
     b.restitution = 0.4f;
     b.friction = 0.5f;
     b.prim = -1;
+    b.inst = -1;
+    b.dirty = 1;
     return b;
 }
 
@@ -82,6 +94,186 @@ int rigid_add_box(RigidWorld *w, Vec3 center, Vec3 half, Quat rot, real density)
     return add_body(w, b);
 }
 
+// ---- mesh bodies -------------------------------------------------------------------------
+
+// the eigenvectors (columns of v, a rotation) and eigenvalues of a symmetric matrix (Jacobi)
+static void eigen3(Mat3 a, Mat3 *v, Vec3 *e){
+    *v = mat3_identity();
+    for (int sweep = 0; sweep < 32; sweep++){
+        real off = r_fabs(a.m[0][1]) + r_fabs(a.m[0][2]) + r_fabs(a.m[1][2]);
+        if (off < 1e-12f * (r_fabs(a.m[0][0]) + r_fabs(a.m[1][1]) + r_fabs(a.m[2][2]))) break;
+        for (int p = 0; p < 2; p++)
+            for (int q = p + 1; q < 3; q++){
+                if (a.m[p][q] == 0) continue;
+                real th = (a.m[q][q] - a.m[p][p]) / (2 * a.m[p][q]);
+                real t = (th >= 0 ? 1 : -1) / (r_fabs(th) + r_sqrt(th * th + 1));
+                real c = 1 / r_sqrt(t * t + 1), s = t * c;
+                for (int k = 0; k < 3; k++){          // a = J^T a J
+                    real akp = a.m[k][p], akq = a.m[k][q];
+                    a.m[k][p] = c * akp - s * akq;
+                    a.m[k][q] = s * akp + c * akq;
+                }
+                for (int k = 0; k < 3; k++){
+                    real apk = a.m[p][k], aqk = a.m[q][k];
+                    a.m[p][k] = c * apk - s * aqk;
+                    a.m[q][k] = s * apk + c * aqk;
+                }
+                for (int k = 0; k < 3; k++){
+                    real vkp = v->m[k][p], vkq = v->m[k][q];
+                    v->m[k][p] = c * vkp - s * vkq;
+                    v->m[k][q] = s * vkp + c * vkq;
+                }
+            }
+    }
+    *e = vec3(a.m[0][0], a.m[1][1], a.m[2][2]);
+    // a rotation, not a reflection
+    if (v_dot(mat3_col(*v, 0), v_cross(mat3_col(*v, 1), mat3_col(*v, 2))) < 0)
+        for (int k = 0; k < 3; k++) v->m[k][2] = -v->m[k][2];
+}
+
+static Quat mat3_to_quat(Mat3 m){
+    real tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
+    Quat q;
+    if (tr > 0){
+        real s = r_sqrt(tr + 1) * 2;
+        q = quat(0.25f * s, (m.m[2][1] - m.m[1][2]) / s, (m.m[0][2] - m.m[2][0]) / s, (m.m[1][0] - m.m[0][1]) / s);
+    } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]){
+        real s = r_sqrt(1 + m.m[0][0] - m.m[1][1] - m.m[2][2]) * 2;
+        q = quat((m.m[2][1] - m.m[1][2]) / s, 0.25f * s, (m.m[0][1] + m.m[1][0]) / s, (m.m[0][2] + m.m[2][0]) / s);
+    } else if (m.m[1][1] > m.m[2][2]){
+        real s = r_sqrt(1 + m.m[1][1] - m.m[0][0] - m.m[2][2]) * 2;
+        q = quat((m.m[0][2] - m.m[2][0]) / s, (m.m[0][1] + m.m[1][0]) / s, 0.25f * s, (m.m[1][2] + m.m[2][1]) / s);
+    } else {
+        real s = r_sqrt(1 + m.m[2][2] - m.m[0][0] - m.m[1][1]) * 2;
+        q = quat((m.m[1][0] - m.m[0][1]) / s, (m.m[0][2] + m.m[2][0]) / s, (m.m[1][2] + m.m[2][1]) / s, 0.25f * s);
+    }
+    return quat_norm(q);
+}
+
+static int add_geom(RigidWorld *w, RigidGeom *g){
+    if (w->ngeoms >= w->cap_geoms){
+        int cap = w->cap_geoms ? w->cap_geoms * 2 : 8;
+        RigidGeom **ng = realloc(w->geoms, (size_t)cap * sizeof(RigidGeom *));
+        if (!ng) return -1;
+        w->geoms = ng;
+        w->cap_geoms = cap;
+    }
+    w->geoms[w->ngeoms] = g;
+    return w->ngeoms++;
+}
+
+static void free_geom(RigidGeom *g){
+    convex_free(&g->hull);
+    mesh_tree_free(&g->tree);
+    free(g->occ);
+    free(g);
+}
+
+int rigid_geom_hull(RigidWorld *w, const Triangle *tris, int ntris, int max_verts){
+    if (ntris <= 0) return -1;
+    Vec3 *pts = malloc((size_t)ntris * 3 * sizeof(Vec3));
+    RigidGeom *g = calloc(1, sizeof(RigidGeom));
+    if (!pts || !g){ free(pts); free(g); return -1; }
+    for (int i = 0; i < ntris; i++){
+        pts[3 * i] = tris[i].q;
+        pts[3 * i + 1] = v_add(tris[i].q, tris[i].u);
+        pts[3 * i + 2] = v_add(tris[i].q, tris[i].v);
+    }
+    if (max_verts <= 0 || max_verts > MAX_HULL_VERTS) max_verts = max_verts <= 0 ? 48 : MAX_HULL_VERTS;
+    int ok = convex_hull(pts, ntris * 3, max_verts, &g->hull);
+    free(pts);
+    if (!ok){ free_geom(g); return -1; }
+    g->kind = BODY_HULL;
+    Mat3 inertia;
+    convex_mass(&g->hull, &g->volume, &g->com, &inertia);
+    eigen3(inertia, &g->frame, &g->inertia);
+    // the hull into its body frame: p' = F^T (p - com)
+    Mat3 ft = mat3_transpose(g->frame);
+    Vec3 h = vec3(0, 0, 0);
+    for (int i = 0; i < g->hull.nv; i++){
+        Vec3 p = mat3_mul_vec(ft, v_sub(g->hull.v[i], g->com));
+        g->hull.v[i] = p;
+        h = vec3(r_fmax(h.x, r_fabs(p.x)), r_fmax(h.y, r_fabs(p.y)), r_fmax(h.z, r_fabs(p.z)));
+    }
+    for (int f = 0; f < g->hull.nf; f++){
+        g->hull.f[f].d -= v_dot(g->hull.f[f].n, g->com);
+        g->hull.f[f].n = mat3_mul_vec(ft, g->hull.f[f].n);
+    }
+    g->half = v_add(h, vec3(1e-3f, 1e-3f, 1e-3f));
+    g->occ = malloc(OCC_WORDS * sizeof(uint32_t));
+    if (!g->occ || !(g->volume > 0)){ free_geom(g); return -1; }
+    occupancy_convex(&g->hull, g->half, g->occ);
+    int id = add_geom(w, g);
+    if (id < 0) free_geom(g);
+    return id;
+}
+
+int rigid_geom_mesh(RigidWorld *w, const Triangle *tris, int ntris){
+    if (ntris <= 0) return -1;
+    RigidGeom *g = calloc(1, sizeof(RigidGeom));
+    if (!g) return -1;
+    g->kind = BODY_MESH;
+    Aabb b = triangle_bounds(&tris[0]);
+    for (int i = 1; i < ntris; i++){
+        Aabb t = triangle_bounds(&tris[i]);
+        b.lo = vec3(r_fmin(b.lo.x, t.lo.x), r_fmin(b.lo.y, t.lo.y), r_fmin(b.lo.z, t.lo.z));
+        b.hi = vec3(r_fmax(b.hi.x, t.hi.x), r_fmax(b.hi.y, t.hi.y), r_fmax(b.hi.z, t.hi.z));
+    }
+    g->com = v_scale(v_add(b.lo, b.hi), 0.5f);
+    g->frame = mat3_identity();
+    g->half = v_add(v_scale(v_sub(b.hi, b.lo), 0.5f), vec3(1e-3f, 1e-3f, 1e-3f));
+    g->occ = malloc(OCC_WORDS * sizeof(uint32_t));
+    if (!g->occ || !mesh_tree_build(&g->tree, tris, ntris, g->com)){ free_geom(g); return -1; }
+    occupancy_mesh(&g->tree, g->half, g->occ);
+    int id = add_geom(w, g);
+    if (id < 0) free_geom(g);
+    return id;
+}
+
+static Mat3 xform_rot(Xform x){
+    Mat3 r;
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r.m[i][j] = x.m[i][j];
+    return r;
+}
+
+// the body's pose from the mesh's placement: R = X F, pos = X(com)
+static void place_body(Body *b, const RigidGeom *g, Xform place){
+    b->rot = mat3_to_quat(mat3_mul(xform_rot(place), g->frame));
+    b->pos = xform_point(&place, g->com);
+}
+
+int rigid_add_hull_body(RigidWorld *w, int geom, Xform place, real density){
+    if (geom < 0 || geom >= w->ngeoms || w->geoms[geom]->kind != BODY_HULL) return -1;
+    const RigidGeom *g = w->geoms[geom];
+    Body b = body_base(vec3(0, 0, 0), g->volume, density);
+    b.shape = BODY_HULL;
+    b.g = g;
+    b.half = g->half;
+    if (b.mass > 0) b.inv_inertia = vec3(1 / (density * g->inertia.x), 1 / (density * g->inertia.y), 1 / (density * g->inertia.z));
+    place_body(&b, g, place);
+    return add_body(w, b);
+}
+
+int rigid_add_mesh_collider(RigidWorld *w, int geom, Xform place){
+    if (geom < 0 || geom >= w->ngeoms || w->geoms[geom]->kind != BODY_MESH) return -1;
+    const RigidGeom *g = w->geoms[geom];
+    Body b = body_base(vec3(0, 0, 0), 0, 0);
+    b.shape = BODY_MESH;
+    b.g = g;
+    b.half = g->half;
+    place_body(&b, g, place);
+    return add_body(w, b);
+}
+
+Xform body_mesh_xform(const Body *b){
+    Mat3 m = mat3_identity();
+    Vec3 com = vec3(0, 0, 0);
+    if (b->g){ m = mat3_transpose(b->g->frame); com = b->g->com; }
+    m = mat3_mul(quat_to_mat3(b->rot), m);                 // world = pos + R F^T (p - com)
+    Vec3 t = v_sub(b->pos, mat3_mul_vec(m, com));
+    return xform_make(t, m.m, 1);
+}
+
 Mat3 body_inv_inertia_world(const Body *b){
     Mat3 r = quat_to_mat3(b->rot);
     return mat3_mul(mat3_mul(r, mat3_diag(b->inv_inertia)), mat3_transpose(r));
@@ -95,6 +287,7 @@ int body_contains(const Body *b, Vec3 p){
     Vec3 d = v_sub(p, b->pos);
     if (b->shape == BODY_SPHERE) return v_dot(d, d) <= b->half.x * b->half.x;
     Mat3 r = quat_to_mat3(b->rot);
+    if (b->g) return occupancy_at(b->g->occ, b->half, mat3_mul_vec(mat3_transpose(r), d));
     for (int k = 0; k < 3; k++){
         real c = v_dot(mat3_col(r, k), d);
         real h = k == 0 ? b->half.x : (k == 1 ? b->half.y : b->half.z);
@@ -105,6 +298,7 @@ int body_contains(const Body *b, Vec3 p){
 
 void body_apply_impulse(Body *b, Vec3 j, Vec3 p){
     if (b->inv_mass == 0) return;
+    b->dirty = 1;
     b->vel = v_add(b->vel, v_scale(j, b->inv_mass));
     b->angvel = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_cross(v_sub(p, b->pos), j)));
 }
@@ -134,6 +328,40 @@ static void box_corners(const Body *b, Vec3 *out){
     }
 }
 
+// ---- boxes and hulls as placed polyhedra (phys/convex.h) ----
+typedef struct {
+    WorldConvex wc;
+    Convex box;              // a box: the unit box's topology, its corners and planes
+    Vec3 bv[8];
+    ConvexFace bf[6];
+    Vec3 v[MAX_HULL_VERTS], n[MAX_HULL_FACES];
+    real d[MAX_HULL_FACES];
+} Placed;
+
+static const Convex *unit_box(void){
+    static Convex c;
+    static int made;
+    if (!made){ convex_box(vec3(1, 1, 1), &c); made = 1; }
+    return &c;
+}
+
+static void place(const Body *b, Placed *p){
+    const Convex *c;
+    if (b->shape == BODY_BOX){
+        const Convex *u = unit_box();
+        p->box = *u;
+        for (int i = 0; i < u->nv; i++) p->bv[i] = v_mul(u->v[i], b->half);
+        for (int f = 0; f < u->nf; f++){
+            p->bf[f] = u->f[f];
+            p->bf[f].d = r_fabs(v_dot(u->f[f].n, b->half));   // its normals are the axes
+        }
+        p->box.v = p->bv;
+        p->box.f = p->bf;
+        c = &p->box;
+    } else c = &b->g->hull;
+    convex_place(&p->wc, c, b->pos, quat_to_mat3(b->rot), p->v, p->n, p->d);
+}
+
 // The room: six walls, each a plane dot(n, x) = off with n pointing into the room.
 static void collide_walls(RigidWorld *w, int ia){
     const Body *b = &w->bodies[ia];
@@ -145,7 +373,7 @@ static void collide_walls(RigidWorld *w, int ia){
             real d = v_dot(n[k], b->pos) - off[k] - b->half.x;
             if (d < 0) add_contact(w, ia, -1, v_sub(b->pos, v_scale(n[k], b->half.x)), n[k], -d);
         }
-    } else {
+    } else if (b->shape == BODY_BOX){
         Vec3 c[8];
         box_corners(b, c);
         for (int k = 0; k < 6; k++)
@@ -153,7 +381,134 @@ static void collide_walls(RigidWorld *w, int ia){
                 real d = v_dot(n[k], c[i]) - off[k];
                 if (d < 0) add_contact(w, ia, -1, c[i], n[k], -d);
             }
+    } else if (b->shape == BODY_HULL){
+        // the hull's corners below each wall, at most 4 of them per wall
+        Placed *p = malloc(sizeof(Placed));
+        if (!p) return;
+        place(b, p);
+        for (int k = 0; k < 6; k++){
+            ConvexContact c[MAX_HULL_VERTS];
+            int m = 0;
+            for (int i = 0; i < p->wc.c->nv; i++){
+                real d = v_dot(n[k], p->v[i]) - off[k];
+                if (d < 0){ c[m].p = p->v[i]; c[m].n = n[k]; c[m].depth = -d; m++; }
+            }
+            m = convex_reduce(c, m, 4);
+            for (int i = 0; i < m; i++) add_contact(w, ia, -1, c[i].p, c[i].n, c[i].depth);
+        }
+        free(p);
     }
+}
+
+// contacts found for (b, a) turned into contacts for (a, b)
+static void flip_contacts(RigidWorld *w, int first, int a, int b){
+    for (int k = first; k < w->ncontacts; k++){
+        Contact *c = &w->contacts[k];
+        c->a = a; c->b = b; c->n = v_neg(c->n);
+    }
+}
+
+// a sphere (ia) against a box or hull (ib)
+static void collide_sphere_convex(RigidWorld *w, int ia, int ib){
+    Placed *p = malloc(sizeof(Placed));
+    if (!p) return;
+    place(&w->bodies[ib], p);
+    ConvexContact c;
+    const Body *s = &w->bodies[ia];
+    if (convex_collide_sphere(s->pos, s->half.x, &p->wc, &c)) add_contact(w, ia, ib, c.p, c.n, c.depth);
+    free(p);
+}
+
+// boxes and hulls
+static void collide_convex(RigidWorld *w, int ia, int ib){
+    Placed *p = malloc(2 * sizeof(Placed));
+    if (!p) return;
+    place(&w->bodies[ia], &p[0]);
+    place(&w->bodies[ib], &p[1]);
+    ConvexContact c[CONVEX_MAX_CONTACTS];
+    int m = convex_collide(&p[0].wc, &p[1].wc, c);
+    for (int k = 0; k < m; k++) add_contact(w, ia, ib, c[k].p, c[k].n, c[k].depth);
+    free(p);
+}
+
+// a body (ia) against a fixed mesh (im): the mesh's triangles near the body, each
+// against it, at most 4 contacts kept
+typedef struct { int *tri; int n, cap; } TriList;
+static void tri_list_add(void *user, int t){
+    TriList *l = user;
+    if (l->n >= l->cap){
+        int cap = l->cap ? l->cap * 2 : 64;
+        int *nt = realloc(l->tri, (size_t)cap * sizeof(int));
+        if (!nt) return;
+        l->tri = nt;
+        l->cap = cap;
+    }
+    l->tri[l->n++] = t;
+}
+
+#define MESH_CONTACTS 256
+
+static void collide_mesh(RigidWorld *w, int ia, int im){
+    const Body *a = &w->bodies[ia], *m = &w->bodies[im];
+    const RigidGeom *g = m->g;
+    Mat3 r = quat_to_mat3(m->rot), rt = mat3_transpose(r);
+    // the body's box in the mesh's frame: a sphere's, or around its corners there
+    Aabb q;
+    Placed *p = NULL;
+    if (a->shape == BODY_SPHERE){
+        real rad = a->half.x;
+        Vec3 c = mat3_mul_vec(rt, v_sub(a->pos, m->pos));
+        q = (Aabb){v_sub(c, vec3(rad, rad, rad)), v_add(c, vec3(rad, rad, rad))};
+    } else {
+        p = malloc(sizeof(Placed));
+        if (!p) return;
+        place(a, p);
+        q.lo = vec3(1e30f, 1e30f, 1e30f);
+        q.hi = vec3(-1e30f, -1e30f, -1e30f);
+        for (int i = 0; i < p->wc.c->nv; i++){
+            Vec3 l = mat3_mul_vec(rt, v_sub(p->v[i], m->pos));
+            q.lo = vec3(r_fmin(q.lo.x, l.x), r_fmin(q.lo.y, l.y), r_fmin(q.lo.z, l.z));
+            q.hi = vec3(r_fmax(q.hi.x, l.x), r_fmax(q.hi.y, l.y), r_fmax(q.hi.z, l.z));
+        }
+    }
+    TriList list = {NULL, 0, 0};
+    mesh_tree_query(&g->tree, q, tri_list_add, &list);
+    if (list.n == 0){ free(list.tri); free(p); return; }
+    ConvexContact *all = malloc(MESH_CONTACTS * sizeof(ConvexContact));
+    int n = 0;
+    for (int k = 0; all && k < list.n && n + CONVEX_MAX_CONTACTS <= MESH_CONTACTS; k++){
+        const Vec3 *tl = g->tree.tri + 3 * (size_t)list.tri[k];
+        Vec3 t[3] = {v_add(m->pos, mat3_mul_vec(r, tl[0])), v_add(m->pos, mat3_mul_vec(r, tl[1])),
+                     v_add(m->pos, mat3_mul_vec(r, tl[2]))};
+        if (a->shape == BODY_SPHERE) n += triangle_collide_sphere(a->pos, a->half.x, t, all + n);
+        else n += convex_collide_triangle(&p->wc, t, all + n);
+    }
+    if (all){
+        n = convex_reduce(all, n, 4);
+        for (int k = 0; k < n; k++) add_contact(w, ia, im, all[k].p, all[k].n, all[k].depth);
+    }
+    free(all);
+    free(p);
+    free(list.tri);
+}
+
+static void collide_sphere_sphere(RigidWorld *w, int ia, int ib);
+static void collide_sphere_box(RigidWorld *w, int ia, int ib);
+static void collide_box_box(RigidWorld *w, int ia, int ib);
+
+static void collide_pair(RigidWorld *w, int i, int j){
+    BodyShape a = w->bodies[i].shape, b = w->bodies[j].shape;
+    if (a == BODY_MESH || b == BODY_MESH){
+        if (a == BODY_MESH && b == BODY_MESH) return;
+        if (a == BODY_MESH){ int first = w->ncontacts; collide_mesh(w, j, i); flip_contacts(w, first, i, j); }
+        else collide_mesh(w, i, j);
+    } else if (a == BODY_SPHERE && b == BODY_SPHERE) collide_sphere_sphere(w, i, j);
+    else if (a == BODY_BOX && b == BODY_BOX) collide_box_box(w, i, j);
+    else if (a == BODY_SPHERE && b == BODY_BOX) collide_sphere_box(w, i, j);
+    else if (b == BODY_SPHERE && a == BODY_BOX){ int first = w->ncontacts; collide_sphere_box(w, j, i); flip_contacts(w, first, i, j); }
+    else if (a == BODY_SPHERE) collide_sphere_convex(w, i, j);
+    else if (b == BODY_SPHERE){ int first = w->ncontacts; collide_sphere_convex(w, j, i); flip_contacts(w, first, i, j); }
+    else collide_convex(w, i, j);
 }
 
 static void collide_sphere_sphere(RigidWorld *w, int ia, int ib){
@@ -347,17 +702,7 @@ static void find_contacts(RigidWorld *w){
             real ra = v_len(a->half), rb = v_len(b->half);
             Vec3 d = v_sub(a->pos, b->pos);
             if (v_dot(d, d) > (ra + rb) * (ra + rb)) continue;
-            if (a->shape == BODY_SPHERE && b->shape == BODY_SPHERE) collide_sphere_sphere(w, i, j);
-            else if (a->shape == BODY_SPHERE) collide_sphere_box(w, i, j);
-            else if (b->shape == BODY_SPHERE){
-                // sphere j against box i, then flip the normal so it points from j to i
-                int first = w->ncontacts;
-                collide_sphere_box(w, j, i);
-                for (int k = first; k < w->ncontacts; k++){
-                    Contact *c = &w->contacts[k];
-                    c->a = i; c->b = j; c->n = v_neg(c->n);
-                }
-            } else collide_box_box(w, i, j);
+            collide_pair(w, i, j);
         }
     }
 }

@@ -38,6 +38,11 @@ typedef struct {
     int max_depth;     // bounces per path
     int mis;           // multiple importance sampling
     real clamp;        // largest sample value, 0 = no limit
+    int random;        // 1 = plain random numbers, 0 (default) = Sobol + blue noise (core/sampler.h)
+    real photons;      // > 0: caustics by light tracing, this many light paths per pixel and pass
+                       // (as -photons; the path tracer then leaves those paths out)
+    int photon_cache;  // 1 = also a world-space photon cache, for real time (blurred a little;
+                       // the light tracer's exact caustics take over as the view stands still)
 } GpuTraceParams;
 // Starts a new image: the scene's geometry and BVH go to the GPU if they changed (the scene's
 // own BVH is used when it has one, so call scene_set_accel after changing geometry). Returns 0
@@ -63,6 +68,9 @@ int gpu_view_trace_busy(const GpuView *v);          // a band is still running o
 typedef void (*GpuTraceReadFn)(void *user, const float *sum_count, int w, int h);
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user);
 double gpu_view_trace_pass_ms(const GpuView *v);    // how long the last one took
+// 1 = the path tracer runs as small kernels, one step of every path at a time (wavefront;
+// docs/PERFORMANCE.md R1), 0 = as one kernel per path (the default)
+void gpu_view_trace_wavefront(GpuView *v, int on);
 // The denoiser (gpu/denoise_gpu.c): on = 1 shows and reads back the image denoised (the
 // count of each pixel is then 1), 0 the samples as they are. Off by default. Returns 1 if it
 // will be used: 0 when this GPU's buffers are too small for its guide at this image size.

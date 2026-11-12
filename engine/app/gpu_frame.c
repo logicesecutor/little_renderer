@@ -5,6 +5,12 @@
 #include <string.h>
 #include <time.h>
 
+static double now_s(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 static void nap_ms(int ms){
     struct timespec ts = {0, (long)ms * 1000000L};
     nanosleep(&ts, NULL);
@@ -45,15 +51,18 @@ static void on_samples(void *user, const float *sc, int w, int h){
 }
 
 int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, const RenderParams *rp,
-                    const MarchParams *mp, int spp, int max_depth, int mis, real clamp, Image *img, int progress){
-    GpuTraceParams tp = {*cam, max_depth, mis, clamp};
+                    const MarchParams *mp, int spp, int max_depth, int mis, real clamp, int sampler, real photons,
+                    Image *img, int progress){
+    GpuTraceParams tp = {*cam, max_depth, mis, clamp, !sampler, photons, 0};
     if (!gpu_view_trace_start(view, s, &tp)) return 1;
-    int shown = -1;
+    int shown = -1, p1 = -1;
+    double t1 = 0;
     while (gpu_view_trace_passes(view) < spp && gpu_state(gpu) == GPU_READY){
         // one band (or, once the GPU proves fast, several whole passes) at a time; the
         // last submission may add a few passes more than spp, which only lowers the noise
         gpu_view_trace_more(view, s, rp, mp);
         gpu_wait(gpu);
+        if (p1 < 0){ p1 = gpu_view_trace_passes(view); t1 = now_s(); }   // after the first: pipelines made, caches warm
         int p = gpu_view_trace_passes(view) * 100 / (spp > 0 ? spp : 1);
         if (progress && p != shown){
             fprintf(stderr, "\r  %3d%%", p > 100 ? 100 : p);
@@ -63,6 +72,10 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
     }
     if (progress) fprintf(stderr, "\n");
     if (gpu_state(gpu) != GPU_READY) return 1;
+    int pn = gpu_view_trace_passes(view);
+    if (progress && pn > p1 && p1 >= 0)
+        printf("  GPU: %.2f ms per pass (1 sample per pixel; mean of %d passes after the first)\n",
+               (now_s() - t1) * 1000.0 / (pn - p1), pn - p1);
     TraceRead r = {img, 0};
     if (!gpu_view_trace_read(view, on_samples, &r)) return 1;
     while (!r.done && gpu_state(gpu) == GPU_READY) gpu_wait(gpu);

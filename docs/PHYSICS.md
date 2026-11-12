@@ -109,6 +109,38 @@ The contact points come from **clipping** (as in Box2D / ODE):
   corners of their overlap, which is what makes it stable.
 - edge axis: one contact between the closest points of the two edges.
 
+### 1.2b Mesh bodies (`phys/convex.c`)
+
+Two more shapes come from a triangle mesh (the scene's `SceneMesh`, in its own space):
+
+- **`BODY_HULL`**, a moving body: the mesh's **convex hull**. `rigid_geom_hull` takes the
+  vertices furthest along 288 directions spread over the sphere (a Fibonacci spiral), keeps
+  at most 48 of them (each next one the furthest from those kept), and builds their hull
+  incrementally (add a point, remove the faces it sees, close the hole from their horizon
+  to it). Coplanar triangles become one polygon face. Its **mass** comes from the hull
+  split into tetrahedra from the centroid: volume, centre of mass, and the inertia tensor
+  from each tetrahedron's covariance (`det/120 · (aaᵀ + bbᵀ + ccᵀ + (a+b+c)(a+b+c)ᵀ)`). The
+  tensor's eigenvectors (Jacobi rotations) are the body's axes, so its inverse inertia
+  stays diagonal, like a box's: the body frame has the centre of mass at the origin and
+  the principal axes as axes, and `body_mesh_xform` gives the mesh's place for drawing.
+- **`BODY_MESH`**, fixed: the mesh's **triangles** themselves (`rigid_geom_mesh`), in a
+  BVH (median splits), a static collider of any shape: balls roll in its hollows, hulls
+  land on it.
+
+| pair | method |
+|---|---|
+| hull – wall | the hull's corners below the wall, at most 4 kept |
+| sphere – hull | the face the centre is furthest outside of; inside: out by it; outside: the closest point of the faces facing the centre |
+| hull – hull, hull – box | separating axis test over both hulls' faces and the pairs of edges that make a face of the Minkowski difference (Gregorius, GDC 2013: the two edges' arcs on the Gauss map cross), then face clipping as for boxes (the incident face against the reference face's sides; at most 4 points: the deepest, the furthest from it, the one spanning the most area, the one adding the most) |
+| sphere – mesh | each triangle near the sphere: its closest point |
+| box / hull – mesh | each triangle near the body (the BVH, with the body's box in the mesh's frame): the same separating axis test, the triangle two-sided (a mesh need not be closed); its edges against only the hull edges on the hull's outline seen along them; at most 4 contacts for the pair |
+
+The air sees both as obstacles through an **occupancy grid**, 48³ bits over the shape's
+box in its own frame: a cell centre inside the hull's planes, or, for a mesh, inside by
+the parity of the crossings of three rays (along x, y and z: the majority decides, so a
+mesh with small holes still has an inside). `body_contains` reads it, so do the GPU's
+obstacle kernel (the bits uploaded once per shape) and the CPU's `mark_solids`.
+
 ### 1.3 The contact solver: sequential impulses
 
 At a contact the bodies must stop approaching. With the velocity of the two contact
@@ -148,6 +180,43 @@ same impulses step after step, so the iterations only have to correct small chan
 **Substeps.** `PhysWorld` runs the rigid bodies 4 times per physics step (`substeps`), at
 1/240 s for the default 1/60 s step: stiffer contacts and no tunnelling for a steel ball
 falling at 10 m/s (4 cm per substep, against a radius of 25–40 cm).
+
+### 1.4 The bodies on the GPU (`gpu/rigid_gpu.c`)
+
+With a GPU (`view -sim on`, `sim`; `-gpurigid off` to keep them on the CPU) the bodies are
+stepped there, all of them: balls, boxes, hulls, fixed meshes and the walls. The state stays
+on the GPU; `phys_step` calls it through the hook `PhysWorld.rigid_step`, and the bodies
+come back to the CPU a step late, asynchronously (the scene is drawn from that copy; offline
+and in the tests every step waits for it, `gpu_rigid_set_wait`). A body changed on the CPU
+(a new one, one pushed by `phys_blast`, one the program moved) has `Body.dirty` set and is
+sent again.
+
+Each substep is a chain of compute passes:
+
+| pass | what it does |
+|---|---|
+| forces | gravity, the air's drag and buoyancy, damping |
+| pairs | one thread per pair of bodies (n²/2) tests the bounding spheres and sorts the pair into three lists: simple (balls and boxes), hulls, body–mesh |
+| contacts | the simple pairs one thread each (`rigid.c`'s tests); hull pairs one workgroup each, 64 threads sharing the separating-axis search (`convex.c`'s SAT and face clipping); the walls |
+| meshes | for each body near a fixed mesh one workgroup walks the mesh's tree breadth first and lists the triangles near the body; then one thread per triangle runs the test, and the best 4 contacts of each pair are kept |
+| contact lists | each body's contacts: count, prefix sum, fill |
+| solve | the contacts' impulses, 16 iterations, warm started |
+| move | integrate |
+
+The lists' sizes are only known on the GPU, so their dispatches are indirect (a small
+kernel writes the workgroup counts).
+
+**Mass splitting.** The CPU's solver (1.3) visits the contacts one after another, each
+seeing the impulses of the ones before: that is what makes it converge, and it is
+sequential. A GPU solves all the contacts at once (Jacobi), and a plain Jacobi solve
+overshoots: a box resting on 4 contacts gets 4 full corrections. Tonge, Benevolenski &
+Voroshilov (2012, "Mass splitting for jitter-free parallel rigid body simulation") split
+each body into as many copies as it has contacts, each with mass `m / k` (inertia `I / k`):
+every contact pushes its own copy, then the body takes the average of its copies'
+velocities. That is a sequential-impulse solve of a different but equivalent system, it
+converges like 1.3 and does not depend on the order. Warm starting is the same as on the
+CPU: each new contact looks for the old one of the same pair, within 1 cm, and starts from
+its impulses.
 
 ---
 
@@ -398,12 +467,21 @@ of not conserving momentum exactly between the two.
 
 ### 4.1 The scene
 
-`phys_add_to_scene(pw, body, scene, material)` adds the body's primitives (a sphere, or a
-box as 6 quads with `u × v` pointing outwards) and remembers the first one in `Body.prim`.
-`phys_sync_scene` rewrites them at the bodies' current poses (`make_sphere`, `make_quad`),
-in place. After that, the path tracer needs its acceleration structure rebuilt
-(`scene_set_accel`: 0.1 ms for the ~100 primitives of a demo); the rasterizer reads the
-primitives directly.
+Every body is drawn as an **instance** (`Body.inst`): `phys_add_to_scene(pw, body, scene,
+material)` adds a ball as an instance of the unit sphere (`INST_SPHERE`) and a box as one of
+the unit box (`INST_BOX`), placed by a transform that scales, turns and moves it
+(`xform_axes`); a mesh body is an instance of its scene mesh (`phys_add_mesh_to_scene(pw,
+body, scene, mesh, material)`). `phys_sync_scene` only moves the instances
+(`scene_move_instance`): no triangle or primitive changes, on the GPU neither (SDK.md
+section 3). The path tracer hits the unit shapes exactly (no tessellation), and its
+acceleration structure is two levels: the scene's fixed primitives and each mesh keep
+their trees, and only the small tree over the instances is rebuilt, by
+`scene_update_instances` (0.02 ms for 600 bodies). The rasterizer draws the unit sphere
+and box once uploaded, one draw per body.
+
+`phys_add_to_scene_prims` is the old way: the body's primitives (a sphere, or a box as 6
+quads) are added to the scene and `phys_sync_scene` rewrites them in place (`Body.prim`);
+the scene's tree then has to be rebuilt every frame (`scene_set_accel`).
 
 ### 4.2 Using it in your own program
 
@@ -433,12 +511,27 @@ phys_add_to_scene(&pw, ball, &scene, scene_add_material(&scene, steel));
 for (int f = 0; f < 30; f++){
     for (int k = 0; k < 2; k++) phys_step(&pw, 1.0 / 60);   // 30 frames per second
     phys_sync_scene(&pw, &scene);
-    scene_set_accel(&scene, ACCEL_NONE, NULL);
+    scene_update_instances(&scene, NULL);              // the bodies are instances (4.1)
     frame_render_rt(&scene, &cam, &img, 16, &tp, 0, 0, f);  // app/frame.h
     image_write_ppm(&img, path);
 }
 phys_free(&pw);          // the air, not the cloud: the scene owns it
 scene_free(&scene);
+```
+
+Mesh bodies (a mesh loaded in its own frame, as for instances):
+
+```c
+int mesh = scene_load_mesh_object(&scene, "models/torus.obj", mat, 120);   // the scene's copy
+const SceneMesh *sm = &scene.meshes[mesh];
+int hull = rigid_geom_hull(&pw.rigid, sm->tris, sm->ntris, 0);           // its convex hull
+int b = rigid_add_hull_body(&pw.rigid, hull, xform_rot_y(vec3(278, 300, 278), 30, 1), 0.8);
+phys_add_mesh_to_scene(&pw, b, &scene, mesh, -1);                          // drawn as an instance
+
+int big = scene_load_mesh_object(&scene, "models/dragon_recon/dragon_vrip_res2.ply", mat, 260);
+int tris = rigid_geom_mesh(&pw.rigid, scene.meshes[big].tris, scene.meshes[big].ntris);
+int c = rigid_add_mesh_collider(&pw.rigid, tris, xform_rot_y(vec3(278, 0, 250), 0, 1));
+phys_add_mesh_to_scene(&pw, c, &scene, big, -1);                           // fixed, never moves
 ```
 
 Rigid bodies without air: leave `pw.fluid` NULL, or use `RigidWorld` alone
@@ -455,6 +548,15 @@ Rigid bodies without air: leave `pw.fluid` NULL, or use `RigidWorld` alone
 | bodies | `-balls` (5) and `-boxes` (3) appear under the ceiling one every 0.4 s, interleaved, and fall through the cloud: glass (2.5 g/cm³), steel (7.8, a mirror), plastic (1.0, orange/blue/yellow), wooden boxes (0.7, tumbling); `-balloons` (3) start on the floor at the back and rise | all of them at rest on the floor; balloons slightly heavier than air (0.0016) |
 | event | | at t = 1 s an explosion in the lower part of the cloud (radius 400, air 1100 cm/s, impulse 50000) |
 | what to watch | holes and wakes in the cloud behind each ball, the cloud dragged down; balloons drifting up through it | the cloud bursting into a shell, balloons and boxes thrown, steel balls rolling |
+
+**Meshes** in either demo: `-collider on` stands the model (`-obj`) in the middle of the room,
+260 units, fixed; `-meshes n` adds n copies of it, 120 units, as convex hulls (density
+0.8): in the drop demo they fall one every 0.4 s, turned at random; in the blast they rest
+on the floor until it throws them. For example
+`bin/sim -obj models/dragon_recon/dragon_vrip_res2.ply -collider on -meshes 4`: dragons
+falling through the cloud and landing around a big one, the air flowing around all of them.
+Rigid bodies take 0.2 ms per 1/60 s step on average for that (2 ms at most, when hulls
+land on the 200k-triangle dragon), the GPU air 0.6 ms.
 
 `bin/sim` writes each frame to `out/sim/frame_NNNN.ppm` (`-o folder`) and then
 `out/sim.gif` (`-gif off` to skip). Each frame: physics for 1/fps seconds (steps of at most
@@ -488,9 +590,22 @@ Each test compares with an answer known in advance:
 | steady wind 100 cm/s for 1 s, open at both ends | the cloud moves 100 cm, keeps its mass | 91 cm, mass ×1.005 |
 | multigrid, expansion source, 10 V-cycles | divergence left / rate < 1% | 0.04% |
 | expansion in open air | outward speed `s R³ (2/15) / d²` | 1.05× (up and sideways) |
+| the hull of a box mesh, turned and moved in its own frame | the box's volume, centre and principal moments | exact (< 10⁻⁴) |
+| that hull dropped tilted, then a second one on it | lands on a face; the second rests on it | 0.01 cm off; 0.4 cm drift |
+| a torus's hull dropped tilted | lands flat (centre at the tube radius 20) | 20.5 (the 48-corner hull) |
+| a ball, a hull and a box on a fixed mesh (a block, top at 100) | rest on it | 0.03 cm off each |
+| the inside of a torus mesh as the air sees it (48³ cells) | 2π²Rr² | 0.988× |
+| two hulls colliding, no gravity | momentum conserved | change < 10⁻⁵ |
 
 The cloud moves 91 and not 100 cm in the wind test because the air needs a moment to reach
 the wind's speed through the projection at the walls; the 10% tolerance covers it.
+
+`examples/test_gpu_rigid.c` (in `make test`; skipped by a build without the GPU) runs the
+same kind of checks on the GPU's bodies: free fall, the bounce, momentum, the stack of 3
+boxes and a ball, the tilted box, a hull landing on a face and a second one stacked on it,
+the torus puck, a ball, a hull and a box resting on a fixed mesh, and a pile of 60 bodies
+(the same on the CPU and the GPU: nothing leaves the room, nothing overlaps, everything at
+rest). Then it times 64 to 2048 bodies on both (section 7).
 
 Also checked: the float and double builds, address + undefined-behaviour sanitizers on the
 tests and on a whole blast simulation, and that every scene without physics renders
@@ -518,14 +633,36 @@ which 75 s were physics. The rasterizer with the raymarched cloud takes about 70
 physics is the limit, which is why `view -sim on` defaults to `-fluidres 32 -cloudres 96`
 (about 30 ms per step).
 
+**The bodies on the GPU** (1.4; RTX 3070, a 1/60 s step of 4 substeps, a pile of balls,
+boxes and hulls; `test_gpu_rigid`):
+
+| bodies | CPU (one thread) | GPU |
+|---|---|---|
+| 64 | 0.53 ms | 0.80 ms |
+| 256 | 2.5 ms | 0.93 ms |
+| 1024 | 17.9 ms | 1.7 ms |
+| 2048 | | 2.8 ms |
+
+Below about 100 bodies the GPU's fixed cost (some 15 dispatches per substep) is larger than
+the work; it still takes the bodies off the CPU, which the live viewer needs: with 600
+bodies `view -sim on` draws 164 frames per second (the screen's limit) with the bodies on
+the GPU, 142 with them on the CPU (19 ms of physics per frame). The dragons
+(`-collider on -meshes 3`) take 1.3 ms per step on the GPU, most of it the hulls' contacts
+(0.35 ms) and the triangles near the big dragon (0.23 ms). Set `LR_GPU_TIMING=1` to print
+the time of every pass at the end (natively; WEB.md 3).
+
 ---
 
 ## 8. Limits and next steps
 
-- **Shapes**: spheres and boxes. Convex meshes would need GJK/EPA (or SAT over the mesh's
-  faces and edges) for detection; the solver is shape-agnostic already.
-- **Broad phase**: all pairs (n² / 2), fine for tens of bodies. A uniform grid or
-  sweep-and-prune for thousands.
+- **Shapes**: spheres, boxes, convex hulls of meshes, and fixed triangle meshes. A moving
+  concave body (a mug that holds a ball) would need a convex decomposition (V-HACD) into
+  several hulls of one body; two fixed meshes never collide with each other.
+- **Mesh contacts**: a body sliding over a mesh can catch on the triangles' inner edges
+  (each triangle is tested on its own); "internal edge" filtering would smooth it.
+- **Broad phase**: all pairs (n² / 2), fine for tens of bodies on the CPU; on the GPU one
+  thread per pair is still cheap at 2000 bodies (section 7). A uniform grid or
+  sweep-and-prune for tens of thousands.
 - **Rolling**: a ball rolls on forever on a flat floor (no rolling resistance), as in most
   game engines; angular damping (0.1 /s) slowly stops it.
 - **Two-way coupling** is weak (section 4); a monolithic solve (Batty, Bertails & Bridson
@@ -555,5 +692,7 @@ physics is the limit, which is why `view -sim on` defaults to `-fluidres 32 -clo
 - E. Catto, "Iterative Dynamics with Temporal Coherence", GDC 2005; Box2D (contact
   clipping, warm starting).
 - D. Baraff, "Physically Based Modeling: Rigid Body Simulation", SIGGRAPH course notes 2001.
+- R. Tonge, F. Benevolenski, A. Voroshilov, "Mass Splitting for Jitter-Free Parallel Rigid
+  Body Simulation", SIGGRAPH 2012.
 - C. Ericson, *Real-Time Collision Detection*, Morgan Kaufmann 2004 (separating axes,
   closest points of segments).
