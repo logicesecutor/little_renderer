@@ -73,8 +73,22 @@ void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
 void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                       int y0, int rows, int repeats, int nvolumes,
                       WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
-WGPUBuffer gpu_trace_accum(GpuTrace *t);
+// Before the first band of an image: each pixel's guide for the denoiser (with no samples),
+// and with history > 0 the samples of the previous image reprojected (at most history each).
+void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
+                           int history, int nvolumes,
+                           WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
+WGPUBuffer gpu_trace_accum(GpuTrace *t);   // the image's samples (4 planes when guided)
+int gpu_trace_guided(const GpuTrace *t);    // 1 = the denoiser's planes follow the samples
 void gpu_trace_destroy(GpuTrace *t);
+
+// The denoiser (gpu/denoise_gpu.c): from the path tracer's 4 planes to a w * h image of
+// vec4 (rgb, 1), or (0, 0, 0, 0) where there is no sample yet.
+typedef struct GpuDenoise GpuDenoise;
+GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height);
+void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels);
+WGPUBuffer gpu_denoise_output(GpuDenoise *d);
+void gpu_denoise_destroy(GpuDenoise *d);
 double gpu_now_ms(void);
 
 // GPU views take the densities of some media straight from a GPU buffer (gpu/fluid_gpu.c)

@@ -43,7 +43,7 @@ struct TP {
     dims: vec4u,   /* image width, height; first row and rows of this band */
     opt: vec4u,    /* max depth, mis, number of prims, the lamp (a prim) */
     cnt: vec4u,    /* BVH nodes, where the normals start in aux, seed, media */
-    f: vec4f,      /* clamp, ray epsilon, shadow margin */
+    f: vec4f,      /* clamp, ray epsilon, shadow margin, 1 = the denoiser's planes follow the samples */
     mats: array<TMat, 16>,
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -52,6 +52,10 @@ struct TP {
 @group(0) @binding(6) var<storage, read> aux: array<u32>;
 @group(0) @binding(7) var<storage, read> prims: array<Prim>;
 @group(0) @binding(8) var<storage, read> tris: array<Tri>;
+/* plane 0 (pixels 0..N-1): the samples, rgb = their sum, a = how many. With T.f.w = 1, for
+   the denoiser (gpu/denoise_gpu.c): plane 1 the sums of l and l^2 (l the luminance of the
+   sample over the albedo), plane 2 the first diffuse surface's normal and distance, plane 3
+   its albedo and what the pixel is (0 a surface, 1 a lamp or nothing, 2 seen through a medium) */
 @group(0) @binding(9) var<storage, read_write> accum: array<vec4f>;
 
 const NONE: u32 = 0xffffffffu;
@@ -453,6 +457,71 @@ fn roulette(thr: ptr<function, vec3f>, depth: i32, rng: ptr<function, u32>) -> b
     return true;
 }
 
+/* The denoiser's guide for one pixel, along the ray through its centre: the first diffuse
+   surface, through mirrors and glass (refracting, unless the glass reflects all), with the
+   albedo of the whole way to it. A medium that hides it (transmittance under 1/2, the mean
+   of 4 ratio tracking estimates) makes the pixel a medium's. */
+struct Guide { n: vec3f, z: f32, a: vec3f, kind: f32 };
+fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
+    var g: Guide;
+    g.n = vec3f(0.0); g.z = 1e30; g.a = vec3f(1.0); g.kind = 1.0;
+    var ray = ray0;
+    var a = vec3f(1.0);
+    var dist = 0.0;
+    var tr = 1.0;
+    var zmed = -1.0;
+    for (var i = 0; i < 6; i++) {
+        let f = traverse(ray, T.f.y, 1e30, false);
+        let found = f.id != NONE;
+        if (T.cnt.w > 0u && tr >= 0.5) {
+            /* how much of what is behind shows through, and where the light scatters (the mean
+               of 4 collision distances: a medium's pixel is reprojected from there) */
+            let tmax = select(1e30, f.t, found);
+            var s = 0.0;
+            var zc = 0.0;
+            var nc = 0.0;
+            for (var j = 0; j < 4; j++) {
+                s += transmittance(ray, 0.0, tmax, rng);
+                var tc = tmax;
+                for (var mv = 0u; mv < T.cnt.w; mv++) {
+                    let ti = track(mv, ray, 0.0, tc, rng, false);
+                    if (ti >= 0.0) { tc = ti; }
+                }
+                if (tc < tmax) { zc += tc; nc += 1.0; }
+            }
+            tr *= s / 4.0;
+            if (tr < 0.5 && nc > 0.0) { zmed = dist + zc / nc; }
+        }
+        if (!found) { break; }
+        let h = make_hit(ray, f);
+        let m = T.mats[shape_mat(f.id)];
+        let kind = u32(m.albedo.w);
+        if (kind == 3u) { g.n = h.n; g.z = dist + h.t; break; }    /* a lamp: kept for reprojection */
+        if (kind == 0u) {
+            g.n = h.n; g.z = dist + h.t; g.a = a * m.albedo.rgb; g.kind = 0.0;
+            break;
+        }
+        a *= m.albedo.rgb;
+        dist += h.t;
+        var nxt = reflect(ray.d, h.n);
+        if (kind == 2u) {
+            let eta = select(m.emission.w, 1.0 / m.emission.w, h.front);
+            let cos_i = min(dot(-ray.d, h.n), 1.0);
+            if (eta * eta * (1.0 - cos_i * cos_i) <= 1.0) { nxt = refract_dir(ray.d, h.n, eta); }
+        }
+        ray = Ray(h.p, normalize(nxt));
+    }
+    if (tr < 0.5) {
+        g.kind = 2.0;
+        g.a = vec3f(1.0);
+        g.n = vec3f(0.0);
+        if (zmed > 0.0) { g.z = zmed; }
+    }
+    return g;
+}
+
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
+
 /* the radiance arriving along one camera ray */
 fn trace(ray0: Ray, rng: ptr<function, u32>) -> vec3f {
     var ray = ray0;
@@ -557,6 +626,126 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
         c *= T.f.x / mx;
     }
     accum[k] = acc + vec4f(c, 1.0);
+    if (T.f.w > 0.5) {
+        let N = W * T.dims.y;
+        let ga = accum[3u * N + k];           /* the guide, made by gbuf before the first sample */
+        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), ga.w == 0.0));
+        accum[N + k] += vec4f(l, l * l, 0.0, 0.0);
+    }
+}
+
+/* A new image's start (with T.f.w = 1): no samples, and each pixel's guide. The whole image
+   (dims z and w, the band, are not used). */
+@compute @workgroup_size(64)
+fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let k = gid.x + gid.y * nw.x * 64u;
+    let W = T.dims.x;
+    let N = W * T.dims.y;
+    if (k >= N) { return; }
+    let x = k % W;
+    let y = k / W;
+    var rng = hash32(k ^ hash32(0x2545f491u + T.cnt.z));
+    let pc = T.upper_left.xyz + T.horizontal.xyz * ((f32(x) + 0.5) / f32(W)) -
+             T.vertical.xyz * ((f32(y) + 0.5) / f32(T.dims.y));
+    let g = guide(Ray(T.origin.xyz, normalize(pc - T.origin.xyz)), &rng);
+    accum[k] = vec4f(0.0);
+    accum[N + k] = vec4f(0.0);
+    accum[2u * N + k] = vec4f(g.n, g.z);
+    accum[3u * N + k] = vec4f(g.a, g.kind);
+}
+);
+
+// Reprojection: the new image's pixels take the samples of the previous image where their
+// surface was (both images' 4 planes, the new one's guide already made by gbuf). The guide's
+// point (along the pixel's ray, at the distance of its first diffuse surface: through a
+// mirror, the point behind it, which moves as the reflection does) is projected into the old
+// camera; of the 4 old pixels around it (bilinear weights), those that saw the same thing
+// count: same kind, a normal within ~25 degrees, a distance from the old eye within 2% (25%
+// in a medium: its distance is a noisy estimate, and its light smooth) plus how much it changes from that old pixel to
+// the next (on a wall seen edgewise it changes a lot within a pixel; the smaller of the two
+// sides, so that an edge next to the pixel does not count). A pixel that matches none (it was hidden, or
+// off screen) starts with no samples. The count is capped at `history`: older samples weigh
+// less, so that a change of light fades in, and the blur of blending again every frame (and
+// the streak it drags a bright sample into, along the motion) stays short. (Taking the
+// nearest old pixel instead does not blur, but duplicates pixels under subpixel motion: the
+// noise lines up in streaks, worse.)
+static const char *REPROJECT = WGSL(
+struct RP {
+    oo: vec4f, oul: vec4f, oh: vec4f, ov: vec4f,     /* the old camera */
+    no: vec4f, nul: vec4f, nh: vec4f, nv: vec4f,     /* the new one */
+    dims: vec4u,                                     /* width, height, history */
+};
+@group(0) @binding(0) var<uniform> R: RP;
+@group(0) @binding(1) var<storage, read> old: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> cur: array<vec4f>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let W = R.dims.x;
+    let H = R.dims.y;
+    let N = W * H;
+    let k = gid.x + gid.y * nw.x * 64u;
+    if (k >= N) { return; }
+    let g2 = cur[2u * N + k];
+    let g3 = cur[3u * N + k];
+    let x = f32(k % W);
+    let y = f32(k / W);
+    let d = normalize(R.nul.xyz + R.nh.xyz * ((x + 0.5) / f32(W)) - R.nv.xyz * ((y + 0.5) / f32(H)) - R.no.xyz);
+    let far = g2.w > 1e29;
+    let p = R.no.xyz + d * select(g2.w, 1e6, far);
+    /* into the old camera: the screen is 1 unit in front of the eye, horizontal and vertical
+       perpendicular to the view direction c */
+    let f = R.oul.xyz - R.oo.xyz;
+    let c = f + 0.5 * R.oh.xyz - 0.5 * R.ov.xyz;
+    let q0 = p - R.oo.xyz;
+    let den = dot(q0, c);
+    var acc0 = vec4f(0.0);
+    var acc1 = vec4f(0.0);
+    var nsum = 0.0;
+    var wsum = 0.0;
+    if (den > 0.0) {
+        let q = q0 * (dot(c, c) / den) - f;
+        let fx = dot(q, R.oh.xyz) / dot(R.oh.xyz, R.oh.xyz) * f32(W) - 0.5;
+        let fy = -dot(q, R.ov.xyz) / dot(R.ov.xyz, R.ov.xyz) * f32(H) - 0.5;
+        let x0 = floor(fx);
+        let y0 = floor(fy);
+        let dist = length(q0);
+        for (var j = 0; j < 4; j++) {
+            let tx = x0 + f32(j & 1);
+            let ty = y0 + f32(j >> 1);
+            if (tx < 0.0 || ty < 0.0 || tx >= f32(W) || ty >= f32(H)) { continue; }
+            let o = u32(ty) * W + u32(tx);
+            let s = old[o];
+            if (s.w == 0.0) { continue; }
+            let o3 = old[3u * N + o];
+            if (o3.w != g3.w) { continue; }
+            let o2 = old[2u * N + o];
+            if (!far) {
+                let ux = u32(tx);
+                let uy = u32(ty);
+                let zl = old[2u * N + o - select(0u, 1u, ux > 0u)].w;
+                let zr = old[2u * N + o + select(0u, 1u, ux + 1u < W)].w;
+                let zu = old[2u * N + o - select(0u, W, uy > 0u)].w;
+                let zd = old[2u * N + o + select(0u, W, uy + 1u < H)].w;
+                let grad = min(abs(zl - o2.w), abs(zr - o2.w)) + min(abs(zu - o2.w), abs(zd - o2.w));
+                if (abs(o2.w - dist) > select(0.02, 0.25, g3.w == 2.0) * dist + grad) { continue; }
+            }
+            if (g3.w == 0.0 && dot(o2.xyz, g2.xyz) < 0.9) { continue; }
+            let w = (1.0 - abs(fx - tx)) * (1.0 - abs(fy - ty));
+            acc0 += w * s / s.w;
+            acc1 += w * old[N + o] / s.w;
+            nsum += w * s.w;
+            wsum += w;
+        }
+    }
+    if (wsum < 0.05) {
+        cur[k] = vec4f(0.0);
+        cur[N + k] = vec4f(0.0);
+        return;
+    }
+    let n = min(nsum / wsum, f32(R.dims.z));
+    cur[k] = vec4f(acc0.rgb / wsum * n, n);
+    cur[N + k] = acc1 / wsum * n;
 }
 );
 
@@ -574,9 +763,14 @@ typedef struct {
 struct GpuTrace {
     Gpu *g;
     int w, h;
-    WGPUBindGroupLayout bgl;
-    WGPUComputePipeline pipe;
-    WGPUBuffer params, accum;
+    WGPUBindGroupLayout bgl, rp_bgl;
+    WGPUComputePipeline pipe, gbuf_pipe, rp_pipe;
+    WGPUBuffer params, rp_params;
+    WGPUBuffer acc[2];       // the image's samples, and (once reprojected) the previous image's
+    int cur;                 // which one is the image's
+    int planes;              // 4 with the denoiser's planes, 1 if this GPU's buffers are too small
+    Camera cam;              // the image's camera
+    int has_image;
     WGPUBuffer nodes, aux, prims, tris;
     size_t nodes_cap, aux_cap, prims_cap, tris_cap;
     uint32_t nnodes, normals_at;
@@ -604,14 +798,22 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation
     t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRW");
     t->pipe = gpu_compute(g, "path tracer", src, "main", t->bgl);
+    t->planes = (uint64_t)width * height * 64 <= g->max_storage ? 4 : 1;
+    if (t->planes == 4){
+        t->gbuf_pipe = gpu_compute(g, "path tracer: guide", src, "gbuf", t->bgl);
+        t->rp_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
+        t->rp_pipe = gpu_compute(g, "path tracer: reprojection", REPROJECT, "main", t->rp_bgl);
+        t->rp_params = gpu_buffer(g, "reprojection parameters", 9 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    }
     free(src);
     t->params = gpu_buffer(g, "path tracer parameters", sizeof(GTP), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    t->accum = gpu_buffer(g, "path tracer samples", (size_t)width * height * 16,
-                          WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
+    t->acc[0] = gpu_buffer(g, "path tracer samples", (size_t)width * height * 16 * t->planes,
+                           WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
     return t;
 }
 
-WGPUBuffer gpu_trace_accum(GpuTrace *t){ return t->accum; }
+WGPUBuffer gpu_trace_accum(GpuTrace *t){ return t->acc[t->cur]; }
+int gpu_trace_guided(const GpuTrace *t){ return t->planes == 4; }
 
 static void put(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y; d[2] = (float)a.z; d[3] = w; }
 
@@ -737,12 +939,10 @@ int gpu_trace_sync(GpuTrace *t, const Scene *s){
 }
 
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc){
-    wgpuCommandEncoderClearBuffer(enc, t->accum, 0, (uint64_t)t->w * t->h * 16);
+    wgpuCommandEncoderClearBuffer(enc, t->acc[t->cur], 0, (uint64_t)t->w * t->h * 16 * t->planes);
 }
 
-void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
-                      int y0, int rows, int repeats, int nvolumes,
-                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+static void write_params(GpuTrace *t, const Scene *s, const GpuTraceParams *tp, int y0, int rows, int nvolumes){
     Gpu *g = t->g;
     GTP P;
     memset(&P, 0, sizeof(P));
@@ -762,28 +962,84 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     P.f[0] = (float)tp->clamp;
     P.f[1] = RT_EPS_F;
     P.f[2] = RT_SHADOW_MARGIN_F;
+    P.f[3] = t->planes == 4 ? 1.0f : 0.0f;
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
         put(P.mats[m], s->mats[m].albedo, (float)s->mats[m].type);
         put(P.mats[m] + 4, s->mats[m].emission, (float)s->mats[m].ior);
     }
     wgpuQueueWriteBuffer(g->queue, t->params, 0, &P, sizeof(P));
-    WGPUBuffer b[10] = {frame_u, dens, bricks, vstat, t->params, t->nodes, t->aux, t->prims, t->tris, t->accum};
-    WGPUBindGroup bg = gpu_bind(g, t->bgl, b, 10);
+}
+
+static void dispatch(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
+                     WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+    WGPUBuffer b[10] = {frame_u, dens, bricks, vstat, t->params, t->nodes, t->aux, t->prims, t->tris, t->acc[t->cur]};
+    WGPUBindGroup bg = gpu_bind(t->g, t->bgl, b, 10);
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-    wgpuComputePassEncoderSetPipeline(pass, t->pipe);
+    wgpuComputePassEncoderSetPipeline(pass, pipe);
     wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
-    for (int k = 0; k < repeats; k++) gpu_dispatch(pass, (size_t)t->w * rows);
+    for (int k = 0; k < repeats; k++) gpu_dispatch(pass, threads);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
     wgpuBindGroupRelease(bg);
 }
 
+void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
+                      int y0, int rows, int repeats, int nvolumes,
+                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+    write_params(t, s, tp, y0, rows, nvolumes);
+    dispatch(t, enc, t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
+}
+
+static void put_cam(float *d, const Camera *c){
+    put(d, c->origin, 0); put(d + 4, c->upper_left, 0); put(d + 8, c->horizontal, 0); put(d + 12, c->vertical, 0);
+}
+
+void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
+                           int history, int nvolumes,
+                           WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+    Gpu *g = t->g;
+    if (t->planes != 4){             // no guide on this GPU: no reprojection either
+        gpu_trace_clear(t, enc);
+        t->cam = tp->cam;
+        t->has_image = 1;
+        return;
+    }
+    int reproject = history > 0 && t->has_image;
+    if (reproject && !t->acc[1 - t->cur])
+        t->acc[1 - t->cur] = gpu_buffer(g, "path tracer samples (previous image)", (size_t)t->w * t->h * 64,
+                                        WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
+    if (reproject) t->cur = 1 - t->cur;
+    write_params(t, s, tp, 0, t->h, nvolumes);
+    dispatch(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, frame_u, dens, bricks, vstat);
+    if (reproject){
+        struct { float cams[8][4]; uint32_t dims[4]; } R;
+        memset(&R, 0, sizeof(R));
+        put_cam(R.cams[0], &t->cam);
+        put_cam(R.cams[4], &tp->cam);
+        R.dims[0] = (uint32_t)t->w; R.dims[1] = (uint32_t)t->h; R.dims[2] = (uint32_t)history;
+        wgpuQueueWriteBuffer(g->queue, t->rp_params, 0, &R, sizeof(R));
+        WGPUBuffer b[3] = {t->rp_params, t->acc[1 - t->cur], t->acc[t->cur]};
+        WGPUBindGroup bg = gpu_bind(g, t->rp_bgl, b, 3);
+        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+        wgpuComputePassEncoderSetPipeline(pass, t->rp_pipe);
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+        gpu_dispatch(pass, (size_t)t->w * t->h);
+        wgpuComputePassEncoderEnd(pass);
+        wgpuComputePassEncoderRelease(pass);
+        wgpuBindGroupRelease(bg);
+    }
+    t->cam = tp->cam;
+    t->has_image = 1;
+}
+
 void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;
-    WGPUBuffer bufs[] = {t->params, t->accum, t->nodes, t->aux, t->prims, t->tris};
+    WGPUBuffer bufs[] = {t->params, t->rp_params, t->acc[0], t->acc[1], t->nodes, t->aux, t->prims, t->tris};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
-    if (t->pipe) wgpuComputePipelineRelease(t->pipe);
+    WGPUComputePipeline pipes[] = {t->pipe, t->gbuf_pipe, t->rp_pipe};
+    for (size_t i = 0; i < 3; i++) if (pipes[i]) wgpuComputePipelineRelease(pipes[i]);
     if (t->bgl) wgpuBindGroupLayoutRelease(t->bgl);
+    if (t->rp_bgl) wgpuBindGroupLayoutRelease(t->rp_bgl);
     if (t->own_built) bvh_free(&t->own);
     free(t->prim_copy);
     free(t);

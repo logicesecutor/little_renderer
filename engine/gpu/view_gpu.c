@@ -14,11 +14,13 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
     return 0;
 }
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ (void)v; (void)s; (void)tp; return 0; }
+int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; }
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
+int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     (void)v; (void)s; (void)p; (void)mp; (void)volumes;
     return 0;
@@ -451,11 +453,20 @@ struct GpuView {
     GpuTrace *trace;
     int trace_failed, show_traced;
     GpuTraceParams tparams;
-    int t_clear;                // the accumulation buffer must be cleared before its next use
+    int t_prep;                 // the image is still to begin: 1 from nothing, 2 from the previous one (reprojected)
+    int t_history;              // with 2: samples kept per pixel at most
+    int t_moved, t_live;        // moved since the last band / the band running follows a move
+    int t_sub_rows, t_sub_reps; // the band running
+    int t_sub_prep;             // and it begins an image (its time includes the whole image's guide)
+    double t_gpu_pass_ms;       // a whole pass, as the last band took
     int t_y, t_rows, t_reps;    // next row; rows per band and passes per submit (both adapt to the GPU)
     int t_passes;               // samples per pixel submitted
     int t_done, t_done_next;    // finished; and what that becomes when the running band ends
     int t_inflight;             // a band is running
+    int t_bands;                // bands finished since the image started
+    // the denoiser (created when first used), and the band count of the image it holds
+    GpuDenoise *den;
+    int den_failed, denoise, den_bands;
     double t_submit_ms, t_pass_t0, t_pass_ms;
     // reading the samples back
     WGPUBuffer t_rb;
@@ -983,6 +994,19 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
     frame_end(v, enc, v->comp_pipe, bind(g, v->comp_bgl, e, 7));
 }
 
+// The path tracer's image to show or read back: the samples, or with the denoiser on, the
+// denoised image (made again only when a band finished since).
+static WGPUBuffer traced_image(GpuView *v, WGPUCommandEncoder enc){
+    WGPUBuffer samples = gpu_trace_accum(v->trace);
+    if (!v->denoise || v->den_failed || !gpu_trace_guided(v->trace)) return samples;
+    if (!v->den && !(v->den = gpu_denoise_create(v->g, v->w, v->h))){ v->den_failed = 1; return samples; }
+    if (v->den_bands != v->t_bands){
+        gpu_denoise_encode(v->den, enc, samples);
+        v->den_bands = v->t_bands;
+    }
+    return gpu_denoise_output(v->den);
+}
+
 // the GPU rasterizer's frame (and, with traced = 1, the path tracer's samples over it), composited
 static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes,
                              int traced, int draw_scene){
@@ -995,13 +1019,13 @@ static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, 
         v->raster_failed = 1;
         return 0;
     }
-    if (traced && v->t_clear){ gpu_trace_clear(v->trace, enc); v->t_clear = 0; }
+    if (traced && v->t_prep == 1) gpu_trace_clear(v->trace, enc);   // nothing to show yet
     v->show_traced = traced;
     frame_begin(v, enc, s, p, mp, volumes);
     v->show_traced = 0;
     WGPUBindGroupEntry e[8] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks), entry(3, v->light),
                                entry(4, NULL), entry(5, NULL), entry(6, v->vstat),
-                               entry(7, v->trace ? gpu_trace_accum(v->trace) : v->color)};
+                               entry(7, traced ? traced_image(v, enc) : v->trace ? gpu_trace_accum(v->trace) : v->color)};
     e[4].size = e[5].size = 0;
     e[4].textureView = gpu_raster_color(v->raster);
     e[5].textureView = gpu_raster_depth(v->raster);
@@ -1023,11 +1047,29 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     }
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
-    v->t_clear = 1;
+    v->t_prep = 1;
     v->t_y = 0;
     v->t_passes = v->t_done = v->t_done_next = 0;
+    v->t_bands = 0;
+    v->den_bands = -1;
+    v->t_moved = 0;
     if (v->t_rows < 1) v->t_rows = 16;
     if (v->t_reps < 1) v->t_reps = 1;
+    v->t_pass_t0 = gpu_now_ms();
+    return 1;
+}
+
+int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){
+    if (!v || !v->trace || history < 1) return gpu_view_trace_start(v, s, tp);
+    if (v->trace_failed) return 0;
+    if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
+    v->tparams = *tp;
+    if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; }   // (an image not begun yet has nothing to keep)
+    // the bands go on where they were: on a slow GPU (a band per frame) every row gets its turn
+    v->t_passes = v->t_done = v->t_done_next = 0;
+    v->t_bands = 0;
+    v->den_bands = -1;
+    v->t_moved = 1;
     v->t_pass_t0 = gpu_now_ms();
     return 1;
 }
@@ -1041,7 +1083,12 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     if (!view_is_live(v)) return;
     v->t_inflight = 0;
     v->t_done = v->t_done_next;
+    v->t_bands++;
     double ms = gpu_now_ms() - v->t_submit_ms;
+    // the time of a pass: from bands that did not begin an image (their time includes the guide
+    // of the whole image), or a smaller one than known (the first includes making the pipelines)
+    double per_pass = v->t_sub_rows > 0 && v->t_sub_reps > 0 ? ms * v->h / ((double)v->t_sub_rows * v->t_sub_reps) : 0;
+    if (per_pass > 0 && (!v->t_sub_prep || v->t_gpu_pass_ms <= 0 || per_pass < v->t_gpu_pass_ms)) v->t_gpu_pass_ms = per_pass;
     if (ms < 12){
         if (v->t_rows < v->h) v->t_rows = v->t_rows * 2 < v->h ? v->t_rows * 2 : v->h;
         else if (v->t_reps < 16) v->t_reps *= 2;
@@ -1052,16 +1099,32 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
 }
 
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){
+    // one band in flight at most (also for a new image's start: on a slow GPU, frames go on
+    // showing the last image until the band ends, rather than piling work up on the queue)
     if (!v || !v->trace || v->t_inflight) return;
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    if (v->t_clear){ gpu_trace_clear(v->trace, enc); v->t_clear = 0; }
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
     const int nvol = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
+    v->t_sub_prep = v->t_prep != 0;
+    if (v->t_prep){
+        gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0, nvol,
+                              v->frame_u, v->dens, v->bricks, v->vstat);
+        v->t_prep = 0;
+    }
     // a band of rows, or (the band being the whole image) several passes
     int whole = v->t_y == 0 && v->t_rows >= v->h;
     int rows = v->t_rows < v->h - v->t_y ? v->t_rows : v->h - v->t_y;
     int reps = whole ? v->t_reps : 1;
+    // something is moving: a frame each, so no more passes than fit in ~10 ms
+    v->t_live = v->t_moved;
+    v->t_moved = 0;
+    if (v->t_live && reps > 1 && v->t_gpu_pass_ms > 0){
+        int fit = (int)(10.0 / v->t_gpu_pass_ms);
+        reps = fit < 1 ? 1 : (fit < reps ? fit : reps);
+    }
+    v->t_sub_rows = rows;
+    v->t_sub_reps = reps;
     gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->frame_u, v->dens, v->bricks, v->vstat);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
@@ -1106,8 +1169,8 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
     size_t bytes = (size_t)v->w * v->h * 16;
     if (!v->t_rb) v->t_rb = gpu_buffer(g, "path tracer readback", bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    if (v->t_clear){ gpu_trace_clear(v->trace, enc); v->t_clear = 0; }
-    wgpuCommandEncoderCopyBufferToBuffer(enc, gpu_trace_accum(v->trace), 0, v->t_rb, 0, bytes);
+    if (v->t_prep == 1) gpu_trace_clear(v->trace, enc);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, traced_image(v, enc), 0, v->t_rb, 0, bytes);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
@@ -1123,7 +1186,16 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
     wgpuBufferMapAsync(v->t_rb, WGPUMapMode_Read, 0, bytes, mi);
     return 1;
 }
-double gpu_view_trace_pass_ms(const GpuView *v){ return v ? v->t_pass_ms : 0; }
+// a whole pass, as the GPU took for the last band (submission to completion, scaled to the
+// whole image); before any band, the time between passes
+double gpu_view_trace_pass_ms(const GpuView *v){ return !v ? 0 : v->t_gpu_pass_ms > 0 ? v->t_gpu_pass_ms : v->t_pass_ms; }
+
+int gpu_view_trace_denoise(GpuView *v, int on){
+    if (!v) return 0;
+    if (v->denoise != on) v->den_bands = -1;
+    v->denoise = on;
+    return on && !v->den_failed && (!v->trace || gpu_trace_guided(v->trace));
+}
 
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     if (!v || !v->trace) return 0;
@@ -1141,6 +1213,7 @@ void gpu_view_destroy(GpuView *v){
     if (v->comp_gpu_pipe) wgpuRenderPipelineRelease(v->comp_gpu_pipe);
     gpu_raster_destroy(v->raster);
     gpu_trace_destroy(v->trace);
+    gpu_denoise_destroy(v->den);
     for (int i = 0; i < 4; i++) if (live_views[i] == v) live_views[i] = NULL;
     if (v->stats_pipe) wgpuComputePipelineRelease(v->stats_pipe);
     if (v->finish_pipe) wgpuComputePipelineRelease(v->finish_pipe);

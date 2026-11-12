@@ -74,6 +74,8 @@ int main(int argc, char **argv){
             gpu_fluid_attach_view(gfluid, gview);
             gpu_fluid_set_wait(gfluid, 1);       // every step runs, however slow the GPU: a reproducible film
         }
+        if (o.backend != BACKEND_RASTER && o.denoise && gpu_view_trace_denoise(gview, 1))
+            printf("GPU: each frame denoised (-denoise off for the raw samples)\n");
     }
 
     printf("rendering %d frames at %g fps, %dx%d, %s\n", o.sim.frames, o.sim.fps, W, H,

@@ -66,8 +66,9 @@ typedef struct {
     int gpu;               // view: use the GPU (gpu/): 0 off, 1 on (default in a web browser), 2 offscreen
     int gpu_fluid;         // view -sim on with the GPU: step the air there too (default 1)
     int gpu_raster;        // view with the GPU: the rasterizer's triangles are drawn there (default 1)
-    int gpu_trace;         // view with the GPU: it path traces too, while the scene stands still
+    int gpu_trace;         // view with the GPU: it path traces too (in rt mode every frame, moving or not)
                            // (1 / 0; -1 = automatic: yes unless the GPU is a software one)
+    int denoise;           // GPU path tracing: denoise the image (view and sim 1, render 0)
     MarchParams march;     // -march (steps), -lightres
 
     // scene
@@ -89,6 +90,8 @@ typedef struct {
     int move_spp;          // samples per pixel for each low-resolution frame while moving
     double speed;          // movement speed in scene units per second
     double autoquit;       // quit after this many seconds (0 = never); for tests/benchmarks
+    double orbit;          // view: the camera swings by itself (+-25 degrees, this many per second)
+    int history;           // view, GPU path tracing while moving: samples kept per pixel (0 = none)
 
     // physics (sim, and view -sim on)
     SimOptions sim;

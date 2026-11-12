@@ -57,6 +57,7 @@ static const char *CONTROLS =
     "  F                rt mode: low-resolution preview while moving on/off\n"
     "  1 2 3 4          rt mode: preview resolution 1/1, 1/2, 1/4, 1/8\n"
     "  R                back to the starting camera\n"
+    "  X                GPU path tracing: denoiser on / off\n"
     "  P                save the current image as PPM\n"
     "  C                print a render command for this exact view\n"
     "  H                print these controls\n"
@@ -244,6 +245,7 @@ static int reset = 1;                  // path tracer: start over at full resolu
 static int raster_dirty = 1;           // rasterizer: draw a new frame
 static int showing_raster = 1;         // what the window shows right now
 static double t_start, t_prev, last_present, last_title, last_change;
+static long frames;          // frames shown (for -autoquit's frame rate)
 static double pass_t0, pass_ms, raster_ms;
 static int sim_paused = 0, sim_moved = 0;
 static double sim_last;
@@ -253,6 +255,9 @@ static GpuView *gview;
 static GpuFluid *gfluid;     // -sim on: the air and the cloud stepped on the GPU
 static int gpu_scene;        // the raster frame being shown is drawn by the GPU rasterizer (fb is not)
 static int gpu_tracing;      // the path traced image being made is the GPU's (acc is not used)
+static Camera gpu_cam;       // and its camera, and bounces
+static int gpu_depth;
+static int gpu_scene_moved;  // the physics moved the scene since that image began
 static int gpu_shown_passes; // its samples per pixel when it was last shown
 static Framebuffer *gfb;     // -gpu offscreen: the GPU's frame, back on the CPU to be shown
 static int gpu_frame_owed;   // offscreen: a frame was drawn but could not be read back yet
@@ -300,13 +305,13 @@ static int shot_started;      // -autoquit: it was asked for
 static void save_traced(void *user, const float *sc, int w, int h){
     (void)user;
     Image img = image_create(w, h);
-    int n = 0;
     for (int i = 0; i < w * h; i++){
         float c = sc[4 * i + 3];
         img.px[i] = c > 0 ? vec3(sc[4 * i] / c, sc[4 * i + 1] / c, sc[4 * i + 2] / c) : vec3(0, 0, 0);
-        if (i == 0) n = (int)c;
     }
-    if (image_write_ppm(&img, shot_path) == 0) printf("saved %s (%dx%d, path traced on the GPU, %d samples/pixel)\n", shot_path, w, h, n);
+    if (image_write_ppm(&img, shot_path) == 0)
+        printf("saved %s (%dx%d, path traced on the GPU, %d samples/pixel%s)\n", shot_path, w, h,
+               gpu_view_trace_passes(gview), o.denoise ? ", denoised" : "");
     else fprintf(stderr, "could not write %s (does the folder exist?)\n", shot_path);
     image_free(&img);
     shot_waiting = 0;
@@ -375,8 +380,52 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
     last_rp = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
     last_rp.mode = shading;
     gpu_tracing = 1;
+    gpu_cam = *cam;
+    gpu_depth = max_depth;
     gpu_shown_passes = -1;
     force_present = 1;
+    return 1;
+}
+
+// Samples per pixel the GPU path tracer keeps from one frame to the next while things move
+// (gpu_view_trace_move): the camera alone changes nothing on the surfaces, so they keep
+// many (-history, 32); with the physics running the light changes too (shadows, the cloud),
+// so fewer, and a change shows within a few frames.
+#define GPU_HISTORY_PHYSICS 12
+
+// rt mode with the GPU: path traced every frame, whatever moves. A new camera or the
+// physics' new state carry the image over (each pixel keeps the samples of its surface,
+// then the denoiser smooths what is new); other changes (bounces, a reset) start over.
+// 0 = this GPU cannot hold the scene: the CPU path traces from now on.
+static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
+    gpu_scene_moved |= sim_moved;
+    if (!gpu_tracing || reset || max_depth != gpu_depth){
+        if (!gpu_trace_begin(cam, at, max_depth)) return 0;
+        gpu_scene_moved = 0;
+    } else if ((gpu_scene_moved || memcmp(cam, &gpu_cam, sizeof(*cam)) != 0) && !gpu_view_trace_busy(gview)){
+        // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
+        // last image as it is, with the raster of its own camera, not a newer one)
+        GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp};
+        int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
+        gpu_scene_moved = 0;
+        if (!gpu_view_trace_move(gview, &scene, &tp, keep)){
+            o.gpu_trace = 0;
+            gpu_tracing = 0;
+            return 0;
+        }
+        // under the pixels that were hidden until now (no sample yet): the scene rasterized
+        last_rp = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
+        last_rp.mode = shading;
+        gpu_cam = *cam;
+        force_present = 1;
+    }
+    reset = 0;
+    if (gpu_view_trace_passes(gview) < o.spp) gpu_view_trace_more(gview, &scene, &last_rp, &o.march);
+    else idle(10);
+    // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
+    // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band.
+    if (gpu_view_trace_busy(gview)) gpu_wait(gpu);
+    pass_ms = gpu_view_trace_pass_ms(gview);
     return 1;
 }
 
@@ -394,6 +443,7 @@ static int frame(void){
         } else {
             printf("GPU: frames shown and clouds raymarched on %s%s\n", gpu_message(gpu),
                    gpu_offscreen(gpu) ? " (offscreen, read back to the canvas)" : "");
+            gpu_view_trace_denoise(gview, o.denoise);
             if (o.gpu_trace < 0){
                 o.gpu_trace = !gpu_software(gpu);
                 if (!o.gpu_trace) printf("GPU: a software GPU: the CPU path traces (faster here; -gputrace on to try it anyway)\n");
@@ -490,6 +540,14 @@ static int frame(void){
                 if (mode != BACKEND_RASTER) changed = 1;
                 break;
             }
+            case 'x':
+                if (!gview) break;
+                o.denoise = !o.denoise;
+                printf("denoiser: %s\n", gpu_view_trace_denoise(gview, o.denoise) ? "on" : "off");
+                fflush(stdout);
+                gpu_shown_passes = -1;
+                force_present = 1;
+                break;
             case 'f': preview_on = !preview_on; break;
             case '1': preview = 1; preview_on = 0; break;
             case '2': preview = 2; preview_on = 1; break;
@@ -562,6 +620,19 @@ static int frame(void){
     if (in.tu){ view.pitch += turn; changed = 1; }
     if (in.td){ view.pitch -= turn; changed = 1; }
     view.pitch = fmax(-1.55, fmin(1.55, view.pitch));
+    if (o.orbit != 0){
+        // -orbit: swing to and fro around the point the start camera looks at, at a constant speed
+        static double phase;
+        phase += o.orbit * dt;
+        double p = fmod(phase, 100.0), deg = p < 50 ? p - 25 : 75 - p;
+        double a = deg * PI / 180, ca = cos(a), sa = sin(a);
+        Vec3 c = scene.cam_at, d = v_sub(home.pos, c);
+        view.pos = v_add(c, vec3(d.x * ca + d.z * sa, d.y, -d.x * sa + d.z * ca));
+        Vec3 fw = v_norm(v_sub(c, view.pos));
+        view.yaw = atan2(fw.x, fw.z);
+        view.pitch = asin(fmax(-1.0, fmin(1.0, fw.y)));
+        changed = 1;
+    }
     if (changed){ last_change = t; raster_dirty = 1; }
 
     // ---- 2b. physics: advance by the time that passed, then the image starts over
@@ -587,8 +658,8 @@ static int frame(void){
                      (mode == BACKEND_HYBRID && (changed || t - last_change < HYBRID_SETTLE_S ||
                                                  (o.sim.on && !sim_paused)));
     // the CPU path tracer reads the cloud on the CPU: bring the GPU's back (it lands a frame later)
-    // (the GPU path tracer takes it from the GPU; it traces only while the scene stands still)
-    if (gfluid && !use_raster && (sim_moved || !(gview && o.gpu_trace > 0))) gpu_fluid_sync_cloud(gfluid);
+    // (the GPU path tracer takes it straight from the GPU)
+    if (gfluid && !use_raster && !(gview && o.gpu_trace > 0)) gpu_fluid_sync_cloud(gfluid);
     if (use_raster){
         if (raster_dirty){
             double r0 = now_s();
@@ -615,6 +686,8 @@ static int frame(void){
         gpu_tracing = 0;
         reset = 0;
         pass_t0 = now_s();
+    } else if (gview && o.gpu_trace > 0 && gpu_trace_frame(&cam, at, max_depth)){
+        // done: the GPU path traces (every frame, the camera or the bodies moving or not)
     } else if (sim_moved){
         // the simulation moved: one pass of the new state, blended with the last ones
         int sc = preview_on ? preview : 1;
@@ -627,16 +700,6 @@ static int frame(void){
         force_present = 1;
         gpu_tracing = 0;
         reset = 1;   // once paused: start refining at full resolution
-    } else if (gview && o.gpu_trace && ((gpu_tracing && !changed && !reset) || gpu_trace_begin(&cam, at, max_depth))){
-        // the GPU path traces (a scene that stands still): bands of rows, submitted as fast
-        // as it finishes them; nothing to wait for here
-        reset = 0;
-        if (gpu_view_trace_passes(gview) < o.spp) gpu_view_trace_more(gview, &scene, &last_rp, &o.march);
-        else idle(10);
-        // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
-        // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band.
-        if (gpu_view_trace_busy(gview)) gpu_wait(gpu);
-        pass_ms = gpu_view_trace_pass_ms(gview);
     } else if (changed || reset){
         // rt mode: start over. If the camera moved, render one whole pass right away
         // (cheap at 1/preview resolution) so the image follows the input.
@@ -707,6 +770,7 @@ static int frame(void){
         } else window_present(win, fb);
         showing_raster = use_raster;
         last_present = tn;
+        frames++;
         force_present = gpu_frame_owed;
     }
     if (tn - last_title > 0.5){
@@ -727,8 +791,9 @@ static int frame(void){
             }
         }
         else if (gpu_tracing)
-            snprintf(title, sizeof(title), "view | %s | path tracing on the GPU | %d/%d spp | %.0f ms/pass | %d bounces | speed %.0f",
-                     backend_name(mode), gpu_view_trace_passes(gview), o.spp, pass_ms, max_depth, speed);
+            snprintf(title, sizeof(title), "view | %s | path tracing on the GPU%s | %d/%d spp | %.0f ms/pass | %d bounces | speed %.0f",
+                     backend_name(mode), o.denoise ? ", denoised" : "", gpu_view_trace_passes(gview), o.spp, pass_ms,
+                     max_depth, speed);
         else
             snprintf(title, sizeof(title), "view | %s | path tracing %s | %d/%d spp | %.0f ms/pass | 1/%d res | %d bounces | speed %.0f",
                      backend_name(mode), accel_name(accel), acc.passes, o.spp, pass_ms, acc.scale, max_depth, speed);
@@ -750,10 +815,16 @@ static int frame(void){
         // the GPU's image: ask for it, and quit once it is saved
         if (!shot_started){
             shot_started = 1;
-            printf("autoquit after %.1f s (%s): ", tn - t_start, backend_name(mode));
+            printf("autoquit after %.1f s (%s, %.0f frames/s): ", tn - t_start, backend_name(mode), frames / (tn - t_start));
             if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s\n", st); }
             else if (showing_raster) printf("raster frame on the GPU\n");
             else printf("%d samples/pixel on the GPU, last pass %.1f ms\n", gpu_view_trace_passes(gview), pass_ms);
+            if (o.orbit != 0){      // the camera of the screenshot, to render it again
+                Options cur = o;
+                cur.max_depth = max_depth;
+                printf("this view: ");
+                options_print_command(&cur, view.pos, v_add(view.pos, v_scale(view_forward(&view), 500)), view.fov, stdout);
+            }
             gpu_screenshot();
         }
         if (!shot_waiting) running = 0;
@@ -761,7 +832,7 @@ static int frame(void){
     }
 #endif
     if (o.autoquit > 0 && tn - t_start > o.autoquit){
-        printf("autoquit after %.1f s (%s): ", tn - t_start, backend_name(mode));
+        printf("autoquit after %.1f s (%s, %.0f frames/s): ", tn - t_start, backend_name(mode), frames / (tn - t_start));
         if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s, last pass %.0f ms\n", st, pass_ms); }
         else if (showing_raster) printf("last raster frame %.1f ms\n", raster_ms);
         else printf("%d samples/pixel, last pass %.0f ms\n", acc.passes, pass_ms);

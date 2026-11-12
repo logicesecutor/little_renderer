@@ -192,6 +192,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-s samples` | render: light paths per pixel. view: stop refining after this many | 128 (view: 4096) | noise falls like 1/√s: 4× the samples = half the grain |
 | `-d bounces` | maximum bounces per path | 50 | 3–5 is fast but darker (less indirect light); Russian roulette ends most paths early anyway |
 | `-clamp max` | caps the brightness of a single sample | 0 (off) | `-clamp 4` removes fireflies (glass, mirrors) but darkens caustics: biased |
+| `-denoise on\|off` | path tracing on the GPU: the image is denoised (an edge-avoiding filter guided by each pixel's noise, normal, distance and albedo: WEB.md 2.4) | `view`, `sim`: on; `render`: off | at 4–16 samples it looks like 256–1024; it blurs a little and is slightly biased (±1%), so a final `render` stays unbiased unless asked; the CPU path tracer does not denoise |
 | `-threads n` | CPU threads, for both backends | 0 = all cores | same as the `OMP_NUM_THREADS` environment variable; the image is the same for any value |
 | `-mis on\|off` | multiple importance sampling of the lamp: direct sampling and bounces both count, weighted | on | helps near the lamp and in fog; `off` = the old estimator |
 | `-caustics lt\|pt` | caustics by light tracing (traced from the lamp and connected to the camera) or by path tracing alone | `render`: lt, `view`: pt | lt removes most fireflies of glass and mirrors, unbiased (RAYTRACER.md 5.14); `-mis off -caustics pt` reproduces the old images bit for bit |
@@ -270,11 +271,13 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-preview n` | `rt` mode: while moving, path trace at 1/n resolution (1 = always full resolution) | 4 |
 | `-movespp n` | samples per pixel of each low-resolution frame while moving | 1 |
 | `-speed units` | movement speed in scene units per second | 300 |
-| `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks) | 0 = never |
+| `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks); prints the frame rate, and with `-orbit` the `render` command of the screenshot's camera | 0 = never |
+| `-orbit deg/s` | the camera swings by itself, ±25° around the point it looks at, at this speed: benchmarks and tests of the image while moving | 0 = off |
+| `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); 12 at most while the physics runs; 0 = start over on every move | 32 |
 | `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
 | `-gpuraster on\|off` | with the GPU: rasterize the scene there | on |
-| `-gputrace on\|off` | with the GPU: path trace there (while the scene stands still) | on, off for a software GPU |
+| `-gputrace on\|off` | with the GPU: path trace there; in `rt` mode every frame, while the camera or the physics move too (reprojected and denoised: WEB.md 2.5) | on, off for a software GPU |
 
 ### 3.1 Physics (`sim`, and `view -sim on`)
 
@@ -326,6 +329,7 @@ is 1/2 (`-preview`) and `-movespp 2` gives less grain per frame.
 | `F` | `rt` mode: low-resolution preview while moving on / off |
 | `1` `2` `3` `4` | `rt` mode: preview resolution 1/1, 1/2, 1/4, 1/8 |
 | `R` | back to the starting camera |
+| `X` | path tracing on the GPU: denoiser on / off |
 | `P` | save what the window shows as PPM (the path traced image, or the raster frame) |
 | `C` | print a `render` command that path traces exactly this view |
 | `H` | print the controls in the terminal |

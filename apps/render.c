@@ -149,6 +149,9 @@ static int render_gpu(const Options *opt, Scene *scene){
                opt->max_depth, opt->clamp > 0 ? ", clamped" : "", opt->mis ? ", MIS" : "");
         if (opt->caustics_lt)
             printf("  caustics: path traced (the CPU's light tracing makes them sharp sooner: -gpu off)\n");
+        if (opt->denoise && !gpu_view_trace_denoise(v, 1))
+            printf("  not denoised: this GPU's buffers are too small for the denoiser at %dx%d\n", W, H);
+        else if (opt->denoise) printf("  denoised (-denoise off for the unbiased image)\n");
         scene_set_accel(scene, ACCEL_BVH, &opt->ap);              // the GPU traces the same BVH
         Camera cam = camera_make(scene->cam_from, scene->cam_at, scene->cam_up, scene->cam_vfov_deg, (real)W / H);
         Image img = image_create(W, H);

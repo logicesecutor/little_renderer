@@ -83,7 +83,7 @@ kernel is slower than the CPU's own code, so `-gputrace` is off by default there
 | `-gpu off` | the CPU does everything | builds without a GPU library |
 | `-gpufluid on\|off` | with `-sim on`: the air and the cloud are simulated on the GPU | on |
 | `-gpuraster on\|off` | the rasterizer's triangles are drawn on the GPU | on |
-| `-gputrace on\|off` | the GPU path traces (while the scene stands still; during the physics the CPU does, at low resolution) | on, off for a software GPU |
+| `-gputrace on\|off` | the GPU path traces; in `rt` mode every frame, the camera and the physics moving or not (2.5) | on, off for a software GPU |
 
 If the browser takes the GPU away (a driver reset, the tab moved to another GPU) the
 program says `GPU lost (...)` and the CPU carries on; with `-gpu on` the canvas cannot be
@@ -96,7 +96,9 @@ used for 2D drawing any more, so reload the page with `?gpu=off` or `?gpu=offscr
 | `gpu.h`, `gpu.c` | `Gpu`: the adapter and device (asked for asynchronously: `gpu_create`, then `gpu_state` every frame until `GPU_READY`), the canvas surface, device loss; helpers for compute kernels (`gpu_layout`, `gpu_compute`, `gpu_bind`, `gpu_dispatch`) |
 | `view_gpu.h`, `view_gpu.c` | `GpuView`: shows a `Framebuffer` (or the GPU rasterizer's frame, or the path tracer's image) and raymarches the scene's media over it; computes each medium's bricks, box and maximum on the GPU; `gpu_view_capture` reads a frame back (screenshots, offscreen mode) |
 | `raster_gpu.c` | the rasterizer: the triangles of `render_scene` (raster/render.h hands them out) pulled from storage buffers by the vertex shader, depth as the CPU's z-buffer, so the clouds composite the same way |
-| `trace_gpu.c` | the path tracer: the scene's BVH, primitives, triangles and normals flattened into buffers, one thread per pixel per sample, samples summed in an accumulation buffer; bands of rows sized to keep each submission under ~45 ms |
+| `trace_gpu.c` | the path tracer: the scene's BVH, primitives, triangles and normals flattened into buffers, one thread per pixel per sample, samples summed in an accumulation buffer; bands of rows sized to keep each submission under ~45 ms; with the samples, the denoiser's moments and guide |
+| `denoise_gpu.c` | the denoiser (2.4) |
+| (in `trace_gpu.c`) | real time: each image's guide pass and the reprojection of the last image's samples (2.5) |
 | `fluid_gpu.h`, `fluid_gpu.c` | `GpuFluid`: takes over a `PhysWorld`'s air (`PhysWorld.air_step`); the state stays on the GPU, the view draws the cloud straight from there; only the air around each body (the drag) comes back every step |
 
 The shaders are WGSL, written inside the C files with the `WGSL(...)` macro, so the engine
@@ -131,6 +133,94 @@ vorticity, a moving obstacle, an explosion) for 40 steps, one on the CPU and one
 GPU, and compares the clouds voxel by voxel: they agree to about 1e-4 of the largest
 density (the GPU and the CPU do not round alike, so not to the last bit). The clouds of
 `-rastercloud` drawn by the GPU and by the CPU differ by 0.2 levels out of 255 on average.
+
+### 2.4 The denoiser (`-denoise`, key `X`)
+
+The GPU path tracer's image can be denoised on the GPU (`gpu/denoise_gpu.c`): an
+edge-avoiding à-trous wavelet filter (Dammertz et al. 2010) steered by each pixel's noise,
+as in SVGF (Schied et al. 2017) without its temporal part.
+
+- **What the path tracer adds** (`trace_gpu.c`, when the GPU's buffers allow 64 bytes per
+  pixel, so up to about 1920×1080 at the default 128 MB limit): per pixel, the sums of `l`
+  and `l²` (`l` the luminance of a sample over the pixel's albedo), and a guide traced once
+  along the ray through the pixel's centre: the normal, distance and albedo of the first
+  diffuse surface, *through* mirrors and glass, so reflections and refractions keep their
+  edges. Lamps and the sky are not filtered; a pixel whose surface a medium hides
+  (transmittance under ½) is filtered on luminance only.
+- **prep:** the pixel's mean over its albedo (the irradiance: smooth where the colour is
+  not) and the variance of that mean, from the pixel's own samples once it has 4, before
+  that from its 7×7 neighbours on the same surface.
+- **5 à-trous passes**, taps 1, 2, 4, 8, 16 pixels apart (a 65×65 footprint), each tap
+  moved at random inside its hole (otherwise a grid prints on smooth walls). A neighbour
+  counts by how alike it is: normal (cosine to the power 128), distance (relative to how
+  fast it changes there) and luminance, relative to the noise of the *noisier* of the two
+  pixels. With the centre's noise alone, a bright outlier keeps its energy to itself and
+  the image darkens by several %; with the larger one, outliers are spread and the mean
+  stays within ±0.6% of the reference.
+- **last:** times the albedo again. As samples add up the variance falls, the luminance
+  weights tighten, and the filter fades out by itself.
+
+Measured natively (512×512, RTX 3070; RMSE in 8-bit levels against 4096 spp):
+
+| scene | 4 spp noisy → denoised | 64 spp noisy → denoised |
+|---|---|---|
+| boxes | 13.9 → 3.0 | 4.7 → 2.2 |
+| spheres (mirror, glass) | 17.0 → 6.2 | 11.9 → 4.3 |
+| cloud | 32.1 → 4.7 | 13.3 → 3.2 |
+
+The 5 passes cost well under a millisecond at 640×640 on that GPU, and run only when a band
+of samples has finished. `view` and `sim` denoise by default, `render` does not (a final
+image stays unbiased unless `-denoise on`); `gpu_view_trace_denoise` turns it on in your
+own program.
+
+### 2.5 Real-time path tracing (`-backend rt`, `-history`)
+
+In `rt` mode with the GPU, `view` path traces every frame, also while the camera moves and
+while the physics runs (bodies falling, the cloud blown by the air), and each frame is
+denoised. This is the temporal half of SVGF (Schied et al. 2017), written for this engine;
+no outside denoiser is used.
+
+- **Each frame** that something moved, `gpu_view_trace_move` begins a new image: a guide
+  pass traces every pixel's guide (2.4) for the new camera and the new geometry, then a
+  reprojection pass gives each pixel the samples its surface had in the previous image.
+  The pixel's guide point (along its ray, at its first diffuse surface's distance: through a
+  mirror, the point behind it, which moves as the reflection does; in a medium, the mean of
+  4 collision distances) is projected into the old camera. Of the 4 old pixels around it,
+  those that saw the same thing count, with bilinear weights: same kind, normal within ~25°,
+  distance from the old eye within 2% (25% in a medium) plus how fast the distance changes
+  there. A pixel that matches none (it was hidden, or off screen) starts from nothing and
+  shows the rasterized scene until its first sample.
+- **History:** a pixel keeps at most `-history` samples (32), 12 while the physics runs.
+  The cap ages old samples: a change of light (a moving shadow, the cloud) shows within a
+  few frames, and the blur of blending 4 pixels again every frame stays short. Taking the
+  nearest old pixel instead does not blur, but it duplicates pixels under subpixel motion
+  and the noise lines up in streaks; it measured worse.
+- **Then** the frame's new samples are added (as many passes as fit in ~10 ms) and the
+  denoiser smooths the result. A band of samples never waits for another: on a GPU too slow
+  for a whole pass per frame, the bands go on round the image, and a move waits until the
+  running band ends, so the frame shows the last image together with its own camera.
+- The physics changes the geometry every step: the scene's BVH is rebuilt on the CPU
+  (`scene_set_accel`) and uploaded; the cloud stays on the GPU (`-gpufluid`).
+
+Measured on an RTX 3070 (Windows, native), with the camera swinging at 15°/s
+(`-orbit 15`); RMSE in 8-bit levels against 1024 spp at the screenshot's camera, 400×400:
+
+| | reprojection, raw | reprojection + denoiser |
+|---|---|---|
+| spheres (mirror, glass) | 13.0 | **8.0**, 104 frames/s |
+| cloud | 12.5 | **6.2**, 102 frames/s |
+
+Before (every move started the image over), at 640×640: 22.8 on the spheres, 69.3 on the
+cloud, whose lower rows never got a sample while moving.
+
+At 640×640: spheres 106 frames/s, cloud 47 (the cloud's passes cost ~20 ms each); the
+physics demo (`-sim on`, 11 bodies, air and cloud on the GPU) 50 frames/s, 35 at
+1024×1024, against 12 frames/s for the CPU's quarter-resolution preview. The denoiser costs
+~2 ms per frame at 640×640; the guide and reprojection passes ~2 ms in the cloud scene.
+
+Try it: `bin/view -backend rt -scene spheres`, `bin/view -backend rt -sim on`, or in a
+browser `?backend=rt&sim=on`. In `hybrid` mode (the default) the rasterizer still draws while
+the camera moves, and the path tracer takes over once it settles.
 
 ## 3. The GPU natively (Windows, Linux)
 

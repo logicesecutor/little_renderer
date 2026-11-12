@@ -43,6 +43,15 @@ typedef struct {
 // own BVH is used when it has one, so call scene_set_accel after changing geometry). Returns 0
 // if this GPU cannot hold the scene: then path trace on the CPU.
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp);
+// Goes on after something changed (the camera moved, the bodies, the media): a new image,
+// whose pixels keep the samples their surface had in the last one (reprojected into the new
+// camera; through mirrors and glass too), at most `history` each, so that a change of light
+// shows within a few frames. Pixels that were hidden start from nothing (and show the
+// rasterized scene until their first sample). Without the denoiser's planes (an image too
+// big for this GPU) or with history 0, the same as gpu_view_trace_start. For real time: call
+// it every frame something moved, then gpu_view_trace_more, then gpu_view_present_traced; the
+// passes per frame stay within ~10 ms while it moves.
+int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history);
 // Call every frame: unless the previous band is still running, submits the next one (p and mp
 // as in gpu_view_present: the media are made ready the same way).
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp);
@@ -54,6 +63,10 @@ int gpu_view_trace_busy(const GpuView *v);          // a band is still running o
 typedef void (*GpuTraceReadFn)(void *user, const float *sum_count, int w, int h);
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user);
 double gpu_view_trace_pass_ms(const GpuView *v);    // how long the last one took
+// The denoiser (gpu/denoise_gpu.c): on = 1 shows and reads back the image denoised (the
+// count of each pixel is then 1), 0 the samples as they are. Off by default. Returns 1 if it
+// will be used: 0 when this GPU's buffers are too small for its guide at this image size.
+int gpu_view_trace_denoise(GpuView *v, int on);
 // Shows the image so far. During the first pass, pixels with no sample yet show the scene
 // rasterized (with its media if volumes = 1), so the picture is painted over, not blanked.
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);

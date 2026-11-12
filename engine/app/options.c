@@ -47,7 +47,8 @@ void options_usage(Program prog, FILE *f){
         "                             offscreen: the GPU draws into a texture read back to the canvas\n"
         "  -gpufluid on|off           with -sim on and the GPU: the air and the cloud are simulated there too\n"
         "  -gpuraster on|off          with the GPU: the rasterizer's triangles are drawn there too\n"
-        "  -gputrace on|off           with the GPU: it path traces too, while the scene stands still\n"
+        "  -gputrace on|off           with the GPU: it path traces too (in rt mode every frame, while the\n"
+        "                             camera or the physics move: each frame reprojected and denoised)\n"
         "                             (default: on, off for a software GPU, which is slower than the CPU at it)\n", view ? "2" : "1");
     else if (sim) fprintf(f,
         "backend\n"
@@ -71,6 +72,7 @@ void options_usage(Program prog, FILE *f){
         "  -s samples                 %s (%s)\n"
         "  -d bounces                 maximum bounces per light path           (50)\n"
         "  -clamp max                 firefly clamp, 0 = off (biased if on)    (0)\n"
+        "  -denoise on|off            path tracing on the GPU: denoise the image (%s)\n"
         "  -threads n                 CPU threads, 0 = all cores               (0)\n"
         "  -mis on|off                multiple importance sampling of the lamp (on)\n"
         "  -caustics lt|pt            caustics by light tracing or by path tracing (%s)\n"
@@ -108,6 +110,7 @@ void options_usage(Program prog, FILE *f){
         view ? "640" : (sim ? "320" : "400"),
         view ? "stop refining after this many samples per pixel" : "samples (light paths) per pixel  ",
         view ? "4096" : (sim ? "32" : "128"),
+        prog == PROG_RENDER ? "off" : "on",
         view ? "pt; lt is render only" : (sim ? "pt" : "lt"),
         view ? "screenshot prefix (key P)  " : (sim ? "folder for the frames      " : "output PPM file            "),
         view ? "out/view" : (sim ? "out/sim" : "out/cornell_<scene>[_raster].ppm"),
@@ -118,7 +121,11 @@ void options_usage(Program prog, FILE *f){
         "  -preview n                 -backend rt: 1/n resolution while moving, 1 = off (4)\n"
         "  -movespp n                 samples per pixel of each preview frame  (1)\n"
         "  -speed units               movement speed per second                (300)\n"
-        "  -autoquit seconds          quit (and save a screenshot) after this time (0 = never)\n");
+        "  -autoquit seconds          quit (and save a screenshot) after this time (0 = never)\n"
+        "  -history n                 GPU path tracing while moving: samples per pixel carried from\n"
+        "                             frame to frame (reprojected), 0 = start over on every move (32)\n"
+        "  -orbit deg/s               the camera swings by itself, +-25 degrees around the point it\n"
+        "                             looks at, at this speed (benchmarks of the image while moving) (0)\n");
     fprintf(f, "\n  -h, --help                 this text\n");
 }
 
@@ -159,6 +166,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->gpu_fluid = 1;
     o->gpu_raster = 1;
     o->gpu_trace = -1;                     // decided when the GPU is known
+    o->denoise = prog != PROG_RENDER;      // a still image is the unbiased one unless asked
     o->march = march_default_params();
     o->scene.kind = SCENE_BOXES;
     o->scene.obj_path = "models/torus.obj";
@@ -168,6 +176,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->cloud = cloud_default_params();
     o->preview = 4;
     o->move_spp = 1;
+    o->history = 32;
     o->speed = 300;
     o->out = prog == PROG_VIEW ? "out/view" : (prog == PROG_SIM ? "out/sim" : NULL);
     o->sim.on = prog == PROG_SIM;
@@ -210,6 +219,8 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-movespp")) o->move_spp = atoi(v);
         else if (!strcmp(a, "-speed"))   o->speed = atof(v);
         else if (!strcmp(a, "-autoquit")) o->autoquit = atof(v);
+        else if (!strcmp(a, "-orbit")) o->orbit = atof(v);
+        else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-density")) o->cloud.sigma_t = atof(v);
         else if (!strcmp(a, "-albedo"))  o->cloud.albedo = parse_color(prog, v);
         else if (!strcmp(a, "-g"))       o->cloud.g = atof(v);
@@ -242,6 +253,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             if (!strcmp(v, "on")) o->gpu_trace = 1;
             else if (!strcmp(v, "off")) o->gpu_trace = 0;
             else fail(prog, "expected on or off after -gputrace, got", v);
+        }
+        else if (!strcmp(a, "-denoise")){
+            if (!strcmp(v, "on")) o->denoise = 1;
+            else if (!strcmp(v, "off")) o->denoise = 0;
+            else fail(prog, "expected on or off after -denoise, got", v);
         }
         else if (!strcmp(a, "-rastercloud")){
             if (!strcmp(v, "on")) o->raster_clouds = 1;
