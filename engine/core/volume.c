@@ -114,6 +114,7 @@ CloudParams cloud_default_params(void){
     p.detail = 0.6f;
     p.time = 0;
     p.wind = vec3(0.05f, 0.0f, 0.02f);
+    p.lean = vec3(0, 0, 0);
     p.resolution = 128;
     p.sigma_t = 0.08f;
     p.albedo = vec3(0.99f, 0.99f, 0.99f);
@@ -154,14 +155,27 @@ void cloud_init(Cloud *c, const CloudParams *cp, Vec3 aspect){
     c->npuffs = n;
 }
 
+// a point in the noise's space, stretched along a wind (dir, unit; s = how strongly): the
+// features come out longer that way, streaks
+static Vec3 along_wind(Vec3 q, Vec3 dir, real s){
+    return s > 0 ? v_sub(q, v_scale(dir, v_dot(q, dir) * (s / (1 + s)))) : q;
+}
+
 real cloud_density(const Cloud *c, Vec3 u){
     const Noise *n = &c->noise;
     // animation: the detail noise drifts with the wind (2 = one cloud size in these units)
     Vec3 drift = v_scale(c->p.wind, 2.0f * c->p.time);
+    // blown by a wind: each height is shifted downwind in proportion (the top pushed over the
+    // base, as a cumulus sheared by the wind above it), the detail drawn out along the wind
+    Vec3 uo = u;                                     // (the box walls stay where they are)
+    Vec3 lean = vec3(c->p.lean.x, 0, c->p.lean.z);
+    real ls = v_len(lean);
+    Vec3 ld = ls > 0 ? v_scale(lean, 1.0f / ls) : vec3(0, 0, 0);
+    if (ls > 0) u = v_sub(u, v_scale(lean, u.y + 0.55f * c->aspect.y));
 
     // 1. domain warping: push the sample point around with smooth noise, so the puffs get
     //    irregular outlines instead of perfect spheres
-    Vec3 q = v_add(v_scale(u, 1.6f), drift);
+    Vec3 q = along_wind(v_add(v_scale(u, 1.6f), drift), ld, 2 * ls);
     Vec3 w = vec3(noise_fbm(n, q, 3), noise_fbm(n, v_add(q, vec3(31.4f, 0, 0)), 3),
                   noise_fbm(n, v_add(q, vec3(0, 0, 47.2f)), 3));
     Vec3 uw = v_add(u, v_scale(w, 0.16f));
@@ -176,14 +190,14 @@ real cloud_density(const Cloud *c, Vec3 u){
     if (shape <= 0) return 0;
     real base = -0.55f * c->aspect.y;
     shape *= smoothstep(base - 0.02f, base + 0.08f, uw.y);
-    shape *= smoothstep(c->aspect.x, c->aspect.x - 0.1f, r_fabs(u.x)) *
-             smoothstep(c->aspect.y, c->aspect.y - 0.1f, r_fabs(u.y)) *
-             smoothstep(c->aspect.z, c->aspect.z - 0.1f, r_fabs(u.z));
+    shape *= smoothstep(c->aspect.x, c->aspect.x - 0.1f, r_fabs(uo.x)) *
+             smoothstep(c->aspect.y, c->aspect.y - 0.1f, r_fabs(uo.y)) *
+             smoothstep(c->aspect.z, c->aspect.z - 0.1f, r_fabs(uo.z));
     if (shape <= 0) return 0;
 
     // 3. erosion: billows (inverted Worley) and fine Perlin detail eat into the edges. The
     //    core, where shape is large, survives; thin edges break into wisps.
-    Vec3 qd = v_add(v_scale(uw, 3.2f), v_scale(drift, 1.6f));
+    Vec3 qd = along_wind(v_add(v_scale(uw, 3.2f), v_scale(drift, 1.6f)), ld, 2 * ls);
     real bill = noise_billow(n, qd, 3);
     real fine = 0.5f + 0.5f * noise_fbm(n, v_add(v_scale(qd, 2.3f), vec3(5.2f, 1.3f, 7.7f)), 3);
     real detail = 0.75f * bill + 0.25f * fine;       // 0 .. 1, 1 = keep

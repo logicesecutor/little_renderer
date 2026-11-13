@@ -123,7 +123,9 @@ typedef struct {
 } Instance;
 
 // SCENE_EMPTY: just the room and the lamp (e.g. for a physics simulation to fill)
-typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY } SceneKind;
+// SCENE_SHOWCASE: one model of each material, a mirror dragon, a diffuse cube and a glass
+// torus (models/), under a cloud (cloud_default_params() unless SceneOptions.cloud)
+typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY, SCENE_SHOWCASE } SceneKind;
 
 struct CloudParams;   // core/volume.h
 struct Volume;

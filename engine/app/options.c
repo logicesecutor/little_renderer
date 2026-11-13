@@ -85,7 +85,8 @@ void options_usage(Program prog, FILE *f){
         "  -o file                    %s (%s)\n"
         "\n"
         "scene\n"
-        "  -scene boxes|spheres|mesh|cloud|empty  what is in the Cornell box  (boxes)\n"
+        "  -scene boxes|spheres|mesh|cloud|empty|showcase  what is in the Cornell box (boxes);\n"
+        "                             showcase: a mirror dragon, a diffuse cube, a glass torus, a cloud\n"
         "  -obj file.obj|file.ply     model for -scene mesh (ASCII .ply)       (models/torus.obj)\n"
         "  -mat diffuse|mirror|glass  material of the model                    (diffuse)\n"
         "  -rot degrees               turn the model around the vertical axis  (0)\n"
@@ -99,6 +100,7 @@ void options_usage(Program prog, FILE *f){
         "  -detail value              0 smooth .. 1 wispy, eroded edges        (0.6)\n"
         "  -seed n                    which cloud                              (1)\n"
         "  -time seconds              animation time: the detail drifts with the wind (0)\n"
+        "  -wind x,y,z                (render, view without -sim) the cloud leans downwind, units / s (0,0,0)\n"
         "  -cloudres n                voxels along the longest side            (128)\n"
         "  -fog sigma                 fill the room with a uniform haze, 0 = off (0)\n"
         "\n"
@@ -354,6 +356,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             else if (!strcmp(v, "mesh")) o->scene.kind = SCENE_MESH;
             else if (!strcmp(v, "cloud")) o->scene.kind = SCENE_CLOUD;
             else if (!strcmp(v, "empty")) o->scene.kind = SCENE_EMPTY;
+            else if (!strcmp(v, "showcase")) o->scene.kind = SCENE_SHOWCASE;
             else fail(prog, "unknown scene", v);
         } else if (!strcmp(a, "-mat")){
             if (!strcmp(v, "diffuse")) o->scene.mesh_mat = MAT_DIFFUSE;
@@ -402,9 +405,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     }
     if (!o->out){
         static const char *rt[] = {"out/cornell_boxes.ppm", "out/cornell_spheres.ppm", "out/cornell_mesh.ppm",
-                                   "out/cornell_cloud.ppm", "out/cornell_empty.ppm"};
+                                   "out/cornell_cloud.ppm", "out/cornell_empty.ppm", "out/cornell_showcase.ppm"};
         static const char *ra[] = {"out/cornell_boxes_raster.ppm", "out/cornell_spheres_raster.ppm",
-                                   "out/cornell_mesh_raster.ppm", "out/cornell_cloud_raster.ppm", "out/cornell_empty_raster.ppm"};
+                                   "out/cornell_mesh_raster.ppm", "out/cornell_cloud_raster.ppm", "out/cornell_empty_raster.ppm",
+                                   "out/cornell_showcase_raster.ppm"};
         o->out = o->backend == BACKEND_RASTER ? ra[o->scene.kind] : rt[o->scene.kind];
     }
 }
@@ -419,9 +423,14 @@ int options_setup_scene(const Options *o, Scene *s){
     if (o->threads > 0) omp_set_num_threads(o->threads);
 #endif
     SceneOptions so = o->scene;
-    so.cloud = (o->use_cloud || so.kind == SCENE_CLOUD) ? &o->cloud : NULL;
+    // -wind outside the physics: the cloud leans with it (its top pushed downwind, 0.25 of its
+    // height per 100 units / s), its detail streaked along it
+    CloudParams cp = o->cloud;
+    if (!o->sim.on && o->prog != PROG_SIM) cp.lean = vec3(o->sim.wind.x / 400, 0, o->sim.wind.z / 400);
+    so.cloud = (o->use_cloud || so.kind == SCENE_CLOUD || so.kind == SCENE_SHOWCASE) ? &cp : NULL;
     if (scene_cornell_box(s, &so) != 0) return 1;
-    if (s->ninsts > 0 && s->nmeshes > 0) printf("loaded %s: %d triangles, %d instances of it\n", o->scene.obj_path, s->meshes[0].ntris, s->ninsts);
+    if (o->scene.kind == SCENE_SHOWCASE) ;   // (it says what it loaded)
+    else if (s->ninsts > 0 && s->nmeshes > 0) printf("loaded %s: %d triangles, %d instances of it\n", o->scene.obj_path, s->meshes[0].ntris, s->ninsts);
     else if (o->scene.kind == SCENE_MESH) printf("loaded %s: %d triangles\n", o->scene.obj_path, s->ntris);
     for (int i = 0; i < s->nvolumes; i++){
         const Volume *v = s->volumes[i];
@@ -443,7 +452,7 @@ int options_setup_scene(const Options *o, Scene *s){
 }
 
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){
-    static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty"};
+    static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase"};
     static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
     fprintf(f, "bin/render -scene %s", scenes[o->scene.kind]);
     if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
@@ -452,9 +461,10 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (o->scene.mesh_mat != MAT_DIFFUSE) fprintf(f, " -mat %s", mats[o->scene.mesh_mat]);
         if (o->scene.rot_deg != 0) fprintf(f, " -rot %g", (double)o->scene.rot_deg);
     }
-    if (o->use_cloud || o->scene.kind == SCENE_CLOUD){
+    if (o->use_cloud || o->scene.kind == SCENE_CLOUD || o->scene.kind == SCENE_SHOWCASE){
         const CloudParams *c = &o->cloud, d = cloud_default_params();
-        if (o->scene.kind != SCENE_CLOUD) fprintf(f, " -cloud on");
+        if (o->scene.kind != SCENE_CLOUD && o->scene.kind != SCENE_SHOWCASE) fprintf(f, " -cloud on");
+        if (o->sim.wind.x != 0 || o->sim.wind.z != 0) fprintf(f, " -wind %g,%g,%g", (double)o->sim.wind.x, (double)o->sim.wind.y, (double)o->sim.wind.z);
         if (c->sigma_t != d.sigma_t) fprintf(f, " -density %g", (double)c->sigma_t);
         if (c->albedo.x != d.albedo.x || c->albedo.y != d.albedo.y || c->albedo.z != d.albedo.z)
             fprintf(f, " -albedo %g,%g,%g", (double)c->albedo.x, (double)c->albedo.y, (double)c->albedo.z);

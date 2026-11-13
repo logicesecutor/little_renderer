@@ -216,6 +216,28 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
             return 1;
         }
     }
+    if (opt->kind == SCENE_SHOWCASE){
+        // one model of each material, each its own mesh and instance: the dragon at the back,
+        // the cube in front on the right, the torus standing up in front on the left (turned
+        // up about x, lifted by its radius); the cloud (below) floats above them all
+        static const struct { const char *path; real size, x, y, z, rot, up; } m[3] = {
+            {"models/dragon_recon/dragon_vrip.ply", 300, 278, 0, 390, -35, 0},
+            {"models/cube.obj", 105, 135, 0, 170, 30, 0},
+            {"models/torus.obj", 160, 405, 81, 190, 25, 90},
+        };
+        Material mats[3] = {mesh_material(MAT_MIRROR), diffuse(0.25, 0.45, 0.75), mesh_material(MAT_GLASS)};
+        for (int i = 0; i < 3; i++){
+            int mesh = scene_load_mesh_object(s, m[i].path, scene_add_material(s, mats[i]), m[i].size);
+            if (mesh < 0){
+                fprintf(stderr, "could not load %s (run from the repository's folder; make models)\n", m[i].path);
+                return 1;
+            }
+            Quat q = quat_mul(quat_axis_angle(vec3(0, 1, 0), m[i].rot * (real)PI / 180),
+                              quat_axis_angle(vec3(1, 0, 0), m[i].up * (real)PI / 180));
+            scene_add_instance(s, mesh, xform_make(vec3(m[i].x, m[i].y, m[i].z), quat_to_mat3(q).m, 1), -1);
+        }
+        printf("showcase: a mirror dragon (%d triangles), a diffuse cube, a glass torus\n", s->meshes[0].ntris);
+    }
     if (opt->instances > 0){
         // one mesh, opt->instances instances of it in a row on the floor, each turned a little
         // more (SCENE_SPHERES: in the free corners first, beside the spheres; SCENE_MESH: one,
@@ -239,9 +261,10 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
 
     // the cloud: floating in the middle of the room, below the lamp, so its shadow falls
     // on the floor and its top is lit from above
-    if (opt->cloud || opt->kind == SCENE_CLOUD){
+    if (opt->cloud || opt->kind == SCENE_CLOUD || opt->kind == SCENE_SHOWCASE){
         CloudParams cp = opt->cloud ? *opt->cloud : cloud_default_params();
         Aabb b = {vec3(70, 150, 110), vec3(485, 440, 450)};
+        if (opt->kind == SCENE_SHOWCASE) b = (Aabb){vec3(110, 330, 190), vec3(470, 505, 500)};   // above the dragon
         Volume *v = volume_new_cloud(b, &cp);
         if (!v){ fprintf(stderr, "out of memory for the cloud\n"); return 1; }
         scene_add_volume(s, v);

@@ -98,6 +98,8 @@ typedef struct CloudParams {
     real detail;       // 0 = smooth blobs .. 1 = strongly eroded, wispy billows
     real time;         // seconds, for animation: the detail noise drifts with `wind`
     Vec3 wind;         // drift of the detail, in cloud sizes per second
+    Vec3 lean;         // blown by a wind: how far its top is pushed downwind (x, z) per unit of
+                       // height, its detail stretched along it; 0 = upright (the default)
     // grid
     int resolution;    // voxels along the longest side of the box (the others in proportion)
     // material (copied into the Volume)

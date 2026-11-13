@@ -207,6 +207,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | option | meaning | default |
 |---|---|---|
 | `-scene boxes` | the classic Cornell box: a tall box and a short box | ✓ |
+| `-scene showcase` | one model of each material: a mirror Stanford dragon (the full 871k triangles), a diffuse blue cube and a glass torus, under a cloud (the cloud options shape it, `-wind` blows it); needs `models/` | |
 | `-scene spheres` | a mirror sphere and a glass sphere | |
 | `-scene mesh` | a model from a file, standing in the middle of the box | |
 | `-scene cloud` | the empty box with a volumetric cloud floating in it (path tracer, see VOLUMES.md) | |
@@ -235,6 +236,7 @@ too, by raymarching (section "Backend": `-rastercloud`, `-march`, `-lightres`,
 | `-detail value` | 0 = smooth blobs .. 1 = wispy, eroded edges | 0.6 |
 | `-seed n` | which cloud (puff layout and noise) | 1 |
 | `-time seconds` | animation: the billows drift with the wind | 0 |
+| `-wind x,y,z` | (`render`, `view` without `-sim`) a wind blows the cloud: its top is pushed downwind by a quarter of its height per 100 units/s, its detail drawn out into streaks along it (with `-sim` the air itself moves, 3.1) | 0,0,0 |
 | `-cloudres n` | voxels along the longest side of the cloud's box (4..1024) | 128 |
 | `-fog sigma` | fill the room with a uniform haze of this extinction (works with or without a cloud; try 0.002) | 0 = off |
 
