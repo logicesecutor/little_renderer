@@ -86,8 +86,8 @@ static real sah_split(const Bvh *b, const BuildInfo *bi, int start, int count,
         const real scale = nb / extent;
         for (int i = start; i < start + count; i++){
             int p = b->refs[i];
-            int k = (int)((comp(bi->centroid[p], axis) - lo) * scale);
-            if (k >= nb) k = nb - 1;
+            real f = (comp(bi->centroid[p], axis) - lo) * scale;
+            int k = f > 0 ? (f < nb ? (int)f : nb - 1) : 0;   // (a NaN box, a body gone wild: bin 0, not a crash)
             bin_n[k]++;
             box_add_box(&bin_box[k], &bi->box[p]);
         }
