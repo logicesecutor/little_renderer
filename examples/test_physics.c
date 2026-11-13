@@ -98,6 +98,7 @@ static void test_stack(void){
     printf("resting stack (3 boxes and a ball on top stay where they are)\n");
     RigidWorld w;
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     for (int k = 0; k < 3; k++) rigid_add_box(&w, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
     int s = rigid_add_sphere(&w, vec3(278, 180 + 25, 278), 25, 1);
@@ -113,6 +114,7 @@ static void test_box_lands_flat(void){
     printf("a tilted box falls and settles on a face\n");
     RigidWorld w;
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     int b = rigid_add_box(&w, vec3(278, 300, 278), vec3(50, 20, 35), quat_axis_angle(vec3(1, 0.3, 0.5), 0.9), 1);
     for (int k = 0; k < 4 * 240 * 4; k++) rigid_step(&w, 1.0 / 960);
@@ -121,6 +123,31 @@ static void test_box_lands_flat(void){
     real best = r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35)));
     check("center height - nearest half size", best, 0, 1.5);
     check("fastest point (at rest), units / s", max_speed(&w), 0, 1);
+    rigid_free(&w);
+}
+
+static void test_sleep(void){
+    printf("sleeping (a resting stack falls asleep, a box dropped on it wakes it, all settle again)\n");
+    RigidWorld w;
+    rigid_init(&w);
+    rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    for (int k = 0; k < 3; k++) rigid_add_box(&w, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
+    for (int k = 0; k < 2 * 240; k++) rigid_steps(&w, 1.0 / 240, 4, NULL);
+    check("asleep after 2 s (of 3)", rigid_sleeping(&w), 3, 0);
+    int d = rigid_add_box(&w, vec3(278, 400, 278), vec3(40, 30, 40), quat_identity(), 1);
+    int fewest = 3;
+    for (int k = 0; k < 4 * 240; k++){
+        rigid_steps(&w, 1.0 / 240, 4, NULL);
+        if (k < 240 && rigid_sleeping(&w) < fewest) fewest = rigid_sleeping(&w);
+    }
+    // (those it lands on wake; the bottom box, touched only by still ones, may sleep on)
+    check("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
+    check("asleep again 4 s later (of 4)", rigid_sleeping(&w), 4, 0);
+    check("the dropped box on top: height", w.bodies[d].pos.y, 210, 1.5);
+    check("the stack's top box: height", w.bodies[2].pos.y, 150, 1.5);
+    body_apply_impulse(&w.bodies[0], vec3(1e5, 0, 0), w.bodies[0].pos);
+    rigid_steps(&w, 1.0 / 240, 4, NULL);
+    check("an impulse wakes a body", w.bodies[0].sleeping, 0, 0);
     rigid_free(&w);
 }
 
@@ -228,6 +255,7 @@ static void test_hulls(void){
     int n = box_tris(tri, h, turn, vec3(10, 30, -5));
     RigidWorld w;
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     int g = rigid_geom_hull(&w, tri, n, 0);
     check("hull made", g >= 0, 1, 0);
@@ -279,6 +307,7 @@ static void test_hulls(void){
 
     // a torus: its hull is a puck that lands flat (centre at the tube radius)
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     n = torus_tris(tri, 60, 20, 32, 16);
     g = rigid_geom_hull(&w, tri, n, 0);
@@ -291,6 +320,7 @@ static void test_hulls(void){
     // a fixed mesh (a block of 12 triangles, top at y = 100) with a ball and a hull on it,
     // and a torus mesh: its inside as the air sees it has the torus's volume
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     n = box_tris(tri, vec3(120, 50, 120), mat3_identity(), vec3(0, 50, 0));
     int gm = rigid_geom_mesh(&w, tri, n);
@@ -308,6 +338,7 @@ static void test_hulls(void){
     rigid_free(&w);
 
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     n = torus_tris(tri, 60, 20, 48, 24);
     gm = rigid_geom_mesh(&w, tri, n);
     const RigidGeom *T = w.geoms[gm];
@@ -319,6 +350,7 @@ static void test_hulls(void){
 
     // two hulls collide in empty space: momentum is kept
     rigid_init(&w);
+    w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     w.gravity = vec3(0, 0, 0);
     w.angular_damping = 0;
     n = box_tris(tri, vec3(30, 20, 25), turn, vec3(0, 0, 0));
@@ -342,6 +374,7 @@ int main(void){
     test_momentum();
     test_stack();
     test_box_lands_flat();
+    test_sleep();
     test_hulls();
     test_fluid();
     if (failures){ printf("%d FAILED\n", failures); return 1; }

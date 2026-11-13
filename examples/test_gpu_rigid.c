@@ -49,6 +49,7 @@ typedef struct { PhysWorld pw; GpuRigid *gr; } World;
 static void world_init(World *w, int gpu){
     phys_init(&w->pw);
     w->pw.air_density = 0;        // no air: the answers above are for a vacuum
+    w->pw.rigid.sleep = 0;        // the solver alone (sleeping: test_sleep, settled)
     w->gr = NULL;
     (void)gpu;
 }
@@ -288,6 +289,60 @@ static void test_pile(void){
     }
 }
 
+// as test_physics.c's: a stack falls asleep, a box dropped on it wakes it, all settle again
+static void test_sleep(void){
+    printf("on the GPU: sleeping\n");
+    World w;
+    world_init(&w, 1);
+    w.pw.rigid.sleep = 1;
+    rigid_set_room(&w.pw.rigid, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    for (int k = 0; k < 3; k++) rigid_add_box(&w.pw.rigid, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
+    world_start(&w, 1);
+    world_run(&w, 2.0);
+    check("asleep after 2 s (of 3)", rigid_sleeping(&w.pw.rigid), 3, 0);
+    int d = rigid_add_box(&w.pw.rigid, vec3(278, 400, 278), vec3(40, 30, 40), quat_identity(), 1);
+    int fewest = 3;
+    for (int k = 0; k < 240; k++){
+        world_run(&w, 1.0 / 240);
+        if (rigid_sleeping(&w.pw.rigid) < fewest) fewest = rigid_sleeping(&w.pw.rigid);
+    }
+    check("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
+    world_run(&w, 3.0);
+    check("asleep again 4 s later (of 4)", rigid_sleeping(&w.pw.rigid), 4, 0);
+    check("the dropped box on top: height", w.pw.rigid.bodies[d].pos.y, 210, 1.5);
+    check("the stack's top box: height", w.pw.rigid.bodies[2].pos.y, 150, 1.5);
+    body_apply_impulse(&w.pw.rigid.bodies[0], vec3(1e5, 0, 0), w.pw.rigid.bodies[0].pos);
+    world_run(&w, 1.0 / 240);
+    check("an impulse wakes a body", w.pw.rigid.bodies[0].sleeping, 0, 0);
+    world_free(&w);
+}
+
+// a settled pile (8 s), with and without sleeping
+static void settled(void){
+    printf("time per 1/60 s step of a settled pile of 1024 bodies (after 8 s), sleeping off / on:\n");
+    for (int gpu = 0; gpu < 2; gpu++){
+        double ms[2];
+        int asleep = 0;
+        for (int sl = 0; sl < 2; sl++){
+            World w;
+            real side;
+            pile(&w, 1024, gpu, &side);
+            w.pw.rigid.sleep = sl;
+            for (int s = 0; s < 8 * 60; s++) phys_step(&w.pw, 1.0f / 60);
+            gpu_rigid_sync(w.gr);
+            if (gpu) gpu_wait(g);
+            double t0 = now_ms();
+            for (int s = 0; s < 30; s++) phys_step(&w.pw, 1.0f / 60);
+            gpu_rigid_sync(w.gr);
+            if (gpu) gpu_wait(g);
+            ms[sl] = (now_ms() - t0) / 30;
+            if (sl) asleep = rigid_sleeping(&w.pw.rigid);
+            world_free(&w);
+        }
+        printf("  %s: %7.2f ms / %7.2f ms (%d of 1024 asleep)\n", gpu ? "GPU" : "CPU", ms[0], ms[1], asleep);
+    }
+}
+
 static void timings(void){
     printf("time per 1/60 s step (4 substeps, 16 iterations), CPU vs GPU, while the pile falls and settles:\n");
     int ns[] = {64, 256, 1024, 2048};
@@ -324,7 +379,9 @@ int main(void){
     test_basics();
     test_meshes();
     test_pile();
+    test_sleep();
     timings();
+    settled();
     gpu_destroy(g);
     if (failures){ printf("%d FAILED\n", failures); return 1; }
     printf("all GPU rigid body tests passed\n");

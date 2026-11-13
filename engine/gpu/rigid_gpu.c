@@ -19,7 +19,9 @@ void gpu_rigid_destroy(GpuRigid *gr){ (void)gr; }
 //
 // Bodies (struct Body, 8 vec4): pos (w: 0 sphere, 1 box, 2 hull, 3 fixed mesh), rot (quaternion x y z w), vel (w:
 // 1 / mass), ang (angular velocity; w: restitution), half (w: friction), iner (1 / inertia in
-// the body's frame), f (unused) and t (x: a hull's or mesh's shape, its index in G). Contacts (struct Contact, 8 vec4), as rigid.c's: the
+// the body's frame), f (sleeping, rigid.c's: x = how long it has been still, y = 1 asleep, z =
+// its 1 / mass while asleep, when vel.w is 0: to the others it is fixed) and t (x: a hull's or
+// mesh's shape, its index in G; yzw: the air's force on it when it fell asleep). Contacts (struct Contact, 10 vec4), as rigid.c's: the
 // point (w: depth), the normal from b to a (w: a), ra (w: b, NONE = a wall), rb (w: bias), the
 // tangents (w: the normal's and the first tangent's effective mass), j = the accumulated
 // impulses (w: the second tangent's mass), imp = this iteration's impulse (w: friction), la =
@@ -37,6 +39,7 @@ struct RP {
     lo: vec4f,     /* the room; w = the walls' restitution */
     hi: vec4f,     /* w = the walls' friction */
     d: vec4f,      /* angular damping, the whole step, the smallest margin (the contacts' margins), the fastest push out */
+    h2: vec4f,     /* sleeping: the speed below which a body is still, how long still before it sleeps, the wake speed */
     m: vec4u,      /* the unit box's shape in G (boxes against hulls), shapes, room in each pair list,
                       the substep (contacts are found in the first) */
 };
@@ -69,6 +72,7 @@ fn qmat(q: vec4f) -> mat3x3f {
                    vec3f(2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)));
 }
 fn inv_inertia(b: Body) -> mat3x3f {
+    if (b.vel.w == 0.0) { return mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0)); }   /* fixed, or asleep */
     let r = qmat(b.rot);
     return r * mat3x3f(vec3f(b.iner.x, 0.0, 0.0), vec3f(0.0, b.iner.y, 0.0), vec3f(0.0, 0.0, b.iner.z)) * transpose(r);
 }
@@ -87,6 +91,7 @@ static const char *K_VEL = WGSL(
 @group(0) @binding(2) var<storage, read_write> cnt: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> F: array<vec4f>;
 @group(0) @binding(4) var<storage, read_write> pc: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> wake: array<atomic<u32>>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
@@ -95,6 +100,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     if (i >= P.n.x) { return; }
     if (first) { atomicStore(&cnt[1u + i], 0u); }
     var b = B[i];
+    if (first && b.f.y > 0.5 && atomicLoad(&wake[i]) != 0u) {
+        /* woken (K_WAKE): its mass back, still at rest */
+        b.vel = vec4f(0.0, 0.0, 0.0, b.f.z);
+        b.f = vec4f(0.0);
+        B[i].f = b.f;
+    }
+    if (first) { atomicStore(&wake[i], 0u); }
     if (b.vel.w == 0.0) { return; }
     let h = P.h.x;
     var v = b.vel.xyz + (P.g.xyz + F[2u * i].xyz * b.vel.w) * h;
@@ -334,6 +346,64 @@ fn box_box(ia: u32, ib: u32) {
 }
 );
 
+
+/* sleeping (rigid.c's): which sleeping bodies wake up this step: a body faster than the wake
+   speed near one (one thread per pair, as K_BROAD), or the air's force on it changed by a
+   quarter of its weight (one thread per body) */
+static const char *K_WAKE = WGSL(
+@group(0) @binding(1) var<storage, read> B: array<Body>;
+@group(0) @binding(2) var<storage, read_write> wake: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read> F: array<vec4f>;
+fn asleep(b: Body) -> bool { return b.f.y > 0.5; }
+fn moving(b: Body) -> bool {
+    return b.vel.w > 0.0 && (length(b.vel.xyz) >= P.h2.z || length(b.ang.xyz) * body_radius(b) >= P.h2.z);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let id = tid(gid, nw);
+    let n = P.n.x;
+    if (id >= n * n) {
+        let i = id - n * n;
+        if (i < n && asleep(B[i]) && length(F[2u * i].xyz - B[i].t.yzw) > 0.25 * length(P.g.xyz) / B[i].f.z) {
+            atomicStore(&wake[i], 1u);
+        }
+        return;
+    }
+    let i = id % n;
+    let j = id / n;
+    if (j <= i) { return; }
+    let a = B[i];
+    let b = B[j];
+    var s = 0u;
+    if (asleep(a) && moving(b)) { s = i; } else if (asleep(b) && moving(a)) { s = j; } else { return; }
+    let d = a.pos.xyz - b.pos.xyz;
+    let reach = body_radius(a) + body_radius(b) + pair_margin(a, b, false);
+    if (dot(d, d) <= reach * reach) { atomicStore(&wake[s], 1u); }
+}
+);
+
+/* the end of a step: how long each body has been still; those still long enough fall asleep:
+   velocity 0, and vel.w = 0 (to the others a fixed body) with the mass kept in f.z */
+static const char *K_SLEEP = WGSL(
+@group(0) @binding(1) var<storage, read_write> B: array<Body>;
+@group(0) @binding(2) var<storage, read> F: array<vec4f>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let i = tid(gid, nw);
+    if (i >= P.n.x) { return; }
+    let b = B[i];
+    if (b.vel.w == 0.0) { return; }
+    let still = length(b.vel.xyz) < P.h2.x && length(b.ang.xyz) * body_radius(b) < P.h2.x;
+    let t = select(0.0, b.f.x + P.d.y, still);
+    if (t < P.h2.y) { B[i].f.x = t; return; }
+    B[i].vel = vec4f(0.0);
+    B[i].ang = vec4f(0.0, 0.0, 0.0, b.ang.w);
+    B[i].f = vec4f(t, 1.0, b.vel.w, 0.0);
+    B[i].t.y = F[2u * i].x;     /* (t.x is a shape index's bits: not written back as a float) */
+    B[i].t.z = F[2u * i].y;
+    B[i].t.w = F[2u * i].z;
+}
+);
 
 /* the pairs whose bounding spheres meet (and the walls), sorted into the two lists */
 static const char *K_BROAD = WGSL(
@@ -1318,14 +1388,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 
 typedef struct {
     uint32_t n[4];
-    float h[4], g[4], lo[4], hi[4], d[4];
+    float h[4], g[4], lo[4], hi[4], d[4], h2[4];
     uint32_t m[4];
 } GRP;
 
 enum { R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HEAVY, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
-       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, NR };
+       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, NR };
 static const struct { const char *name, *types; const char **body, **more, **more2; } RK[NR] = {
-    {"bodies: forces",   "UWWRW",    &K_VEL, NULL, NULL},
+    {"bodies: forces",   "UWWRWW",   &K_VEL, NULL, NULL},
     {"bodies: pairs",    "URWW",     &K_BROAD, NULL, NULL},
     {"bodies: pair counts", "UWW",   &K_ARGS, NULL, NULL},
     {"bodies: contacts", "URWWRW",   &K_NARROW, &K_SIMPLE, NULL},
@@ -1340,6 +1410,8 @@ static const struct { const char *name, *types; const char **body, **more, **mor
     {"bodies: solve",    "URWW",     &K_SOLVE, NULL, NULL},
     {"bodies: apply",    "UWRRR",    &K_APPLY, NULL, NULL},
     {"bodies: move",     "UW",       &K_POS, NULL, NULL},
+    {"bodies: wake",     "URWR",     &K_WAKE, NULL, NULL},
+    {"bodies: sleep",    "UWR",      &K_SLEEP, NULL, NULL},
 };
 
 #define BODY_BYTES 128
@@ -1351,7 +1423,7 @@ struct GpuRigid {
     PhysWorld *pw;
     WGPUBindGroupLayout bgl[NR];
     WGPUComputePipeline pipe[NR];
-    WGPUBuffer par, bodies, forces, cnt, cursor;
+    WGPUBuffer par, bodies, forces, cnt, cursor, wake;
     WGPUBuffer pairs, pc, args;                  // the candidate pairs' lists, their counts, dispatch sizes
     WGPUBuffer tris, store, scount;              // body - mesh: the triangles to test, their contacts per pair
     size_t cap_pairs;                            // per list
@@ -1376,7 +1448,7 @@ struct GpuRigid {
 
 static const char *const RK_NAMES[NR] = {"forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
     "contacts: hulls", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
-    "contact lists 1", "contact lists 2", "prepare (warm start)", "solve", "apply", "move"};
+    "contact lists 1", "contact lists 2", "prepare (warm start)", "solve", "apply", "move", "wake", "sleep"};
 
 static GpuRigid *live[4];
 static int is_live(const GpuRigid *gr){
@@ -1402,7 +1474,7 @@ static void make_groups(GpuRigid *gr){
         WGPUBuffer C = gr->contacts[p], L = gr->lists[p], O = gr->offs[p];
         WGPUBuffer Cp = gr->contacts[!p], Lp = gr->lists[!p], Op = gr->offs[!p];
 #define BG(k, ...) do { WGPUBuffer b_[] = {__VA_ARGS__}; gr->bg[k][p] = gpu_bind(g, gr->bgl[k], b_, (int)(sizeof(b_) / sizeof(b_[0]))); } while (0)
-        BG(R_VEL, gr->par, gr->bodies, gr->cnt, gr->forces, gr->pc);
+        BG(R_VEL, gr->par, gr->bodies, gr->cnt, gr->forces, gr->pc, gr->wake);
         BG(R_BROAD, gr->par, gr->bodies, gr->pairs, gr->pc);
         BG(R_ARGS, gr->par, gr->pc, gr->args);
         BG(R_SIMPLE, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc);
@@ -1420,6 +1492,8 @@ static void make_groups(GpuRigid *gr){
         BG(R_SOLVE, gr->par, gr->bodies, C, gr->cnt);
         BG(R_APPLY, gr->par, gr->bodies, C, O, L);
         BG(R_POS, gr->par, gr->bodies);
+        BG(R_WAKE, gr->par, gr->bodies, gr->wake, gr->forces);
+        BG(R_SLEEP, gr->par, gr->bodies, gr->forces);
 #undef BG
     }
 }
@@ -1431,7 +1505,7 @@ static int reserve(GpuRigid *gr, int nb){
     size_t cap = 64;
     while (cap < want) cap *= 2;
     Gpu *g = gr->g;
-    WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->contacts[0], &gr->contacts[1],
+    WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
                          &gr->tris, &gr->store, &gr->scount};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
@@ -1441,6 +1515,8 @@ static int reserve(GpuRigid *gr, int nb){
     gr->forces = storage(g, "bodies: forces", cap * 32);
     gr->cnt = storage(g, "bodies: contact counts", (cap + 1) * 4);
     gr->cursor = storage(g, "bodies: list cursors", cap * 4);
+    gr->wake = storage(g, "bodies: to wake", cap * 4);
+    { uint32_t *z = calloc(cap, 4); if (z){ wgpuQueueWriteBuffer(g->queue, gr->wake, 0, z, cap * 4); free(z); } }
     gr->cap_pairs = 32 * cap;
     gr->pairs = storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
     gr->pc = storage(g, "bodies: pair counts", 16);
@@ -1580,6 +1656,8 @@ static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
             b->rot = quat(o[7], o[4], o[5], o[6]);
             b->vel = vec3(o[8], o[9], o[10]);
             b->angvel = vec3(o[12], o[13], o[14]);
+            b->sleep_time = o[24];
+            b->sleeping = o[25] > 0.5f;
         }
         uint32_t nc;
         memcpy(&nc, d + 32 * (size_t)gr->rb_n, 4);
@@ -1669,6 +1747,8 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         P.d[1] = (float)dt;
         P.d[2] = 0.1f;                           // rigid.c's SPECULATIVE_MIN
         P.d[3] = 300.0f;                         // rigid.c's MAX_PUSH
+        P.h2[0] = 5.0f; P.h2[1] = 0.5f;          // rigid.c's SLEEP_SPEED, SLEEP_TIME, WAKE_SPEED
+        P.h2[2] = 20.0f;
         P.m[0] = gr->unit_box;
         P.m[1] = (uint32_t)w->ngeoms;
         P.m[2] = (uint32_t)gr->cap_pairs;
@@ -1678,6 +1758,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         WGPUBuffer par = gr->par;
         wgpuQueueWriteBuffer(g->queue, par, 0, &P, sizeof(P));
         WGPUComputePassEncoder pass = NULL;
+        if (s == 0 && w->sleep) dispatch(enc, &pass, gr, R_WAKE, (size_t)nb * nb + nb);
         dispatch(enc, &pass, gr, R_VEL, (size_t)nb);
         if (s == 0){
             // the contacts, once per step (with margins: they are followed through the substeps)
@@ -1699,6 +1780,10 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_APPLY, (size_t)nb);
         }
         dispatch(enc, &pass, gr, R_POS, (size_t)nb);
+        if (s == steps - 1 && w->sleep){
+            // the end of the step: who falls asleep
+            dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
+        }
         if (pass){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); }
         // queue writes happen before the command buffer runs: the substeps must go one by one
         WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
@@ -1790,7 +1875,7 @@ void gpu_rigid_destroy(GpuRigid *gr){
     for (int i = 0; i < 4; i++) if (live[i] == gr) live[i] = NULL;
     if (gr->pw && gr->pw->rigid_user == gr){ gr->pw->rigid_step = NULL; gr->pw->rigid_user = NULL; }
     release_groups(gr);
-    WGPUBuffer *all[] = {&gr->par, &gr->shapes, &gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->contacts[0], &gr->contacts[1],
+    WGPUBuffer *all[] = {&gr->par, &gr->shapes, &gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->rb};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
     for (int k = 0; k < NR; k++){

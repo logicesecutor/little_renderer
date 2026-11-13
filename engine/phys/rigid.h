@@ -55,6 +55,10 @@ typedef struct {
     int inst;                // or the scene instance that shows it, -1 = none
     const RigidGeom *g;      // BODY_HULL, BODY_MESH: its shape
     int dirty;               // changed by the CPU (new, pushed, moved): a GPU copy must take it again
+                             // (and a sleeping body wakes up)
+    int sleeping;            // 1: at rest, not moved until something wakes it (rigid_steps)
+    real sleep_time;         // how long it has been still (s)
+    Vec3 sleep_force;        // the external force on it when it fell asleep
 } Body;
 
 typedef struct {
@@ -83,6 +87,7 @@ typedef struct {
     Contact *prev;           // of the step before: their impulses "warm start" the solver
     int nprev, cap_prev;
     int warm_start;          // 1 (default): start each contact from last step's impulse
+    int sleep;               // 1 (default): bodies at rest fall asleep (PHYSICS.md 1.5)
     RigidGeom **geoms;       // the shapes of mesh bodies (owned)
     int ngeoms, cap_geoms;
 } RigidWorld;
@@ -120,6 +125,7 @@ void body_apply_impulse(Body *b, Vec3 impulse, Vec3 p);
 // force for the whole step, or NULL); rigid_step = rigid_steps(w, dt, 1, NULL)
 void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces);
 void rigid_step(RigidWorld *w, real dt);
+int rigid_sleeping(const RigidWorld *w);   // how many bodies sleep
 
 // diagnostics: total kinetic energy and momentum
 real rigid_kinetic_energy(const RigidWorld *w);

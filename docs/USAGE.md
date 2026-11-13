@@ -16,6 +16,7 @@ for `models/` and write into `out/` relative to it.
 | `bin/sim` | `apps/sim.c` | offline: a physics simulation (rigid bodies, air, the cloud it carries), path traced frame by frame into `out/sim/` and a GIF |
 | `bin/raster_milestones` | `examples/raster_milestones.c` | the rasterizer step by step: one image per milestone into `out/*.ppm` |
 | `bin/hello_rt`, `bin/hello_raster`, `bin/custom_scene` | `examples/` | small programs using the library (see `SDK.md`); write into `out/` |
+| `bin/mesh_rain` | `examples/mesh_rain.c` | random meshes rain into the room as convex hulls, without end (the oldest are reused past `-max`); the frame rate and the bodies asleep in the window's title. Options: `-rate meshes/s` (8), `-max bodies`, `-size units` (70), `-obj model`, `-gpu on\|off`, `-sleep on\|off` (on: bodies at rest fall asleep, PHYSICS.md 1.5), `-endless on\|off` (off: the rain stops at `-max` and the pile settles), `-seed n`, `-autoquit seconds`, `-n`/`-h` the window |
 | `bin/test_medium` | `examples/test_medium.c` | unit test of the volume sampling (`make test`) |
 | `bin/test_physics` | `examples/test_physics.c` | the physics against known answers (`make test`) |
 | `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.ppm` into an animated GIF (Pillow: `uv run` brings it, see 2.1) |
@@ -518,6 +519,7 @@ These have no command-line option. Change them and run `make` again.
 | milestone image size | `examples/raster_milestones.c` | 640×480 |
 | contact slop, Baumgarte factor, bounce threshold | `engine/phys/rigid.c` (`CONTACT_SLOP`, `BAUMGARTE`, `BOUNCE_THRESHOLD`) | 0.5 / 0.2 / 60 |
 | speculative contacts: smallest margin, fastest push out | `engine/phys/rigid.c` (`SPECULATIVE_MIN`, `MAX_PUSH`; the GPU's copies in `gpu/rigid_gpu.c`) | 0.1 / 300 |
+| sleeping: still below this speed, for this long; the speed that wakes; on or off | `engine/phys/rigid.c` (`SLEEP_SPEED`, `SLEEP_TIME`, `WAKE_SPEED`; the GPU's copies in `gpu/rigid_gpu.c`), `RigidWorld.sleep` | 5 units/s, 0.5 s, 20 units/s, on |
 | solver iterations, damping, wall restitution / friction | `engine/phys/rigid.c`, `rigid_init` | 16, angular 0.1 /s, 0.4 / 0.5 |
 | rigid substeps, air density, drag coefficients | `engine/phys/world.c`, `phys_init` | 4, 0.0012, sphere 0.47 / box 1.05 |
 | pressure V-cycles, wind rate, which faces are open | `engine/phys/fluid.c`, `fluid_create` | 5, 0.3 /s, front |

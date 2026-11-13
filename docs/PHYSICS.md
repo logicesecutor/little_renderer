@@ -240,6 +240,7 @@ in each substep:
 | prepare | every substep | each contact's points where its bodies are now, its depth, masses and target (as the CPU's) |
 | solve | every substep | the contacts' impulses, 16 iterations, warm started |
 | move | every substep | integrate |
+| wake, sleep | once per step | sleeping (1.5): which sleeping bodies wake (one thread per pair), and, at the end, how long each has been still and who falls asleep |
 
 The lists' sizes are only known on the GPU, so their dispatches are indirect (a small
 kernel writes the workgroup counts).
@@ -255,6 +256,37 @@ velocities. That is a sequential-impulse solve of a different but equivalent sys
 converges like 1.3 and does not depend on the order. Warm starting is the same as on the
 CPU: each new contact looks for the old one of the same pair, within 1 cm, and starts from
 its impulses.
+
+### 1.5 Sleeping
+
+A pile at rest still costs a full step: its contacts are found and solved every step, only
+to push nothing anywhere. So a body at rest falls asleep: when it has been **still** (its
+centre and its outermost point slower than 5 cm/s) for **0.5 s**, its velocity is set to 0
+and it is no longer moved (`Body.sleeping`). To the bodies still awake it is a fixed body,
+so they rest on it; pairs of two sleeping bodies, and their walls, are not tested at all.
+
+Each body decides alone, as in ODE's auto-disable. Box2D and PhysX put a whole island (all
+the bodies that touch, through each other) to sleep at once, when all of them are still;
+in a pile of hulls some body always jitters a little, and that kept whole islands awake
+(a test with the island rule, and with "a body and all it touches": 250 hulls, about 10%
+asleep after 40 s). Alone, the still ones fall asleep, hold the others still as fixed
+bodies, and the pile falls asleep from the bottom up (all 250 after 35 s).
+
+A sleeping body **wakes** when:
+
+- a body faster than 20 cm/s (four times the "still" speed, so that a jittering neighbour
+  does not wake it) comes within the contact margin of it (1.3), before the contacts are
+  looked for, so it takes part in the same step. The bodies it then moves wake their
+  neighbours in turn, a step later each;
+- the program changes it: `Body.dirty` (a new position or velocity), `body_apply_impulse`
+  (explosions), or any velocity it was given;
+- the force from outside on it (the air's) changes by more than a quarter of its weight.
+
+A slower body that reaches a sleeping one stops against it, as against a wall.
+`RigidWorld.sleep = 0` turns sleeping off (the tests of the solver do; `test_sleep` tests
+it); so does `mesh_rain -sleep off`. On the GPU the same rules run in two passes (1.4): the
+sleeping body keeps its mass aside and shows 1 / mass = 0, so every other pass treats it
+as fixed without knowing about sleep.
 
 ---
 
@@ -686,6 +718,12 @@ they were found in every substep, 1.73 → 1.07 ms at 1024 bodies; the CPU about
 18.8 → 20.3 ms: its balls' and boxes' tests are cheap, and the speculative contacts give
 the solver more contacts. With hulls the gain is larger: 1500 hulls in `mesh_rain`, 8.9 →
 4.7 ms per step on the GPU, their contacts 7.1 → 2.6 ms.)
+
+**Sleeping** (1.5) takes a settled pile off the CPU almost entirely: 1024 balls and boxes at
+rest, 22.7 → 3.5 ms per step (907 asleep). On the GPU it removes the hulls' contacts (600
+hulls in `mesh_rain`: 2.5 → 0.9 ms per step on average), but not the fixed cost of the
+passes, which are launched for the room for contacts: the settled 1024 balls and boxes take
+1.07 ms either way (PERFORMANCE.md P10).
 
 Below about 64 bodies the GPU's fixed cost (some 10 dispatches per substep) is larger than
 the work; it still takes the bodies off the CPU, which the live viewer needs: with 600

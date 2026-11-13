@@ -11,6 +11,9 @@
 #define BOUNCE_THRESHOLD 60.0f   // approach speeds below this (units / s) do not bounce
 #define SPECULATIVE_MIN 0.1f     // the smallest margin (units) of a pair's speculative contacts
 #define MAX_PUSH 300.0f          // the fastest an overlap is pushed out (units / s; Box2D: 3 m/s)
+#define SLEEP_SPEED 5.0f         // slower than this (units / s, the outermost point too) is still
+#define SLEEP_TIME 0.5f          // still this long (s): asleep
+#define WAKE_SPEED 20.0f         // a body faster than this wakes the sleeping ones it comes near
 #define MAX_HULL_VERTS 64        // corners of a hull (rigid_geom_hull)
 #define MAX_HULL_FACES 128
 
@@ -25,6 +28,7 @@ void rigid_init(RigidWorld *w){
     w->linear_damping = 0.0f;
     w->angular_damping = 0.1f;
     w->warm_start = 1;
+    w->sleep = 1;
 }
 
 void rigid_free(RigidWorld *w){
@@ -745,6 +749,74 @@ static void find_contacts(RigidWorld *w, real dt){
     }
 }
 
+// ---- sleeping --------------------------------------------------------------------------------
+//
+// A body that has been still (SLEEP_SPEED) for SLEEP_TIME falls asleep: its velocity is set
+// to 0 and it is no longer moved. To the bodies still awake it is fixed, so they rest on it;
+// pairs of sleeping bodies (and their walls) are not even tested. A resting pile then costs
+// little more than its awake edge. It wakes when a body faster than WAKE_SPEED comes near it
+// (within the contact margin), when the program changes it (Body.dirty, body_apply_impulse,
+// a velocity set), or when the external force on it changes by a quarter of its weight (the
+// air's push). Each body decides alone (as ODE's auto-disable), not with the island of all it
+// touches (Box2D, PhysX): in a pile of hulls some body always jitters a little, which kept
+// whole islands, or every body next to one, awake; once the still ones sleep, they hold the
+// others still, and the pile falls asleep from the bottom up. The gap between SLEEP_SPEED and
+// WAKE_SPEED keeps a jittering neighbour from waking them again.
+
+static int body_still(const Body *b){
+    return v_len(b->vel) < SLEEP_SPEED && v_len(b->angvel) * body_radius(b) < SLEEP_SPEED;
+}
+static void wake(Body *b){ b->sleeping = 0; b->sleep_time = 0; }
+
+// at the start of a step: wake the sleeping bodies that must move; returns how many still sleep
+static int wake_bodies(RigidWorld *w, real dt, const Vec3 *forces){
+    int asleep = 0;
+    real wake_force = 0.25f * v_len(w->gravity);
+    for (int i = 0; i < w->nbodies; i++){
+        Body *b = &w->bodies[i];
+        int changed = b->dirty;
+        b->dirty = 0;                         // (the CPU's steps: no GPU copy to resend)
+        if (!b->sleeping) continue;
+        Vec3 f = forces ? v_add(b->force, forces[i]) : b->force;
+        if (changed || v_dot(b->vel, b->vel) > 0 || v_dot(b->angvel, b->angvel) > 0 ||
+            v_dot(b->torque, b->torque) > 0 || v_len(v_sub(f, b->sleep_force)) > wake_force * b->mass) wake(b);
+        else asleep++;
+    }
+    if (!asleep) return 0;
+    for (int i = 0; i < w->nbodies; i++){
+        const Body *a = &w->bodies[i];
+        if (a->inv_mass == 0 || a->sleeping) continue;
+        if (v_len(a->vel) < WAKE_SPEED && v_len(a->angvel) * body_radius(a) < WAKE_SPEED) continue;
+        for (int j = 0; j < w->nbodies; j++){
+            Body *b = &w->bodies[j];
+            if (!b->sleeping) continue;
+            real r = body_radius(a) + body_radius(b) + pair_margin(a, b, dt);
+            Vec3 d = v_sub(a->pos, b->pos);
+            if (v_dot(d, d) <= r * r){ wake(b); asleep--; }
+        }
+    }
+    return asleep;
+}
+
+// at the end of a step: the bodies still long enough fall asleep
+static void fall_asleep(RigidWorld *w, real dt, const Vec3 *forces){
+    for (int i = 0; i < w->nbodies; i++){
+        Body *b = &w->bodies[i];
+        if (b->inv_mass == 0 || b->sleeping) continue;
+        b->sleep_time = body_still(b) ? b->sleep_time + dt : 0;
+        if (b->sleep_time < SLEEP_TIME) continue;
+        b->sleeping = 1;
+        b->vel = b->angvel = vec3(0, 0, 0);
+        b->sleep_force = forces ? v_add(b->force, forces[i]) : b->force;
+    }
+}
+
+int rigid_sleeping(const RigidWorld *w){
+    int n = 0;
+    for (int i = 0; i < w->nbodies; i++) n += w->bodies[i].sleeping;
+    return n;
+}
+
 // ---- the solver: sequential impulses (Catto, "Iterative Dynamics with Temporal Coherence") --
 //
 // At a contact the bodies must not keep approaching: the relative velocity along the normal
@@ -788,6 +860,14 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     if (dt <= 0) return;
     if (substeps < 1) substeps = 1;
     const real h = dt / substeps;
+    // the sleeping bodies (those that stay asleep) are fixed for this step: inv_mass 0
+    int nsleep = w->sleep ? wake_bodies(w, dt, forces) : 0;
+    real *sleep_m = nsleep ? malloc((size_t)w->nbodies * sizeof(real)) : NULL;
+    if (sleep_m) for (int i = 0; i < w->nbodies; i++){
+        Body *b = &w->bodies[i];
+        sleep_m[i] = b->inv_mass;
+        if (b->sleeping) b->inv_mass = 0;
+    }
     // the contacts (the previous step's are kept for warm starting)
     { Contact *t = w->prev; w->prev = w->contacts; w->contacts = t;
       int tc = w->cap_prev; w->cap_prev = w->cap_contacts; w->cap_contacts = tc;
@@ -828,7 +908,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             b->vel = v_scale(b->vel, 1.0f / (1.0f + w->linear_damping * h));
             b->angvel = v_scale(b->angvel, 1.0f / (1.0f + w->angular_damping * h));
         }
-        for (int i = 0; i < w->nbodies; i++) iw[i] = body_inv_inertia_world(&w->bodies[i]);
+        for (int i = 0; i < w->nbodies; i++) iw[i] = w->bodies[i].inv_mass > 0 ? body_inv_inertia_world(&w->bodies[i]) : zero;
 
         // 2. each contact where its bodies are now: arms, depth, effective masses, target
         int nact = 0;
@@ -907,6 +987,8 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         }
     }
 
+    if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
+    if (w->sleep) fall_asleep(w, dt, forces);
     free(iw);
     free(act);
     for (int i = 0; i < w->nbodies; i++) w->bodies[i].force = w->bodies[i].torque = vec3(0, 0, 0);

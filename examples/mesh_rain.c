@@ -16,6 +16,8 @@
 //   bin/mesh_rain -rate 30 -max 1000 -size 50       more, smaller, faster
 //   bin/mesh_rain -obj models/torus.obj             only one model
 //   bin/mesh_rain -gpu off                          everything on the CPU
+//   bin/mesh_rain -max 1500 -endless off            the rain stops at 1500: the pile
+//                                                   settles and falls asleep (-sleep off: not)
 //
 // Keys: Space pause / resume the rain, + / - rain faster / slower, Esc quit.
 #define _POSIX_C_SOURCE 200809L
@@ -56,11 +58,12 @@ static Vec3 drop_spot(real size){
 
 static void usage(void){
     printf("usage: mesh_rain [-n width] [-h height] [-rate meshes/s] [-max bodies] [-size units]\n"
-           "                 [-obj model.obj|.ply] [-gpu on|off] [-seed n] [-autoquit seconds]\n");
+           "                 [-obj model.obj|.ply] [-gpu on|off] [-sleep on|off] [-endless on|off]\n"
+           "                 [-seed n] [-autoquit seconds]\n");
 }
 
 int main(int argc, char **argv){
-    int W = 800, H = 800, max_bodies = -1, use_gpu = 1, seed = 1;
+    int W = 800, H = 800, max_bodies = -1, use_gpu = 1, seed = 1, sleep_on = 1, endless = 1;
     double rate = 8, autoquit = 0;
     real size = 70;
     const char *only = NULL;
@@ -75,6 +78,8 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "-size")) size = (real)atof(v);
         else if (!strcmp(a, "-obj")) only = v;
         else if (!strcmp(a, "-gpu")) use_gpu = strcmp(v, "off") != 0;
+        else if (!strcmp(a, "-sleep")) sleep_on = strcmp(v, "off") != 0;
+        else if (!strcmp(a, "-endless")) endless = strcmp(v, "off") != 0;
         else if (!strcmp(a, "-seed")) seed = atoi(v);
         else if (!strcmp(a, "-autoquit")) autoquit = atof(v);
         else { fprintf(stderr, "unknown option %s\n", a); usage(); return 1; }
@@ -96,6 +101,7 @@ int main(int argc, char **argv){
     phys_init(&pw);                                   // no air: pw.fluid stays NULL
     Aabb room = {vec3(0, 0, 0), vec3(ROOM, ROOM, ROOM)};
     rigid_set_room(&pw.rigid, room);
+    pw.rigid.sleep = sleep_on;                         // bodies at rest fall asleep (PHYSICS.md 1.5)
 
     static const Vec3 colors[] = {{0.80, 0.55, 0.25}, {0.25, 0.55, 0.85}, {0.85, 0.30, 0.30},
                                   {0.35, 0.75, 0.40}, {0.90, 0.85, 0.30}, {0.70, 0.45, 0.80}};
@@ -184,8 +190,9 @@ int main(int argc, char **argv){
         t_last = t;
         if (dt > 1.0 / 20) dt = 1.0 / 20;              // a slow frame shows slow motion, no jump
 
-        // ---- the rain: new bodies until -max, then the oldest one taken back up
-        if (!paused){
+        // ---- the rain: new bodies until -max, then the oldest one taken back up (-endless off:
+        // the rain stops there, and the pile settles)
+        if (!paused && (endless || nring < max_bodies)){
             spawn_debt += rate * dt;
             while (spawn_debt >= 1){
                 spawn_debt -= 1;
@@ -253,8 +260,8 @@ int main(int argc, char **argv){
         if (t - t_title >= 0.5){
             fps = title_frames / (t - t_title);
             char title[256];
-            snprintf(title, sizeof(title), "mesh rain | %.0f fps (%.1f ms) | %d meshes, %.0f/s%s | physics %.2f ms%s, draw %.2f ms (CPU time) | %s",
-                     fps, 1000.0 / (fps > 0 ? fps : 1), nring, rate, paused ? " (paused)" : "",
+            snprintf(title, sizeof(title), "mesh rain | %.0f fps (%.1f ms) | %d meshes (%d asleep), %.0f/s%s | physics %.2f ms%s, draw %.2f ms (CPU time) | %s",
+                     fps, 1000.0 / (fps > 0 ? fps : 1), nring, rigid_sleeping(&pw.rigid), rate, paused ? " (paused)" : "",
                      phys_ms / frames, grigid ? " (GPU)" : "", draw_ms / frames,
                      gview ? gpu_message(gpu) : "CPU raster");
             window_set_title(win, title);
@@ -266,8 +273,8 @@ int main(int argc, char **argv){
             frames = 0;
         }
         if (autoquit > 0 && t - t_start > autoquit){
-            printf("autoquit after %.1f s: %.0f frames/s now (%.0f on average), %d meshes, physics on the %s (%.2f ms of CPU), "
-                   "drawn on the %s (%.2f ms of CPU)\n", t - t_start, fps, total_frames / (t - t_start), nring,
+            printf("autoquit after %.1f s: %.0f frames/s now (%.0f on average), %d meshes (%d asleep), physics on the %s (%.2f ms of CPU), "
+                   "drawn on the %s (%.2f ms of CPU)\n", t - t_start, fps, total_frames / (t - t_start), nring, rigid_sleeping(&pw.rigid),
                    grigid ? "GPU" : "CPU", last_phys, gview ? "GPU" : "CPU", last_draw);
             running = 0;
         }
