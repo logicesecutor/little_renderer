@@ -367,7 +367,8 @@ With `-sim on`:
 | `N` | drop a steel ball |
 | `T` | restart the demo |
 
-The title bar shows the mode and either the raster shading and frame time, or (path
+The title bar always starts with the frame rate (frames shown per second, and the time of
+one), then shows the mode and either the raster shading and frame time, or (path
 tracing) the acceleration structure, samples per pixel so far (/ the `-s` limit), time
 per full pass, current resolution (1/1 when still), bounces and speed.
 

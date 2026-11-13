@@ -252,6 +252,7 @@ static int raster_dirty = 1;           // rasterizer: draw a new frame
 static int showing_raster = 1;         // what the window shows right now
 static double t_start, t_prev, last_present, last_title, last_change;
 static long frames;          // frames shown (for -autoquit's frame rate)
+static long title_frames;    // frames shown when the title was last written (its frame rate)
 
 // where a frame's time goes on the CPU (printed by -autoquit), after the first second
 enum { PROF_SIM, PROF_ACCEL, PROF_MOVE, PROF_MORE, PROF_WAIT, PROF_RASTER, PROF_PRESENT, PROF_FRAME, PROF_N };
@@ -856,7 +857,13 @@ static int frame(void){
             size_t l = strlen(title);
             snprintf(title + l, sizeof(title) - l, " | GPU%s %s", gpu_offscreen(gpu) ? " (offscreen)" : "", gpu_message(gpu));
         }
-        window_set_title(win, title);
+        // the frame rate first, always: frames shown since the last title, every mode
+        double fps = (frames - title_frames) / (tn - last_title);
+        char shown[640];
+        snprintf(shown, sizeof(shown), "view | %.0f fps (%.1f ms)%s", fps, fps > 0 ? 1000.0 / fps : 0.0,
+                 strncmp(title, "view", 4) == 0 ? title + 4 : title);
+        window_set_title(win, shown);
+        title_frames = frames;
         last_title = tn;
     }
 #ifndef __EMSCRIPTEN__
