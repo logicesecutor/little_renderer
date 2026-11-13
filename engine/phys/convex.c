@@ -263,7 +263,7 @@ static int clip_poly(const Vec3 *in, int n, Vec3 d, real off, Vec3 *out){
 // the incident polygon clipped to the sides of the reference face (loop `ref`, counter-
 // clockwise around its outward normal nr, plane nr . x = dr); the points below it are the
 // contacts, with normal `cn` (from b to a)
-static int face_contacts(const Vec3 *ref, int nref, Vec3 nr, real dr, const Vec3 *inc, int ninc, Vec3 cn, ConvexContact *out){
+static int face_contacts(const Vec3 *ref, int nref, Vec3 nr, real dr, const Vec3 *inc, int ninc, Vec3 cn, real margin, ConvexContact *out){
     Vec3 a[MAXPOLY], b[MAXPOLY];
     int n = ninc < MAXPOLY ? ninc : MAXPOLY;
     memcpy(a, inc, (size_t)n * sizeof(Vec3));
@@ -277,7 +277,7 @@ static int face_contacts(const Vec3 *ref, int nref, Vec3 nr, real dr, const Vec3
     int m = 0;
     for (int k = 0; k < n; k++){
         real depth = dr - v_dot(nr, a[k]);
-        if (depth < 0) continue;
+        if (depth < -margin) continue;
         c[m].p = v_add(a[k], v_scale(nr, 0.5f * depth));
         c[m].n = cn;
         c[m].depth = depth;
@@ -325,19 +325,19 @@ static real min_along(const Vec3 *v, int n, Vec3 d){
 #define PREFER_B(sa, sb) ((sa) < 1.02f * (sb) - 0.01f)
 #define PREFER_EDGE(sf, se) ((sf) < 1.1f * (se) - 0.1f)
 
-int convex_collide(const WorldConvex *A, const WorldConvex *B, ConvexContact *out){
+int convex_collide(const WorldConvex *A, const WorldConvex *B, real margin, ConvexContact *out){
     const Convex *ca = A->c, *cb = B->c;
     real sa = -1e30f, sb = -1e30f, se = -1e30f;
     int fa = -1, fb = -1, ea = -1, eb = -1;
     Vec3 le = vec3(0, 1, 0);
     for (int f = 0; f < ca->nf; f++){
         real s = min_along(B->v, cb->nv, A->n[f]) - A->d[f];
-        if (s > 0) return 0;
+        if (s > margin) return 0;
         if (s > sa){ sa = s; fa = f; }
     }
     for (int f = 0; f < cb->nf; f++){
         real s = min_along(A->v, ca->nv, B->n[f]) - B->d[f];
-        if (s > 0) return 0;
+        if (s > margin) return 0;
         if (s > sb){ sb = s; fb = f; }
     }
     for (int i = 0; i < ca->ne; i++){
@@ -360,7 +360,7 @@ int convex_collide(const WorldConvex *A, const WorldConvex *B, ConvexContact *ou
             L = v_scale(L, 1 / ll);
             if (v_dot(L, v_sub(pa, A->center)) < 0) L = v_neg(L);
             real s = v_dot(L, v_sub(pb, pa));
-            if (s > 0) return 0;
+            if (s > margin) return 0;
             if (s > se){ se = s; ea = i; eb = j; le = L; }
         }
     }
@@ -379,15 +379,15 @@ int convex_collide(const WorldConvex *A, const WorldConvex *B, ConvexContact *ou
         int fi = incident_face(A, B->n[fb]);
         face_loop(B, fb, ref);
         face_loop(A, fi, inc);
-        return face_contacts(ref, cb->f[fb].count, B->n[fb], B->d[fb], inc, ca->f[fi].count, B->n[fb], out);
+        return face_contacts(ref, cb->f[fb].count, B->n[fb], B->d[fb], inc, ca->f[fi].count, B->n[fb], margin, out);
     }
     int fi = incident_face(B, A->n[fa]);
     face_loop(A, fa, ref);
     face_loop(B, fi, inc);
-    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], inc, cb->f[fi].count, v_neg(A->n[fa]), out);
+    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], inc, cb->f[fi].count, v_neg(A->n[fa]), margin, out);
 }
 
-int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], ConvexContact *out){
+int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], real margin, ConvexContact *out){
     const Convex *ca = A->c;
     Vec3 nt = v_cross(v_sub(t[1], t[0]), v_sub(t[2], t[0]));
     real ln = v_len(nt);
@@ -398,13 +398,13 @@ int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], ConvexContact
     real sp = min_along(A->v, ca->nv, nt) - dt, sm = min_along(A->v, ca->nv, v_neg(nt)) + dt;
     real st = sp > sm ? sp : sm;
     Vec3 ns = sp > sm ? nt : v_neg(nt);   // pointing towards a
-    if (st > 0) return 0;
+    if (st > margin) return 0;
     real sa = -1e30f, se = -1e30f;
     int fa = -1, ea = -1, ek = -1;
     Vec3 le = nt;
     for (int f = 0; f < ca->nf; f++){
         real s = min_along(t, 3, A->n[f]) - A->d[f];
-        if (s > 0) return 0;
+        if (s > margin) return 0;
         if (s > sa){ sa = s; fa = f; }
     }
     // a's edges against the triangle's: only a's edges on its outline seen along the
@@ -422,7 +422,7 @@ int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], ConvexContact
             L = v_scale(L, 1 / ll);
             if (v_dot(L, v_add(na, nb)) < 0) L = v_neg(L);
             real s = min_along(t, 3, L) - v_dot(L, pa);
-            if (s > 0) return 0;
+            if (s > margin) return 0;
             if (s > se){ se = s; ea = i; ek = k; le = L; }
         }
     }
@@ -442,10 +442,10 @@ int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], ConvexContact
         if (v_dot(ns, nt) < 0){ tl[1] = t[2]; tl[2] = t[1]; }
         int fi = incident_face(A, ns);
         face_loop(A, fi, inc);
-        return face_contacts(tl, 3, ns, v_dot(ns, t[0]), inc, ca->f[fi].count, ns, out);
+        return face_contacts(tl, 3, ns, v_dot(ns, t[0]), inc, ca->f[fi].count, ns, margin, out);
     }
     face_loop(A, fa, ref);
-    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], t, 3, v_neg(A->n[fa]), out);
+    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], t, 3, v_neg(A->n[fa]), margin, out);
 }
 
 // the point of triangle a b c closest to p (Ericson, Real-Time Collision Detection 5.1.5)
@@ -470,11 +470,11 @@ static Vec3 closest_on_triangle(Vec3 p, Vec3 a, Vec3 b, Vec3 c){
     return v_add(a, v_add(v_scale(ab, vb * den), v_scale(ac, vc * den)));
 }
 
-int triangle_collide_sphere(Vec3 c, real r, const Vec3 t[3], ConvexContact *out){
+int triangle_collide_sphere(Vec3 c, real r, const Vec3 t[3], real margin, ConvexContact *out){
     Vec3 q = closest_on_triangle(c, t[0], t[1], t[2]);
     Vec3 d = v_sub(c, q);
     real l2 = v_dot(d, d);
-    if (l2 >= r * r) return 0;
+    if (l2 >= (r + margin) * (r + margin)) return 0;
     real l = r_sqrt(l2);
     Vec3 n;
     if (l > 1e-4f) n = v_scale(d, 1 / l);
@@ -486,12 +486,12 @@ int triangle_collide_sphere(Vec3 c, real r, const Vec3 t[3], ConvexContact *out)
     return 1;
 }
 
-int convex_collide_sphere(Vec3 c, real r, const WorldConvex *B, ConvexContact *out){
+int convex_collide_sphere(Vec3 c, real r, const WorldConvex *B, real margin, ConvexContact *out){
     const Convex *cb = B->c;
     real dmax = -1e30f;
     int fm = 0;
     for (int f = 0; f < cb->nf; f++){ real s = v_dot(B->n[f], c) - B->d[f]; if (s > dmax){ dmax = s; fm = f; } }
-    if (dmax > r) return 0;
+    if (dmax > r + margin) return 0;
     if (dmax <= 0){                              // the centre is inside: out by the nearest face
         out[0].n = B->n[fm];
         out[0].depth = r - dmax;
@@ -511,7 +511,7 @@ int convex_collide_sphere(Vec3 c, real r, const WorldConvex *B, ConvexContact *o
             if (d < best){ best = d; bq = q; }
         }
     }
-    if (best >= r) return 0;
+    if (best >= r + margin) return 0;
     out[0].n = best > 1e-5f ? v_scale(v_sub(c, bq), 1 / best) : B->n[fm];
     out[0].depth = r - best;
     out[0].p = bq;

@@ -55,14 +55,16 @@ void convex_place(WorldConvex *w, const Convex *c, Vec3 pos, Mat3 rot, Vec3 *v, 
 typedef struct { Vec3 p, n; real depth; } ConvexContact;   // n points from b towards a
 #define CONVEX_MAX_CONTACTS 4
 
+// The contacts of two shapes closer than `margin` (0 = only touching ones): depth < 0 is a
+// gap (a speculative contact, phys/rigid.c: the solver lets the gap close, no more).
 // a against b; the contacts found (0 = apart)
-int convex_collide(const WorldConvex *a, const WorldConvex *b, ConvexContact *out);
+int convex_collide(const WorldConvex *a, const WorldConvex *b, real margin, ConvexContact *out);
 // a against the triangle t (world): two-sided
-int convex_collide_triangle(const WorldConvex *a, const Vec3 t[3], ConvexContact *out);
+int convex_collide_triangle(const WorldConvex *a, const Vec3 t[3], real margin, ConvexContact *out);
 // a sphere against a polyhedron (1 contact or 0)
-int convex_collide_sphere(Vec3 center, real radius, const WorldConvex *b, ConvexContact *out);
+int convex_collide_sphere(Vec3 center, real radius, const WorldConvex *b, real margin, ConvexContact *out);
 // a sphere against a triangle (two-sided)
-int triangle_collide_sphere(Vec3 center, real radius, const Vec3 t[3], ConvexContact *out);
+int triangle_collide_sphere(Vec3 center, real radius, const Vec3 t[3], real margin, ConvexContact *out);
 // keeps at most `keep` of n contacts: the deepest, then those spreading the most area
 int convex_reduce(ConvexContact *c, int n, int keep);
 

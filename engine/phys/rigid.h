@@ -3,12 +3,15 @@
 // Units are the scene's: the Cornell box is 555 units, think of them as centimetres, so
 // gravity is 981 units / s^2 and densities are in g / cm^3 (water = 1).
 //
-// One step (rigid_step):
-//   1. velocities += (gravity + external forces / mass) * dt   (semi-implicit Euler)
-//   2. find the contacts (body-body and body-wall)
-//   3. sequential impulses: push the bodies apart at every contact, again and again
+// One step (rigid_steps, in substeps):
+//   1. find the contacts (body-body and body-wall), once, including the pairs that are not
+//      touching yet but may within the step (speculative contacts)
+//   then each substep h:
+//   2. velocities += (gravity + external forces / mass) * h   (semi-implicit Euler)
+//   3. the contacts moved with their bodies (their points in each body's frame), then
+//      sequential impulses: push the bodies apart at every contact, again and again
 //      (iterations), so that they stop approaching; friction and bounce included
-//   4. positions += velocity * dt, orientations += angular velocity * dt
+//   4. positions += velocity * h, orientations += angular velocity * h
 #ifndef LR_RIGID_H
 #define LR_RIGID_H
 
@@ -57,10 +60,13 @@ typedef struct {
 typedef struct {
     int a, b;                // bodies; b = -1 for a wall of the room
     Vec3 p, n;               // contact point; normal, pointing from b towards a
-    real depth;              // how far they overlap
+    real depth;              // how far they overlap (< 0: a gap, a speculative contact)
+    Vec3 la, lb;             // the point in a's frame and in b's (a wall: the world point)
+    real depth0;             // the depth when it was found
+    real vn0;                // the approach speed it is to bounce from (0 once it has)
     // solver state
     Vec3 ra, rb, t1, t2;
-    real mass_n, mass_t1, mass_t2, bias, jn, jt1, jt2;
+    real mass_n, mass_t1, mass_t2, bias, mu, jn, jt1, jt2;
 } Contact;
 
 typedef struct {
@@ -110,6 +116,9 @@ int body_contains(const Body *b, Vec3 p);
 // apply an impulse (momentum change) at world point p
 void body_apply_impulse(Body *b, Vec3 impulse, Vec3 p);
 
+// dt in `substeps` substeps, the contacts found once (forces: per body, added to its own
+// force for the whole step, or NULL); rigid_step = rigid_steps(w, dt, 1, NULL)
+void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces);
 void rigid_step(RigidWorld *w, real dt);
 
 // diagnostics: total kinetic energy and momentum

@@ -79,9 +79,11 @@ them is cheap. `Quat` (`w + xi + yj + zk`) has `quat_axis_angle`, `quat_mul`,
 
 ### 1.2 Collision detection
 
-Every step, every pair of bodies whose bounding spheres overlap is tested, and every body
-against the six walls of the room. Each touching pair gives one or more **contacts**: a
-point `p`, a normal `n` (from body b towards body a) and a penetration depth.
+Once per physics step (not per substep: 1.3), every pair of bodies whose bounding spheres
+come within a margin of each other is tested, and every body against the six walls of the
+room. Each pair that touches, or is closer than the margin, gives one or more **contacts**:
+a point `p`, a normal `n` (from body b towards body a) and a depth (how far they overlap;
+negative: the gap between them, a *speculative* contact, 1.3).
 
 | pair | method |
 |---|---|
@@ -166,8 +168,8 @@ Three additions make it behave:
 
 | term | what it does | value |
 |---|---|---|
-| restitution | if the bodies approach faster than 60 cm/s, the target is `v_rel · n = −e · v_before` (they bounce back with e of their speed); `e` = the larger of the two bodies' | balls 0.45–0.6, walls 0.4 |
-| Baumgarte bias | overlap left over (it always is: steps are discrete) is removed gradually: the target separating speed is `0.2 · (depth − slop) / dt` | slop 0.5 cm |
+| restitution | if the bodies approached faster than 60 cm/s when the step began, once they touch the target is `v_rel · n = −e · v_before` (they bounce back with e of that speed; once per contact); `e` = the larger of the two bodies' | balls 0.45–0.6, walls 0.4 |
+| Baumgarte bias | overlap left over (it always is: steps are discrete) is removed gradually: the target separating speed is `0.2 · (depth − slop) / dt`, at most 300 cm/s | slop 0.5 cm |
 | friction | two tangent directions `t1`, `t2`; the same kind of impulse, but clamped to `±μ jn` (Coulomb's law: friction at most μ times the normal force), `μ = √(μa μb)` | 0.5 (balloons 0.3) |
 
 **Warm starting.** The contacts of the previous step are kept. A new contact between the
@@ -177,9 +179,43 @@ same impulses step after step, so the iterations only have to correct small chan
 `test_physics` a stack of 3 boxes and a ball goes from sinking and drifting 1.4 cm in 3 s
 (without warm starting, with the old corner-based contacts) to 0.0003 cm.
 
-**Substeps.** `PhysWorld` runs the rigid bodies 4 times per physics step (`substeps`), at
-1/240 s for the default 1/60 s step: stiffer contacts and no tunnelling for a steel ball
-falling at 10 m/s (4 cm per substep, against a radius of 25–40 cm).
+**Substeps.** `PhysWorld` runs the solver 4 times per physics step (`substeps`, in
+`rigid_steps`), at 1/240 s for the default 1/60 s step: stiffer contacts and no tunnelling
+for a steel ball falling at 10 m/s (4 cm per substep, against a radius of 25–40 cm).
+
+**Contacts found once per step** (Catto's "soft step", Box2D v3). Looking for contacts is
+the costly part (the hulls' separating axes, the meshes' triangles), so it is done once per
+step, and the 4 substeps follow the contacts instead of finding them again. Each contact
+keeps its point in the frame of each body (`la`, `lb`; a wall's: the world point) and its
+depth when found (`depth0`). In each substep both points are moved with their bodies, and
+
+```
+depth = depth0 − ((xa + Ra la) − (xb + Rb lb)) · n
+```
+
+the depth when found minus how far the two points have moved apart along the normal (the
+normal stays as found). For the bodies' motion within one step (millimetres, a few degrees)
+this is what a new search would find.
+
+**Speculative contacts.** A pair that does not touch at the start of the step may touch
+before its end: its contacts must be there from the start. So the pairs are tested with a
+margin, how far they can close in the step:
+
+```
+margin = 0.1 + dt (closing speed + |ωa| ra + |ωb| rb),   at most 0.1 + (ra + rb) / 2
+```
+
+(the closing speed along the line between their centres, the spin of their outermost
+points; `ra`, `rb` their bounding radii; against a wall the whole speed). A contact with a
+gap (depth < 0) lets the bodies approach by at most the gap in the substep: its target is
+`v_rel · n ≥ depth / h`, which is a pull of nothing until the gap would close, and exactly
+what stops them at the surface when it would. The iterations skip the gaps that cannot
+close in the substep even at twice the speed (most of a pile's), and a gap does not bounce
+until it has closed: the bounce comes in the next substep (or the next step: a contact
+stopped in the last substep remembers its speed, `vn0`), from the speed when the step
+began. Bouncing a gap that is about to close, or bouncing from the speed after the solver
+has stopped the bodies, made piles jump and blow up, as did an uncapped push out (a light
+balloon squeezed into a wall by heavy balls was shot out ever faster).
 
 ### 1.4 The bodies on the GPU (`gpu/rigid_gpu.c`)
 
@@ -191,17 +227,19 @@ and in the tests every step waits for it, `gpu_rigid_set_wait`). A body changed 
 (a new one, one pushed by `phys_blast`, one the program moved) has `Body.dirty` set and is
 sent again.
 
-Each substep is a chain of compute passes:
+Each step is a chain of compute passes, the contacts once (with margins, 1.3) and the rest
+in each substep:
 
-| pass | what it does |
-|---|---|
-| forces | gravity, the air's drag and buoyancy, damping |
-| pairs | one thread per pair of bodies (n²/2) tests the bounding spheres and sorts the pair into three lists: simple (balls and boxes), hulls, body–mesh |
-| contacts | the simple pairs one thread each (`rigid.c`'s tests); hull pairs one workgroup each, 64 threads sharing the separating-axis search (`convex.c`'s SAT and face clipping); the walls |
-| meshes | for each body near a fixed mesh one workgroup walks the mesh's tree breadth first and lists the triangles near the body; then one thread per triangle runs the test, and the best 4 contacts of each pair are kept |
-| contact lists | each body's contacts: count, prefix sum, fill |
-| solve | the contacts' impulses, 16 iterations, warm started |
-| move | integrate |
+| pass | when | what it does |
+|---|---|---|
+| forces | every substep | gravity, the air's drag and buoyancy, damping |
+| pairs | once per step | one thread per pair of bodies (n²/2) tests the bounding spheres (with the margin) and sorts the pair into three lists: simple (balls and boxes), hulls, body–mesh |
+| contacts | once per step | the simple pairs one thread each (`rigid.c`'s tests); hull pairs one workgroup each, 64 threads sharing the separating-axis search (`convex.c`'s SAT and face clipping); the walls |
+| meshes | once per step | for each body near a fixed mesh one workgroup walks the mesh's tree breadth first and lists the triangles near the body; then one thread per triangle runs the test, and the best 4 contacts of each pair are kept |
+| contact lists | once per step | each body's contacts: count, prefix sum, fill |
+| prepare | every substep | each contact's points where its bodies are now, its depth, masses and target (as the CPU's) |
+| solve | every substep | the contacts' impulses, 16 iterations, warm started |
+| move | every substep | integrate |
 
 The lists' sizes are only known on the GPU, so their dispatches are indirect (a small
 kernel writes the workgroup counts).
@@ -638,12 +676,18 @@ boxes and hulls; `test_gpu_rigid`):
 
 | bodies | CPU (one thread) | GPU |
 |---|---|---|
-| 64 | 0.53 ms | 0.80 ms |
-| 256 | 2.5 ms | 0.93 ms |
-| 1024 | 17.9 ms | 1.7 ms |
-| 2048 | | 2.8 ms |
+| 64 | 0.67 ms | 0.67 ms |
+| 256 | 2.9 ms | 0.80 ms |
+| 1024 | 20.3 ms | 1.07 ms |
+| 2048 | | 1.60 ms |
 
-Below about 100 bodies the GPU's fixed cost (some 15 dispatches per substep) is larger than
+(Since the contacts are found once per step, 1.3: the GPU 1.6–1.8 times faster than when
+they were found in every substep, 1.73 → 1.07 ms at 1024 bodies; the CPU about 8% slower,
+18.8 → 20.3 ms: its balls' and boxes' tests are cheap, and the speculative contacts give
+the solver more contacts. With hulls the gain is larger: 1500 hulls in `mesh_rain`, 8.9 →
+4.7 ms per step on the GPU, their contacts 7.1 → 2.6 ms.)
+
+Below about 64 bodies the GPU's fixed cost (some 10 dispatches per substep) is larger than
 the work; it still takes the bodies off the CPU, which the live viewer needs: with 600
 bodies `view -sim on` draws 164 frames per second (the screen's limit) with the bodies on
 the GPU, 142 with them on the CPU (19 ms of physics per frame). The dragons
@@ -690,7 +734,8 @@ the time of every pass at the end (natively; WEB.md 3).
 - R. Bridson, *Fluid Simulation for Computer Graphics*, 2nd ed., CRC Press 2015.
 - W. L. Briggs, V. E. Henson, S. F. McCormick, *A Multigrid Tutorial*, 2nd ed., SIAM 2000.
 - E. Catto, "Iterative Dynamics with Temporal Coherence", GDC 2005; Box2D (contact
-  clipping, warm starting).
+  clipping, warm starting); "Solver2D", 2024, and Box2D v3 (the soft step: contacts found
+  once per step, followed through the substeps; speculative contacts; the push-out cap).
 - D. Baraff, "Physically Based Modeling: Rigid Body Simulation", SIGGRAPH course notes 2001.
 - R. Tonge, F. Benevolenski, A. Voroshilov, "Mass Splitting for Jitter-Free Parallel Rigid
   Body Simulation", SIGGRAPH 2012.

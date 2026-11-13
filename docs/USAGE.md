@@ -517,6 +517,7 @@ These have no command-line option. Change them and run `make` again.
 | turn speed / mouse sensitivity | `apps/view.c` | 1.5 rad/s / 0.004 rad per pixel |
 | milestone image size | `examples/raster_milestones.c` | 640×480 |
 | contact slop, Baumgarte factor, bounce threshold | `engine/phys/rigid.c` (`CONTACT_SLOP`, `BAUMGARTE`, `BOUNCE_THRESHOLD`) | 0.5 / 0.2 / 60 |
+| speculative contacts: smallest margin, fastest push out | `engine/phys/rigid.c` (`SPECULATIVE_MIN`, `MAX_PUSH`; the GPU's copies in `gpu/rigid_gpu.c`) | 0.1 / 300 |
 | solver iterations, damping, wall restitution / friction | `engine/phys/rigid.c`, `rigid_init` | 16, angular 0.1 /s, 0.4 / 0.5 |
 | rigid substeps, air density, drag coefficients | `engine/phys/world.c`, `phys_init` | 4, 0.0012, sphere 0.47 / box 1.05 |
 | pressure V-cycles, wind rate, which faces are open | `engine/phys/fluid.c`, `fluid_create` | 5, 0.3 /s, front |

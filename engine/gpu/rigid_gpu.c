@@ -22,7 +22,11 @@ void gpu_rigid_destroy(GpuRigid *gr){ (void)gr; }
 // the body's frame), f (unused) and t (x: a hull's or mesh's shape, its index in G). Contacts (struct Contact, 8 vec4), as rigid.c's: the
 // point (w: depth), the normal from b to a (w: a), ra (w: b, NONE = a wall), rb (w: bias), the
 // tangents (w: the normal's and the first tangent's effective mass), j = the accumulated
-// impulses (w: the second tangent's mass), imp = this iteration's impulse (w: friction).
+// impulses (w: the second tangent's mass), imp = this iteration's impulse (w: friction), la =
+// the point in a's frame (w: the depth when found), lb = in b's (a wall: the world point;
+// w: the approach speed it is to bounce from, 0 once it has: rigid.c's vn0).
+// Contacts are found once per physics step, with a margin (speculative contacts, as rigid.c),
+// and followed through the substeps by la and lb (K_PREP).
 // cnt[0] counts the contacts, cnt[1 + i] those of body i; off[] (n + 1) are where each body's
 // contacts start in L[], as 2 c (it is a) or 2 c + 1 (it is b).
 static const char *RHEAD = WGSL(
@@ -32,14 +36,32 @@ struct RP {
     g: vec4f,      /* gravity, linear damping */
     lo: vec4f,     /* the room; w = the walls' restitution */
     hi: vec4f,     /* w = the walls' friction */
-    d: vec4f,      /* angular damping */
-    m: vec4u,      /* the unit box's shape in G (boxes against hulls), shapes, room in each pair list */
+    d: vec4f,      /* angular damping, the whole step, the smallest margin (the contacts' margins), the fastest push out */
+    m: vec4u,      /* the unit box's shape in G (boxes against hulls), shapes, room in each pair list,
+                      the substep (contacts are found in the first) */
 };
 @group(0) @binding(0) var<uniform> P: RP;
 struct Body { pos: vec4f, rot: vec4f, vel: vec4f, ang: vec4f, half: vec4f, iner: vec4f, f: vec4f, t: vec4f };
-struct Contact { p: vec4f, n: vec4f, ra: vec4f, rb: vec4f, t1: vec4f, t2: vec4f, j: vec4f, imp: vec4f };
+struct Contact { p: vec4f, n: vec4f, ra: vec4f, rb: vec4f, t1: vec4f, t2: vec4f, j: vec4f, imp: vec4f, la: vec4f, lb: vec4f };
 const NONE: u32 = 0xffffffffu;
 fn tid(gid: vec3u, nw: vec3u) -> u32 { return gid.x + gid.y * nw.x * 64u; }
+fn body_radius(b: Body) -> f32 { return select(length(b.half.xyz), b.half.x, b.pos.w < 0.5); }
+/* how far apart a pair may be and still get a contact (rigid.c's pair_margin): as far as
+   they can close in a step, plus a little; at most half their sizes */
+fn pair_margin(a: Body, b: Body, wall: bool) -> f32 {
+    var closing = length(a.vel.xyz);
+    var r = body_radius(a);
+    var spin = length(a.ang.xyz) * r;
+    if (!wall) {
+        let dv = a.vel.xyz - b.vel.xyz;
+        let d = a.pos.xyz - b.pos.xyz;
+        let l = length(d);
+        closing = select(length(dv), max(-dot(dv, d) / l, 0.0), l > 0.0);
+        spin += length(b.ang.xyz) * body_radius(b);
+        r += body_radius(b);
+    }
+    return min(P.d.z + P.d.y * (closing + spin), P.d.z + 0.5 * r);
+}
 fn qmat(q: vec4f) -> mat3x3f {
     let x = q.x; let y = q.y; let z = q.z; let w = q.w;
     return mat3x3f(vec3f(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),
@@ -68,9 +90,10 @@ static const char *K_VEL = WGSL(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
-    if (i == 0u) { atomicStore(&cnt[0], 0u); for (var l = 0u; l < 4u; l++) { atomicStore(&pc[l], 0u); } }
+    let first = P.m.w == 0u;
+    if (i == 0u && first) { atomicStore(&cnt[0], 0u); for (var l = 0u; l < 4u; l++) { atomicStore(&pc[l], 0u); } }
     if (i >= P.n.x) { return; }
-    atomicStore(&cnt[1u + i], 0u);
+    if (first) { atomicStore(&cnt[1u + i], 0u); }
     var b = B[i];
     if (b.vel.w == 0.0) { return; }
     let h = P.h.x;
@@ -94,6 +117,14 @@ static const char *K_NARROW = WGSL(
 @group(0) @binding(4) var<storage, read> pairs: array<vec2u>;
 @group(0) @binding(5) var<storage, read_write> pc: array<atomic<u32>>;
 
+/* the margin of the pair being tested (set before its tests) */
+var<private> MG: f32;
+fn margin_of(ia: u32, ib: u32) -> f32 {
+    let a = B[ia];
+    if (ib == NONE) { return pair_margin(a, a, true); }
+    return pair_margin(a, B[ib], false);
+}
+
 fn add_contact(a: u32, b: u32, p: vec3f, n: vec3f, depth: f32) {
     let k = atomicAdd(&cnt[0], 1u);
     if (k >= P.n.y) { return; }
@@ -101,6 +132,9 @@ fn add_contact(a: u32, b: u32, p: vec3f, n: vec3f, depth: f32) {
     c.p = vec4f(p, depth);
     c.n = vec4f(n, bitcast<f32>(a));
     c.ra = vec4f(0.0, 0.0, 0.0, bitcast<f32>(b));
+    let A = B[a];
+    c.la = vec4f(transpose(qmat(A.rot)) * (p - A.pos.xyz), depth);
+    if (b != NONE) { let Bb = B[b]; c.lb = vec4f(transpose(qmat(Bb.rot)) * (p - Bb.pos.xyz), 0.0); } else { c.lb = vec4f(p, 0.0); }
     C[k] = c;
     atomicAdd(&cnt[1u + a], 1u);
     if (b != NONE) { atomicAdd(&cnt[1u + b], 1u); }
@@ -118,14 +152,14 @@ fn walls(ia: u32) {
         let n = ns[k];
         if (b.pos.w < 0.5) {
             let d = dot(n, b.pos.xyz) - offs[k] - b.half.x;
-            if (d < 0.0) { add_contact(ia, NONE, b.pos.xyz - n * b.half.x, n, -d); }
+            if (d < MG) { add_contact(ia, NONE, b.pos.xyz - n * b.half.x, n, -d); }
         } else {
             for (var i = 0u; i < 8u; i++) {
                 let l = vec3f(select(-b.half.x, b.half.x, (i & 1u) != 0u), select(-b.half.y, b.half.y, (i & 2u) != 0u),
                               select(-b.half.z, b.half.z, (i & 4u) != 0u));
                 let c = b.pos.xyz + r * l;
                 let d = dot(n, c) - offs[k];
-                if (d < 0.0) { add_contact(ia, NONE, c, n, -d); }
+                if (d < MG) { add_contact(ia, NONE, c, n, -d); }
             }
         }
     }
@@ -137,7 +171,7 @@ fn sphere_sphere(ia: u32, ib: u32) {
     let d = a.pos.xyz - b.pos.xyz;
     let r = a.half.x + b.half.x;
     let l2 = dot(d, d);
-    if (l2 >= r * r) { return; }
+    if (l2 >= (r + MG) * (r + MG)) { return; }
     let l = sqrt(l2);
     let n = select(vec3f(0.0, 1.0, 0.0), d / l, l > 1e-6);
     let depth = r - l;
@@ -157,7 +191,7 @@ fn sphere_box(ia: u32, ib: u32) {
     var nl = vec3f(0.0);
     var depth = 0.0;
     if (l2 > 1e-12) {
-        if (l2 >= rad * rad) { return; }
+        if (l2 >= (rad + MG) * (rad + MG)) { return; }
         let l = sqrt(l2);
         nl = diff / l;
         depth = rad - l;
@@ -204,7 +238,7 @@ fn box_box(ia: u32, ib: u32) {
         let pb = b.half.x * abs(dot(rb[0], L)) + b.half.y * abs(dot(rb[1], L)) + b.half.z * abs(dot(rb[2], L));
         let dist = dot(t, L);
         let overlap = pa + pb - abs(dist);
-        if (overlap < 0.0) { return; }
+        if (overlap < -MG) { return; }
         var score = overlap * 1.1 + 0.1;
         if (i < 3) { score = overlap; } else if (i < 6) { score = overlap * 1.02 + 0.01; }
         if (score < best) {
@@ -262,7 +296,7 @@ fn box_box(ia: u32, ib: u32) {
         var added = 0u;
         for (var q = 0u; q < n; q++) {
             let sep = dot(nref, poly[q]) - face;
-            if (sep > 0.0) { continue; }
+            if (sep > MG) { continue; }
             add_contact(ia, ib, poly[q] - nref * (0.5 * sep), bn, -sep);
             added++;
         }
@@ -329,7 +363,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let rai = select(length(a.half.xyz), a.half.x, a.pos.w < 0.5);
     let rbj = select(length(b.half.xyz), b.half.x, b.pos.w < 0.5);
     let d = a.pos.xyz - b.pos.xyz;
-    if (dot(d, d) > (rai + rbj) * (rai + rbj)) { return; }
+    let reach = rai + rbj + pair_margin(a, b, false);
+    if (dot(d, d) > reach * reach) { return; }
     if (a.pos.w > 2.5 && b.pos.w > 2.5) { return; }
     if (a.pos.w > 2.5) { push(2u, j, i); }
     else if (b.pos.w > 2.5) { push(2u, i, j); }
@@ -379,6 +414,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let pr = pairs[k];
     let i = pr.x;
     let j = pr.y;
+    MG = margin_of(i, j);
     if (j == NONE) { walls(i); return; }
     let sa = B[i].pos.w < 0.5;
     let sb = B[j].pos.w < 0.5;
@@ -425,6 +461,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let pr = pairs[P.m.z + k];
     let ia = pr.x;
     let ib = pr.y;
+    MG = margin_of(ia, ib);
     if (ib == NONE) { if (lid == 0u) { hull_walls(ia); } return; }
     let ka = u32(B[ia].pos.w + 0.5);
     let kb = u32(B[ib].pos.w + 0.5);
@@ -437,7 +474,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     var bi = 0u;
     for (var f = lid; f < A.nf; f += 64u) {
         let s = min_along(S, sn(A, f)) - sd(A, f);
-        if (s > 0.0) { wsep = 1u; }
+        if (s > MG) { wsep = 1u; }
         if (s > best) { best = s; bi = f; }
     }
     ws[lid] = best; wi[lid] = bi; wj[lid] = 0u; wl[lid] = vec3f(0.0);
@@ -450,7 +487,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     bi = 0u;
     for (var f = lid; f < S.nf; f += 64u) {
         let s = min_along(A, sn(S, f)) - sd(S, f);
-        if (s > 0.0) { wsep = 1u; }
+        if (s > MG) { wsep = 1u; }
         if (s > best) { best = s; bi = f; }
     }
     workgroupBarrier();
@@ -490,7 +527,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             L = L / ll;
             if (dot(L, pa - A.pos) < 0.0) { L = -L; }
             let s = dot(L, pb - pa);
-            if (s > 0.0) { wsep = 1u; }
+            if (s > MG) { wsep = 1u; }
             if (s > best) { best = s; bi = i; bj = j; bl = L; }
         }
     }
@@ -644,7 +681,7 @@ fn face_contacts(rf: ptr<function, array<vec3f, 32>>, nref: u32, nr: vec3f, dr: 
     }
     for (var k = 0u; k < n; k++) {
         let depth = dr - dot(nr, a[k]);
-        if (depth >= 0.0) { cand(a[k] + nr * (0.5 * depth), ncon, depth); }
+        if (depth >= -MG) { cand(a[k] + nr * (0.5 * depth), ncon, depth); }
     }
 }
 
@@ -694,12 +731,12 @@ fn collide_convex(ia: u32, ib: u32) {
     var le = vec3f(0.0, 1.0, 0.0);
     for (var f = 0u; f < A.nf; f++) {
         let s = min_along(S, sn(A, f)) - sd(A, f);
-        if (s > 0.0) { return; }
+        if (s > MG) { return; }
         if (s > sa) { sa = s; fa = f; }
     }
     for (var f = 0u; f < S.nf; f++) {
         let s = min_along(A, sn(S, f)) - sd(S, f);
-        if (s > 0.0) { return; }
+        if (s > MG) { return; }
         if (s > sb) { sb = s; fb = f; }
     }
     for (var i = 0u; i < A.ne; i++) {
@@ -728,7 +765,7 @@ fn collide_convex(ia: u32, ib: u32) {
             L = L / ll;
             if (dot(L, pa - A.pos) < 0.0) { L = -L; }
             let s = dot(L, pb - pa);
-            if (s > 0.0) { return; }
+            if (s > MG) { return; }
             if (s > se) { se = s; ea = i; eb = j; le = L; }
         }
     }
@@ -791,7 +828,7 @@ fn sphere_convex(ia: u32, ib: u32) {
     var dmax = -1e30;
     var fm = 0u;
     for (var f = 0u; f < S.nf; f++) { let s = dot(sn(S, f), c) - sd(S, f); if (s > dmax) { dmax = s; fm = f; } }
-    if (dmax > r) { return; }
+    if (dmax > r + MG) { return; }
     if (dmax <= 0.0) { add_contact(ia, ib, c - sn(S, fm) * dmax, sn(S, fm), r - dmax); return; }
     var best = 1e30;
     var bq = c;
@@ -806,7 +843,7 @@ fn sphere_convex(ia: u32, ib: u32) {
             if (d < best) { best = d; bq = q; }
         }
     }
-    if (best >= r) { return; }
+    if (best >= r + MG) { return; }
     add_contact(ia, ib, bq, select(sn(S, fm), (c - bq) / best, best > 1e-5), r - best);
 }
 
@@ -821,7 +858,7 @@ fn hull_walls(ia: u32) {
         for (var i = 0u; i < S.nv; i++) {
             let v = sv(S, i);
             let d = dot(ns[k], v) - offs[k];
-            if (d < 0.0) { cand(v, ns[k], -d); }
+            if (d < MG) { cand(v, ns[k], -d); }
         }
         flush(ia, NONE);
     }
@@ -839,7 +876,7 @@ fn convex_triangle(A: Shape, t0: vec3f, t1: vec3f, t2: vec3f) {
     let sm = min_along(A, -nt) + dt;
     let st = max(sp, sm);
     let ns = select(-nt, nt, sp > sm);
-    if (st > 0.0) { return; }
+    if (st > MG) { return; }
     var sa = -1e30;
     var se = -1e30;
     var fa = 0u;
@@ -849,7 +886,7 @@ fn convex_triangle(A: Shape, t0: vec3f, t1: vec3f, t2: vec3f) {
     for (var f = 0u; f < A.nf; f++) {
         let n = sn(A, f);
         let s = min(min(dot(t0, n), dot(t1, n)), dot(t2, n)) - sd(A, f);
-        if (s > 0.0) { return; }
+        if (s > MG) { return; }
         if (s > sa) { sa = s; fa = f; }
     }
     for (var k = 0u; k < 3u; k++) {
@@ -867,7 +904,7 @@ fn convex_triangle(A: Shape, t0: vec3f, t1: vec3f, t2: vec3f) {
             L = L / ll;
             if (dot(L, na + nb) < 0.0) { L = -L; }
             let s = min(min(dot(t0, L), dot(t1, L)), dot(t2, L)) - dot(L, pa);
-            if (s > 0.0) { return; }
+            if (s > MG) { return; }
             if (s > se) { se = s; ea = i; ek = k; le = L; }
         }
     }
@@ -912,7 +949,7 @@ fn mesh_tri(i: u32, im: u32, q: u32) {
         let p = closest_on_triangle(c, t0, t1, t2);
         let d = c - p;
         let l2 = dot(d, d);
-        if (l2 < a.half.x * a.half.x) {
+        if (l2 < (a.half.x + MG) * (a.half.x + MG)) {
             let l = sqrt(l2);
             var n = normalize(cross(t1 - t0, t2 - t0));
             if (l > 1e-4) { n = d / l; } else if (dot(n, c - t0) < 0.0) { n = -n; }
@@ -961,6 +998,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let gi = bitcast<u32>(m.t.x);
     let node0 = gq(2u * gi + 1u, 0u);
     let rt = transpose(qmat(m.rot));
+    let mg = pair_margin(a, m, false);
     if (lid == 0u) {
         /* the body's box in the mesh's frame: a ball's, or around a hull's (box's) corners */
         var lo = vec3f(1e30);
@@ -977,8 +1015,8 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
                 hi = max(hi, l);
             }
         }
-        wlo = lo;
-        whi = hi;
+        wlo = lo - vec3f(mg);
+        whi = hi + vec3f(mg);
         front[0] = 0u;
         wn = 1u;
         atomicStore(&nnext, 0u);
@@ -1039,6 +1077,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let t = T[e];
     let pr = pairs[2u * P.m.z + t.x];
     nc = 0u;
+    MG = margin_of(pr.x, pr.y);
     mesh_tri(pr.x, pr.y, t.y);
     for (var q = 0u; q < nc; q++) {
         let slot = atomicAdd(&sc[t.x], 1u);
@@ -1106,9 +1145,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 }
 );
 
-/* each contact before solving: arms, tangents, effective masses with each body's mass split
-   among its contacts, the bias (bounce or push-out), and the impulse of the same contact in
-   the substep before (warm start), applied first */
+/* each contact before solving, every substep: where its points are now (la, lb moved with
+   their bodies) and so its depth, arms, tangents, effective masses with each body's mass
+   split among its contacts, the bias (bounce, push-out, or for a gap how fast it may close),
+   and the impulse to start from (warm start), applied first: in the step's first substep
+   the same contact's in the step before, then its own of the substep before */
 static const char *K_PREP = WGSL(
 @group(0) @binding(1) var<storage, read> B: array<Body>;
 @group(0) @binding(2) var<storage, read_write> C: array<Contact>;
@@ -1133,7 +1174,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let a = B[ia];
     let n = k.n.xyz;
     let p = k.p.xyz;
-    let ra = p - a.pos.xyz;
+    let ra = qmat(a.rot) * k.la.xyz;
+    var pb = k.lb.xyz;
     let sa = f32(off[ia + 1u] - off[ia]);
     let Ia = inv_inertia(a) * sa;
     let ma = a.vel.w * sa;
@@ -1145,7 +1187,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     var mu = sqrt(a.half.w * P.hi.w);
     if (ib != NONE) {
         let b = B[ib];
-        rb = p - b.pos.xyz;
+        rb = qmat(b.rot) * k.lb.xyz;
+        pb = b.pos.xyz + rb;
         let sb = f32(off[ib + 1u] - off[ib]);
         Ib = inv_inertia(b) * sb;
         mb = b.vel.w * sb;
@@ -1155,25 +1198,39 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     }
     let t = onb(n);
     let vn = dot(a.vel.xyz + cross(a.ang.xyz, ra) - vb, n);
-    let bounce = select(0.0, -e * vn, vn < -P.h.w);
-    let push = P.h.z / P.h.x * max(k.p.w - P.h.y, 0.0);
-    k.ra = vec4f(ra, k.ra.w);
-    k.rb = vec4f(rb, max(bounce, push));
-    k.t1 = vec4f(t[0], eff(ma, mb, Ia, Ib, ra, rb, n));
-    k.t2 = vec4f(t[1], eff(ma, mb, Ia, Ib, ra, rb, t[0]));
-    var j = vec3f(0.0);
-    if (bounce == 0.0 && ia < P.n.z) {
-        for (var q = offp[ia]; q < offp[ia + 1u]; q++) {
-            let e2 = Lp[q];
-            if ((e2 & 1u) != 0u) { continue; }
-            let o = Cp[e2 >> 1u];
-            if (bitcast<u32>(o.ra.w) != ib) { continue; }
-            let dd = o.p.xyz - p;
-            if (dot(dd, dd) > 1.0 || dot(o.n.xyz, n) < 0.95) { continue; }
-            j = o.j.xyz;
-            break;
+    let depth = k.la.w - dot(a.pos.xyz + ra - pb, n);
+    let h = P.h.x;
+    /* apart: they may approach until they touch, no closer; touching: the overlap beyond the
+       slop is pushed out a little each substep, and they bounce if they approached fast when
+       the step began (rigid.c) */
+    var j = k.j.xyz;
+    if (P.m.w == 0u) {
+        /* the step's first substep: the normal speed now, and the same contact last step
+           (warm start: its impulses; a bounce it still owed: its speed then) */
+        j = vec3f(0.0);
+        k.lb.w = vn;
+        if (ia < P.n.z) {
+            for (var q = offp[ia]; q < offp[ia + 1u]; q++) {
+                let e2 = Lp[q];
+                if ((e2 & 1u) != 0u) { continue; }
+                let o = Cp[e2 >> 1u];
+                if (bitcast<u32>(o.ra.w) != ib) { continue; }
+                let dd = o.p.xyz - p;
+                if (dot(dd, dd) > 1.0 || dot(o.n.xyz, n) < 0.95) { continue; }
+                j = o.j.xyz;
+                if (o.j.x > 0.0) { k.lb.w = min(vn, o.lb.w); }
+                break;
+            }
         }
     }
+    let bounce = select(0.0, -e * k.lb.w, depth > -P.d.z && k.lb.w < -P.h.w);
+    let bias = select(select(min(P.h.z / h * max(depth - P.h.y, 0.0), P.d.w), depth / h, depth < 0.0), bounce, bounce > 0.0);
+    if (bounce > 0.0) { j = vec3f(0.0); k.lb.w = 0.0; }
+    k.p = vec4f(p, depth);
+    k.ra = vec4f(ra, k.ra.w);
+    k.rb = vec4f(rb, bias);
+    k.t1 = vec4f(t[0], eff(ma, mb, Ia, Ib, ra, rb, n));
+    k.t2 = vec4f(t[1], eff(ma, mb, Ia, Ib, ra, rb, t[0]));
     k.j = vec4f(j, eff(ma, mb, Ia, Ib, ra, rb, t[1]));
     k.imp = vec4f(n * j.x + t[0] * j.y + t[1] * j.z, mu);
     C[c] = k;
@@ -1206,6 +1263,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     C[c] = k;
 }
 );
+
 
 /* each body takes the sum of its contacts' impulses (each with the whole mass: the shares
    average back to it) */
@@ -1285,7 +1343,7 @@ static const struct { const char *name, *types; const char **body, **more, **mor
 };
 
 #define BODY_BYTES 128
-#define CONTACT_BYTES 128
+#define CONTACT_BYTES 160
 #define MAX_INFLIGHT 2
 
 struct GpuRigid {
@@ -1301,7 +1359,7 @@ struct GpuRigid {
     size_t shapes_cap;
     int nshapes;                                 // RigidWorld.geoms in it
     uint32_t unit_box;                           // its shape index in G
-    WGPUBuffer contacts[2], lists[2], offs[2];   // this substep's and the one before's
+    WGPUBuffer contacts[2], lists[2], offs[2];   // this step's and the one before's
     size_t cap_bodies, cap_contacts;             // what the buffers hold
     int nb;                                      // bodies on the GPU
     int prev_nb;                                 // bodies in the last substep (its lists)
@@ -1608,25 +1666,32 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         put4(P.lo, w->room.lo, (float)w->wall_restitution);
         put4(P.hi, w->room.hi, (float)w->wall_friction);
         P.d[0] = (float)w->angular_damping;
+        P.d[1] = (float)dt;
+        P.d[2] = 0.1f;                           // rigid.c's SPECULATIVE_MIN
+        P.d[3] = 300.0f;                         // rigid.c's MAX_PUSH
         P.m[0] = gr->unit_box;
         P.m[1] = (uint32_t)w->ngeoms;
         P.m[2] = (uint32_t)gr->cap_pairs;
-        // the parameters change between substeps only in prev_nb: written now, read in order
-        // (a buffer per substep would do too; one write per pass keeps it simple)
+        P.m[3] = (uint32_t)s;
+        // the parameters change between substeps only in the substep: written now, read in
+        // order (a buffer per substep would do too; one write per pass keeps it simple)
         WGPUBuffer par = gr->par;
         wgpuQueueWriteBuffer(g->queue, par, 0, &P, sizeof(P));
         WGPUComputePassEncoder pass = NULL;
         dispatch(enc, &pass, gr, R_VEL, (size_t)nb);
-        dispatch(enc, &pass, gr, R_BROAD, (size_t)nb * nb + nb);
-        dispatch(enc, &pass, gr, R_ARGS, 1);
-        dispatch(enc, &pass, gr, R_SIMPLE, 0);
-        dispatch(enc, &pass, gr, R_HEAVY, 0);
-        dispatch(enc, &pass, gr, R_MESHQ, 0);
-        dispatch(enc, &pass, gr, R_ARGS2, 1);
-        dispatch(enc, &pass, gr, R_MESHTRI, 0);
-        dispatch(enc, &pass, gr, R_MESHFLUSH, 0);
-        dispatch(enc, &pass, gr, R_SCAN, 1);
-        dispatch(enc, &pass, gr, R_FILL, gr->cap_contacts);
+        if (s == 0){
+            // the contacts, once per step (with margins: they are followed through the substeps)
+            dispatch(enc, &pass, gr, R_BROAD, (size_t)nb * nb + nb);
+            dispatch(enc, &pass, gr, R_ARGS, 1);
+            dispatch(enc, &pass, gr, R_SIMPLE, 0);
+            dispatch(enc, &pass, gr, R_HEAVY, 0);
+            dispatch(enc, &pass, gr, R_MESHQ, 0);
+            dispatch(enc, &pass, gr, R_ARGS2, 1);
+            dispatch(enc, &pass, gr, R_MESHTRI, 0);
+            dispatch(enc, &pass, gr, R_MESHFLUSH, 0);
+            dispatch(enc, &pass, gr, R_SCAN, 1);
+            dispatch(enc, &pass, gr, R_FILL, gr->cap_contacts);
+        }
         dispatch(enc, &pass, gr, R_PREP, gr->cap_contacts);
         dispatch(enc, &pass, gr, R_APPLY, (size_t)nb);                  // the warm start
         for (int it = 0; it < w->iterations; it++){
@@ -1641,9 +1706,9 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         wgpuCommandBufferRelease(cb);
         wgpuCommandEncoderRelease(enc);
         enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-        gr->prev_nb = nb;
-        gr->parity ^= 1;
     }
+    gr->prev_nb = nb;          // (the next step's contacts start from this one's)
+    gr->parity ^= 1;
     // the bodies back to the CPU (if the last readback has landed)
     if (!gr->rb_pending){
         size_t bytes = (size_t)nb * BODY_BYTES + 16;

@@ -52,18 +52,18 @@ reconstructed and may be refined.
 
 ### Physics (rigid bodies; CPU in `phys/`, GPU in `gpu/rigid_gpu.c`)
 
-Where the time goes today (`mesh_rain`, 1500 hulls piled in the room, GPU, `LR_GPU_TIMING=1`):
-9.9 ms of GPU per physics step, of which **7.9 ms are the hull–hull contacts**, 0.4 ms the
-single-thread contact-list scan, 1.3 ms solve + apply, 0.05 ms the pairs (broad phase).
-Frames per second with N hulls: 400–500: 151–165 (the screen's limit), 700: 49, 1000: 17,
-1500: 7–9.
+Where the time goes today (`mesh_rain`, 1500 hulls piled in the room, GPU, `LR_GPU_TIMING=1`,
+after P1): 4.7 ms of GPU per physics step, of which **2.6 ms are the hull–hull contacts**,
+1.9 ms solve + apply, 0.3 ms the single-thread contact-list scan, 0.05 ms the pairs (broad
+phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 52, 1500: 19.
+(Before P1: 9.9 ms, 7.9 of them the hulls; 1000: 17, 1500: 7–9.)
 
 | ID | idea | status | expected gain / why |
 |---|---|---|---|
-| P1 | **Collision detection once per step**, not every substep: contact points kept in each body's space, the separation updated from them in every substep (Box2D v3's "soft step"); the narrow phase runs 3–4 times per step today | planned | about 3x on the hull contacts |
-| P2 | **Sleeping**: bodies at rest for a while stop being integrated, pairs where both sleep are skipped; woken by a touch or by the CPU (`Body.dirty`); persistent islands as in Box2D v3 | planned | a resting pile costs almost nothing (`mesh_rain` is mostly a resting pile) |
+| P2 | **Sleeping**: bodies at rest for a while stop being integrated, pairs where both sleep are skipped; woken by a touch or by the CPU (`Body.dirty`); persistent islands as in Box2D v3 | next | a resting pile costs almost nothing (`mesh_rain` is mostly a resting pile) |
 | P3 | **Cheaper hull–hull test**: fewer corners per hull (48 today, about 19k edge pairs per pair of hulls; PhysX caps GPU hulls at 64 vertices / 32 per face); GJK or MPR (Newton) for the depth and a contact manifold from the touching faces; reuse last frame's separating axis or contacts while the bodies barely moved (PhysX's persistent contacts) | planned | 4x fewer edge pairs with half the corners; most piled pairs barely move |
-| P4 | Choose CPU or GPU automatically by the number of bodies | planned | the crossover is about 100 bodies: 64 bodies 0.53 ms CPU / 0.80 ms GPU, 256 bodies 2.5 / 0.93 |
+| P4 | Choose CPU or GPU automatically by the number of bodies | planned | the crossover is about 64 bodies since P1: 64 bodies 0.67 ms CPU / 0.67 ms GPU, 256 bodies 2.9 / 0.80 |
+| P9 | Fewer speculative contacts on the CPU: a tighter margin (only the approach along the normal, or Box2D's fixed 4 cm plus continuous collision for the fast ones), or contacts reused while the pair barely moves | idea | P1 made the CPU about 8% slower (1024 bodies 18.8 → 20.3 ms): its narrow phase was cheap, and the gaps add solver work; a dense, restless pile has twice the contacts it had |
 | P5 | **AVBD solver** (Augmented Vertex Block Descent, SIGGRAPH 2025): bodies colored, a 6x6 system per body, 3–4 iterations, hard contacts through an augmented Lagrangian | planned (bigger rewrite) | paper, RTX 4090: 110k bodies 3.5 ms of solve vs 14.1 ms sequential impulses, 19.5 ms XPBD; stable at mass ratios where the others crush; a WebGPU port exists. Even there collision detection cost as much as the solve, so P1–P3 come first |
 | P6 | Faster CPU path as in Box2D v3: graph coloring of the contacts, SIMD (AVX2 natively, WASM SIMD in browsers), threads | planned | more than 2x on one thread in Box2D v3, and it scales with cores; matters for builds without a GPU and in the browser (one thread) |
 | P7 | Broad phase with a tree (reuse the tracer's GPU LBVH builder) or sweep-and-prune | when needed | all pairs (n²) still cost only 0.05 ms at 1500 bodies; needed past about 10k |
@@ -104,6 +104,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 
 | when | what | measured |
 |---|---|---|
+| 2026-11-13 | **P1: contacts found once per step**, CPU and GPU: each contact's points kept in its bodies' frames and followed through the substeps (Box2D v3's soft step), speculative contacts (a margin of how far a pair can close in the step), the bounce from the speed when the step began, the push out capped at 300 units/s | `mesh_rain` 1500 hulls: 8.9 → 4.7 ms of GPU per step, hull contacts 7.1 → 2.6 ms, 9 → 19 frames/s; 1000 hulls 17 → 52 frames/s. `test_gpu_rigid` GPU: 64 bodies 1.20 → 0.67 ms, 1024 1.73 → 1.07 ms, 2048 2.80 → 1.60 ms; CPU 1024 18.8 → 20.3 ms (P9) |
 | 2026-11-13 | The GPU takes the CPU's top level (SAH) when it is current (`scene_tlas`), instead of building an LBVH every frame (`LR_GPU_TLAS=lbvh` for the old way) | rays 12% faster on 40 instanced dragons (3.49 → 3.08 ms), 6% on a pile of 700 falling bodies (5.48 → 5.15), 2-3% on static scenes of 400-2000 instances; no GPU build pass (0.13-0.18 ms per frame) |
 | 2026-11-13 | SAH builder: plain comparisons instead of `fminf`/`fmaxf` in the box code, one multiply instead of a division per binned item, subtrees in parallel from 1024 items (was 32768) | 2500 boxes 5.3 → 2.1 ms on one thread, 1.15 ms on 2; the viewer's "scene trees" with 2500 bodies 4.2 → 0.8 ms per frame; the 871k-triangle dragon's BVH 515 → 226 ms |
 | 2026-11-13 | **GPU traversal stack: one array of 40 u32** instead of three arrays of 64 (node, instance, distance). Entering an instance pushes EXIT and its mesh's root (instances are never nested), so no instance per entry; no distance per entry (children are culled against the closest hit when tested). What a thread keeps in memory decides how many threads run at once | 1.9x to 5.6x on every GPU scene (table above); the stack size itself (24 to 64 entries) matters little, the three arrays did |
@@ -125,6 +126,9 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 | 2026-11-13 | 4-wide BVH in the GPU's single kernel (4 slots of 32 bytes per node, children sorted by distance; also unsorted) | 5-10% slower than the binary tree there (dragon 8.8-9.0 vs 8.1 ms); kept behind `LR_GPU_WIDE=1` to try again with R1 and compressed nodes |
 | 2026-11-12 | Nearest-pixel reprojection for the real-time path tracer | duplicated pixels under subpixel motion, noise in streaks: measured worse than 2x2 bilinear |
 | 2026-11-13 | The GPU rigid bodies' heavy tests inside the all-pairs kernel | one slow pair stalled the whole kernel: replaced by pair lists and indirect dispatches |
+| 2026-11-13 | P1 variants: bouncing a speculative contact whose gap closes within the substep | in a pile the bounces fed on each other: bodies at 10 000 units/s, then NaN |
+| 2026-11-13 | P1 variants: the bounce as a separate pass after the substeps (Box2D v3) | with only the bouncing contacts the pile kept jumping; with all touching ones (target 0) GPU hull stacks slid apart (mass splitting with 4 iterations): replaced by a bounce in the substeps from the speed when the step began |
+| 2026-11-13 | P1 variants: mass splitting counting only the "active" contacts of a body on the GPU | no gain and more contacts per step: all of a body's contacts count |
 
 ## Sources
 

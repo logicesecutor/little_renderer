@@ -9,6 +9,8 @@
 #define CONTACT_SLOP 0.5f        // overlap (units) left alone, so resting contacts do not jitter
 #define BAUMGARTE 0.2f           // fraction of the remaining overlap removed per step
 #define BOUNCE_THRESHOLD 60.0f   // approach speeds below this (units / s) do not bounce
+#define SPECULATIVE_MIN 0.1f     // the smallest margin (units) of a pair's speculative contacts
+#define MAX_PUSH 300.0f          // the fastest an overlap is pushed out (units / s; Box2D: 3 m/s)
 #define MAX_HULL_VERTS 64        // corners of a hull (rigid_geom_hull)
 #define MAX_HULL_FACES 128
 
@@ -314,6 +316,11 @@ static void add_contact(RigidWorld *w, int a, int b, Vec3 p, Vec3 n, real depth)
     Contact *c = &w->contacts[w->ncontacts++];
     memset(c, 0, sizeof(*c));
     c->a = a; c->b = b; c->p = p; c->n = n; c->depth = depth;
+    // the point in each body's frame (a wall's: in the world), to follow the bodies through
+    // the substeps without looking for the contacts again
+    c->depth0 = depth;
+    c->la = mat3_mul_vec(mat3_transpose(quat_to_mat3(w->bodies[a].rot)), v_sub(p, w->bodies[a].pos));
+    c->lb = b >= 0 ? mat3_mul_vec(mat3_transpose(quat_to_mat3(w->bodies[b].rot)), v_sub(p, w->bodies[b].pos)) : p;
 }
 
 static real comp(Vec3 v, int k){ return k == 0 ? v.x : (k == 1 ? v.y : v.z); }
@@ -363,7 +370,7 @@ static void place(const Body *b, Placed *p){
 }
 
 // The room: six walls, each a plane dot(n, x) = off with n pointing into the room.
-static void collide_walls(RigidWorld *w, int ia){
+static void collide_walls(RigidWorld *w, int ia, real m){
     const Body *b = &w->bodies[ia];
     const Aabb *r = &w->room;
     Vec3 n[6] = {vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1)};
@@ -371,7 +378,7 @@ static void collide_walls(RigidWorld *w, int ia){
     if (b->shape == BODY_SPHERE){
         for (int k = 0; k < 6; k++){
             real d = v_dot(n[k], b->pos) - off[k] - b->half.x;
-            if (d < 0) add_contact(w, ia, -1, v_sub(b->pos, v_scale(n[k], b->half.x)), n[k], -d);
+            if (d < m) add_contact(w, ia, -1, v_sub(b->pos, v_scale(n[k], b->half.x)), n[k], -d);
         }
     } else if (b->shape == BODY_BOX){
         Vec3 c[8];
@@ -379,10 +386,11 @@ static void collide_walls(RigidWorld *w, int ia){
         for (int k = 0; k < 6; k++)
             for (int i = 0; i < 8; i++){
                 real d = v_dot(n[k], c[i]) - off[k];
-                if (d < 0) add_contact(w, ia, -1, c[i], n[k], -d);
+                if (d < m) add_contact(w, ia, -1, c[i], n[k], -d);
             }
     } else if (b->shape == BODY_HULL){
-        // the hull's corners below each wall, at most 4 of them per wall
+        // the hull's corners below each wall (or within the margin), at most 4 per wall
+        const real mg = m;
         Placed *p = malloc(sizeof(Placed));
         if (!p) return;
         place(b, p);
@@ -391,7 +399,7 @@ static void collide_walls(RigidWorld *w, int ia){
             int m = 0;
             for (int i = 0; i < p->wc.c->nv; i++){
                 real d = v_dot(n[k], p->v[i]) - off[k];
-                if (d < 0){ c[m].p = p->v[i]; c[m].n = n[k]; c[m].depth = -d; m++; }
+                if (d < mg){ c[m].p = p->v[i]; c[m].n = n[k]; c[m].depth = -d; m++; }
             }
             m = convex_reduce(c, m, 4);
             for (int i = 0; i < m; i++) add_contact(w, ia, -1, c[i].p, c[i].n, c[i].depth);
@@ -409,24 +417,24 @@ static void flip_contacts(RigidWorld *w, int first, int a, int b){
 }
 
 // a sphere (ia) against a box or hull (ib)
-static void collide_sphere_convex(RigidWorld *w, int ia, int ib){
+static void collide_sphere_convex(RigidWorld *w, int ia, int ib, real m){
     Placed *p = malloc(sizeof(Placed));
     if (!p) return;
     place(&w->bodies[ib], p);
     ConvexContact c;
     const Body *s = &w->bodies[ia];
-    if (convex_collide_sphere(s->pos, s->half.x, &p->wc, &c)) add_contact(w, ia, ib, c.p, c.n, c.depth);
+    if (convex_collide_sphere(s->pos, s->half.x, &p->wc, m, &c)) add_contact(w, ia, ib, c.p, c.n, c.depth);
     free(p);
 }
 
 // boxes and hulls
-static void collide_convex(RigidWorld *w, int ia, int ib){
+static void collide_convex(RigidWorld *w, int ia, int ib, real mg){
     Placed *p = malloc(2 * sizeof(Placed));
     if (!p) return;
     place(&w->bodies[ia], &p[0]);
     place(&w->bodies[ib], &p[1]);
     ConvexContact c[CONVEX_MAX_CONTACTS];
-    int m = convex_collide(&p[0].wc, &p[1].wc, c);
+    int m = convex_collide(&p[0].wc, &p[1].wc, mg, c);
     for (int k = 0; k < m; k++) add_contact(w, ia, ib, c[k].p, c[k].n, c[k].depth);
     free(p);
 }
@@ -448,7 +456,7 @@ static void tri_list_add(void *user, int t){
 
 #define MESH_CONTACTS 256
 
-static void collide_mesh(RigidWorld *w, int ia, int im){
+static void collide_mesh(RigidWorld *w, int ia, int im, real mg){
     const Body *a = &w->bodies[ia], *m = &w->bodies[im];
     const RigidGeom *g = m->g;
     Mat3 r = quat_to_mat3(m->rot), rt = mat3_transpose(r);
@@ -456,7 +464,7 @@ static void collide_mesh(RigidWorld *w, int ia, int im){
     Aabb q;
     Placed *p = NULL;
     if (a->shape == BODY_SPHERE){
-        real rad = a->half.x;
+        real rad = a->half.x + mg;
         Vec3 c = mat3_mul_vec(rt, v_sub(a->pos, m->pos));
         q = (Aabb){v_sub(c, vec3(rad, rad, rad)), v_add(c, vec3(rad, rad, rad))};
     } else {
@@ -471,6 +479,7 @@ static void collide_mesh(RigidWorld *w, int ia, int im){
             q.hi = vec3(r_fmax(q.hi.x, l.x), r_fmax(q.hi.y, l.y), r_fmax(q.hi.z, l.z));
         }
     }
+    if (a->shape != BODY_SPHERE){ q.lo = v_sub(q.lo, vec3(mg, mg, mg)); q.hi = v_add(q.hi, vec3(mg, mg, mg)); }   // (a sphere's: in rad)
     TriList list = {NULL, 0, 0};
     mesh_tree_query(&g->tree, q, tri_list_add, &list);
     if (list.n == 0){ free(list.tri); free(p); return; }
@@ -480,8 +489,8 @@ static void collide_mesh(RigidWorld *w, int ia, int im){
         const Vec3 *tl = g->tree.tri + 3 * (size_t)list.tri[k];
         Vec3 t[3] = {v_add(m->pos, mat3_mul_vec(r, tl[0])), v_add(m->pos, mat3_mul_vec(r, tl[1])),
                      v_add(m->pos, mat3_mul_vec(r, tl[2]))};
-        if (a->shape == BODY_SPHERE) n += triangle_collide_sphere(a->pos, a->half.x, t, all + n);
-        else n += convex_collide_triangle(&p->wc, t, all + n);
+        if (a->shape == BODY_SPHERE) n += triangle_collide_sphere(a->pos, a->half.x, t, mg, all + n);
+        else n += convex_collide_triangle(&p->wc, t, mg, all + n);
     }
     if (all){
         n = convex_reduce(all, n, 4);
@@ -492,30 +501,36 @@ static void collide_mesh(RigidWorld *w, int ia, int im){
     free(list.tri);
 }
 
-static void collide_sphere_sphere(RigidWorld *w, int ia, int ib);
-static void collide_sphere_box(RigidWorld *w, int ia, int ib);
-static void collide_box_box(RigidWorld *w, int ia, int ib);
+static void collide_sphere_sphere(RigidWorld *w, int ia, int ib, real m);
+static void collide_sphere_box(RigidWorld *w, int ia, int ib, real m);
+static void collide_box_box(RigidWorld *w, int ia, int ib, real m);
 
-static void collide_pair(RigidWorld *w, int i, int j){
-    BodyShape a = w->bodies[i].shape, b = w->bodies[j].shape;
-    if (a == BODY_MESH || b == BODY_MESH){
-        if (a == BODY_MESH && b == BODY_MESH) return;
-        if (a == BODY_MESH){ int first = w->ncontacts; collide_mesh(w, j, i); flip_contacts(w, first, i, j); }
-        else collide_mesh(w, i, j);
-    } else if (a == BODY_SPHERE && b == BODY_SPHERE) collide_sphere_sphere(w, i, j);
-    else if (a == BODY_BOX && b == BODY_BOX) collide_box_box(w, i, j);
-    else if (a == BODY_SPHERE && b == BODY_BOX) collide_sphere_box(w, i, j);
-    else if (b == BODY_SPHERE && a == BODY_BOX){ int first = w->ncontacts; collide_sphere_box(w, j, i); flip_contacts(w, first, i, j); }
-    else if (a == BODY_SPHERE) collide_sphere_convex(w, i, j);
-    else if (b == BODY_SPHERE){ int first = w->ncontacts; collide_sphere_convex(w, j, i); flip_contacts(w, first, i, j); }
-    else collide_convex(w, i, j);
+// (flipped contacts: their anchors swap too)
+static void flip_anchors(RigidWorld *w, int first){
+    for (int k = first; k < w->ncontacts; k++){ Contact *c = &w->contacts[k]; Vec3 t = c->la; c->la = c->lb; c->lb = t; }
 }
 
-static void collide_sphere_sphere(RigidWorld *w, int ia, int ib){
+static void collide_pair(RigidWorld *w, int i, int j, real m){
+    BodyShape a = w->bodies[i].shape, b = w->bodies[j].shape;
+    int first = w->ncontacts;
+    if (a == BODY_MESH || b == BODY_MESH){
+        if (a == BODY_MESH && b == BODY_MESH) return;
+        if (a == BODY_MESH){ collide_mesh(w, j, i, m); flip_contacts(w, first, i, j); flip_anchors(w, first); }
+        else collide_mesh(w, i, j, m);
+    } else if (a == BODY_SPHERE && b == BODY_SPHERE) collide_sphere_sphere(w, i, j, m);
+    else if (a == BODY_BOX && b == BODY_BOX) collide_box_box(w, i, j, m);
+    else if (a == BODY_SPHERE && b == BODY_BOX) collide_sphere_box(w, i, j, m);
+    else if (b == BODY_SPHERE && a == BODY_BOX){ collide_sphere_box(w, j, i, m); flip_contacts(w, first, i, j); flip_anchors(w, first); }
+    else if (a == BODY_SPHERE) collide_sphere_convex(w, i, j, m);
+    else if (b == BODY_SPHERE){ collide_sphere_convex(w, j, i, m); flip_contacts(w, first, i, j); flip_anchors(w, first); }
+    else collide_convex(w, i, j, m);
+}
+
+static void collide_sphere_sphere(RigidWorld *w, int ia, int ib, real m){
     const Body *a = &w->bodies[ia], *b = &w->bodies[ib];
     Vec3 d = v_sub(a->pos, b->pos);
     real r = a->half.x + b->half.x, l2 = v_dot(d, d);
-    if (l2 >= r * r) return;
+    if (l2 >= (r + m) * (r + m)) return;
     real l = r_sqrt(l2);
     Vec3 n = l > 1e-6f ? v_scale(d, 1.0f / l) : vec3(0, 1, 0);
     real depth = r - l;
@@ -523,7 +538,7 @@ static void collide_sphere_sphere(RigidWorld *w, int ia, int ib){
 }
 
 // sphere a against box b
-static void collide_sphere_box(RigidWorld *w, int ia, int ib){
+static void collide_sphere_box(RigidWorld *w, int ia, int ib, real m){
     const Body *s = &w->bodies[ia], *b = &w->bodies[ib];
     Mat3 r = quat_to_mat3(b->rot);
     Vec3 d = v_sub(s->pos, b->pos);
@@ -535,7 +550,7 @@ static void collide_sphere_box(RigidWorld *w, int ia, int ib){
     Vec3 nl;
     real depth;
     if (l2 > 1e-12f){                                   // center outside the box
-        if (l2 >= rad * rad) return;
+        if (l2 >= (rad + m) * (rad + m)) return;
         real l = r_sqrt(l2);
         nl = v_scale(diff, 1.0f / l);
         depth = rad - l;
@@ -602,7 +617,7 @@ static void closest_segments(Vec3 p0, Vec3 d0, Vec3 p1, Vec3 d1, Vec3 *c0, Vec3 
     *c1 = v_add(p1, v_scale(d1, t));
 }
 
-static void collide_box_box(RigidWorld *w, int ia, int ib){
+static void collide_box_box(RigidWorld *w, int ia, int ib, real m){
     const Body *a = &w->bodies[ia], *b = &w->bodies[ib];
     Mat3 ra = quat_to_mat3(a->rot), rb = quat_to_mat3(b->rot);
     Vec3 ax[3] = {mat3_col(ra, 0), mat3_col(ra, 1), mat3_col(ra, 2)};
@@ -623,7 +638,7 @@ static void collide_box_box(RigidWorld *w, int ia, int ib){
         real pb = b->half.x * r_fabs(v_dot(bx[0], L)) + b->half.y * r_fabs(v_dot(bx[1], L)) + b->half.z * r_fabs(v_dot(bx[2], L));
         real dist = v_dot(t, L);
         real overlap = pa + pb - r_fabs(dist);
-        if (overlap < 0) return;                        // separating axis found
+        if (overlap < -m) return;                       // separating axis found (beyond the margin)
         // prefer face axes (an edge axis must be clearly better), and a's faces over b's,
         // so that the choice does not flip between steps for a resting contact
         real score = i < 3 ? overlap : (i < 6 ? overlap * 1.02f + 0.01f : overlap * 1.1f + 0.1f);
@@ -669,7 +684,7 @@ static void collide_box_box(RigidWorld *w, int ia, int ib){
         int added = 0;
         for (int q = 0; q < n; q++){
             real sep = v_dot(nref, poly[q]) - face;
-            if (sep > 0) continue;
+            if (sep > m) continue;
             // the contact point halfway between the incident point and the reference face
             Vec3 p = v_sub(poly[q], v_scale(nref, 0.5f * sep));
             add_contact(w, ia, ib, p, bn, -sep);
@@ -690,19 +705,42 @@ static void collide_box_box(RigidWorld *w, int ia, int ib){
     add_contact(w, ia, ib, v_scale(v_add(c0, c1), 0.5f), bn, depth);
 }
 
-static void find_contacts(RigidWorld *w){
+// How far apart two bodies may be and still get a contact: as far as they can close in a
+// step (their speed towards each other along the line between their centres, the spin of
+// their outermost points; against a wall, their whole speed), plus a little. Contacts are
+// found once per step (rigid_steps), so those that will touch during its substeps must be
+// there from the start: "speculative" contacts (Catto, Box2D v3), whose gap the solver lets
+// close and no more.
+static real body_radius(const Body *b){ return b->shape == BODY_SPHERE ? b->half.x : v_len(b->half); }
+// At most half their sizes: a body that moves farther than that in a step would need
+// continuous collision detection anyway, and the cap keeps a burst of fast bodies from
+// pairing everything with everything.
+static real pair_margin(const Body *a, const Body *b, real dt){
+    real ra = body_radius(a), rb = b ? body_radius(b) : 0;
+    real spin = v_len(a->angvel) * ra + (b ? v_len(b->angvel) * rb : 0);
+    real closing = v_len(a->vel);
+    if (b){
+        Vec3 dv = v_sub(a->vel, b->vel), d = v_sub(a->pos, b->pos);
+        real l = v_len(d);
+        closing = l > 0 ? r_fmax(-v_dot(dv, d) / l, 0) : v_len(dv);
+    }
+    return r_fmin(SPECULATIVE_MIN + dt * (closing + spin), SPECULATIVE_MIN + 0.5f * (ra + rb));
+}
+
+static void find_contacts(RigidWorld *w, real dt){
     w->ncontacts = 0;
     for (int i = 0; i < w->nbodies; i++){
         Body *a = &w->bodies[i];
-        if (w->has_room && a->inv_mass > 0) collide_walls(w, i);
+        if (w->has_room && a->inv_mass > 0) collide_walls(w, i, pair_margin(a, NULL, dt));
         for (int j = i + 1; j < w->nbodies; j++){
             Body *b = &w->bodies[j];
             if (a->inv_mass == 0 && b->inv_mass == 0) continue;
             // quick reject with bounding spheres
-            real ra = v_len(a->half), rb = v_len(b->half);
+            real m = pair_margin(a, b, dt);
+            real r = body_radius(a) + body_radius(b) + m;
             Vec3 d = v_sub(a->pos, b->pos);
-            if (v_dot(d, d) > (ra + rb) * (ra + rb)) continue;
-            collide_pair(w, i, j);
+            if (v_dot(d, d) > r * r) continue;
+            collide_pair(w, i, j, m);
         }
     }
 }
@@ -710,7 +748,8 @@ static void find_contacts(RigidWorld *w){
 // ---- the solver: sequential impulses (Catto, "Iterative Dynamics with Temporal Coherence") --
 //
 // At a contact the bodies must not keep approaching: the relative velocity along the normal
-// must become >= 0 (or >= a small push-out "bias" that removes overlap, plus the bounce).
+// must become >= 0 (or >= a small push-out "bias" that removes overlap; or, for a gap, no
+// faster than closes it within the substep). The bounce comes once per step, after.
 // An impulse j along n changes it by j / m_eff, where the effective mass m_eff combines both
 // bodies' mass and rotational inertia at that point. Solving one contact disturbs the
 // others, so all are visited many times (iterations); the accumulated impulse is clamped
@@ -739,97 +778,141 @@ static void apply(Body *a, Body *b, Mat3 ia, Mat3 ib, Vec3 ra, Vec3 rb, Vec3 j){
     }
 }
 
-void rigid_step(RigidWorld *w, real dt){
+// One step of dt in `substeps` substeps (rigid.h). The contacts are found once, at the start
+// (with margins: pair_margin), and followed through the substeps by their points in each
+// body's frame: in each substep a contact's depth is its depth when found minus how far its
+// two points have moved apart along the normal since. Looking for contacts is the costly
+// part (the hulls' separating axes, the meshes' triangles), so this does it once instead of
+// once per substep; the solver itself still runs every substep, stiff as before.
+void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     if (dt <= 0) return;
-    // 1. forces -> velocities
-    for (int i = 0; i < w->nbodies; i++){
-        Body *b = &w->bodies[i];
-        if (b->inv_mass == 0){ b->force = b->torque = vec3(0, 0, 0); continue; }
-        b->vel = v_add(b->vel, v_scale(v_add(w->gravity, v_scale(b->force, b->inv_mass)), dt));
-        b->angvel = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_scale(b->torque, dt)));
-        b->vel = v_scale(b->vel, 1.0f / (1.0f + w->linear_damping * dt));
-        b->angvel = v_scale(b->angvel, 1.0f / (1.0f + w->angular_damping * dt));
-        b->force = b->torque = vec3(0, 0, 0);
-    }
-
-    // 2. contacts (the previous step's are kept for warm starting)
+    if (substeps < 1) substeps = 1;
+    const real h = dt / substeps;
+    // the contacts (the previous step's are kept for warm starting)
     { Contact *t = w->prev; w->prev = w->contacts; w->contacts = t;
       int tc = w->cap_prev; w->cap_prev = w->cap_contacts; w->cap_contacts = tc;
       w->nprev = w->ncontacts; w->ncontacts = 0; }
-    find_contacts(w);
-    Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
-    if (!iw){ perror("malloc"); exit(1); }
-    for (int i = 0; i < w->nbodies; i++) iw[i] = body_inv_inertia_world(&w->bodies[i]);
-    Mat3 zero = {{{0}}};
-
+    find_contacts(w, dt);
     for (int k = 0; k < w->ncontacts; k++){
         Contact *c = &w->contacts[k];
-        Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
-        Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
-        c->ra = v_sub(c->p, a->pos);
-        c->rb = b ? v_sub(c->p, b->pos) : vec3(0, 0, 0);
         onb_from_normal(c->n, &c->t1, &c->t2);
-        c->mass_n = eff_mass(a, b, ia, ib, c->ra, c->rb, c->n);
-        c->mass_t1 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t1);
-        c->mass_t2 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t2);
-        real vn = v_dot(rel_velocity(a, b, c->ra, c->rb), c->n);
-        real e = b ? r_fmax(a->restitution, b->restitution) : r_fmax(a->restitution, w->wall_restitution);
-        real bounce = vn < -BOUNCE_THRESHOLD ? -e * vn : 0;
-        real push = BAUMGARTE / dt * r_fmax(c->depth - CONTACT_SLOP, 0);
-        c->bias = r_fmax(bounce, push);
         // Warm start: the same contact last step (same bodies, within 1 unit) needed some
-        // impulse to stay put; apply it now, and the iterations only correct the change.
+        // impulse to stay put; it starts from that, and the iterations only correct the change.
         // A resting stack then converges in a few steps instead of sinking and jittering.
-        if (w->warm_start && bounce == 0){
-            for (int q = 0; q < w->nprev; q++){
-                const Contact *o = &w->prev[q];
-                if (o->a != c->a || o->b != c->b) continue;
-                Vec3 d = v_sub(o->p, c->p);
-                if (v_dot(d, d) > 1.0f || v_dot(o->n, c->n) < 0.95f) continue;
-                c->jn = o->jn; c->jt1 = o->jt1; c->jt2 = o->jt2;
-                apply(a, b, ia, ib, c->ra, c->rb,
-                      v_add(v_scale(c->n, c->jn), v_add(v_scale(c->t1, c->jt1), v_scale(c->t2, c->jt2))));
-                break;
-            }
+        if (!w->warm_start) continue;
+        for (int q = 0; q < w->nprev; q++){
+            const Contact *o = &w->prev[q];
+            if (o->a != c->a || o->b != c->b) continue;
+            Vec3 d = v_sub(o->p, c->p);
+            if (v_dot(d, d) > 1.0f || v_dot(o->n, c->n) < 0.95f) continue;
+            c->jn = o->jn; c->jt1 = o->jt1; c->jt2 = o->jt2;
+            // stopped at the surface by a speculative contact in the last substep, without a
+            // bounce yet: it still owes one, from its speed then
+            if (o->jn > 0) c->vn0 = o->vn0;
+            break;
         }
     }
+    Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
+    int *act = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(int));
+    if (!iw || !act){ perror("malloc"); exit(1); }
+    Mat3 zero = {{{0}}};
 
-    // 3. iterate
-    for (int it = 0; it < w->iterations; it++){
+    for (int s = 0; s < substeps; s++){
+        // 1. forces -> velocities (the external ones act through the whole step)
+        for (int i = 0; i < w->nbodies; i++){
+            Body *b = &w->bodies[i];
+            if (b->inv_mass == 0) continue;
+            Vec3 f = forces ? v_add(b->force, forces[i]) : b->force;
+            b->vel = v_add(b->vel, v_scale(v_add(w->gravity, v_scale(f, b->inv_mass)), h));
+            b->angvel = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_scale(b->torque, h)));
+            b->vel = v_scale(b->vel, 1.0f / (1.0f + w->linear_damping * h));
+            b->angvel = v_scale(b->angvel, 1.0f / (1.0f + w->angular_damping * h));
+        }
+        for (int i = 0; i < w->nbodies; i++) iw[i] = body_inv_inertia_world(&w->bodies[i]);
+
+        // 2. each contact where its bodies are now: arms, depth, effective masses, target
+        int nact = 0;
         for (int k = 0; k < w->ncontacts; k++){
             Contact *c = &w->contacts[k];
             Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
             Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
-            real mu = b ? r_sqrt(a->friction * b->friction) : r_sqrt(a->friction * w->wall_friction);
+            c->ra = quat_rotate(a->rot, c->la);
+            c->rb = b ? quat_rotate(b->rot, c->lb) : vec3(0, 0, 0);
+            Vec3 pa = v_add(a->pos, c->ra), pb = b ? v_add(b->pos, c->rb) : c->lb;
+            c->depth = c->depth0 - v_dot(v_sub(pa, pb), c->n);
+            c->mass_n = eff_mass(a, b, ia, ib, c->ra, c->rb, c->n);
+            c->mass_t1 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t1);
+            c->mass_t2 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t2);
+            real vn = v_dot(rel_velocity(a, b, c->ra, c->rb), c->n);
+            if (s == 0) c->vn0 = r_fmin(c->vn0, vn);
+            // Apart (a speculative contact): they may approach until they touch, no closer.
+            // Touching: the overlap beyond the slop is pushed out a little each substep, and
+            // if they approached fast when the step began, they bounce. That speed, not the
+            // one now: a speculative contact has already stopped them at the surface. The push
+            // is capped: a light body squeezed deep into a wall by heavy ones was shot out ever
+            // faster, until the numbers overflowed. (A gap
+            // that only will close in this substep does not bounce: in a pile such bounces
+            // fed on each other until it blew up.) A contact bounces once (vn0 = 0 after).
+            real e = b ? r_fmax(a->restitution, b->restitution) : r_fmax(a->restitution, w->wall_restitution);
+            c->mu = b ? r_sqrt(a->friction * b->friction) : r_sqrt(a->friction * w->wall_friction);
+            real bounce = c->depth > -SPECULATIVE_MIN && c->vn0 < -BOUNCE_THRESHOLD ? -e * c->vn0 : 0;
+            c->bias = bounce > 0 ? bounce
+                    : (c->depth < 0 ? c->depth / h : r_fmin(BAUMGARTE / h * r_fmax(c->depth - CONTACT_SLOP, 0), MAX_PUSH));
+            // the impulse it had (last step's, or this step's last substep's), applied first
+            if (bounce > 0){ c->jn = c->jt1 = c->jt2 = 0; c->vn0 = 0; act[nact++] = k; continue; }
+            if (c->jn != 0 || c->jt1 != 0 || c->jt2 != 0)
+                apply(a, b, ia, ib, c->ra, c->rb,
+                      v_add(v_scale(c->n, c->jn), v_add(v_scale(c->t1, c->jt1), v_scale(c->t2, c->jt2))));
+            // The iterations skip the gaps that cannot close in this substep, even twice as
+            // fast (most of a pile's speculative contacts): should one close all the same
+            // (pushed by another), the next substep finds it touching and pushes it out.
+            if (c->depth > -SPECULATIVE_MIN || c->jn > 0 || -c->depth < 2 * h * r_fmax(-vn, 0) + SPECULATIVE_MIN)
+                act[nact++] = k;
+        }
 
-            Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
-            real dj = c->mass_n * (c->bias - v_dot(dv, c->n));
-            real jn = r_fmax(c->jn + dj, 0);
-            dj = jn - c->jn;
-            c->jn = jn;
-            apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
+        // 3. iterate
+        for (int it = 0; it < w->iterations; it++){
+            for (int q = 0; q < nact; q++){
+                Contact *c = &w->contacts[act[q]];
+                Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+                Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
 
-            dv = rel_velocity(a, b, c->ra, c->rb);
-            real lim = mu * c->jn;
-            real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
-            apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
-            c->jt1 = jt;
-            dv = rel_velocity(a, b, c->ra, c->rb);
-            jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
-            apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
-            c->jt2 = jt;
+                Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
+                real dj = c->mass_n * (c->bias - v_dot(dv, c->n));
+                real jn = r_fmax(c->jn + dj, 0);
+                dj = jn - c->jn;
+                c->jn = jn;
+                if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
+                // no push, no friction: nothing more to do (a gap, most of the time)
+                if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) continue;
+
+                dv = rel_velocity(a, b, c->ra, c->rb);
+                real lim = c->mu * c->jn;
+                real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
+                apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
+                c->jt1 = jt;
+                dv = rel_velocity(a, b, c->ra, c->rb);
+                jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
+                apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
+                c->jt2 = jt;
+            }
+        }
+
+        // 4. velocities -> positions
+        for (int i = 0; i < w->nbodies; i++){
+            Body *b = &w->bodies[i];
+            if (b->inv_mass == 0) continue;
+            b->pos = v_add(b->pos, v_scale(b->vel, h));
+            b->rot = quat_integrate(b->rot, b->angvel, h);
         }
     }
-    free(iw);
 
-    // 4. velocities -> positions
-    for (int i = 0; i < w->nbodies; i++){
-        Body *b = &w->bodies[i];
-        if (b->inv_mass == 0) continue;
-        b->pos = v_add(b->pos, v_scale(b->vel, dt));
-        b->rot = quat_integrate(b->rot, b->angvel, dt);
-    }
+    free(iw);
+    free(act);
+    for (int i = 0; i < w->nbodies; i++) w->bodies[i].force = w->bodies[i].torque = vec3(0, 0, 0);
 }
+
+void rigid_step(RigidWorld *w, real dt){ rigid_steps(w, dt, 1, NULL); }
 
 real rigid_kinetic_energy(const RigidWorld *w){
     real e = 0;

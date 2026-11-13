@@ -96,7 +96,7 @@ keeps every measurement, and the ideas still to try):
 | Cornell box, 640×640, one sample per pixel | **1.9 ms** on the GPU |
 | Stanford dragon, 871k triangles | **8.1 ms** per pass on the GPU · 3.4 M paths/s on the CPU |
 | Live path traced dragon (`view -backend rt`), 640×640 | **79 fps**, denoised |
-| 1024 rigid bodies, one 1/60 s step | 17.9 ms on the CPU → **1.7 ms** on the GPU |
+| 1024 rigid bodies, one 1/60 s step | 20 ms on the CPU → **1.1 ms** on the GPU |
 
 ## Documentation
 

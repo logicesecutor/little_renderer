@@ -272,7 +272,7 @@ static void pile_checks(const char *who, const RigidWorld *rw, real side){
     // settled: nobody falling or bouncing any more (balls may still roll: no rolling resistance)
     double vy = 0;
     for (int i = 0; i < rw->nbodies; i++) vy = fmax(vy, fabs(rw->bodies[i].vel.y));
-    snprintf(what, sizeof(what), "pile (%s): fastest vertical speed after 6 s, units / s", who);
+    snprintf(what, sizeof(what), "pile (%s): fastest vertical speed after 8 s, units / s", who);
     check(what, vy, 0, 10);
 }
 
@@ -282,7 +282,7 @@ static void test_pile(void){
         World w;
         real side;
         pile(&w, 60, gpu, &side);
-        world_run(&w, 6.0);
+        world_run(&w, 8.0);    // (on the CPU a ball rolls off a box at 5 s and lands at 6.5)
         pile_checks(gpu ? "GPU" : "CPU", &w.pw.rigid, side);
         world_free(&w);
     }

@@ -128,11 +128,7 @@ void phys_step(PhysWorld *pw, real dt){
     int steps = pw->substeps > 0 ? pw->substeps : 1;
     real h = dt / steps;
     for (int i = 0; i < n; i++) fs[i] = v_add(drag_force(pw, i, h), buoyancy_force(pw, i));
-    if (!pw->rigid_step || !pw->rigid_step(pw->rigid_user, pw, dt, steps, fs))
-        for (int s = 0; s < steps; s++){
-            for (int i = 0; i < n; i++) w->bodies[i].force = v_add(w->bodies[i].force, fs[i]);
-            rigid_step(w, h);
-        }
+    if (!pw->rigid_step || !pw->rigid_step(pw->rigid_user, pw, dt, steps, fs)) rigid_steps(w, dt, steps, fs);
     if (fs != forces) free(fs);
     double t1 = now_ms();
     if (pw->fluid && pw->air_step) pw->air_step(pw->air_user, pw, dt);
