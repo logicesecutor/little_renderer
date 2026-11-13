@@ -1,114 +1,120 @@
+<div align="center">
+
 # little_renderer
 
-A small rendering engine written from scratch in plain C, with two backends that draw the
-same scene: a **rasterizer** (fast, local lighting) and a physically based **path tracer**
-(slow, global illumination), plus a **physics engine** (rigid bodies, and the air that
-carries a volumetric cloud). One static library, one header, apps and examples on top.
-The only dependencies are `libm`, the window system (`libX11` on Linux, Win32 on Windows)
-and optionally OpenMP. It builds with gcc on Linux and with MSYS2's gcc on Windows
-(docs/USAGE.md, section 2.1), and with Emscripten for **web browsers**. Everywhere it can
-also run on the **GPU** through WebGPU: in the browser by itself, natively after `make deps`
-(docs/WEB.md).
+**A small rendering engine in plain C, written from scratch.**
 
-## Layout
+A rasterizer, a path tracer and a physics engine that share one scene,
+on the CPU or on the GPU through WebGPU, natively and in the browser.
 
-```
-little_renderer/
-├── engine/                    the engine -> build/float/liblr.a, everything via lr.h
-│   ├── lr.h                   the one header to include
-│   ├── core/                  shared by everything: math (float or double), random numbers,
-│   │                          images, camera, meshes (.obj/.ply), scenes, textures,
-│   │                          noise and volumes (procedural clouds)
-│   ├── raster/                backend 1: the rasterizer (triangles -> pixels, z-buffer;
-│   │                          clouds and fog by raymarching)
-│   ├── rt/                    backend 2: the path tracer (rays, octree, BVH, light transport,
-│   │                          participating media: clouds)
-│   ├── phys/                  physics: rigid bodies, the air (stable fluids, multigrid),
-│   │                          the cloud it carries, the coupling between them
-│   ├── gpu/                   the GPU backend (WebGPU, shaders in WGSL): rasterizer, path
-│   │                          tracer, clouds raymarched, the air and the cloud simulated
-│   ├── platform/              the window: X11, Win32, or an HTML canvas
-│   └── app/                   what the programs share: options, the physics demos, frames
-├── apps/
-│   ├── render.c               offline: one image into a PPM, -backend rt|raster -> bin/render
-│   ├── view.c                 real time: raster while moving, path tracing when still -> bin/view
-│   └── sim.c                  physics simulation, path traced frame by frame -> bin/sim
-├── examples/                  small programs using the library (start here for the SDK)
-│   ├── hello_raster.c         the Cornell box, rasterized           -> bin/hello_raster
-│   ├── hello_rt.c             the Cornell box, path traced          -> bin/hello_rt
-│   ├── custom_scene.c         your own objects, both backends       -> bin/custom_scene
-│   ├── raster_milestones.c    the rasterizer step by step           -> bin/raster_milestones
-│   ├── hello_physics.c        a ball falling through a cloud        -> bin/hello_physics
-│   ├── mesh_rain.c            endless random meshes, fps in the title -> bin/mesh_rain
-│   ├── test_medium.c          checks the cloud sampling (make test) -> bin/test_medium
-│   ├── test_physics.c         checks the physics (make test)        -> bin/test_physics
-│   └── test_gpu_fluid.c       the GPU air against the CPU's (make webtest, in a browser)
-├── docs/
-│   ├── USAGE.md               every command, option, key and tunable constant
-│   ├── SDK.md                 how to use the engine in your own program
-│   ├── RAYTRACER.md           how the path tracer works (code + maths)
-│   ├── VOLUMES.md             volumetric clouds: physics, algorithms, next steps
-│   ├── PHYSICS.md             the physics engine: rigid bodies, air, coupling (code + maths)
-│   ├── RASTERIZER.md          how the rasterizer works (files + milestones)
-│   ├── WEB.md                 the engine in a browser, and on the GPU
-│   └── PERFORMANCE.md         ideas and plans for speed, how to measure, what was measured
-├── web/                       shell.html (the page around the program); make web -> web/build/
-├── tools/                     gen_models.py (test models), frames_to_gif.py (animations)
-├── models/                    .obj test models + the Stanford dragon
-├── out/                       rendered images
-└── Makefile                   builds everything; `make clean` removes build/ and bin/
-```
+![C](https://img.shields.io/badge/language-C-00599C?logo=c&logoColor=white)
+![WebGPU](https://img.shields.io/badge/GPU-WebGPU%20%2F%20WGSL-7B3FE4)
+![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%7C%20Windows%20%7C%20Browser-2E7D32)
+![Dependencies](https://img.shields.io/badge/dependencies-libm%20%2B%20a%20window-555555)
 
-Each layer only uses the ones above it in this list: `core` uses nothing, `raster`, `rt`,
-`phys` and `platform` use only `core`, and the backends and the physics never include each
-other; `gpu` may use `core`, `raster`, `rt` and `phys` (`make check-layers` verifies it).
+<img src="docs/images/spheres.jpg" width="32%" alt="Mirror and glass spheres with caustics"> <img src="docs/images/fog.jpg" width="32%" alt="Glass spheres in a volumetric cloud and fog"> <img src="docs/images/dragon.jpg" width="32%" alt="The Stanford dragon, path traced">
+
+</div>
+
+---
+
+## What it is
+
+One engine with two ways of drawing the same `Scene`. The **rasterizer** answers *which
+pixels does each triangle cover?* in milliseconds. The **path tracer** answers *what does
+each pixel see?* with soft shadows, reflection, refraction, caustics and clouds. A
+**physics engine** moves things inside the scene: rigid bodies, and the air that carries
+a volumetric cloud. All of it is plain C on its own small math library, one static
+library behind one header (`lr.h`), with no third-party code in the engine.
+
+## Features
+
+| | |
+|---|---|
+| **Path tracer** | Next event estimation with multiple importance sampling, mirror and glass, caustics traced from the lamp, Owen-scrambled Sobol with blue noise, volumetric clouds and fog (delta and ratio tracking), SAH BVH (4-wide on the CPU), instanced meshes in a two-level tree |
+| **Rasterizer** | Edge functions, perspective-correct shading (flat, Gouraud, Phong, wireframe), multithreaded; clouds and fog raymarched over the frame |
+| **GPU (WebGPU)** | Every backend again in WGSL compute and render shaders: the rasterizer, the path tracer with an SVGF-style denoiser and temporal reprojection for real-time path tracing, light-traced caustics with a photon cache, a GPU BVH builder, the air and the cloud, the rigid bodies |
+| **Physics** | Spheres, boxes, convex hulls and triangle meshes (separating axes, sequential impulses with warm starting, mass splitting on the GPU), the air as Stable Fluids on a MAC grid with a multigrid pressure solve, a MacCormack-advected cloud, explosions; bodies push the air and the air drags them |
+| **Platforms** | Linux (X11), Windows (Win32, MSYS2), web browsers (Emscripten + WebGPU); `float` or `double` precision |
+
+## Gallery
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="docs/images/boxes.jpg" alt="Cornell box"> | <img src="docs/images/cloud.jpg" alt="A volumetric cloud"> | <img src="docs/images/glass_dragon.jpg" alt="A glass dragon"> |
+| The Cornell box | A procedural cloud | A glass dragon (871k triangles) |
+
+<div align="center">
+<img src="docs/images/physics.gif" width="45%" alt="Dragons falling through a cloud onto a big dragon">
+<br><sub>Convex-hull dragons fall through the cloud onto a fixed one; the air flows around them and drags the cloud. Physics and path tracing on the GPU.</sub>
+</div>
 
 ## Quick start
 
 ```sh
-make models                    # test models into models/ (needs uv or python3, once)
-make                           # the library, both apps, the examples
-bin/view                       # fly around the Cornell box (WASD + mouse, M = mode, Esc quits)
-bin/render                     # path trace it to out/cornell_boxes.ppm
-bin/render -backend raster     # rasterize it to out/cornell_boxes_raster.ppm
-bin/render -scene cloud        # a volumetric cloud in the box -> out/cornell_cloud.ppm
-bin/sim                        # physics: balls fall through the cloud -> out/sim.gif
-bin/view -sim on               # the same, live (Space pause, K explosion, N another ball)
-bin/sim -backend raster        # the whole animation in ~40 s: rasterized, cloud raymarched
-bin/hello_rt                   # the 40-line SDK example -> out/hello_rt.ppm
-make DOUBLE=1                  # the same in double precision, into bin/double/
-make deps && make              # the GPU natively (WebGPU through wgpu-native, docs/WEB.md)
-make web && make serve         # in a browser, on the GPU: http://localhost:8000 (docs/WEB.md)
+make models          # the test models (needs uv or python3, once)
+make                 # the library, the programs, the examples
+bin/view             # fly through the Cornell box: WASD + mouse, M changes mode
+bin/render           # a path traced image -> out/cornell_boxes.ppm
+bin/view -sim on     # the physics, live (Space pauses, K is an explosion)
+
+make deps && make    # use the GPU natively (fetches wgpu-native)
+make web && make serve   # the same in a browser: http://localhost:8000
 ```
 
-Every program prints its options with `-h`. All commands and options are in
-**[docs/USAGE.md](docs/USAGE.md)**. To write your own program on the engine, see
-**[docs/SDK.md](docs/SDK.md)**.
+Every program lists its options with `-h`; all of them are in [docs/USAGE.md](docs/USAGE.md).
+To build your own program on the engine, start with `examples/hello_rt.c` (40 lines) and
+[docs/SDK.md](docs/SDK.md).
 
-## One engine, two backends
+## How it is built
 
-| | rasterizer (`raster/`) | path tracer (`rt/`) |
-|---|---|---|
-| question it answers | which pixels does each triangle cover? | what does each pixel see? |
-| lighting | local: ambient + lamp + highlights, no shadows; clouds and fog raymarched with a light grid | global: soft shadows, color bleeding, reflection, refraction, caustics (light traced from the lamp, with MIS), volumetric clouds and fog |
-| speed (Cornell box) | milliseconds per frame | seconds per clean image |
-| used for | the real-time preview, quick looks | final images |
+```mermaid
+flowchart LR
+    core["core<br/>math · scene · meshes · volumes"] --> raster["raster<br/>rasterizer"]
+    core --> rt["rt<br/>path tracer"]
+    core --> phys["phys<br/>bodies · air · cloud"]
+    core --> platform["platform<br/>X11 · Win32 · canvas"]
+    raster --> gpu["gpu<br/>WebGPU backend"]
+    rt --> gpu
+    phys --> gpu
+    gpu --> app["app<br/>options · demos"]
+    platform --> app
+    app --> programs["render · view · sim<br/>examples"]
+```
 
-Both draw the same `Scene` (`core/scene.h`), built from the same meshes and cameras with
-the same math. `real` is `float` by default (faster), `double` with `make DOUBLE=1`.
+Each layer only includes the ones before it (`make check-layers` checks), so the
+backends and the physics never depend on each other, and the CPU versions always stay
+next to the GPU ones.
 
-## Physics
+## Performance
 
-`phys/` moves rigid spheres and boxes (separating axes and face clipping, sequential
-impulses with friction and warm starting) and the air of the room (Stable Fluids on a MAC
-grid, multigrid pressure, vorticity confinement), which carries the cloud's density
-(MacCormack advection) in the very `Volume` the path tracer renders. Bodies push the air;
-the air drags bodies and lifts balloons; an explosion makes the air expand. See
-**[docs/PHYSICS.md](docs/PHYSICS.md)**.
+Measured on an RTX 3070 and an 8-core CPU ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+keeps every measurement, and the ideas still to try):
+
+| | |
+|---|---|
+| Cornell box, 640×640, one sample per pixel | **1.9 ms** on the GPU |
+| Stanford dragon, 871k triangles | **8.1 ms** per pass on the GPU · 3.4 M paths/s on the CPU |
+| Live path traced dragon (`view -backend rt`), 640×640 | **79 fps**, denoised |
+| 1024 rigid bodies, one 1/60 s step | 17.9 ms on the CPU → **1.7 ms** on the GPU |
+
+## Documentation
+
+| | |
+|---|---|
+| [USAGE](docs/USAGE.md) | every command, option, key and tunable constant |
+| [SDK](docs/SDK.md) | using the engine in your own program, the API |
+| [RAYTRACER](docs/RAYTRACER.md) | the path tracer, from rays to MIS, with the maths |
+| [RASTERIZER](docs/RASTERIZER.md) | the rasterizer, milestone by milestone |
+| [VOLUMES](docs/VOLUMES.md) | volumetric clouds and fog |
+| [PHYSICS](docs/PHYSICS.md) | rigid bodies, the air, the coupling |
+| [WEB](docs/WEB.md) | the GPU backend and the browser build |
+| [PERFORMANCE](docs/PERFORMANCE.md) | how to measure, what was measured, what is next |
 
 ## Credits
 
-The Stanford dragon (`models/dragon_recon/`, `make dragon-download`) is from the Stanford
-3D Scanning Repository, © Stanford University Computer Graphics Laboratory. It may be
-used for non-commercial purposes with credit; please don't animate, morph or break it
-apart.
+The Stanford dragon (`models/dragon_recon/`, `make dragon-download`) is from the
+[Stanford 3D Scanning Repository](https://graphics.stanford.edu/data/3Dscanrep/),
+© Stanford University Computer Graphics Laboratory, used for non-commercial purposes
+with credit. The techniques come from the papers and books cited in each document under
+`docs/`.
