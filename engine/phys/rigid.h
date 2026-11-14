@@ -90,6 +90,7 @@ typedef struct {
     int sleep;               // 1 (default): bodies at rest fall asleep (PHYSICS.md 1.5)
     RigidGeom **geoms;       // the shapes of mesh bodies (owned)
     int ngeoms, cap_geoms;
+    struct PairMemos *memos; // what decided each pair of hulls last step (rigid.c, P3)
 } RigidWorld;
 
 void rigid_init(RigidWorld *w);   // gravity 981 down, no room, 16 iterations

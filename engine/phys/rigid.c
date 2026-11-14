@@ -19,6 +19,77 @@
 
 // ---- bodies -----------------------------------------------------------------------------
 
+// ---- what decided each pair of hulls last step (P3) ---------------------------------------
+//
+// Testing two hulls is the costly part of a step (phys/convex.c: every face of each against
+// the other's corners, every pair of edges). Each pair's result is kept for the next step
+// (convex_collide_cached): the axis that separated them, or the feature of least overlap
+// with the pose of b in a's frame when it was found. Next step a separating axis is tried
+// first (most pairs whose bounding spheres meet are apart, and stay apart along the same
+// axis), and a touching pair that has moved less than MEMO_MOVE (of the smaller body's
+// size) and MEMO_TURN since that full test takes its contacts from the same feature.
+// Two tables: last step's (read) and this step's (written), so that pairs no longer met
+// drop out by themselves. Open addressing, keys (a, b) + 1.
+
+#define MEMO_MOVE 0.01f          // of the smaller bounding radius
+#define MEMO_TURN 0.99996f       // cos of half the angle: about 1 degree
+
+typedef struct { uint64_t key; ConvexFeature ft; Vec3 t; Quat q; } PairMemo;
+struct PairMemos { PairMemo *e[2]; size_t cap; int cur; size_t used; };
+
+static void memos_free(RigidWorld *w){
+    if (!w->memos) return;
+    free(w->memos->e[0]);
+    free(w->memos->e[1]);
+    free(w->memos);
+    w->memos = NULL;
+}
+
+static size_t memo_slot(uint64_t key, size_t cap){ return (size_t)((key * 0x9E3779B97F4A7C15ull) >> 20) & (cap - 1); }
+
+static PairMemo *memo_find(PairMemo *t, size_t cap, uint64_t key){
+    for (size_t i = memo_slot(key, cap);; i = (i + 1) & (cap - 1)){
+        if (t[i].key == key) return &t[i];
+        if (t[i].key == 0) return NULL;
+    }
+}
+static void memo_put(PairMemo *t, size_t cap, const PairMemo *m){
+    for (size_t i = memo_slot(m->key, cap);; i = (i + 1) & (cap - 1))
+        if (t[i].key == 0 || t[i].key == m->key){ t[i] = *m; return; }
+}
+
+// at the start of a step: last step's table becomes the one read, a clear one is written
+// (twice as large when last step filled a quarter of it)
+static void memos_step(RigidWorld *w){
+    struct PairMemos *m = w->memos;
+    if (!m){
+        m = w->memos = calloc(1, sizeof(*m));
+        if (!m) return;
+        m->cap = 1024;
+        m->e[0] = calloc(m->cap, sizeof(PairMemo));
+        m->e[1] = calloc(m->cap, sizeof(PairMemo));
+        if (!m->e[0] || !m->e[1]){ memos_free(w); return; }
+        return;
+    }
+    if (m->used * 4 > m->cap){
+        size_t cap = m->cap * 4;
+        PairMemo *r = calloc(cap, sizeof(PairMemo)), *wr = calloc(cap, sizeof(PairMemo));
+        if (!r || !wr){ free(r); free(wr); memos_free(w); return; }
+        const PairMemo *last = m->e[m->cur ^ 1];      // (the table written last step)
+        for (size_t i = 0; i < m->cap; i++) if (last[i].key) memo_put(r, cap, &last[i]);
+        free(m->e[0]);
+        free(m->e[1]);
+        m->e[0] = r;
+        m->e[1] = wr;
+        m->cur = 0;
+        m->cap = cap;
+    } else {
+        m->cur ^= 1;
+        memset(m->e[m->cur ^ 1], 0, m->cap * sizeof(PairMemo));
+    }
+    m->used = 0;
+}
+
 void rigid_init(RigidWorld *w){
     memset(w, 0, sizeof(*w));
     w->gravity = vec3(0, -981, 0);
@@ -43,6 +114,7 @@ void rigid_free(RigidWorld *w){
     free(w->bodies);
     free(w->contacts);
     free(w->prev);
+    memos_free(w);
     memset(w, 0, sizeof(*w));
 }
 
@@ -432,13 +504,29 @@ static void collide_sphere_convex(RigidWorld *w, int ia, int ib, real m){
 }
 
 // boxes and hulls
+static real body_radius(const Body *b);
+
 static void collide_convex(RigidWorld *w, int ia, int ib, real mg){
     Placed *p = malloc(2 * sizeof(Placed));
     if (!p) return;
-    place(&w->bodies[ia], &p[0]);
-    place(&w->bodies[ib], &p[1]);
+    const Body *a = &w->bodies[ia], *b = &w->bodies[ib];
+    place(a, &p[0]);
+    place(b, &p[1]);
+    // what decided this pair last step, and b in a's frame now (P3: the memos above)
+    struct PairMemos *mm = w->memos;
+    PairMemo memo = {((uint64_t)ia << 32 | (uint64_t)ib) + 1, {CONVEX_NONE, 0, 0, 0}, vec3(0, 0, 0), quat_identity()};
+    const PairMemo *old = mm ? memo_find(mm->e[mm->cur], mm->cap, memo.key) : NULL;
+    if (old) memo = *old;
+    Quat qa = a->rot, ca = quat(qa.w, -qa.x, -qa.y, -qa.z);
+    Quat q = quat_mul(ca, b->rot);
+    Vec3 t = quat_rotate(ca, v_sub(b->pos, a->pos));
+    real rmin = r_fmin(body_radius(a), body_radius(b));
+    int reuse = old && v_len(v_sub(t, memo.t)) < MEMO_MOVE * rmin &&
+                r_fabs(q.w * memo.q.w + q.x * memo.q.x + q.y * memo.q.y + q.z * memo.q.z) > MEMO_TURN;
     ConvexContact c[CONVEX_MAX_CONTACTS];
-    int m = convex_collide(&p[0].wc, &p[1].wc, mg, c);
+    int m = convex_collide_cached(&p[0].wc, &p[1].wc, mg, &memo.ft, reuse, c);
+    if (memo.ft.full){ memo.t = t; memo.q = q; }
+    if (mm && mm->used * 2 < mm->cap){ memo_put(mm->e[mm->cur ^ 1], mm->cap, &memo); mm->used++; }
     for (int k = 0; k < m; k++) add_contact(w, ia, ib, c[k].p, c[k].n, c[k].depth);
     free(p);
 }
@@ -872,6 +960,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     { Contact *t = w->prev; w->prev = w->contacts; w->contacts = t;
       int tc = w->cap_prev; w->cap_prev = w->cap_contacts; w->cap_contacts = tc;
       w->nprev = w->ncontacts; w->ncontacts = 0; }
+    memos_step(w);
     find_contacts(w, dt);
     for (int k = 0; k < w->ncontacts; k++){
         Contact *c = &w->contacts[k];

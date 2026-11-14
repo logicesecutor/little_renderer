@@ -325,19 +325,81 @@ static real min_along(const Vec3 *v, int n, Vec3 d){
 #define PREFER_B(sa, sb) ((sa) < 1.02f * (sb) - 0.01f)
 #define PREFER_EDGE(sf, se) ((sf) < 1.1f * (se) - 0.1f)
 
-int convex_collide(const WorldConvex *A, const WorldConvex *B, real margin, ConvexContact *out){
+static real max_along(const Vec3 *v, int n, Vec3 d){
+    real m = -1e30f;
+    for (int i = 0; i < n; i++){ real s = v_dot(v[i], d); if (s > m) m = s; }
+    return m;
+}
+
+// the axis of the edge pair (i of a, j of b), pointing from a to b (0 if they are parallel)
+static Vec3 edge_axis(const WorldConvex *A, const WorldConvex *B, int i, int j){
+    const ConvexEdge *E = &A->c->e[i], *G = &B->c->e[j];
+    Vec3 pa = A->v[E->a], da = v_sub(A->v[E->b], pa), db = v_sub(B->v[G->b], B->v[G->a]);
+    Vec3 L = v_cross(da, db);
+    real ll = v_len(L);
+    if (ll < 1e-6f * v_len(da) * v_len(db)) return vec3(0, 0, 0);
+    L = v_scale(L, 1 / ll);
+    return v_dot(L, v_sub(pa, A->center)) < 0 ? v_neg(L) : L;
+}
+
+// the contacts of a feature known to be the one of least overlap
+static int feature_contacts(const WorldConvex *A, const WorldConvex *B, const ConvexFeature *ft, real margin, ConvexContact *out){
+    const Convex *ca = A->c, *cb = B->c;
+    if (ft->type == CONVEX_EDGE){
+        const ConvexEdge *E = &ca->e[ft->i], *G = &cb->e[ft->j];
+        Vec3 L = edge_axis(A, B, ft->i, ft->j);
+        if (v_dot(L, L) == 0) return 0;
+        real s = v_dot(L, v_sub(B->v[G->a], A->v[E->a]));
+        if (s > margin) return 0;
+        Vec3 c0, c1;
+        closest_seg(A->v[E->a], A->v[E->b], B->v[G->a], B->v[G->b], &c0, &c1);
+        out[0].p = v_scale(v_add(c0, c1), 0.5f);
+        out[0].n = v_neg(L);
+        out[0].depth = -s;
+        return 1;
+    }
+    Vec3 ref[MAXPOLY], inc[MAXPOLY];
+    if (ft->type == CONVEX_FACE_B){
+        int fb = ft->i, fi = incident_face(A, B->n[fb]);
+        face_loop(B, fb, ref);
+        face_loop(A, fi, inc);
+        return face_contacts(ref, cb->f[fb].count, B->n[fb], B->d[fb], inc, ca->f[fi].count, B->n[fb], margin, out);
+    }
+    int fa = ft->i, fi = incident_face(B, A->n[fa]);
+    face_loop(A, fa, ref);
+    face_loop(B, fi, inc);
+    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], inc, cb->f[fi].count, v_neg(A->n[fa]), margin, out);
+}
+
+// how far apart a and b are along the separating feature ft (> 0: apart)
+static real feature_gap(const WorldConvex *A, const WorldConvex *B, const ConvexFeature *ft){
+    if (ft->type == CONVEX_SEP_FACE_A) return min_along(B->v, B->c->nv, A->n[ft->i]) - A->d[ft->i];
+    if (ft->type == CONVEX_SEP_FACE_B) return min_along(A->v, A->c->nv, B->n[ft->i]) - B->d[ft->i];
+    Vec3 L = edge_axis(A, B, ft->i, ft->j);
+    if (v_dot(L, L) == 0) return -1e30f;
+    return min_along(B->v, B->c->nv, L) - max_along(A->v, A->c->nv, L);
+}
+
+int convex_collide_cached(const WorldConvex *A, const WorldConvex *B, real margin, ConvexFeature *ft, int reuse,
+                          ConvexContact *out){
+    ft->full = 0;
+    // apart last time: if they still are along that axis, nothing more to test
+    if (ft->type >= CONVEX_SEP_FACE_A && ft->type <= CONVEX_SEP_EDGE && feature_gap(A, B, ft) > margin) return 0;
+    // touching last time, and they have barely moved since the full test: the same feature
+    if (reuse && ft->type >= CONVEX_FACE_A && ft->type <= CONVEX_EDGE) return feature_contacts(A, B, ft, margin, out);
+    // the full test
+    ft->full = 1;
     const Convex *ca = A->c, *cb = B->c;
     real sa = -1e30f, sb = -1e30f, se = -1e30f;
     int fa = -1, fb = -1, ea = -1, eb = -1;
-    Vec3 le = vec3(0, 1, 0);
     for (int f = 0; f < ca->nf; f++){
         real s = min_along(B->v, cb->nv, A->n[f]) - A->d[f];
-        if (s > margin) return 0;
+        if (s > margin){ ft->type = CONVEX_SEP_FACE_A; ft->i = f; return 0; }
         if (s > sa){ sa = s; fa = f; }
     }
     for (int f = 0; f < cb->nf; f++){
         real s = min_along(A->v, ca->nv, B->n[f]) - B->d[f];
-        if (s > margin) return 0;
+        if (s > margin){ ft->type = CONVEX_SEP_FACE_B; ft->i = f; return 0; }
         if (s > sb){ sb = s; fb = f; }
     }
     for (int i = 0; i < ca->ne; i++){
@@ -360,31 +422,20 @@ int convex_collide(const WorldConvex *A, const WorldConvex *B, real margin, Conv
             L = v_scale(L, 1 / ll);
             if (v_dot(L, v_sub(pa, A->center)) < 0) L = v_neg(L);
             real s = v_dot(L, v_sub(pb, pa));
-            if (s > margin) return 0;
-            if (s > se){ se = s; ea = i; eb = j; le = L; }
+            if (s > margin){ ft->type = CONVEX_SEP_EDGE; ft->i = i; ft->j = j; return 0; }
+            if (s > se){ se = s; ea = i; eb = j; }
         }
     }
     real sf = PREFER_B(sa, sb) ? sb : sa;
-    if (ea >= 0 && PREFER_EDGE(sf, se)){
-        const ConvexEdge *E = &ca->e[ea], *G = &cb->e[eb];
-        Vec3 c0, c1;
-        closest_seg(A->v[E->a], A->v[E->b], B->v[G->a], B->v[G->b], &c0, &c1);
-        out[0].p = v_scale(v_add(c0, c1), 0.5f);
-        out[0].n = v_neg(le);
-        out[0].depth = -se;
-        return 1;
-    }
-    Vec3 ref[MAXPOLY], inc[MAXPOLY];
-    if (PREFER_B(sa, sb)){                     // b's face
-        int fi = incident_face(A, B->n[fb]);
-        face_loop(B, fb, ref);
-        face_loop(A, fi, inc);
-        return face_contacts(ref, cb->f[fb].count, B->n[fb], B->d[fb], inc, ca->f[fi].count, B->n[fb], margin, out);
-    }
-    int fi = incident_face(B, A->n[fa]);
-    face_loop(A, fa, ref);
-    face_loop(B, fi, inc);
-    return face_contacts(ref, ca->f[fa].count, A->n[fa], A->d[fa], inc, cb->f[fi].count, v_neg(A->n[fa]), margin, out);
+    if (ea >= 0 && PREFER_EDGE(sf, se)){ ft->type = CONVEX_EDGE; ft->i = ea; ft->j = eb; }
+    else if (PREFER_B(sa, sb)){ ft->type = CONVEX_FACE_B; ft->i = fb; }
+    else { ft->type = CONVEX_FACE_A; ft->i = fa; }
+    return feature_contacts(A, B, ft, margin, out);
+}
+
+int convex_collide(const WorldConvex *A, const WorldConvex *B, real margin, ConvexContact *out){
+    ConvexFeature ft = {CONVEX_NONE, 0, 0, 0};
+    return convex_collide_cached(A, B, margin, &ft, 0, out);
 }
 
 int convex_collide_triangle(const WorldConvex *A, const Vec3 t[3], real margin, ConvexContact *out){

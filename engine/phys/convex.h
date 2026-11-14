@@ -59,6 +59,16 @@ typedef struct { Vec3 p, n; real depth; } ConvexContact;   // n points from b to
 // gap (a speculative contact, phys/rigid.c: the solver lets the gap close, no more).
 // a against b; the contacts found (0 = apart)
 int convex_collide(const WorldConvex *a, const WorldConvex *b, real margin, ConvexContact *out);
+// The same, remembering what decided it (P3): the axis that separated them, or the feature
+// of least overlap (a face of a or of b, or a pair of edges). Given it again, the next test
+// starts there: a separating axis that still separates ends it at once (one face against
+// the other's corners instead of all faces and all pairs of edges), and with `reuse` (the
+// caller saw that the two barely moved relative to each other since the full test) a
+// touching feature gives the contacts directly. ft->full tells whether the full test ran.
+enum { CONVEX_NONE, CONVEX_SEP_FACE_A, CONVEX_SEP_FACE_B, CONVEX_SEP_EDGE, CONVEX_FACE_A, CONVEX_FACE_B, CONVEX_EDGE };
+typedef struct { int type, i, j, full; } ConvexFeature;
+int convex_collide_cached(const WorldConvex *a, const WorldConvex *b, real margin, ConvexFeature *ft, int reuse,
+                          ConvexContact *out);
 // a against the triangle t (world): two-sided
 int convex_collide_triangle(const WorldConvex *a, const Vec3 t[3], real margin, ConvexContact *out);
 // a sphere against a polyhedron (1 contact or 0)

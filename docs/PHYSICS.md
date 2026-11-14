@@ -137,6 +137,33 @@ Two more shapes come from a triangle mesh (the scene's `SceneMesh`, in its own s
 | sphere – mesh | each triangle near the sphere: its closest point |
 | box / hull – mesh | each triangle near the body (the BVH, with the body's box in the mesh's frame): the same separating axis test, the triangle two-sided (a mesh need not be closed); its edges against only the hull edges on the hull's outline seen along them; at most 4 contacts for the pair |
 
+**Remembered pairs.** The hull–hull test is the costly part of a pile: every face of each
+hull against the other's corners (92 faces × 48 corners, twice) and some 19 000 pairs of
+edges. Each pair of hulls keeps, from one step to the next, what decided it
+(`convex_collide_cached`; the "memos" in `rigid.c`, the same tables on the GPU in
+`K_HEAVY`): the **axis that separated** them, or the **feature of least overlap** (a face
+of either hull, or a pair of edges) with the pose of one hull in the other's frame when
+that full test ran. Next step:
+
+- a separating axis is tried first: if it still separates them (by the contact margin),
+  that is all (one face against the other's corners). Two thirds of the pairs whose
+  bounding spheres meet in a pile are apart, and most stay apart along the same axis;
+- a touching pair that has moved less than 1% of the smaller hull's size and turned less
+  than about 1° relative to the other since its full test takes its contacts from the same
+  feature (the incident face clipped as usual, the depths measured now): the face or edge
+  pair of least overlap does not change while the pose barely does;
+- otherwise the full test runs, and its result is kept.
+
+Two tables, last step's (read) and this step's (written), so that pairs no longer near
+drop out by themselves. 250 hulls settling in a room, one CPU thread: 30.5 → 9.4 ms per
+step; on the GPU, 1000 hulls raining: the hulls' contacts 2.3 → 1.4 ms per step
+(PERFORMANCE.md P3).
+
+Fewer corners per hull would be the other way: the test's cost goes with them (250 hulls:
+48 corners 31.8 ms per step, 32 corners 20.2, 24 corners 15.4), but the hull also leaves
+more of the mesh out (the farthest vertex outside it: dragon 2.5% of its size at 48
+corners, 2.9% at 32; torus 3.5% and 5.0%; sphere 4.9% and 7.1%). The 48 corners stay.
+
 The air sees both as obstacles through an **occupancy grid**, 48³ bits over the shape's
 box in its own frame: a cell centre inside the hull's planes, or, for a mesh, inside by
 the parity of the crossings of three rays (along x, y and z: the majority decides, so a

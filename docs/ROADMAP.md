@@ -12,9 +12,9 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 
 | # | step | status | what it is |
 |---|---|---|---|
-| 1 | **PNG, and the FPS counter on the image** | next | below |
-| 2 | **P3: a cheaper hull–hull test** | planned | below; PERFORMANCE.md P3 |
-| 3 | **P8: a parallel prefix sum for the contact lists** | planned | below; PERFORMANCE.md P8 |
+| 1 | **PNG, and the FPS counter on the image** | done (050baf2, 97091cd) | below |
+| 2 | **P3: a cheaper hull–hull test** | done | below; PERFORMANCE.md P3 |
+| 3 | **P8: a parallel prefix sum for the contact lists** | next | below; PERFORMANCE.md P8 |
 | 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | planned | below; PERFORMANCE.md R4b |
 | 5 | **PBR: one physically based material model for all four pipelines** | planned | [PBR.md](PBR.md), phases PBR1–PBR6 |
 
@@ -64,6 +64,10 @@ on the GPU). The separating-axis test tries every pair of edges (48 corners per 
   axis or touching faces from the last step; a pair that barely moved starts there and most
   of the time needs one test.
 - CPU and GPU together; measured with `mesh_rain` and the tall piles of P11.
+
+Done (2026-11-14): the remembered pairs (the third point), CPU and GPU; the corners measured
+and kept at 48 (32 would be 1.6x faster but leave up to 7% of a round shape out); GJK not
+needed for now (PERFORMANCE.md P3b). Results in PERFORMANCE.md's Done.
 
 ## 3. P8: a parallel prefix sum for the contact lists
 
