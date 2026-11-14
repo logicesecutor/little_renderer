@@ -61,18 +61,37 @@ clip, perspective divide, viewport, cull, rasterize) draws them.
 a point and the lamp (shadows), or what light bounces off the walls (color bleeding).
 Those are exactly what the path tracer computes. `render_scene` uses *local* lighting:
 
-- a **point light** at the center of the scene's light quad, moved half the lamp's size
-  towards the side it shines to (so it also lights the ceiling around it a little);
-- `brightness = 0.08 (ambient) + 0.70 · max(n·l, 0) (lamp) + 0.22 · (n·v) (fill)`. The
-  *fill* term is a weak light from the camera: it stands in for the bounced light that
-  makes the faces the lamp does not see grey instead of black;
+- every surface is its material's **BSDF** (`core/brdf.h`, the path tracer's: GGX,
+  diffuse, multiple scattering; docs/PBR.md), lit by the scene's **quad lamp** itself
+  (`render_shade`, PBR3):
+  - the diffuse-like lobes by the lamp's exact **form factor** (Lambert's formula for a
+    polygon, the lamp clipped at the surface's horizon; each edge's θ / sin θ by Heitz and
+    Hill's rational fit instead of atan2);
+  - the microfacet lobe by comparing its solid angle (`4π α² cos θv`) with the lamp's:
+    a lobe much wider than the lamp takes f at the lamp's centre, one about as wide
+    averages f over the lamp's 4 quarters, a narrower one takes f at the lamp's point
+    nearest the reflected ray (Karis's representative point) over the lobe's own solid
+    angle, so a mirror shows the lamp with its edges; in between they are blended;
+  - no shadows: the lamp lights everything in front of it;
+- an **ambient** light for what bounces around the room: a uniform environment of
+  radiance 0.06 plus 0.025 · (n·v) from the camera's side (`RENDER_SCENE_AMBIENT`, `_FILL`),
+  through the BSDF's albedo for that environment (`bsdf_albedo_uniform`). With it the
+  spheres' room has the path tracer's mean brightness; `LR_RASTER_AMBIENT=0` turns it off
+  (to compare with the path tracer's direct light, `-d 1`);
 - **two-sided** surfaces: the normal is turned towards the camera first, because the
   scene's quads have no "outside" (the walls are seen from inside the box);
-- materials: **diffuse** = its albedo, **mirror** = a darker base + a sharp Blinn-Phong
-  highlight, **glass** = an even darker base + a sharper highlight, **light** = its color at
-  full brightness;
+- mirrors and glass reflect the lamp and the ambient light, not the room (PBR4's
+  environment); glass shows no refraction; **lights** are drawn as their colour at full
+  brightness;
+- what depends on one cosine alone (the ambient albedo, the diffuse lobes' Fresnel
+  factors) is tabulated per material once per frame (33 cosines), the rest computed per
+  pixel: ~160 ns per pixel on one core;
 - colors are linear like the path tracer's, and are sRGB-encoded at the end
   (`image_pack_srgb`), so both backends show the same wall colors.
+
+The GPU rasterizer (`gpu/raster_gpu.c`) does the same in WGSL, with the path tracer's
+`GPU_WGSL_BSDF` and its tables; its images match the CPU's within 1/255 but for a few
+pixels on triangle edges (ties).
 
 Shading modes: `phong` (per pixel), `gouraud` (per vertex), `flat` (per triangle; a quad's
 two halves are shaded at the quad's center so they match), `wireframe`.

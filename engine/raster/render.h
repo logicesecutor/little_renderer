@@ -39,8 +39,8 @@ RenderParams render_params_camera(Vec3 from, Vec3 at, Vec3 up, real vfov_deg, in
 void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p);
 
 // Draws every primitive of the scene (spheres are tessellated, quads become 2 triangles).
-// Colors come from the materials, light from a point light at the center of the scene's
-// light quad; output is sRGB-encoded like the path tracer's. Uses p->view, p->proj,
+// The materials' BSDF (core/brdf.h) lit by the scene's lamp and an ambient light
+// (render_shade); output is sRGB-encoded like the path tracer's. Uses p->view, p->proj,
 // p->eye, p->mode (TEXTURED acts as PHONG) and p->cull_backfaces. Does NOT clear fb.
 void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p);
 
@@ -48,9 +48,11 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p);
 // For other rasterizers of the same Scene (the GPU's, gpu/raster_gpu.c): the same
 // triangles, the same lamp, the same material model, so that they draw the same image.
 
-#define RENDER_SCENE_AMBIENT 0.08f
-#define RENDER_SCENE_LAMP 0.70f       // weight of the point light
-#define RENDER_SCENE_FILL 0.22f       // weight of the light from the camera
+// the ambient light standing in for the light that bounces around the room (a rasterizer
+// has none): a uniform environment of this radiance, and more of it towards the camera (the
+// faces the camera sees head-on are lit by what is behind it)
+#define RENDER_SCENE_AMBIENT 0.06f
+#define RENDER_SCENE_FILL 0.025f
 #define RENDER_SPHERE_STACKS 16
 #define RENDER_SPHERE_SLICES 32
 // a sphere is a latitude / longitude grid; every cell is 2 triangles, 1 at the poles
@@ -64,9 +66,22 @@ int render_prim_tri_count(const Primitive *p);
 void render_prim_triangle(const Primitive *p, int sub, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at);
 // the point light standing in for the scene's lamp
 Vec3 render_scene_light(const Scene *s);
-// how a material is drawn: brightness k = AMBIENT + LAMP * max(n.l, 0) + FILL * n.eye (n
-// turned towards the eye), color = base * k + spec_k * (n.h)^spec_exp; `constant`: just base
-typedef struct { Vec3 base; real spec_k, spec_exp; int constant; } RenderMaterial;
+// The lamp as the rasterizers light with it (PBR3): the quad q + a u + b v (a, b in 0..1),
+// the side it shines to (n), w = (u x v) / |u x v|^2 (a point's a, b), its radiance; and
+// the ambient light (RENDER_SCENE_AMBIENT, _FILL; LR_RASTER_AMBIENT=0 turns it off, to
+// compare with the path tracer's direct light, -d 1)
+typedef struct { int on; Vec3 q, u, v, n, w, center, le; real area, ambient, fill; } RenderLamp;
+RenderLamp render_scene_lamp(const Scene *s);
+// The radiance point p (normal n, turned to the eye) sends to the eye: the material's BSDF
+// lit by the lamp - its diffuse-like lobes by the lamp's exact form factor (no shadow), its
+// microfacet lobe by the lamp's centre or 4 quarters when the lobe is wider than the lamp,
+// by the lamp's point nearest the reflected ray over the lobe's own solid angle 4 π α² cos
+// when it is narrower (a mirror shows the lamp itself) - and by the ambient light
+// (bsdf_albedo_uniform). The rasterizer tabulates per material what this recomputes.
+Vec3 render_shade(const RenderLamp *L, const Material *m, Vec3 p, Vec3 n, Vec3 eye);
+// a material drawn as it is (constant: a lamp, its colour at full brightness), or shaded
+// (render_shade; base: its base colour, for the wireframe)
+typedef struct { Vec3 base; int constant; } RenderMaterial;
 RenderMaterial render_scene_material(const Material *m);
 
 const char *render_mode_name(RenderMode mode);

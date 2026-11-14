@@ -197,7 +197,9 @@ static inline Bsdf bsdf_make(const Material *mat, int outside){
     b.kd_norm = 1 / (1 - bsdf_spec_albedo_avg(&b));
     b.kms_norm = 1 / ((real)PI * (1 - b.e_avg));
     b.ms = b.smooth || b.metallic <= 0 ? vec3(0, 0, 0) : bsdf_ms_color(&b);
-    b.cv = -1;
+    b.cv = -1;                                   // bsdf_view fills the rest
+    b.es_v = b.e_v = 0;
+    for (int i = 0; i < BSDF_LOBES; i++) b.p[i] = 0;
     return b;
 }
 
@@ -343,6 +345,51 @@ static inline int bsdf_sample(Bsdf *b, Vec3 n, Vec3 v, real ul, real u1, real u2
     if (cv <= 0) return 0;
     bsdf_view(b, cv);
     return bsdf_sample_lobe(b, bsdf_pick(b, ul), n, v, u1, u2, s);
+}
+
+// ---- for the rasterizers (PBR3): the lobes one at a time ----
+
+// The microfacet reflection lobe alone, f(v, l), at GGX width `alpha` (a perfectly smooth
+// material too: then b->alpha, 1e-4), for a light the BSDF is not sampled towards
+static inline Vec3 bsdf_spec_lobe(const Bsdf *b, Vec3 n, Vec3 v, Vec3 l, real alpha){
+    real cv = v_dot(v, n), cl = v_dot(l, n);
+    if (cv <= 0 || cl <= 0) return vec3(0, 0, 0);
+    Vec3 h = v_norm(v_add(v, l));
+    real vh = bsdf_clamp01(v_dot(v, h)), nh = v_dot(n, h);
+    if (nh <= 0) return vec3(0, 0, 0);
+    real fd = bsdf_fresnel_dielectric(vh, b->eta), m = b->metallic;
+    Vec3 fm = bsdf_fresnel_metal(b->base, vh);
+    real s = ggx_d(nh, ggx_s2(n, h), alpha) * ggx_vis(cv, cl, alpha);
+    return vec3(((1 - m) * fd + m * fm.x) * s, ((1 - m) * fd + m * fm.y) * s, ((1 - m) * fd + m * fm.z) * s);
+}
+
+// The diffuse-like lobes (diffuse and multiple scattering) for light arriving at cosine cl,
+// after bsdf_view(b, cv): they depend on the directions only through the two cosines
+static inline Vec3 bsdf_diffuse_lobes(Bsdf *b, real cl){
+    const real m = b->metallic, t = b->transmission;
+    Vec3 f = vec3(0, 0, 0);
+    if ((1 - m) * (1 - t) > 0)
+        f = v_scale(b->base, (1 - m) * (1 - t) * (1 - b->es_v) * (1 - bsdf_spec_albedo(b, cl)) * b->kd_norm / (real)PI);
+    if (!b->smooth && m > 0) f = v_add(f, v_scale(b->ms, m * (1 - b->e_v) * (1 - bsdf_albedo(b, cl)) * b->kms_norm));
+    return f;
+}
+
+// What the BSDF sends towards v at cosine cv from a uniform environment of radiance 1 (all
+// lobes, reflected and transmitted): the specular lobes' albedo with their Fresnel (the
+// metal's per channel, F0 (E - B) + B), the diffuse and transmitted light below them, the
+// multiple scattering. The rasterizers' ambient light (and PBR4's environment).
+static inline Vec3 bsdf_albedo_uniform(Bsdf *b, real cv){
+    bsdf_view(b, cv);
+    const real m = b->metallic;
+    real es = bsdf_spec_albedo(b, cv);
+    real e = b->smooth ? 1 : bsdf_albedo(b, cv);
+    real bb;
+    if (b->smooth){ real x = 1 - bsdf_clamp01(cv), x2 = x * x; bb = x2 * x2 * x; }
+    else bb = bsdf_table(BRDF_B, b->rough, cv);
+    Vec3 a = vec3(es + (1 - es) * b->base.x, es + (1 - es) * b->base.y, es + (1 - es) * b->base.z);
+    Vec3 mt = vec3(b->base.x * (e - bb) + bb + b->ms.x * (1 - e), b->base.y * (e - bb) + bb + b->ms.y * (1 - e),
+                   b->base.z * (e - bb) + bb + b->ms.z * (1 - e));
+    return v_add(v_scale(a, 1 - m), v_scale(mt, m));
 }
 
 // the material has perfect (delta) lobes: mirror reflection or refraction

@@ -326,6 +326,52 @@ fn bsdf_sample(b: ptr<function, Bsdf>, n: vec3f, v: vec3f, ul: f32, u: vec2f) ->
     bsdf_view(b, cv);
     return bsdf_sample_lobe(b, bsdf_pick(b, ul), n, v, u);
 }
+
+/* for the rasterizers (PBR3): the lobes one at a time (core/brdf.h) */
+fn bsdf_spec_lobe(b: ptr<function, Bsdf>, n: vec3f, v: vec3f, l: vec3f, alpha: f32) -> vec3f {
+    let cv = dot(v, n);
+    let cl = dot(l, n);
+    if (cv <= 0.0 || cl <= 0.0) { return vec3f(0.0); }
+    let h = normalize(v + l);
+    let vh = clamp(dot(v, h), 0.0, 1.0);
+    let nh = dot(n, h);
+    if (nh <= 0.0) { return vec3f(0.0); }
+    let fd = bsdf_fresnel_dielectric(vh, (*b).eta);
+    let m = (*b).metallic;
+    let fm = bsdf_fresnel_metal((*b).base, vh);
+    let s = ggx_d(nh, ggx_s2(n, h), alpha) * ggx_vis(cv, cl, alpha);
+    return ((1.0 - m) * fd + m * fm) * s;
+}
+fn bsdf_diffuse_lobes(b: ptr<function, Bsdf>, cl: f32) -> vec3f {
+    let m = (*b).metallic;
+    let t = (*b).transmission;
+    var f = vec3f(0.0);
+    if ((1.0 - m) * (1.0 - t) > 0.0) {
+        f = (*b).base * ((1.0 - m) * (1.0 - t) * (1.0 - (*b).es_v) * (1.0 - bsdf_spec_albedo(b, cl)) * (*b).kd_norm / BSDF_PI);
+    }
+    if ((*b).perfect == 0u && m > 0.0) {
+        f += (*b).ms * (m * (1.0 - (*b).e_v) * (1.0 - bsdf_albedo(b, cl)) * (*b).kms_norm);
+    }
+    return f;
+}
+fn bsdf_albedo_uniform(b: ptr<function, Bsdf>, cv: f32) -> vec3f {
+    bsdf_view(b, cv);
+    let m = (*b).metallic;
+    let es = bsdf_spec_albedo(b, cv);
+    var e = 1.0;
+    var bb = 0.0;
+    if ((*b).perfect != 0u) {
+        let x = 1.0 - clamp(cv, 0.0, 1.0);
+        let x2 = x * x;
+        bb = x2 * x2 * x;
+    } else {
+        e = bsdf_albedo(b, cv);
+        bb = bsdf_table(BSDF_TAB_B, (*b).rough, cv);
+    }
+    let a = vec3f(es) + (1.0 - es) * (*b).base;
+    let mt = (*b).base * (e - bb) + vec3f(bb) + (*b).ms * (1.0 - e);
+    return a * (1.0 - m) + mt * m;
+}
 );
 
 void gpu_bsdf_tables(float *out){

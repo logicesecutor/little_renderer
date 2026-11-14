@@ -1,8 +1,8 @@
 // raster_gpu.c - the rasterizer of raster/render.c (render_scene), on the GPU.
 //
 // The same triangles (raster/render.h hands them out: 2 per quad, a latitude / longitude
-// grid per sphere, the mesh triangles), the same point light and material model, the same
-// four shading modes, drawn by a WebGPU render pipeline into a color and a depth texture
+// grid per sphere, the mesh triangles), the same lamp and BSDF (render_shade, in WGSL with
+// gpu/brdf_gpu.c's GPU_WGSL_BSDF), the same four shading modes, drawn by a WebGPU render pipeline into a color and a depth texture
 // that the view then composites (gpu/view_gpu.c). What the CPU does per triangle on many
 // threads (transform, clip, cull, fill, z-test) is the GPU's own machinery here.
 //
@@ -24,14 +24,24 @@
 
 static const char *SHADER = WGSL(
 struct RMat {
-    base: vec4f,     /* color; w = 1: drawn as it is (lamps) */
-    spec: vec4f,     /* highlight: strength, exponent */
+    base: vec4f,     /* base colour (a lamp's: its colour at full brightness); w = 1: drawn as it is */
+    pbr: vec4f,      /* metallic, roughness, index of refraction, transmission (material_resolved) */
+};
+/* the lamp (RenderLamp): the quad q + a u + b v, the side it shines to, w = (u x v) / |u x v|^2 */
+struct RLamp {
+    q: vec4f,        /* w = 1: there is a lamp */
+    u: vec4f,        /* w = its area */
+    v: vec4f,
+    n: vec4f,
+    w: vec4f,
+    center: vec4f,
+    le: vec4f,       /* its radiance */
+    k: vec4f,        /* the ambient light: uniform, towards the camera */
 };
 struct RU {
     vp: mat4x4f,     /* world -> clip, z in -w..w as on the CPU */
     eye: vec4f,      /* w = mode: 0 wireframe, 1 flat, 2 gouraud, 3 phong */
-    lamp: vec4f,     /* the point light */
-    k: vec4f,        /* weights: ambient, lamp, fill light from the camera */
+    lamp: RLamp,
     mats: array<RMat, 16>,
 };
 @group(0) @binding(0) var<uniform> U: RU;
@@ -41,6 +51,10 @@ struct RU {
    draw's first instance): object -> world rows, the inverse's rows (normals), material */
 struct IX { r0: vec4f, r1: vec4f, r2: vec4f, i0: vec4f, i1: vec4f, i2: vec4f, m: vec4u };
 @group(0) @binding(3) var<storage, read> ix: array<IX>;
+/* the BSDF's tables (gpu_bsdf_tables) */
+struct RT { t: array<vec4f, 528> };
+@group(0) @binding(4) var<uniform> TB: RT;
+fn bsdf_tab(k: u32) -> f32 { return TB.t[k >> 2u][k & 3u]; }
 fn to_world(k: u32, p: vec3f) -> vec3f {
     let x = ix[k];
     let q = vec4f(p, 1.0);
@@ -56,20 +70,101 @@ struct VO {
     @builtin(position) pos: vec4f,
     @location(0) wp: vec3f,
     @location(1) n: vec3f,
-    @location(2) light: f32,
+    @location(2) light: vec3f,
     @location(3) @interpolate(flat) mat: u32,
 };
 
-/* brightness from the lamp (diff) and the fill light; n faces the eye */
-fn scene_k(diff: f32, n: vec3f, to_eye: vec3f) -> f32 {
-    return U.k.x + U.k.y * max(diff, 0.0) + U.k.z * dot(n, to_eye);
+/* render_shade (raster/render.c): the lamp's corner i (q, q + u, q + u + v, q + v) */
+fn lamp_corner(i: u32) -> vec3f {
+    return U.lamp.q.xyz + select(vec3f(0.0), U.lamp.u.xyz, i == 1u || i == 2u) + select(vec3f(0.0), U.lamp.v.xyz, i >= 2u);
 }
-/* surfaces are lit from both sides: the normal is turned towards the eye first */
-fn scene_diffuse(p: vec3f, n0: vec3f) -> f32 {
-    let to_eye = normalize(U.eye.xyz - p);
+/* the lamp's form factor from p (normal n), the lamp clipped at p's horizon; an edge's
+   theta / sin theta by Heitz and Hill's fit */
+fn edge_theta_sin(x: f32) -> f32 {
+    let y = abs(x);
+    let t = (0.8543985 + (0.4965155 + 0.0145206 * y) * y) / (3.4175940 + (4.1616724 + y) * y);
+    return select(0.5 * inverseSqrt(max(1.0 - x * x, 1e-7)) - t, t, x > 0.0);
+}
+fn lamp_form_factor(p: vec3f, n: vec3f) -> f32 {
+    var o: array<vec3f, 8>;
+    var k = 0u;
+    for (var i = 0u; i < 4u; i++) {
+        let a = lamp_corner(i) - p;
+        let b = lamp_corner((i + 1u) & 3u) - p;
+        let da = dot(a, n);
+        let db = dot(b, n);
+        if (da >= 0.0) { o[k] = normalize(a); k++; }
+        if ((da >= 0.0) != (db >= 0.0)) { o[k] = normalize(a + (b - a) * (da / (da - db))); k++; }
+    }
+    if (k < 3u) { return 0.0; }
+    var sum = 0.0;
+    for (var i = 0u; i < k; i++) {
+        let a = o[i];
+        let b = o[(i + 1u) % k];
+        sum += dot(cross(a, b), n) * edge_theta_sin(dot(a, b));
+    }
+    return abs(sum) * BSDF_PI;
+}
+/* the lamp's point nearest the ray from p along r */
+fn lamp_nearest(p: vec3f, r: vec3f) -> vec3f {
+    let ln = U.lamp.n.xyz;
+    let q = U.lamp.q.xyz;
+    let dn = dot(r, ln);
+    let far = 4.0 * length(U.lamp.center.xyz - p);
+    var t = far;
+    if (dn < 0.0) { t = min(dot(q - p, ln) / dn, far); }
+    t = max(t, 0.0);
+    let y = p + r * t;
+    let qx = y - ln * dot(y - q, ln) - q;
+    let a = clamp(dot(U.lamp.w.xyz, cross(qx, U.lamp.v.xyz)), 0.0, 1.0);
+    let b = clamp(dot(U.lamp.w.xyz, cross(U.lamp.u.xyz, qx)), 0.0, 1.0);
+    return q + U.lamp.u.xyz * a + U.lamp.v.xyz * b;
+}
+/* the radiance p (normal n0, turned to the eye), material mi, sends to the eye */
+fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
+    let m = U.mats[mi];
+    let v = normalize(U.eye.xyz - p);
     var n = n0;
-    if (dot(n, to_eye) < 0.0) { n = -n; }
-    return scene_k(dot(n, normalize(U.lamp.xyz - p)), n, to_eye);
+    if (dot(n, v) < 0.0) { n = -n; }
+    let cv = max(dot(n, v), 1e-4);
+    var b = bsdf_make(m.base.rgb, m.pbr.x, m.pbr.y, m.pbr.z, m.pbr.w, true);
+    var c = bsdf_albedo_uniform(&b, cv) * (U.lamp.k.x + U.lamp.k.y * cv);
+    let center = U.lamp.center.xyz;
+    let ln = U.lamp.n.xyz;
+    if (U.lamp.q.w < 0.5 || dot(p - center, ln) <= 0.0) { return c; }
+    let ff = lamp_form_factor(p, n);
+    if (ff > 0.0) {
+        let lc = normalize(center - p);
+        c += bsdf_diffuse_lobes(&b, max(dot(n, lc), 0.0)) * U.lamp.le.rgb * ff;
+    }
+    let area = U.lamp.u.w;
+    let tc = center - p;
+    let dc2 = dot(tc, tc);
+    let om = min(area * max(-dot(ln, tc), 0.0) / (dc2 * sqrt(dc2)), 2.0 * BSDF_PI);
+    let lobe = 4.0 * BSDF_PI * b.alpha * b.alpha * cv;
+    let w = lobe / (lobe + om);
+    var spec = vec3f(0.0);
+    if (w > 0.01 && lobe > 32.0 * om) {
+        let lc = tc * inverseSqrt(dc2);
+        let ck = dot(n, lc);
+        if (ck > 0.0) { spec = bsdf_spec_lobe(&b, n, v, lc, b.alpha) * (w * ck * om); }
+    } else if (w > 0.01) {
+        for (var k = 0u; k < 4u; k++) {
+            let xk = U.lamp.q.xyz + U.lamp.u.xyz * select(0.25, 0.75, (k & 1u) != 0u) + U.lamp.v.xyz * select(0.25, 0.75, (k & 2u) != 0u);
+            let dk = xk - p;
+            let d2 = dot(dk, dk);
+            let lk = dk * inverseSqrt(d2);
+            let ck = dot(n, lk);
+            let cosl = -dot(ln, lk);
+            if (ck > 0.0 && cosl > 0.0) { spec += bsdf_spec_lobe(&b, n, v, lk, b.alpha) * (w * ck * cosl * area * 0.25 / d2); }
+        }
+    }
+    if (w < 0.99) {
+        let l = normalize(lamp_nearest(p, reflect(-v, n)) - p);
+        let cl = dot(n, l);
+        if (cl > 0.0) { spec += bsdf_spec_lobe(&b, n, v, l, b.alpha) * ((1.0 - w) * cl * om * lobe / (om + lobe)); }
+    }
+    return c + spec * U.lamp.le.rgb;
 }
 /* WebGPU keeps z in 0..w: (z + w) / 2 is the same depth the CPU z-buffer stores */
 fn clip_of(p: vec3f) -> vec4f {
@@ -98,15 +193,16 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> VO {
     o.wp = p;
     o.n = n;
     o.mat = mat_of(k, code);
-    o.light = 0.0;
+    o.light = vec3f(0.0);
+    if (U.mats[o.mat].base.w > 0.5) { return o; }
     if (mode == 1u) {
         let flag = (code >> 4u) & 3u;
         var at = (p0 + p1 + p2) * (1.0 / 3.0);
         if (flag == 1u) { at = (p0 + p2) * 0.5; }
         if (flag == 2u) { at = (p0 + p1) * 0.5; }
-        o.light = scene_diffuse(at, face_n);
+        o.light = scene_shade(o.mat, at, face_n);
     } else if (mode == 2u) {
-        o.light = scene_diffuse(p, n);
+        o.light = scene_shade(o.mat, p, n);
     }
     return o;
 }
@@ -115,23 +211,10 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> VO {
 fn fs(i: VO) -> @location(0) vec4f {
     let m = U.mats[i.mat];
     if (m.base.w > 0.5) { return vec4f(to_srgb(m.base.rgb), 1.0); }
-    /* flat and gouraud: the vertex stage computed the brightness */
-    if (u32(U.eye.w) != 3u) { return vec4f(to_srgb(m.base.rgb * i.light), 1.0); }
-    /* phong: per-pixel diffuse + Blinn-Phong highlight */
-    var n = normalize(i.n);
-    let to_eye = normalize(U.eye.xyz - i.wp);
-    if (dot(n, to_eye) < 0.0) { n = -n; }
-    let l = normalize(U.lamp.xyz - i.wp);
-    var diff = dot(n, l);
-    var spec = 0.0;
-    if (diff > 0.0) {
-        let nh = dot(n, normalize(l + to_eye));
-        if (m.spec.x > 0.0 && nh > 0.0) { spec = m.spec.x * pow(nh, m.spec.y); }
-    } else {
-        diff = 0.0;
-    }
-    let k = scene_k(diff, n, to_eye);
-    return vec4f(to_srgb(m.base.rgb * k + spec), 1.0);
+    /* flat and gouraud: the vertex stage shaded */
+    if (u32(U.eye.w) != 3u) { return vec4f(to_srgb(i.light), 1.0); }
+    /* phong: render_shade at every pixel */
+    return vec4f(to_srgb(scene_shade(i.mat, i.wp, normalize(i.n))), 1.0);
 }
 
 /* wireframe: the 3 edges of every triangle as lines, 6 vertices per triangle */
@@ -155,7 +238,7 @@ fn fs_wire(i: WO) -> @location(0) vec4f { return vec4f(to_srgb(U.mats[i.mat].bas
 );
 
 typedef struct {
-    float vp[16], eye[4], lamp[4], k[4];
+    float vp[16], eye[4], lamp[32];
     float mats[MAX_MATS][8];
 } GRU;
 
@@ -172,7 +255,7 @@ struct GpuRaster {
     int w, h;
     WGPUTexture color_tex, depth_tex;
     WGPUTextureView color, depth;
-    WGPUBuffer uni;
+    WGPUBuffer uni, tab;                   // the uniforms; the BSDF's tables
     WGPUBindGroupLayout bgl;
     WGPURenderPipeline fill[2], wire;      // fill[1]: back faces culled
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
@@ -263,8 +346,16 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->color = wgpuTextureCreateView(r->color_tex, NULL);
     r->depth = wgpuTextureCreateView(r->depth_tex, NULL);
     r->uni = gpu_buffer(g, "scene", sizeof(GRU), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRR");
-    WGPUShaderModule m = gpu_shader(g, "scene", SHADER);
+    float tab[GPU_BSDF_TABLE_FLOATS];
+    gpu_bsdf_tables(tab);
+    r->tab = gpu_buffer(g, "scene: BSDF tables", sizeof(tab), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    wgpuQueueWriteBuffer(g->queue, r->tab, 0, tab, sizeof(tab));
+    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRU");
+    char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(SHADER) + 2);
+    if (!src){ gpu_raster_destroy(r); return NULL; }
+    strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, SHADER);
+    WGPUShaderModule m = gpu_shader(g, "scene", src);
+    free(src);
     r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);
     r->fill[1] = make_pipeline(g, m, r->bgl, 0, 1);
     r->wire = make_pipeline(g, m, r->bgl, 1, 0);
@@ -291,8 +382,8 @@ static void geo_bind(GpuRaster *r, Geo *geo){
     if (geo->bg) wgpuBindGroupRelease(geo->bg);
     geo->bg = NULL;
     if (!geo->pos || !r->ix) return;
-    WGPUBuffer b[4] = {r->uni, geo->pos, geo->nrm, r->ix};
-    geo->bg = gpu_bind(r->g, r->bgl, b, 4);
+    WGPUBuffer b[5] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab};
+    geo->bg = gpu_bind(r->g, r->bgl, b, 5);
 }
 
 // room for `verts` vertices in a set; its bind group follows the buffers
@@ -475,13 +566,23 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     for (int c = 0; c < 4; c++)
         for (int k = 0; k < 4; k++) U.vp[c * 4 + k] = (float)vp.m[k][c];      // WGSL matrices are stored by columns
     put(U.eye, p->eye, mode == MODE_WIREFRAME ? 0.0f : (mode == MODE_FLAT ? 1.0f : (mode == MODE_GOURAUD ? 2.0f : 3.0f)));
-    put(U.lamp, render_scene_light(s), 0);
-    U.k[0] = RENDER_SCENE_AMBIENT; U.k[1] = RENDER_SCENE_LAMP; U.k[2] = RENDER_SCENE_FILL;
+    RenderLamp L = render_scene_lamp(s);
+    put(U.lamp, L.q, L.on ? 1.0f : 0.0f);
+    put(U.lamp + 4, L.u, (float)L.area);
+    put(U.lamp + 8, L.v, 0);
+    put(U.lamp + 12, L.n, 0);
+    put(U.lamp + 16, L.w, 0);
+    put(U.lamp + 20, L.center, 0);
+    put(U.lamp + 24, L.le, 0);
+    U.lamp[28] = (float)L.ambient; U.lamp[29] = (float)L.fill;
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
         RenderMaterial rm = render_scene_material(&s->mats[m]);
-        put(U.mats[m], rm.base, rm.constant ? 1.0f : 0.0f);
-        U.mats[m][4] = (float)rm.spec_k;
-        U.mats[m][5] = (float)rm.spec_exp;
+        Material res = material_resolved(&s->mats[m]);
+        put(U.mats[m], rm.constant ? rm.base : res.albedo, rm.constant ? 1.0f : 0.0f);
+        U.mats[m][4] = (float)res.metallic;
+        U.mats[m][5] = (float)res.roughness;
+        U.mats[m][6] = (float)res.ior;
+        U.mats[m][7] = (float)res.transmission;
     }
     wgpuQueueWriteBuffer(g->queue, r->uni, 0, &U, sizeof(U));
 
@@ -541,6 +642,7 @@ void gpu_raster_destroy(GpuRaster *r){
     if (r->wire) wgpuRenderPipelineRelease(r->wire);
     if (r->bgl) wgpuBindGroupLayoutRelease(r->bgl);
     if (r->uni){ wgpuBufferDestroy(r->uni); wgpuBufferRelease(r->uni); }
+    if (r->tab){ wgpuBufferDestroy(r->tab); wgpuBufferRelease(r->tab); }
     if (r->color) wgpuTextureViewRelease(r->color);
     if (r->depth) wgpuTextureViewRelease(r->depth);
     if (r->color_tex){ wgpuTextureDestroy(r->color_tex); wgpuTextureRelease(r->color_tex); }

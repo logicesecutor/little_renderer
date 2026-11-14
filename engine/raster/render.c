@@ -1,6 +1,7 @@
 #include "raster/render.h"
 
 #include "raster/raster.h"
+#include "core/brdf.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -437,62 +438,184 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p){
 // ---- whole scenes (the same Scene the path tracer renders) ----------------------------
 //
 // A rasterizer has no global light transport: no shadows, no bounced light, no refraction.
-// What it can do fast is local lighting, so every surface gets ambient + Lambert from a
-// point light placed at the light quad + a weak "fill" light from the camera (it stands in
-// for the bounced light that brightens the faces the lamp does not see), and mirrors /
-// glass are faked with a darker base and a sharp highlight. Good enough to frame a shot
-// before path tracing it.
+// What it can do fast is local lighting: every surface is the material's BSDF (core/brdf.h)
+// lit by the scene's lamp (render_shade: the lamp's area, not a point), plus an ambient
+// light standing in for the light that bounces around. Good enough to frame a shot before
+// path tracing it; mirrors and glass reflect the lamp and the ambient light (the room
+// itself comes with PBR4's environment).
 
-#define SCENE_AMBIENT RENDER_SCENE_AMBIENT
-#define SCENE_LAMP RENDER_SCENE_LAMP
-#define SCENE_FILL RENDER_SCENE_FILL
 #define SPHERE_STACKS RENDER_SPHERE_STACKS
 #define SPHERE_SLICES RENDER_SPHERE_SLICES
 
+// A material as render_shade lights it: its BSDF, and what depends on one cosine alone,
+// tabulated once (SHADE_TAB + 1 cosines over 0..1, linear in between): the ambient's albedo
+// (bsdf_albedo_uniform) and the diffuse-like lobes' two factors, 1 - the layer above them
+// (bsdf_diffuse_lobes: f = base kd gd(cv) gd(cl) + ms kms gm(cv) gm(cl))
+#define SHADE_TAB 32
 typedef struct {
-    Vec3 base;            // material color
-    Vec3 light_pos;       // the point light
+    Bsdf b;
+    real kd, kms;
+    Vec3 amb[SHADE_TAB + 1];
+    real gd[SHADE_TAB + 1], gm[SHADE_TAB + 1];
+} ShadeMat;
+
+static void shade_mat_init(ShadeMat *sm, const Material *m){
+    sm->b = bsdf_make(m, 1);
+    Bsdf *b = &sm->b;
+    const real mt = b->metallic, t = b->transmission;
+    sm->kd = (1 - mt) * (1 - t) > 0 ? (1 - mt) * (1 - t) * b->kd_norm / (real)PI : 0;
+    sm->kms = !b->smooth && mt > 0 ? mt * b->kms_norm : 0;
+    for (int i = 0; i <= SHADE_TAB; i++){
+        real mu = r_fmax((real)i / SHADE_TAB, 1e-4f);
+        sm->amb[i] = bsdf_albedo_uniform(b, mu);
+        sm->gd[i] = sm->kd > 0 ? 1 - bsdf_spec_albedo(b, mu) : 0;
+        sm->gm[i] = sm->kms > 0 ? 1 - bsdf_albedo(b, mu) : 0;
+    }
+}
+
+// where cosine mu falls in the tables: entry *i, and the weight of entry *i + 1
+static inline real shade_tab_at(real mu, int *i){
+    real x = bsdf_clamp01(mu) * SHADE_TAB;
+    int k = (int)x;
+    if (k > SHADE_TAB - 1) k = SHADE_TAB - 1;
+    *i = k;
+    return x - k;
+}
+
+typedef struct {
+    const Material *mat;
+    ShadeMat sm;
+    const RenderLamp *lamp;
     Vec3 eye;             // camera position
-    real spec_k, spec_exp;
     uint32_t flat_color;  // emitters and wireframe lines
 } SceneShading;
 
-// Brightness from the lamp (diff) and the camera fill light; n must face the eye.
-static real scene_k(real diff, Vec3 n, Vec3 to_eye){
-    return SCENE_AMBIENT + SCENE_LAMP * (diff > 0 ? diff : 0) + SCENE_FILL * v_dot(n, to_eye);
+// ∫ cos dω over the lamp as seen from p, above the plane of n (the lamp clipped to the
+// hemisphere first): Lambert's formula for a polygon, the sum over its edges of the angle θ
+// they span times the cosine of their plane's normal with n, halved. θ / sin θ from the
+// edge's cosine by Heitz and Hill's rational fit (0.1%; theirs is of θ / (2 π sin θ)), not
+// atan2.
+static real edge_theta_sin(real x){
+    real y = r_fabs(x);
+    real t = (0.8543985f + (0.4965155f + 0.0145206f * y) * y) / (3.4175940f + (4.1616724f + y) * y);
+    return x > 0 ? t : 0.5f / r_sqrt(r_fmax(1 - x * x, 1e-7f)) - t;
 }
 
-// Lambert brightness at p. Surfaces are lit from both sides: the normal is turned towards
-// the eye first (scene quads have no "outside", e.g. the walls are seen from inside the box).
-static real scene_diffuse(const SceneShading *s, Vec3 p, Vec3 n){
-    Vec3 to_eye = v_norm(v_sub(s->eye, p));
-    if (v_dot(n, to_eye) < 0) n = v_neg(n);
-    return scene_k(v_dot(n, v_norm(v_sub(s->light_pos, p))), n, to_eye);
+static real lamp_form_factor(const RenderLamp *L, Vec3 p, Vec3 n){
+    Vec3 c[4] = {v_sub(L->q, p), v_sub(v_add(L->q, L->u), p), v_sub(v_add(v_add(L->q, L->u), L->v), p), v_sub(v_add(L->q, L->v), p)};
+    real d[4];
+    int below = 0;
+    for (int i = 0; i < 4; i++){ d[i] = v_dot(c[i], n); below |= d[i] < 0; }
+    Vec3 o[8];
+    int k = 0;
+    if (!below) for (; k < 4; k++) o[k] = v_norm(c[k]);
+    else {
+        for (int i = 0; i < 4; i++){
+            int j = (i + 1) & 3;
+            if (d[i] >= 0) o[k++] = v_norm(c[i]);
+            if ((d[i] >= 0) != (d[j] >= 0)) o[k++] = v_norm(v_add(c[i], v_scale(v_sub(c[j], c[i]), d[i] / (d[i] - d[j]))));
+        }
+        if (k < 3) return 0;
+    }
+    real sum = 0;
+    for (int i = 0; i < k; i++){
+        Vec3 a = o[i], b = o[(i + 1) % k];
+        sum += v_dot(v_cross(a, b), n) * edge_theta_sin(v_dot(a, b));
+    }
+    return r_fabs(sum) * (real)PI;
 }
 
-// flat and gouraud: brightness from the vertex stage
+// the lamp's point nearest the ray from p along r: where the ray meets the lamp's plane, at
+// most 4 times as far as the lamp's centre (a ray almost parallel to the plane, or going
+// away from it, takes the point of the plane under that far point: no jump in between),
+// kept inside the quad
+static Vec3 lamp_nearest(const RenderLamp *L, Vec3 p, Vec3 r){
+    real dn = v_dot(r, L->n), far = 4 * v_len(v_sub(L->center, p));
+    real t = dn < 0 ? v_dot(v_sub(L->q, p), L->n) / dn : far;
+    if (!(t <= far)) t = far;
+    if (t < 0) t = 0;
+    Vec3 y = v_add(p, v_scale(r, t));
+    Vec3 x = v_sub(y, v_scale(L->n, v_dot(v_sub(y, L->q), L->n)));
+    Vec3 qx = v_sub(x, L->q);
+    real a = v_dot(L->w, v_cross(qx, L->v)), b = v_dot(L->w, v_cross(L->u, qx));
+    a = a < 0 ? 0 : a > 1 ? 1 : a;
+    b = b < 0 ? 0 : b > 1 ? 1 : b;
+    return v_add(L->q, v_add(v_scale(L->u, a), v_scale(L->v, b)));
+}
+
+static Vec3 shade_point(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n, Vec3 eye){
+    Vec3 v = v_norm(v_sub(eye, p));
+    if (v_dot(n, v) < 0) n = v_neg(n);           // both sides lit (the walls have no "outside")
+    real cv = r_fmax(v_dot(n, v), 1e-4f);
+    const Bsdf *b = &sm->b;
+    int iv;
+    real fv = shade_tab_at(cv, &iv);
+    Vec3 c = v_scale(v_add(sm->amb[iv], v_scale(v_sub(sm->amb[iv + 1], sm->amb[iv]), fv)), L->ambient + L->fill * cv);
+    if (!L->on || v_dot(v_sub(p, L->center), L->n) <= 0) return c;   // behind the lamp
+    // the diffuse-like lobes: the lamp's form factor
+    real ff = sm->kd > 0 || sm->kms > 0 ? lamp_form_factor(L, p, n) : 0;
+    if (ff > 0){
+        Vec3 lc = v_norm(v_sub(L->center, p));
+        int il;
+        real fl = shade_tab_at(v_dot(n, lc), &il);
+        real gd = (sm->gd[iv] + fv * (sm->gd[iv + 1] - sm->gd[iv])) * (sm->gd[il] + fl * (sm->gd[il + 1] - sm->gd[il]));
+        real gm = (sm->gm[iv] + fv * (sm->gm[iv + 1] - sm->gm[iv])) * (sm->gm[il] + fl * (sm->gm[il + 1] - sm->gm[il]));
+        Vec3 f = v_add(v_scale(b->base, sm->kd * gd), v_scale(b->ms, sm->kms * gm));
+        c = v_add(c, v_scale(v_mul(f, L->le), ff));
+    }
+    // the microfacet lobe. Its solid angle (4 pi alpha^2 cos: where f cos is near its peak,
+    // F / that) against the lamp's decides how: a lobe wider than the lamp sees all of it, so
+    // f is averaged over the lamp's 4 quarters; a narrower one sees only the lamp's part
+    // around the reflected ray, so f is taken at the lamp's point nearest that ray, over the
+    // lobe's solid angle (a mirror shows the lamp itself, with its edges); in between, both
+    // weighted by how much wider the lobe is
+    Vec3 tc = v_sub(L->center, p);
+    real dc2 = v_dot(tc, tc);
+    real om = r_fmin(L->area * r_fmax(-v_dot(L->n, tc), 0) / (dc2 * r_sqrt(dc2)), 2 * (real)PI);
+    real lobe = 4 * (real)PI * b->alpha * b->alpha * cv;
+    real w = lobe / (lobe + om);
+    Vec3 spec = vec3(0, 0, 0);
+    if (w > 0.01f && lobe > 32 * om){
+        // a lobe much wider than the lamp: f hardly changes over it, its centre will do
+        Vec3 lc = v_scale(tc, 1 / r_sqrt(dc2));
+        real ck = v_dot(n, lc);
+        if (ck > 0) spec = v_scale(bsdf_spec_lobe(b, n, v, lc, b->alpha), w * ck * om);
+    } else if (w > 0.01f){
+        for (int k = 0; k < 4; k++){
+            Vec3 xk = v_add(L->q, v_add(v_scale(L->u, (k & 1) ? 0.75f : 0.25f), v_scale(L->v, (k & 2) ? 0.75f : 0.25f)));
+            Vec3 dk = v_sub(xk, p);
+            real d2 = v_dot(dk, dk);
+            Vec3 lk = v_scale(dk, 1 / r_sqrt(d2));
+            real ck = v_dot(n, lk), cosl = -v_dot(L->n, lk);
+            if (ck > 0 && cosl > 0) spec = v_add(spec, v_scale(bsdf_spec_lobe(b, n, v, lk, b->alpha), w * ck * cosl * L->area * 0.25f / d2));
+        }
+    }
+    if (w < 0.99f){
+        Vec3 l = v_norm(v_sub(lamp_nearest(L, p, v_reflect(v_neg(v), n)), p));
+        real cl = v_dot(n, l);
+        if (cl > 0) spec = v_add(spec, v_scale(bsdf_spec_lobe(b, n, v, l, b->alpha), (1 - w) * cl * om * lobe / (om + lobe)));
+    }
+    return v_add(c, v_mul(spec, L->le));
+}
+
+Vec3 render_shade(const RenderLamp *L, const Material *m, Vec3 p, Vec3 n, Vec3 eye){
+    ShadeMat sm;
+    shade_mat_init(&sm, m);
+    return shade_point(L, &sm, p, n, eye);
+}
+
+// flat and gouraud: the colour from the vertex stage
 static uint32_t shade_scene_light(const real *v, const void *ctx){
-    const SceneShading *s = ctx;
-    return image_pack_srgb(v_scale(s->base, v[V_LIGHT]));
+    (void)ctx;
+    return image_pack_srgb(vec3(v[V_LIGHT], v[V_LIGHT_G], v[V_LIGHT_B]));
 }
 
-// phong: per-pixel diffuse + Blinn-Phong highlight
+// phong: render_shade at every pixel
 static uint32_t shade_scene_phong(const real *v, const void *ctx){
     const SceneShading *s = ctx;
     Vec3 n = v_norm(vec3(v[V_NX], v[V_NY], v[V_NZ]));
     Vec3 p = vec3(v[V_PX], v[V_PY], v[V_PZ]);
-    Vec3 to_eye = v_norm(v_sub(s->eye, p));
-    if (v_dot(n, to_eye) < 0) n = v_neg(n);
-    Vec3 l = v_norm(v_sub(s->light_pos, p));
-    real diff = v_dot(n, l), spec = 0;
-    if (diff > 0){
-        real nh = v_dot(n, v_norm(v_add(l, to_eye)));
-        if (s->spec_k > 0 && nh > 0) spec = s->spec_k * r_pow(nh, s->spec_exp);
-    } else {
-        diff = 0;
-    }
-    real k = scene_k(diff, n, to_eye);
-    return image_pack_srgb(vec3(s->base.x * k + spec, s->base.y * k + spec, s->base.z * k + spec));
+    return image_pack_srgb(shade_point(s->lamp, &s->sm, p, n, s->eye));
 }
 
 static uint32_t shade_constant(const real *v, const void *ctx){
@@ -542,6 +665,7 @@ typedef struct {
     int *inst_first;                // the instances': instance i's first triangle
     SceneShading sh[MAX_MATS];      // one shading context per material
     FragShader shader[MAX_MATS];
+    RenderLamp lamp;
 } SceneJob;
 
 int render_prim_tri_count(const Primitive *p){
@@ -666,7 +790,8 @@ static void scene_vertices(const TriJob *j, int i, ClipVert *cv, FragShader *sha
     RenderMode mode = j->mode;
 
     Vec3 face_n = v_norm(v_cross(v_sub(wp[1], wp[0]), v_sub(wp[2], wp[0])));
-    real flat_k = mode == MODE_FLAT ? scene_diffuse(sh, flat_at, face_n) : 0;
+    const int lit = sh->mat->type != MAT_LIGHT;
+    Vec3 flat_c = mode == MODE_FLAT && lit ? shade_point(sh->lamp, &sh->sm, flat_at, face_n, sh->eye) : vec3(0, 0, 0);
     for (int k = 0; k < 3; k++){
         Vec3 n = (has_n && mode != MODE_FLAT) ? wn[k] : face_n;
         cv[k].clip = mat4_mul_vec4(j->view_proj, (Vec4){wp[k].x, wp[k].y, wp[k].z, 1.0f});
@@ -674,7 +799,8 @@ static void scene_vertices(const TriJob *j, int i, ClipVert *cv, FragShader *sha
         vy[V_PX] = wp[k].x; vy[V_PY] = wp[k].y; vy[V_PZ] = wp[k].z;
         vy[V_NX] = n.x;     vy[V_NY] = n.y;     vy[V_NZ] = n.z;
         vy[V_U] = 0;        vy[V_V] = 0;
-        vy[V_LIGHT] = mode == MODE_FLAT ? flat_k : (mode == MODE_GOURAUD ? scene_diffuse(sh, wp[k], n) : 0);
+        Vec3 c = mode == MODE_FLAT ? flat_c : (mode == MODE_GOURAUD && lit ? shade_point(sh->lamp, &sh->sm, wp[k], n, sh->eye) : vec3(0, 0, 0));
+        vy[V_LIGHT] = c.x;  vy[V_LIGHT_G] = c.y;  vy[V_LIGHT_B] = c.z;
     }
     *shader = sj->shader[mat];
     *ctx = sh;
@@ -693,16 +819,30 @@ Vec3 render_scene_light(const Scene *s){
     return light_pos;
 }
 
+RenderLamp render_scene_lamp(const Scene *s){
+    RenderLamp L;
+    memset(&L, 0, sizeof(L));
+    const char *amb = getenv("LR_RASTER_AMBIENT");
+    real k = amb ? (real)atof(amb) : 1;
+    L.ambient = RENDER_SCENE_AMBIENT * k;
+    L.fill = RENDER_SCENE_FILL * k;
+    if (s->light < 0 || s->light >= s->nprims || s->prims[s->light].type != PRIM_QUAD) return L;
+    const Primitive *l = &s->prims[s->light];
+    L.on = 1;
+    L.q = l->q; L.u = l->u; L.v = l->v; L.n = l->normal; L.w = l->w;
+    L.center = v_add(l->q, v_scale(v_add(l->u, l->v), 0.5f));
+    L.le = s->mats[l->material].emission;
+    L.area = l->area;
+    return L;
+}
+
 RenderMaterial render_scene_material(const Material *mt){
-    RenderMaterial rm = {mt->albedo, 0, 1, 0};
+    RenderMaterial rm = {mt->albedo, 0};
     if (mt->type == MAT_LIGHT){
         real mx = v_max(mt->emission);               // show the light's color at full brightness
         rm.base = mx > 0 ? v_scale(mt->emission, 1.0f / mx) : mt->emission;
         rm.constant = 1;
     }
-    MatType kind = material_kind(mt);           // (until PBR3: the preset closest to it)
-    if (kind == MAT_MIRROR){ rm.base = v_scale(mt->albedo, 0.45f); rm.spec_k = 0.7f; rm.spec_exp = 80; }
-    if (kind == MAT_GLASS){  rm.base = v_scale(mt->albedo, 0.25f); rm.spec_k = 0.9f; rm.spec_exp = 120; }
     return rm;
 }
 
@@ -713,7 +853,7 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
     SceneJob *sj = xmalloc(sizeof(*sj));
     sj->s = s;
 
-    Vec3 light_pos = render_scene_light(s);
+    sj->lamp = render_scene_lamp(s);
 
     // one shading context per material
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
@@ -721,12 +861,11 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
         SceneShading *sh = &sj->sh[m];
         RenderMaterial rm = render_scene_material(mt);
         sh->eye = p->eye;
-        sh->light_pos = light_pos;
-        sh->base = rm.base;
-        sh->spec_k = rm.spec_k;
-        sh->spec_exp = rm.spec_exp;
+        sh->mat = mt;
+        if (!rm.constant) shade_mat_init(&sh->sm, mt);
+        sh->lamp = &sj->lamp;
         sj->shader[m] = rm.constant ? shade_constant : (mode == MODE_PHONG ? shade_scene_phong : shade_scene_light);
-        sh->flat_color = image_pack_srgb(sh->base);
+        sh->flat_color = image_pack_srgb(rm.constant ? rm.base : material_resolved(mt).albedo);
     }
 
     // number the triangles (see TriRun): the primitives' triangles, then the mesh

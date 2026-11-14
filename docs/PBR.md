@@ -92,14 +92,13 @@ node with a mesh becomes an instance), the materials above with their textures. 
 |---|---|---|
 | PBR1 | The material model, the presets, the C BRDF; the CPU path tracer with VNDF sampling and rough glass; options `-base`, `-metal`, `-rough`, `-ior`, `-transmission` (and `-mat` presets) | white furnace test (a white rough metal and a white dielectric in a uniform environment keep their energy, up to the lost multiple scattering), BRDF reciprocity and sampling-vs-evaluation tests; the reference images remade. **Done** (below) |
 | PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today). **Done** (below) |
-| PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights |
+| PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights. **Done** (below) |
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized |
 | PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four |
 | PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers |
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
 `make test`; the measurements in [PERFORMANCE.md](PERFORMANCE.md); one commit per phase.
-(Until PBR3 the rasterizers draw the preset closest to a material, `material_kind`.)
 
 ### PBR1, done (2026-11-14)
 
@@ -156,10 +155,37 @@ Decided on the way (the open questions):
   0.25% (the CPU's noise).
 - Cost on the GPU: PERFORMANCE.md (+2% to +28%).
 
+### PBR3, done (2026-11-14)
+
+- `raster/render.c`: `render_shade`, the BSDF lit by the quad lamp (RASTERIZER.md,
+  "Lighting"): the diffuse-like lobes by the lamp's exact form factor; the microfacet lobe
+  at the lamp's centre, over its 4 quarters or at its point nearest the reflected ray, by
+  how the lobe's solid angle compares with the lamp's; an ambient light through the BSDF's
+  albedo for a uniform environment. Flat and Gouraud shade with it at the triangle's point
+  and at the vertices (the varying is now a colour).
+- `core/brdf.h`: `bsdf_spec_lobe`, `bsdf_diffuse_lobes`, `bsdf_albedo_uniform` (the lobes
+  one at a time; the last one PBR4's environment uses too), and their WGSL copies in
+  `GPU_WGSL_BSDF`.
+- `gpu/raster_gpu.c`: the same in WGSL (the lamp and the resolved materials in its
+  uniforms, the BSDF's tables in a second uniform buffer).
+- Against the path traced direct light (`LR_RASTER_AMBIENT=0` against `-d 1 -caustics pt`,
+  a model sphere 300 px, linear radiance at the sphere's top, where the highlight is): the
+  walls the same; metal +10%, plastic +11%, rough metal +2%, mirror -10%, half-rough metal
+  -6%; the highlights in the same places, of the same shapes and sizes. A first version
+  with the representative point alone gave rough lobes 28% too much (it lights the whole
+  lobe from the lamp's best point): the quarters fixed it.
+- With the ambient light: the spheres' room has the path tracer's mean brightness (0.0949
+  against 0.0947, linear); the boxes' floor is brighter (no shadows), the ceiling and the
+  back wall within 10%.
+- CPU against GPU rasterizer: within 1/255 but for a few pixels on triangle edges, float
+  and double. Cost: PERFORMANCE.md.
+
 ## Open questions (decided during the phases)
 
 - The lamp in the rasterizer: representative point first; linearly transformed cosines if
-  the highlights differ visibly from the path tracer.
+  the highlights differ visibly from the path tracer. (Decided in PBR3: no LTC; the
+  representative point for narrow lobes, quadrature over the lamp for wide ones, the
+  exact form factor for the diffuse: within about 10% of the path tracer.)
 - Multiple-scattering compensation: only if the furnace test shows the loss. (Decided in
   PBR1: it showed, compensated.)
 - Textures on the GPU: atlases or arrays.

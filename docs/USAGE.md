@@ -342,6 +342,7 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `LR_GPU_PLOC_SMALL=n` | PLOC: from this many clusters down, one workgroup finishes the tree (default 1024) |
 | `LR_GPU_BVH_CHECK=1` | every tree the GPU builds is read back and checked (one tree over all its items); its cost (`bvh_cost`) and depth are printed at the end |
 | `LR_TLAS_REFIT=1` | the top level is refit while the instances only move, instead of rebuilt |
+| `LR_RASTER_AMBIENT=k` | the rasterizers' ambient light times k (default 1); 0 = the lamp alone, to compare with the path tracer's direct light (`-d 1`) |
 
 ---
 

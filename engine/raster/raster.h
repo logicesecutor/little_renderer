@@ -7,7 +7,7 @@
 // A vertex that has already been through the whole transform pipeline.
 // "vary" holds the per-vertex values (position, normal, uv, light...) that get
 // interpolated across the triangle and handed to the fragment shader.
-enum { V_PX, V_PY, V_PZ, V_NX, V_NY, V_NZ, V_U, V_V, V_LIGHT, V_COUNT };
+enum { V_PX, V_PY, V_PZ, V_NX, V_NY, V_NZ, V_U, V_V, V_LIGHT, V_LIGHT_G, V_LIGHT_B, V_COUNT };   // V_LIGHT..B: a colour (render_scene)
 
 typedef struct {
     real x, y;        // screen position in pixels, (0,0) top-left
