@@ -19,8 +19,10 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 | 5 | **PBR: one physically based material model for all four pipelines** | in progress: PBR1, PBR2 done | [PBR.md](PBR.md), phases PBR1–PBR6 |
 
 Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost per step),
-both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; mixed materials
-for the falling meshes (`-meshmat mirror,diffuse`).
+both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; R7
+(anti-aliasing for the rasterizers and the viewer: MSAA, FXAA/SMAA, TAA, the path tracer's
+pixel filter and denoiser guide); mixed materials for the falling meshes
+(`-meshmat mirror,diffuse`).
 
 **Stopped: the web.** No browser checks and no web work until the user resumes it
 (PERFORMANCE.md W1). Meanwhile `make web` is not run; when the web resumes, the web build is
