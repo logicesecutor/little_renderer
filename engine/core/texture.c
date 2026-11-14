@@ -1,45 +1,22 @@
 #include "core/texture.h"
 
 #include "core/image.h"   // rgb8
-#include <ctype.h>
+#include "core/png.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-// next integer in a PPM header / P3 body, skipping whitespace and # comments. -1 on EOF.
-static int ppm_int(FILE *f){
-    int c;
-    for (;;){
-        c = fgetc(f);
-        if (c == EOF) return -1;
-        if (c == '#'){ while (c != '\n' && c != EOF) c = fgetc(f); }
-        else if (!isspace(c)) break;
-    }
-    int n = 0;
-    while (isdigit(c)){ n = n * 10 + (c - '0'); c = fgetc(f); }   // eats the one char after the number
-    return n;
-}
-
-Texture *texture_load_ppm(const char *path){
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-
-    int m0 = fgetc(f), m1 = fgetc(f);
-    if (m0 != 'P' || (m1 != '3' && m1 != '6')){ fclose(f); return NULL; }
-    int w = ppm_int(f), h = ppm_int(f), maxval = ppm_int(f);
-    if (w <= 0 || h <= 0 || maxval <= 0 || maxval > 255){ fclose(f); return NULL; }
-
+Texture *texture_load_png(const char *path){
+    int w, h, ch;
+    unsigned char *px = png_read(path, &w, &h, &ch, 3);
+    if (!px) return NULL;
     Texture *t = malloc(sizeof(*t));
+    if (t) t->px = malloc((size_t)w * h * sizeof(uint32_t));
+    if (!t || !t->px){ free(t); free(px); return NULL; }
     t->w = w;
     t->h = h;
-    t->px = malloc((size_t)w * h * sizeof(uint32_t));
-    for (int i = 0; i < w * h; i++){
-        int rgb[3];
-        for (int k = 0; k < 3; k++) rgb[k] = (m1 == '6') ? fgetc(f) : ppm_int(f);
-        if (rgb[0] < 0 || rgb[1] < 0 || rgb[2] < 0){ free(t->px); free(t); fclose(f); return NULL; }
-        t->px[i] = rgb8(rgb[0] * 255 / maxval, rgb[1] * 255 / maxval, rgb[2] * 255 / maxval);
-    }
-    fclose(f);
+    for (size_t i = 0; i < (size_t)w * h; i++) t->px[i] = rgb8(px[3 * i], px[3 * i + 1], px[3 * i + 2]);
+    free(px);
     return t;
 }
 

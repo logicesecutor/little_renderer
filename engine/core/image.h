@@ -1,6 +1,6 @@
 // image.h - the two pixel buffers of the engine.
 //   Framebuffer: 8-bit color (0x00RRGGBB) + a depth buffer. The rasterizer draws into it,
-//                windows show it, and it saves as PPM.
+//                windows show it, and it saves as PNG.
 //   Image:       linear floating-point color, what the path tracer accumulates. Converted
 //                to sRGB only when written or shown.
 #ifndef LR_IMAGE_H
@@ -35,7 +35,7 @@ void fb_destroy(Framebuffer *fb);
 void fb_clear(Framebuffer *fb, uint32_t color);                   // also resets the z-buffer
 void fb_set_pixel(Framebuffer *fb, int x, int y, uint32_t color);  // bounds checked
 void fb_show_depth(Framebuffer *fb);                               // debug: colors := z-buffer
-int fb_save_ppm(const Framebuffer *fb, const char *path);          // binary PPM (P6), 0 on success
+int fb_save_png(const Framebuffer *fb, const char *path);          // RGB PNG (core/png.h), 0 on success
 
 // ---- Image (linear color) -----------------------------------------------------------
 
@@ -46,8 +46,8 @@ typedef struct {
 
 Image image_create(int w, int h);
 void image_free(Image *img);
-// clamps to [0,1], applies the sRGB curve and writes a binary PPM (P6). 0 on success.
-int image_write_ppm(const Image *img, const char *path);
+// clamps to [0,1], applies the sRGB curve and writes an RGB PNG. 0 on success.
+int image_write_png(const Image *img, const char *path);
 
 // ---- linear color -> display -------------------------------------------------------
 

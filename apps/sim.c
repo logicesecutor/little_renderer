@@ -8,7 +8,7 @@
 //
 // Each frame: advance the physics by 1/fps seconds (steps of at most 1/60 s, each with 4
 // rigid-body substeps), move the scene's primitives to the bodies, rebuild the path
-// tracer's acceleration structure, render, write frame_NNNN.ppm. At the end the frames
+// tracer's acceleration structure, render, write frame_NNNN.png. At the end the frames
 // become a GIF with tools/frames_to_gif.py, run by uv (which fetches Pillow by itself) or,
 // without uv, by python3 (with Pillow installed).
 #define _POSIX_C_SOURCE 200809L
@@ -99,19 +99,19 @@ int main(int argc, char **argv){
         phys_s += b - a;
 
         char path[600];
-        snprintf(path, sizeof(path), "%s/frame_%04d.ppm", o.out, f);
+        snprintf(path, sizeof(path), "%s/frame_%04d.png", o.out, f);
         int err = -1;
         if (gview){
             // on the GPU; if it cannot draw this scene, the CPU takes over from here on
             if (o.backend == BACKEND_RASTER){
-                if (gpu_frame_raster(gpu, gview, &scene, &rp, &o.march, o.raster_clouds, fb) == 0) err = fb_save_ppm(fb, path);
+                if (gpu_frame_raster(gpu, gview, &scene, &rp, &o.march, o.raster_clouds, fb) == 0) err = fb_save_png(fb, path);
             } else {
                 // the bodies are instances: the world's structure is built once, the top level each frame
                 if (scene_accel_kind(&scene) != ACCEL_BVH) scene_set_accel(&scene, ACCEL_BVH, &o.ap);
                 else scene_update_instances(&scene, &o.ap);
                 if (gpu_frame_trace(gpu, gview, &scene, &cam, &rp, &o.march, o.spp, o.max_depth, o.mis, (real)o.clamp, o.sampler,
                                     o.caustics_lt ? (real)o.photons : 0, &img, 0) == 0)
-                    err = image_write_ppm(&img, path);
+                    err = image_write_png(&img, path);
             }
             if (err < 0){
                 fprintf(stderr, "\nthe GPU cannot draw this scene: the CPU renders the frames\n");
@@ -133,13 +133,13 @@ int main(int argc, char **argv){
             fb_clear(fb, rgb8(0, 0, 0));
             render_scene(fb, &scene, &rp);
             if (o.raster_clouds) raster_draw_volumes(rvol, fb, &scene, &rp, &o.march);
-            err = fb_save_ppm(fb, path);
+            err = fb_save_png(fb, path);
         } else {
             AccelKind ak = options_resolve_accel(&o, &scene);
             if (!scene.accel || scene_accel_kind(&scene) != ak) scene_set_accel(&scene, ak, &o.ap);
             else scene_update_instances(&scene, &o.ap);
             frame_render_rt(&scene, &cam, &img, o.spp, &tp, (real)o.clamp, o.caustics_lt ? o.photons : 0, (uint64_t)f + 1);
-            err = image_write_ppm(&img, path);
+            err = image_write_png(&img, path);
         }
         if (err){ fprintf(stderr, "could not write %s\n", path); return 1; }
         double c = now_s();

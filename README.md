@@ -55,7 +55,7 @@ library behind one header (`lr.h`), with no third-party code in the engine.
 make models          # the test models (needs uv or python3, once)
 make                 # the library, the programs, the examples
 bin/view             # fly through the Cornell box: WASD + mouse, M changes mode
-bin/render           # a path traced image -> out/cornell_boxes.ppm
+bin/render           # a path traced image -> out/cornell_boxes.png
 bin/view -sim on     # the physics, live (Space pauses, K is an explosion)
 
 make deps && make    # use the GPU natively (fetches wgpu-native)

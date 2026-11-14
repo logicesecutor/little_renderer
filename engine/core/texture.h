@@ -10,7 +10,7 @@ typedef struct {
     uint32_t *px;   // 0x00RRGGBB, row 0 = top of the image
 } Texture;
 
-Texture *texture_load_ppm(const char *path);   // P3 or P6, NULL on failure
+Texture *texture_load_png(const char *path);   // any PNG (core/png.h), NULL on failure
 Texture *texture_checker(int size, int cells); // procedural checkerboard
 void texture_destroy(Texture *t);
 

@@ -23,6 +23,7 @@
 #include "core/lrmath.h"
 #include "core/rng.h"
 #include "core/image.h"
+#include "core/png.h"
 #include "core/texture.h"
 #include "core/camera.h"
 #include "core/mesh.h"

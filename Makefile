@@ -75,7 +75,7 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/hello_physics \
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/hello_physics \
                               $(BIN)/mesh_rain)
 
 all: lib apps examples
@@ -170,24 +170,25 @@ view-dragon: $(BIN)/view$(EXE)
 	mkdir -p out
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
-# unit test of the participating-medium sampling (exact answers, see examples/test_medium.c)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
+# the unit tests: the medium sampling, PNG files, the physics (CPU and GPU)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
 	$(BIN)/test_medium
+	$(BIN)/test_png
 	$(BIN)/test_physics
 	$(BIN)/test_gpu_rigid
 
 # volumetric cloud in the box (docs/VOLUMES.md): a clean image, and an animation as frames
 cloud: $(BIN)/render$(EXE)
 	mkdir -p out
-	$(BIN)/render -scene cloud -n 600 -s 1024 -o out/cornell_cloud_final.ppm
+	$(BIN)/render -scene cloud -n 600 -s 1024 -o out/cornell_cloud_final.png
 
 FRAMES = 48
 cloud-frames: $(BIN)/render$(EXE)
 	mkdir -p out/cloud_frames
 	for i in $$(seq 0 $$(($(FRAMES) - 1))); do \
 	  $(BIN)/render -scene cloud -n 300 -s 64 -time $$(echo "$$i * 0.5" | bc -l) \
-	                -o out/cloud_frames/frame_$$(printf %03d $$i).ppm || exit 1; done
-	@echo "frames in out/cloud_frames/ (e.g. ffmpeg -framerate 12 -i out/cloud_frames/frame_%03d.ppm out/cloud.mp4)"
+	                -o out/cloud_frames/frame_$$(printf %03d $$i).png || exit 1; done
+	@echo "frames in out/cloud_frames/ (e.g. ffmpeg -framerate 12 -i out/cloud_frames/frame_%03d.png out/cloud.mp4)"
 
 # physics (docs/PHYSICS.md): a simulation rendered frame by frame, then a GIF
 sim: $(BIN)/sim$(EXE)
@@ -199,15 +200,15 @@ sim-blast: $(BIN)/sim$(EXE)
 # slow, clean versions
 final: $(BIN)/render$(EXE)
 	mkdir -p out
-	$(BIN)/render -scene boxes -n 600 -s 1024 -o out/cornell_boxes_final.ppm
-	$(BIN)/render -scene spheres -n 600 -s 1024 -o out/cornell_spheres_final.ppm
-	$(BIN)/render -scene spheres -n 600 -s 1024 -clamp 4 -o out/cornell_spheres_final_clamped.ppm
-	$(BIN)/render -scene mesh -n 600 -s 1024 -o out/cornell_mesh_final.ppm
+	$(BIN)/render -scene boxes -n 600 -s 1024 -o out/cornell_boxes_final.png
+	$(BIN)/render -scene spheres -n 600 -s 1024 -o out/cornell_spheres_final.png
+	$(BIN)/render -scene spheres -n 600 -s 1024 -clamp 4 -o out/cornell_spheres_final_clamped.png
+	$(BIN)/render -scene mesh -n 600 -s 1024 -o out/cornell_mesh_final.png
 
 dragon: $(BIN)/render$(EXE)
 	mkdir -p out
-	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 600 -s 512 -o out/cornell_dragon.ppm
-	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -mat glass -clamp 4 -n 600 -s 512 -o out/cornell_dragon_glass.ppm
+	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 600 -s 512 -o out/cornell_dragon.png
+	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -mat glass -clamp 4 -n 600 -s 512 -o out/cornell_dragon_glass.png
 
 # Compares two images: identical, or how many bytes differ. In the double build the three
 # acceleration structures give identical images. In float a few pixels may differ: where a
@@ -219,18 +220,18 @@ SAME = n=$$(cmp -l $(1) $(2) | wc -l); if [ $$n = 0 ]; then echo "$(1) = $(2): i
 # all acceleration structures on the torus (2304 triangles)
 bench: $(BIN)/render$(EXE)
 	mkdir -p out
-	$(BIN)/render -scene mesh -n 200 -s 16 -accel none   -o out/bench_none.ppm
-	$(BIN)/render -scene mesh -n 200 -s 16 -accel octree -o out/bench_octree.ppm
-	$(BIN)/render -scene mesh -n 200 -s 16 -accel bvh    -o out/bench_bvh.ppm
-	@$(call SAME,out/bench_none.ppm,out/bench_octree.ppm)
-	@$(call SAME,out/bench_none.ppm,out/bench_bvh.ppm)
+	$(BIN)/render -scene mesh -n 200 -s 16 -accel none   -o out/bench_none.png
+	$(BIN)/render -scene mesh -n 200 -s 16 -accel octree -o out/bench_octree.png
+	$(BIN)/render -scene mesh -n 200 -s 16 -accel bvh    -o out/bench_bvh.png
+	@$(call SAME,out/bench_none.png,out/bench_octree.png)
+	@$(call SAME,out/bench_none.png,out/bench_bvh.png)
 
 # octree vs BVH on the Stanford dragon (needs "make dragon-download")
 bench-dragon: $(BIN)/render$(EXE)
 	mkdir -p out
-	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 300 -s 32 -accel octree -o out/bench_dragon_octree.ppm
-	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 300 -s 32 -accel bvh    -o out/bench_dragon_bvh.ppm
-	@$(call SAME,out/bench_dragon_octree.ppm,out/bench_dragon_bvh.ppm)
+	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 300 -s 32 -accel octree -o out/bench_dragon_octree.png
+	$(BIN)/render -scene mesh -obj $(DRAGON) -rot -35 -n 300 -s 32 -accel bvh    -o out/bench_dragon_bvh.png
+	@$(call SAME,out/bench_dragon_octree.png,out/bench_dragon_bvh.png)
 
 # ---- the web (Emscripten + WebAssembly) ----------------------------------------------------
 #

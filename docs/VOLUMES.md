@@ -8,7 +8,7 @@ rendered physically by the path tracer (`rt/medium.c`, `rt/tracer.c`), and in re
 by the rasterizer's raymarcher (`raster/volume_march.c`, section 7.1).
 
 ```sh
-bin/render -scene cloud                         # the cloud alone in the box -> out/cornell_cloud.ppm
+bin/render -scene cloud                         # the cloud alone in the box -> out/cornell_cloud.png
 bin/render -scene boxes -cloud on -density 0.05 # a cloud added to any scene
 bin/view -scene cloud                           # fly around it: raymarched while moving, path traced when still
 bin/render -scene cloud -backend raster         # the raymarched version, in milliseconds

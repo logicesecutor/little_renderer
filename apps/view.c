@@ -59,7 +59,7 @@ static const char *CONTROLS =
     "  1 2 3 4          rt mode: preview resolution 1/1, 1/2, 1/4, 1/8\n"
     "  R                back to the starting camera\n"
     "  X                GPU path tracing: denoiser on / off\n"
-    "  P                save the current image as PPM\n"
+    "  P                save the current image as PNG\n"
     "  C                print a render command for this exact view\n"
     "  H                print these controls\n"
     "  Esc              quit\n";
@@ -198,7 +198,7 @@ static void save_accum(const Accum *a, const char *path){
     Image img = image_create(a->rw, a->rh);
     for (int k = 0; k < a->rw * a->rh; k++)
         img.px[k] = a->count[k] ? v_scale(a->sum[k], 1.0 / a->count[k]) : vec3(0, 0, 0);
-    if (image_write_ppm(&img, path) == 0)
+    if (image_write_png(&img, path) == 0)
         printf("saved %s (%dx%d, path traced, %d samples/pixel)\n", path, a->rw, a->rh, a->passes);
     else
         fprintf(stderr, "could not write %s (does the folder exist?)\n", path);
@@ -206,7 +206,7 @@ static void save_accum(const Accum *a, const char *path){
 }
 
 static void save_fb(const Framebuffer *fb, const char *path, const char *what){
-    if (fb_save_ppm(fb, path) == 0) printf("saved %s (%dx%d, %s)\n", path, fb->w, fb->h, what);
+    if (fb_save_png(fb, path) == 0) printf("saved %s (%dx%d, %s)\n", path, fb->w, fb->h, what);
     else fprintf(stderr, "could not write %s (does the folder exist?)\n", path);
 }
 
@@ -215,7 +215,7 @@ static void save_fb(const Framebuffer *fb, const char *path, const char *what){
 static void save_view(const Accum *a, const Framebuffer *fb, int showing_raster, RenderMode shading,
                       const char *prefix, int *shot_no){
     char path[512], what[64];
-    snprintf(path, sizeof(path), "%s_%03d.ppm", prefix, ++*shot_no);
+    snprintf(path, sizeof(path), "%s_%03d.png", prefix, ++*shot_no);
     if (!showing_raster && a->passes > 0 && a->scale == 1){ save_accum(a, path); return; }
     if (showing_raster) snprintf(what, sizeof(what), "rasterized, %s", render_mode_name(shading));
     else snprintf(what, sizeof(what), "path tracing preview, first pass not finished");
@@ -347,7 +347,7 @@ static void save_traced(void *user, const float *sc, int w, int h){
         float c = sc[4 * i + 3];
         img.px[i] = c > 0 ? vec3(sc[4 * i] / c, sc[4 * i + 1] / c, sc[4 * i + 2] / c) : vec3(0, 0, 0);
     }
-    if (image_write_ppm(&img, shot_path) == 0)
+    if (image_write_png(&img, shot_path) == 0)
         printf("saved %s (%dx%d, path traced on the GPU, %d samples/pixel%s)\n", shot_path, w, h,
                gpu_view_trace_passes(gview), o.denoise ? ", denoised" : "");
     else fprintf(stderr, "could not write %s (does the folder exist?)\n", shot_path);
@@ -356,7 +356,7 @@ static void save_traced(void *user, const float *sc, int w, int h){
 }
 
 static void gpu_screenshot(void){
-    snprintf(shot_path, sizeof(shot_path), "%s_%03d.ppm", o.out, ++shot_no);
+    snprintf(shot_path, sizeof(shot_path), "%s_%03d.png", o.out, ++shot_no);
     shot_waiting = 1;
     if (!showing_raster && gpu_tracing && gpu_view_trace_passes(gview) > 0){
         if (!gpu_view_trace_read(gview, save_traced, NULL)) shot_waiting = 0;
@@ -373,7 +373,7 @@ static void on_gpu_frame(void *user, const uint32_t *px, int w, int h){
 #ifndef __EMSCRIPTEN__
     if (shot_waiting && shot_path[0]){
         Framebuffer shot = {w, h, (uint32_t *)px, NULL};
-        if (fb_save_ppm(&shot, shot_path) == 0) printf("saved %s (%dx%d, drawn by the GPU)\n", shot_path, w, h);
+        if (fb_save_png(&shot, shot_path) == 0) printf("saved %s (%dx%d, drawn by the GPU)\n", shot_path, w, h);
         else fprintf(stderr, "could not write %s (does the folder exist?)\n", shot_path);
         shot_path[0] = 0;
         shot_waiting = 0;

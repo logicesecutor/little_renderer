@@ -1,5 +1,5 @@
 // options.h - command-line options shared by the three programs:
-//   render  (offline: one image into a PPM, with the path tracer or the rasterizer)
+//   render  (offline: one image into a PNG, with the path tracer or the rasterizer)
 //   view    (real-time window: rasterized preview while moving, path tracing when still)
 //   sim     (offline: a physics simulation rendered frame by frame into an animation)
 // Run either one with -h for the full list. Apps only, not needed to use the engine.

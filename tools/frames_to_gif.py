@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = ["pillow"]
 # ///
-"""frames_to_gif.py - the frames of bin/sim (or any folder of frame_NNNN.ppm) into a GIF.
+"""frames_to_gif.py - the frames of bin/sim (or any folder of frame_NNNN.png) into a GIF.
 
     uv run tools/frames_to_gif.py out/sim out/sim.gif 30       (uv installs Pillow by itself)
     python3 tools/frames_to_gif.py out/sim out/sim.gif 30      (needs: pip install pillow)
@@ -24,9 +24,9 @@ def main():
         return 1
     folder, out = sys.argv[1], sys.argv[2]
     fps = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
-    files = sorted(glob.glob(os.path.join(folder, "frame_*.ppm")))
+    files = sorted(glob.glob(os.path.join(folder, "frame_*.png")))
     if not files:
-        print("no frame_*.ppm in", folder)
+        print("no frame_*.png in", folder)
         return 1
     frames = [Image.open(f).convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT,
                                                     dither=Image.Dither.FLOYDSTEINBERG) for f in files]

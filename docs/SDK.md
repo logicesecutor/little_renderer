@@ -175,7 +175,7 @@ for each pixel (x, y):
     for each sample: sum += trace_path(&scene, camera_ray(&cam, (x + rng_real(&rng)) / W,
                                                                (y + rng_real(&rng)) / H), &rng, 50);
     img.px[y * W + x] = sum / samples;
-image_write_ppm(&img, "out/hello_rt.ppm");
+image_write_png(&img, "out/hello_rt.png");
 image_free(&img); scene_free(&scene);
 ```
 
@@ -185,7 +185,7 @@ image_free(&img); scene_free(&scene);
   it at once, as long as each has its own `Rng` (the examples seed one per pixel, which also
   makes the image independent of the thread count). Do not call `scene_set_accel` or
   `scene_add_prim` while other threads are tracing.
-- `trace_path` returns linear radiance; `image_write_ppm` clamps and sRGB-encodes it.
+- `trace_path` returns linear radiance; `image_write_png` clamps and sRGB-encodes it.
 - **Caustics** (as `bin/render` does it): path trace with `TraceParams.skip_caustics = 1`,
   average the samples into an `Image`, then
   `light_trace_caustics(&scene, &cam, W, H, (long long)W * H * SPP, &params, seed, img.px)`
@@ -203,7 +203,7 @@ RenderParams p = render_params_camera(scene.cam_from, scene.cam_at, scene.cam_up
                                       scene.cam_vfov_deg, W, H);   // same camera as the path tracer
 p.mode = MODE_PHONG;                                    // or MODE_GOURAUD, MODE_FLAT, MODE_WIREFRAME
 render_scene(fb, &scene, &p);
-fb_save_ppm(fb, "out/hello_raster.ppm");
+fb_save_png(fb, "out/hello_raster.png");
 fb_destroy(fb);
 ```
 
@@ -223,7 +223,7 @@ render_mesh(fb, mesh, &p);
 ```
 
 - **Textures** (`render_mesh` only): `p.texture = texture_checker(256, 16);` or
-  `texture_load_ppm("x.ppm")`, then `MODE_TEXTURED`.
+  `texture_load_png("x.png")`, then `MODE_TEXTURED`.
 - **Your own camera:** set `p.eye`, `p.view = mat4_look_at(eye, target, up)` and
   `p.proj = mat4_perspective(fov_rad, aspect, near, far)`.
 - **Your own shading:** `draw_triangle` takes any `FragShader`, a function
@@ -261,8 +261,9 @@ To show a path traced `Image`, convert each pixel with `image_pack_srgb` into
 | `core/lrmath.h` | `real`, `REAL_MAX`, `PI`, `r_sqrt`/`r_sin`/`r_pow`/... (float or double versions), `Vec2`/`Vec3`/`Vec4`, `Mat4`, `Mat3` and `Quat` (`mat3_*`, `quat_axis_angle`, `quat_mul`, `quat_rotate`, `quat_to_mat3`, `quat_integrate`), `vec3()`, `v_add`, `v_sub`, `v_mul` (per channel), `v_scale`, `v_neg`, `v_dot`, `v_cross`, `v_len`, `v_norm`, `v_max`, `v_reflect`, `v_refract`, `mat4_identity`, `mat4_mul`, `mat4_mul_vec4`, `mat4_mul_point`, `mat4_mul_dir`, `mat4_rotate_x`, `mat4_rotate_y`, `mat4_look_at`, `mat4_perspective` |
 | `core/rng.h` | `Rng`, `rng_seed(rng, seed, stream)`, `rng_u32`, `rng_real` (in [0,1)), `onb_from_normal`, `sample_cosine_hemisphere` (`_u`: from 2 given numbers) |
 | `core/sampler.h` | `Sampler`, `sampler_make(rng, x, y, index, seed, on)`, `sampler_2d(s, dim, &a, &b)`, `sampler_1d`: a path's numbers from Owen-scrambled Sobol with a blue-noise shift per pixel; dimension ids `SAMPLE_CAMERA`, `SAMPLE_LIGHT(depth)`, `SAMPLE_DIR(depth)`, `SAMPLE_MISC(depth)`; `blue_noise_mask()` |
-| `core/image.h` | `Framebuffer` (`color` 0x00RRGGBB + `depth`), `rgb8`, `rgbf`, `fb_create`, `fb_destroy`, `fb_clear`, `fb_set_pixel`, `fb_show_depth`, `fb_save_ppm`; `Image` (linear `Vec3` pixels), `image_create`, `image_free`, `image_write_ppm` (sRGB); `image_srgb8`, `srgb_lut_init`, `image_pack_srgb` |
-| `core/texture.h` | `Texture`, `texture_load_ppm`, `texture_checker`, `texture_sample`, `texture_destroy` |
+| `core/image.h` | `Framebuffer` (`color` 0x00RRGGBB + `depth`), `rgb8`, `rgbf`, `fb_create`, `fb_destroy`, `fb_clear`, `fb_set_pixel`, `fb_show_depth`, `fb_save_png`; `Image` (linear `Vec3` pixels), `image_create`, `image_free`, `image_write_png` (sRGB); `image_srgb8`, `srgb_lut_init`, `image_pack_srgb` |
+| `core/texture.h` | `Texture`, `texture_load_png`, `texture_checker`, `texture_sample`, `texture_destroy` |
+| `core/png.h` | `png_write` / `png_encode` (8-bit grey, grey + alpha, RGB, RGBA), `png_read` / `png_decode` (any PNG, to 1–4 channels of 8 bits), `zlib_compress`, `zlib_decompress` |
 | `core/camera.h` | `Ray`, `Camera`, `camera_make(from, at, up, vfov_deg, aspect)`, `camera_ray(cam, s, t)` with s, t in [0,1] from the top-left |
 | `core/mesh.h` | `Mesh`, `Face`, `mesh_load` (`.obj` / ASCII `.ply`), `mesh_destroy`, `mesh_compute_normals`, `mesh_normalize` (fit in [-1,1]), `mesh_place` (scale, turn, stand on a point) |
 | `core/noise.h` | `Noise`, `noise_init(seed)`, `noise_perlin`, `noise_worley`, `noise_fbm`, `noise_billow` |

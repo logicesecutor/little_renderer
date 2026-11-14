@@ -14,7 +14,7 @@ renders the classic **Cornell box**:
   medium rendered with delta tracking, ratio tracking and multiple scattering. It has its
   own document: **VOLUMES.md**.
 
-Two programs use it: `render` writes a PPM (`-backend rt`, the default), and `view`
+Two programs use it: `render` writes a PNG (`-backend rt`, the default), and `view`
 (section 5.13) is a window you can fly through: the rasterizer draws while you move, and
 the path tracer refines the image when you stop.
 **Every command, option, key and tunable constant is listed in `USAGE.md`.**
@@ -34,11 +34,11 @@ Run these from the top folder of the repository:
 make                  # build/float/liblr.a, bin/render, bin/view, the examples (gcc -O2, OpenMP)
 make DOUBLE=1         # the same in double precision, into bin/double/
 bin/view              # the real-time window (section 5.13)
-make run              # quick previews: out/cornell_boxes.ppm, _spheres.ppm, _mesh.ppm (+ _raster)
+make run              # quick previews: out/cornell_boxes.png, _spheres.png, _mesh.png (+ _raster)
 make final            # slow, clean 600x600 / 1024 samples per pixel versions
 make bench            # none vs. octree vs. BVH on the torus, compares the images
 make dragon-download  # fetches the Stanford dragon (11 MB) into models/dragon_recon/
-make dragon           # renders it in the box: out/cornell_dragon.ppm and _glass.ppm
+make dragon           # renders it in the box: out/cornell_dragon.png and _glass.png
 make view-dragon      # flies around it in the viewer
 make bench-dragon     # octree vs. BVH on the dragon
 make SINGLE=1         # build without OpenMP (one thread)
@@ -49,7 +49,7 @@ The most used options (`render` and `view` take the same ones):
 
 ```
 bin/render -n 600 -s 512 -d 50 -scene mesh -obj model.ply -mat glass -rot -35 \
-           -cam 278,278,-800 -look 278,278,0 -fov 40 -accel bvh -clamp 4 -o out/x.ppm
+           -cam 278,278,-800 -look 278,278,0 -fov 40 -accel bvh -clamp 4 -o out/x.png
 ```
 
 The full list, with defaults, tips, the viewer keys and the constants you can change in
@@ -136,7 +136,8 @@ engine/
 │   ├── camera.h         Ray, pinhole camera: pixel coordinates -> primary ray (header only)
 │   ├── mesh.h/c         .obj and ASCII .ply readers, vertex normals, placing a model
 │   ├── scene.h/c        materials, primitives (sphere | quad | triangle), Scene, the Cornell box
-│   └── image.h/c        Image (linear float pixels) -> sRGB -> PPM; also the rasterizer's Framebuffer
+│   ├── image.h/c        Image (linear float pixels) -> sRGB -> PNG; also the rasterizer's Framebuffer
+│   └── png.h/c          PNG writer and reader, with deflate / inflate (no library)
 ├── rt/                  the path tracer
 │   ├── intersect.h/c    Hit, ray-box slab test, sphere / quad / triangle intersection
 │   ├── octree.h/c       octree build and front-to-back traversal (closest hit and any hit)
@@ -147,7 +148,7 @@ engine/
 ├── platform/window.h/c  the X11 window (the viewer)
 └── app/options.h/c      command-line options of the two programs
 apps/
-├── render.c             `bin/render`: pixel loop (OpenMP), anti-aliasing, timing, PPM output
+├── render.c             `bin/render`: pixel loop (OpenMP), anti-aliasing, timing, PNG output
 └── view.c               `bin/view`: camera controls, raster preview + progressive path tracing
 examples/hello_rt.c      the smallest program that path traces
 ```
@@ -300,8 +301,16 @@ sections 5.11 and 5.12.
 
 **`core/image.h/c`**: the image is stored in **linear** radiance (`Vec3` per pixel). Only on
 output is each value clamped to `[0, 1]` and converted with the sRGB transfer curve
-(section 5.9). The output is a binary PPM: a text header `P6 width height 255`, then
-3 bytes per pixel.
+(section 5.9). The output is a PNG, written by `core/png.c` (below).
+
+**`core/png.h/c`**: PNG files without a library. Writing: each row gets the PNG filter that
+leaves the smallest bytes (none, sub, up, average or Paeth: each predicts a byte from its
+neighbours and stores the difference), then deflate compresses the rows: LZ77 (a repeated
+run of bytes becomes a back reference, found through hash chains of 3-byte prefixes) and
+the fixed Huffman codes. Reading: the whole format (every colour type and bit depth,
+palettes, transparency, interlacing) with an inflate that decodes all three kinds of
+deflate blocks; the textures and, later, glTF files use it. Every chunk carries a CRC-32,
+the compressed stream an Adler-32: both are checked.
 
 **`app/options.h/c`**: one parser for both programs (`-h` prints the list), so every option
 means the same in `render` and `view`. `options_setup_scene` builds the scene, applies
@@ -913,7 +922,7 @@ different but the result is reproducible.
 **Extras.**
 - **C** prints the `render` command for the current view (`-cam`, `-look`, `-fov`
   plus your scene options), to render it offline in high quality.
-- **P** saves what the window shows as a PPM: the path traced average at full precision,
+- **P** saves what the window shows as a PNG: the path traced average at full precision,
   or the raster frame.
 - **V** changes the raster shading (Phong, Gouraud, flat, wireframe).
 - **B** rebuilds the scene with another acceleration structure.
@@ -1063,8 +1072,8 @@ carries a huge value: a single white speckle, a **firefly**. These are real ligh
 | full bidirectional path tracing / photon mapping | would also cover the paths the camera sees *through* glass or in a mirror (`camera → glass → floor → glass → lamp`), the remaining grain inside the glass sphere |
 
 `make final` renders the spheres scene both ways, so the trade-off can be compared directly:
-`out/cornell_spheres_final.ppm` (unbiased, slight grain) and
-`out/cornell_spheres_final_clamped.ppm` (clean, dimmer caustic).
+`out/cornell_spheres_final.png` (unbiased, slight grain) and
+`out/cornell_spheres_final_clamped.png` (clean, dimmer caustic).
 
 ---
 

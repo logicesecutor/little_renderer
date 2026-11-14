@@ -583,7 +583,7 @@ for (int f = 0; f < 30; f++){
     phys_sync_scene(&pw, &scene);
     scene_update_instances(&scene, NULL);              // the bodies are instances (4.1)
     frame_render_rt(&scene, &cam, &img, 16, &tp, 0, 0, f);  // app/frame.h
-    image_write_ppm(&img, path);
+    image_write_png(&img, path);
 }
 phys_free(&pw);          // the air, not the cloud: the scene owns it
 scene_free(&scene);
@@ -628,7 +628,7 @@ falling through the cloud and landing around a big one, the air flowing around a
 Rigid bodies take 0.2 ms per 1/60 s step on average for that (2 ms at most, when hulls
 land on the 200k-triangle dragon), the GPU air 0.6 ms.
 
-`bin/sim` writes each frame to `out/sim/frame_NNNN.ppm` (`-o folder`) and then
+`bin/sim` writes each frame to `out/sim/frame_NNNN.png` (`-o folder`) and then
 `out/sim.gif` (`-gif off` to skip). Each frame: physics for 1/fps seconds (steps of at most
 1/60 s), sync, rebuild, path trace. With `-backend raster` the frames are rasterized and
 the cloud raymarched (VOLUMES.md 7.1): the whole 120-frame animation takes about 40 s

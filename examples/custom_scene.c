@@ -2,7 +2,7 @@
 // glass sphere and a mirror sphere. Path traced (multithreaded with OpenMP) AND rasterized,
 // because both backends of the engine draw the same Scene.
 //
-//   make bin/custom_scene && bin/custom_scene   -> out/custom_scene.ppm, out/custom_scene_raster.ppm
+//   make bin/custom_scene && bin/custom_scene   -> out/custom_scene.png, out/custom_scene_raster.png
 #include <stdio.h>
 #include "lr.h"
 
@@ -56,8 +56,8 @@ int main(void){
         }
     }
 
-    int err = image_write_ppm(&img, "out/custom_scene.ppm");
-    printf(err ? "could not write out/custom_scene.ppm\n" : "wrote out/custom_scene.ppm\n");
+    int err = image_write_png(&img, "out/custom_scene.png");
+    printf(err ? "could not write out/custom_scene.png\n" : "wrote out/custom_scene.png\n");
     image_free(&img);
 
     // the same scene through the rasterizer: no shadows or reflections, but instant
@@ -65,8 +65,8 @@ int main(void){
     fb_clear(fb, rgb8(0, 0, 0));
     RenderParams p = render_params_camera(s.cam_from, s.cam_at, s.cam_up, s.cam_vfov_deg, W, H);
     render_scene(fb, &s, &p);
-    err |= fb_save_ppm(fb, "out/custom_scene_raster.ppm");
-    printf("wrote out/custom_scene_raster.ppm\n");
+    err |= fb_save_png(fb, "out/custom_scene_raster.png");
+    printf("wrote out/custom_scene_raster.png\n");
     fb_destroy(fb);
     scene_free(&s);
     return err;

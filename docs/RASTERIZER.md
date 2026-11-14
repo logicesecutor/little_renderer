@@ -8,8 +8,8 @@ only. Commands and options: [USAGE.md](USAGE.md). Using it as a library: [SDK.md
 
 ```sh
 make models                              # cube/sphere/torus .obj into models/ (uv or python3, once)
-make demo                                # bin/raster_milestones: one image per milestone into out/*.ppm
-bin/render -backend raster               # the Cornell box, rasterized -> out/cornell_boxes_raster.ppm
+make demo                                # bin/raster_milestones: one image per milestone into out/*.png
+bin/render -backend raster               # the Cornell box, rasterized -> out/cornell_boxes_raster.png
 bin/view -backend raster                 # fly through it in real time (V cycles the shading)
 ```
 
@@ -18,9 +18,9 @@ bin/view -backend raster                 # fly through it in real time (V cycles
 | file | job |
 |---|---|
 | `engine/core/lrmath.h` | `real`, Vec2/3/4, Mat4 (rotate, look-at, perspective). Header only, shared with the path tracer. |
-| `engine/core/image.c` (+ `.h`) | `Framebuffer`: the pixel array + z-buffer, `fb_set_pixel`, PPM output, sRGB packing |
+| `engine/core/image.c` (+ `.h`) | `Framebuffer`: the pixel array + z-buffer, `fb_set_pixel`, PNG output, sRGB packing |
 | `engine/core/mesh.c` (+ `.h`) | `.obj` / ASCII `.ply` loader (v / vt / vn / polygons / negative indices), normalize, vertex normals |
-| `engine/core/texture.c` (+ `.h`) | PPM texture loader, procedural checkerboard, nearest sampling |
+| `engine/core/texture.c` (+ `.h`) | PNG texture loader (`core/png.c`), procedural checkerboard, nearest sampling |
 | `engine/raster/raster.c` (+ `.h`) | Bresenham line, barycentric triangle, z-test, perspective-correct interpolation |
 | `engine/raster/render.c` (+ `.h`) | the pipeline: model -> world -> view -> projection -> near clip -> viewport -> shaders. `render_mesh` draws one mesh, `render_scene` a whole `Scene` |
 | `engine/raster/volume_march.c` (+ `.h`) | clouds and fog: raymarched over the finished frame, stopped by its z-buffer (VOLUMES.md 7.1) |
@@ -32,17 +32,17 @@ bin/view -backend raster                 # fly through it in real time (V cycles
 
 | # | what | output / code |
 |---|---|---|
-| 0 | hello pixels | `out/0_gradient.ppm`, `core/image.c` |
-| 1 | Bresenham lines | `out/1_lines.ppm`, `draw_line` in `raster.c` |
-| 2 | wireframe OBJ | `out/2_wireframe.ppm`, `core/mesh.c` |
-| 3 | filled triangles (edge functions) | `out/3_triangles_zbuffer.ppm`, `draw_triangle` |
-| 4 | flat shading + back-face culling | `out/4_flat.ppm`, `out/4_flat_no_culling.ppm` |
-| 5 | z-buffer | `out/3_triangles_zbuffer.ppm`, `out/5_depth.ppm` |
+| 0 | hello pixels | `out/0_gradient.png`, `core/image.c` |
+| 1 | Bresenham lines | `out/1_lines.png`, `draw_line` in `raster.c` |
+| 2 | wireframe OBJ | `out/2_wireframe.png`, `core/mesh.c` |
+| 3 | filled triangles (edge functions) | `out/3_triangles_zbuffer.png`, `draw_triangle` |
+| 4 | flat shading + back-face culling | `out/4_flat.png`, `out/4_flat_no_culling.png` |
+| 5 | z-buffer | `out/3_triangles_zbuffer.png`, `out/5_depth.png` |
 | 6 | real camera (model/view/projection) | `core/lrmath.h`, `render_mesh` in `render.c` |
 | 7 | real time | `bin/view -backend raster` |
-| 8 | Gouraud, Phong, textures, perspective-correct UVs | `out/8_*.ppm` |
-| 9 | near-plane clipping, shaders as function pointers | `out/9_near_clipping.ppm`, `FragShader` |
-| 10 | whole scenes: the path tracer's `Scene` as triangles | `render_scene`, `out/cornell_*_raster.ppm` |
+| 8 | Gouraud, Phong, textures, perspective-correct UVs | `out/8_*.png` |
+| 9 | near-plane clipping, shaders as function pointers | `out/9_near_clipping.png`, `FragShader` |
+| 10 | whole scenes: the path tracer's `Scene` as triangles | `render_scene`, `out/cornell_*_raster.png` |
 
 ## Drawing a `Scene` (`render_scene`)
 

@@ -1,8 +1,8 @@
 // hello_rt.c - the smallest program that PATH TRACES a scene with the engine (liblr.a).
-// Builds the Cornell box, adds a BVH, traces 16 paths per pixel, writes a PPM.
+// Builds the Cornell box, adds a BVH, traces 16 paths per pixel, writes a PNG.
 // hello_raster.c rasterizes the very same scene.
 //
-//   make bin/hello_rt && bin/hello_rt        -> out/hello_rt.ppm
+//   make bin/hello_rt && bin/hello_rt        -> out/hello_rt.png
 #include <stdio.h>
 #include "lr.h"
 
@@ -31,8 +31,8 @@ int main(void){
         }
     }
 
-    int err = image_write_ppm(&img, "out/hello_rt.ppm");
-    printf(err ? "could not write out/hello_rt.ppm\n" : "wrote out/hello_rt.ppm\n");
+    int err = image_write_png(&img, "out/hello_rt.png");
+    printf(err ? "could not write out/hello_rt.png\n" : "wrote out/hello_rt.png\n");
     image_free(&img);
     scene_free(&scene);
     return err;

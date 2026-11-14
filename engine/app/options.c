@@ -15,7 +15,7 @@ void options_usage(Program prog, FILE *f){
     int view = prog == PROG_VIEW, sim = prog == PROG_SIM;
     fprintf(f, "usage: %s [options]\n\n", view ? "view" : (sim ? "sim" : "render"));
     if (sim) fprintf(f,
-        "physics simulation: renders every frame with the path tracer into <-o>/frame_NNNN.ppm\n\n"
+        "physics simulation: renders every frame with the path tracer into <-o>/frame_NNNN.png\n\n"
         "demo\n"
         "  -demo drop|blast           drop: balls and boxes fall through the cloud, balloons rise\n"
         "                             blast: an explosion in the cloud at 1 s     (drop)\n"
@@ -121,8 +121,8 @@ void options_usage(Program prog, FILE *f){
         view ? "4096" : (sim ? "32" : "128"),
         prog == PROG_RENDER ? "off" : "on",
         view ? "lt; on the CPU: pt" : (sim ? "pt" : "lt"),
-        view ? "screenshot prefix (key P)  " : (sim ? "folder for the frames      " : "output PPM file            "),
-        view ? "out/view" : (sim ? "out/sim" : "out/cornell_<scene>[_raster].ppm"),
+        view ? "screenshot prefix (key P)  " : (sim ? "folder for the frames      " : "output PNG file            "),
+        view ? "out/view" : (sim ? "out/sim" : "out/cornell_<scene>[_raster].png"),
         AUTO_ACCEL_MIN_PRIMS);
     if (view) fprintf(f,
         "\n"
@@ -404,11 +404,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         if (prog == PROG_VIEW && !cloudres_set) o->cloud.resolution = 96;
     }
     if (!o->out){
-        static const char *rt[] = {"out/cornell_boxes.ppm", "out/cornell_spheres.ppm", "out/cornell_mesh.ppm",
-                                   "out/cornell_cloud.ppm", "out/cornell_empty.ppm", "out/cornell_showcase.ppm"};
-        static const char *ra[] = {"out/cornell_boxes_raster.ppm", "out/cornell_spheres_raster.ppm",
-                                   "out/cornell_mesh_raster.ppm", "out/cornell_cloud_raster.ppm", "out/cornell_empty_raster.ppm",
-                                   "out/cornell_showcase_raster.ppm"};
+        static const char *rt[] = {"out/cornell_boxes.png", "out/cornell_spheres.png", "out/cornell_mesh.png",
+                                   "out/cornell_cloud.png", "out/cornell_empty.png", "out/cornell_showcase.png"};
+        static const char *ra[] = {"out/cornell_boxes_raster.png", "out/cornell_spheres_raster.png",
+                                   "out/cornell_mesh_raster.png", "out/cornell_cloud_raster.png", "out/cornell_empty_raster.png",
+                                   "out/cornell_showcase_raster.png"};
         o->out = o->backend == BACKEND_RASTER ? ra[o->scene.kind] : rt[o->scene.kind];
     }
 }
@@ -484,5 +484,5 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     if (!o->mis) fprintf(f, " -mis off");
     if (!o->sampler) fprintf(f, " -sampler random");
     if (o->clamp > 0) fprintf(f, " -clamp %g", o->clamp);
-    fprintf(f, " -o out/from_viewer.ppm\n");
+    fprintf(f, " -o out/from_viewer.png\n");
 }

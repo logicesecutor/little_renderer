@@ -1,6 +1,6 @@
-// raster_milestones.c - the rasterizer step by step: one image per milestone into out/*.ppm.
+// raster_milestones.c - the rasterizer step by step: one image per milestone into out/*.png.
 //
-//   make bin/raster_milestones && bin/raster_milestones [model.obj] [texture.ppm]
+//   make bin/raster_milestones && bin/raster_milestones [model.obj] [texture.png]
 //
 // Defaults to models/torus.obj and a procedural checkerboard.
 // Uses render_mesh (one mesh, directional light); for whole scenes see hello_raster.c.
@@ -31,7 +31,7 @@ static double now_ms(void){
 static void save(const Framebuffer *fb, const char *name){
     char path[256];
     snprintf(path, sizeof(path), OUT_DIR "/%s", name);
-    if (fb_save_ppm(fb, path) != 0) fprintf(stderr, "could not write %s\n", path);
+    if (fb_save_png(fb, path) != 0) fprintf(stderr, "could not write %s\n", path);
     else printf("  wrote %s\n", path);
 }
 
@@ -41,7 +41,7 @@ static void demo_gradient(void){
     for (int y = 0; y < fb->h; y++)
         for (int x = 0; x < fb->w; x++)
             fb_set_pixel(fb, x, y, rgb8(x, y, 128));
-    save(fb, "0_gradient.ppm");
+    save(fb, "0_gradient.png");
     fb_destroy(fb);
 }
 
@@ -60,7 +60,7 @@ static void demo_lines(void){
     draw_line(fb, 5, 250, 250, 250, rgb8(255, 255, 0));   // horizontal
     draw_line(fb, 5, 5, 5, 250, rgb8(255, 255, 0));       // vertical
     draw_line(fb, -50, 100, 400, 140, rgb8(0, 255, 0));   // partly off screen: must not crash
-    save(fb, "1_lines.ppm");
+    save(fb, "1_lines.png");
     fb_destroy(fb);
 }
 
@@ -101,7 +101,7 @@ static void demo_triangles(void){
     ScreenVert i = make_vert(150, 30, 0.8f, 1, 1, 1);
     draw_triangle(fb, &g, &h, &i, shade_rgb, NULL, 0);
 
-    save(fb, "3_triangles_zbuffer.ppm");
+    save(fb, "3_triangles_zbuffer.png");
     fb_destroy(fb);
 }
 
@@ -116,11 +116,11 @@ static void demo_model(const Mesh *mesh, const Texture *tex){
     p.texture = tex;
 
     struct { RenderMode mode; const char *file; } shots[] = {
-        {MODE_WIREFRAME, "2_wireframe.ppm"},
-        {MODE_FLAT,      "4_flat.ppm"},
-        {MODE_GOURAUD,   "8_gouraud.ppm"},
-        {MODE_PHONG,     "8_phong.ppm"},
-        {MODE_TEXTURED,  "8_textured.ppm"},
+        {MODE_WIREFRAME, "2_wireframe.png"},
+        {MODE_FLAT,      "4_flat.png"},
+        {MODE_GOURAUD,   "8_gouraud.png"},
+        {MODE_PHONG,     "8_phong.png"},
+        {MODE_TEXTURED,  "8_textured.png"},
     };
     for (size_t s = 0; s < sizeof(shots) / sizeof(shots[0]); s++){
         p.mode = shots[s].mode;
@@ -136,14 +136,14 @@ static void demo_model(const Mesh *mesh, const Texture *tex){
     fb_clear(fb, bg);
     render_mesh(fb, mesh, &p);
     fb_show_depth(fb);
-    save(fb, "5_depth.ppm");
+    save(fb, "5_depth.png");
 
     // back faces visible: the inside of the model shows through where it is open
     p.cull_backfaces = 0;
     p.mode = MODE_FLAT;
     fb_clear(fb, bg);
     render_mesh(fb, mesh, &p);
-    save(fb, "4_flat_no_culling.ppm");
+    save(fb, "4_flat_no_culling.png");
     p.cull_backfaces = 1;
 
     // near-plane clipping: put the camera so close that the near plane cuts the model
@@ -152,7 +152,7 @@ static void demo_model(const Mesh *mesh, const Texture *tex){
     p.view = mat4_look_at(p.eye, vec3(0, 0, 0), vec3(0, 1, 0));
     fb_clear(fb, bg);
     render_mesh(fb, mesh, &p);
-    save(fb, "9_near_clipping.ppm");
+    save(fb, "9_near_clipping.png");
 
     fb_destroy(fb);
 }
@@ -177,7 +177,7 @@ int main(int argc, char **argv){
     // (mesh_load computes vertex normals itself when the file has none)
     printf("loaded %s: %d vertices, %d triangles\n", model_path, mesh->nv, mesh->nf);
 
-    Texture *tex = tex_path ? texture_load_ppm(tex_path) : NULL;
+    Texture *tex = tex_path ? texture_load_png(tex_path) : NULL;
     if (tex_path && !tex) fprintf(stderr, "could not read texture %s, using checkerboard\n", tex_path);
     if (!tex) tex = texture_checker(256, 16);
 

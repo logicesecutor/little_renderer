@@ -1,4 +1,4 @@
-// render.c - offline renderer: one image of the Cornell box into a PPM file, made by the
+// render.c - offline renderer: one image of the Cornell box into a PNG file, made by the
 // path tracer (-backend rt, default) or the rasterizer (-backend raster). Run with -h.
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -41,7 +41,7 @@ static int render_raster(const Options *opt, const Scene *scene){
         raster_volumes_free(rv);
     }
 
-    int err = fb_save_ppm(fb, opt->out);
+    int err = fb_save_png(fb, opt->out);
     if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
     else printf("wrote %s in %.1f ms\n", opt->out, ms);
     fb_destroy(fb);
@@ -118,7 +118,7 @@ static int render_rt(const Options *opt, const Scene *scene){
         printf("light tracing: %lld light paths in %.1f s\n", photons, now_s() - l0);
     }
     double secs = now_s() - t0;
-    int err = image_write_ppm(&img, opt->out);
+    int err = image_write_png(&img, opt->out);
     if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
     else printf("wrote %s in %.1f s (%.2f M paths/s)\n", opt->out, secs, (double)W * H * spp / secs / 1e6);
     image_free(&img);
@@ -144,7 +144,7 @@ static int render_gpu(const Options *opt, Scene *scene){
             gpu_frame_close(g, v);
             return -1;
         }
-        err = fb_save_ppm(fb, opt->out);
+        err = fb_save_png(fb, opt->out);
         if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
         else printf("wrote %s in %.1f ms (the first frame on a GPU includes making its pipelines)\n", opt->out, (now_s() - t0) * 1000.0);
         fb_destroy(fb);
@@ -167,7 +167,7 @@ static int render_gpu(const Options *opt, Scene *scene){
             return -1;
         }
         double secs = now_s() - t0;
-        err = image_write_ppm(&img, opt->out);
+        err = image_write_png(&img, opt->out);
         if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
         else printf("wrote %s in %.2f s (%.1f M paths/s)\n", opt->out, secs, (double)W * H * opt->spp / secs / 1e6);
         image_free(&img);

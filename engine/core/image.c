@@ -1,5 +1,6 @@
 #include "core/image.h"
 
+#include "core/png.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -60,25 +61,19 @@ void fb_show_depth(Framebuffer *fb){
     }
 }
 
-int fb_save_ppm(const Framebuffer *fb, const char *path){
-    FILE *f = fopen(path, "wb");
-    if (!f) return 1;
-
+int fb_save_png(const Framebuffer *fb, const char *path){
     size_t n = (size_t)fb->w * fb->h;
     unsigned char *bytes = malloc(n * 3);
-    if (!bytes){ fclose(f); return 1; }
+    if (!bytes) return 1;
     for (size_t i = 0; i < n; i++){
         uint32_t c = fb->color[i];
         bytes[3 * i + 0] = (c >> 16) & 255;
         bytes[3 * i + 1] = (c >> 8) & 255;
         bytes[3 * i + 2] = c & 255;
     }
-
-    fprintf(f, "P6\n%d %d\n255\n", fb->w, fb->h);
-    size_t written = fwrite(bytes, 3, n, f);
+    int err = png_write(path, fb->w, fb->h, 3, bytes);
     free(bytes);
-    fclose(f);
-    return written == n ? 0 : 1;
+    return err;
 }
 
 // ---- Image --------------------------------------------------------------------------
@@ -105,16 +100,18 @@ static unsigned char to_srgb8(double c){
 
 unsigned char image_srgb8(double linear){ return to_srgb8(linear); }
 
-int image_write_ppm(const Image *img, const char *path){
-    FILE *f = fopen(path, "wb");
-    if (!f) return 1;
-    fprintf(f, "P6\n%d %d\n255\n", img->w, img->h);
+int image_write_png(const Image *img, const char *path){
     size_t n = (size_t)img->w * img->h;
+    unsigned char *bytes = malloc(n * 3);
+    if (!bytes) return 1;
     for (size_t i = 0; i < n; i++){
-        unsigned char rgb[3] = { to_srgb8(img->px[i].x), to_srgb8(img->px[i].y), to_srgb8(img->px[i].z) };
-        fwrite(rgb, 1, 3, f);
+        bytes[3 * i + 0] = to_srgb8(img->px[i].x);
+        bytes[3 * i + 1] = to_srgb8(img->px[i].y);
+        bytes[3 * i + 2] = to_srgb8(img->px[i].z);
     }
-    return fclose(f) == 0 ? 0 : 1;
+    int err = png_write(path, img->w, img->h, 3, bytes);
+    free(bytes);
+    return err;
 }
 
 // ---- fast linear -> sRGB pixel ------------------------------------------------------

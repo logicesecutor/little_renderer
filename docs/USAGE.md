@@ -11,15 +11,15 @@ for `models/` and write into `out/` relative to it.
 
 | program | source | what it is |
 |---|---|---|
-| `bin/render` | `apps/render.c` | offline: renders the Cornell box into a `.ppm`, with the path tracer (`-backend rt`, default) or the rasterizer (`-backend raster`) |
+| `bin/render` | `apps/render.c` | offline: renders the Cornell box into a `.png`, with the path tracer (`-backend rt`, default) or the rasterizer (`-backend raster`) |
 | `bin/view` | `apps/view.c` | real time: a window you fly through; rasterizer while moving, path tracer when still; `-sim on` runs the physics live |
 | `bin/sim` | `apps/sim.c` | offline: a physics simulation (rigid bodies, air, the cloud it carries), path traced frame by frame into `out/sim/` and a GIF |
-| `bin/raster_milestones` | `examples/raster_milestones.c` | the rasterizer step by step: one image per milestone into `out/*.ppm` |
+| `bin/raster_milestones` | `examples/raster_milestones.c` | the rasterizer step by step: one image per milestone into `out/*.png` |
 | `bin/hello_rt`, `bin/hello_raster`, `bin/custom_scene` | `examples/` | small programs using the library (see `SDK.md`); write into `out/` |
 | `bin/mesh_rain` | `examples/mesh_rain.c` | random meshes rain into the room as convex hulls, without end (the oldest are reused past `-max`); the frame rate and the bodies asleep in the window's title. Options: `-rate meshes/s` (8), `-max bodies`, `-size units` (70), `-obj model`, `-gpu on\|off`, `-sleep on\|off` (on: bodies at rest fall asleep, PHYSICS.md 1.5), `-endless on\|off` (off: the rain stops at `-max` and the pile settles), `-seed n`, `-autoquit seconds`, `-n`/`-h` the window |
 | `bin/test_medium` | `examples/test_medium.c` | unit test of the volume sampling (`make test`) |
 | `bin/test_physics` | `examples/test_physics.c` | the physics against known answers (`make test`) |
-| `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.ppm` into an animated GIF (Pillow: `uv run` brings it, see 2.1) |
+| `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.png` into an animated GIF (Pillow: `uv run` brings it, see 2.1) |
 | `tools/gen_models.py` | `tools/` | writes the test models (cube, sphere, torus, dense torus) |
 
 Everything is written from scratch in C. The only libraries are `libm`, `libX11` (for the
@@ -35,8 +35,8 @@ cd ~/Projects/little_renderer
 make models                      # test models into models/ (once)
 make                             # library, apps and examples into build/ and bin/
 bin/view                         # fly around the Cornell box (window)
-bin/render                       # path trace it to out/cornell_boxes.ppm (~7 s)
-bin/render -backend raster       # rasterize it to out/cornell_boxes_raster.ppm (milliseconds)
+bin/render                       # path trace it to out/cornell_boxes.png (~7 s)
+bin/render -backend raster       # rasterize it to out/cornell_boxes_raster.png (milliseconds)
 
 bin/sim                          # physics: things fall through the cloud -> out/sim.gif (~10 min)
 bin/view -sim on                 # the same, live in the window
@@ -45,8 +45,8 @@ make dragon-download             # Stanford dragon, 11 MB (once; already in the 
 bin/view -scene mesh -obj models/dragon_recon/dragon_vrip.ply -rot -35
 ```
 
-Every program prints its options with `-h`. PPM images open in GIMP, Eye of GNOME
-(`eog file.ppm`) and most image viewers.
+Every program prints its options with `-h`. The images are PNG files: any image viewer
+or browser opens them.
 
 ---
 
@@ -80,7 +80,7 @@ Shortcuts that build and run:
 | `make test` | `bin/test_medium` and `bin/test_physics`: the cloud's sampling and the physics against exact answers |
 | `make sim` | the drop demo: 120 frames, 320×320, 64 spp → `out/sim/` and `out/sim.gif` (~20 min) |
 | `make sim-blast` | the explosion demo: 90 frames → `out/sim_blast/` and `out/sim_blast.gif` |
-| `make cloud` | the cloud, 600×600, 1024 spp → `out/cornell_cloud_final.ppm` |
+| `make cloud` | the cloud, 600×600, 1024 spp → `out/cornell_cloud_final.png` |
 | `make cloud-frames` | 48 animation frames (`-time` 0 to 23.5 s, 300×300, 64 spp) into `out/cloud_frames/` (`FRAMES=n` to change) |
 
 Build flags, combinable with any target:
@@ -135,7 +135,7 @@ The engine builds natively on Windows with MSYS2's gcc: same Makefile, same comm
    or start MSYS2 with `MSYS2_PATH_TYPE=inherit`.
 
 Visual Studio (MSVC) is not supported: the code needs OpenMP 3 (tasks in the BVH build)
-and gcc builtins. A `.ppm` opens in GIMP or IrfanView on Windows.
+and gcc builtins.
 
 ### 2.2 The GPU (natively: make deps)
 
@@ -200,7 +200,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-mis on\|off` | multiple importance sampling of the lamp: direct sampling and bounces both count, weighted | on | helps near the lamp and in fog; `off` = the old estimator |
 | `-caustics lt\|pt` | caustics by light tracing (traced from the lamp and connected to the camera) or by path tracing alone; on the GPU too (WEB.md 2.6) | `render`, `view`: lt (the CPU viewer: pt), `sim`: pt | lt removes most fireflies of glass and mirrors, unbiased (RAYTRACER.md 5.14); `-mis off -caustics pt -sampler random` reproduces the old images bit for bit |
 | `-photons x` | light paths per camera path for `-caustics lt` | 1 | more = smoother caustics, slower |
-| `-o file` | render: output PPM. view: prefix for screenshots (`<prefix>_001.ppm`, ...) | `out/cornell_<scene>.ppm`, `..._raster.ppm` for the rasterizer (view: `out/view`) | the folder must exist (`make` targets create `out/`) |
+| `-o file` | render: output PNG. view: prefix for screenshots (`<prefix>_001.png`, ...) | `out/cornell_<scene>.png`, `..._raster.png` for the rasterizer (view: `out/view`) | the folder must exist (`make` targets create `out/`) |
 
 ### Scene
 
@@ -310,7 +310,7 @@ carries, `-fog` adds haze, the camera options work as usual.
 | `-frames n` | `sim`: frames to render | 120 |
 | `-fps n` | `sim`: frames per second of the animation (the physics steps are at most 1/60 s) | 30 |
 | `-gif on\|off` | `sim`: also write `<-o>.gif` (with `uv run`, else python3 + Pillow) | on |
-| `-o folder` | `sim`: where the frames go (`frame_0000.ppm` ...) | `out/sim` |
+| `-o folder` | `sim`: where the frames go (`frame_0000.png` ...) | `out/sim` |
 
 `sim`'s image defaults are smaller than `render`'s: `-n 320 -s 32`, `-caustics pt`.
 `-backend raster` renders the frames with the rasterizer and the cloud raymarched: the
@@ -355,7 +355,7 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `1` `2` `3` `4` | `rt` mode: preview resolution 1/1, 1/2, 1/4, 1/8 |
 | `R` | back to the starting camera |
 | `X` | path tracing on the GPU: denoiser on / off |
-| `P` | save what the window shows as PPM (the path traced image, or the raster frame) |
+| `P` | save what the window shows as PNG (the path traced image, or the raster frame) |
 | `C` | print a `render` command that path traces exactly this view |
 | `H` | print the controls in the terminal |
 | `Esc` | quit |
@@ -406,25 +406,25 @@ script, set `DISPLAY=:0`.
 bin/render -backend raster                 # milliseconds, local lighting: check the camera
 bin/render -n 200 -s 16                    # < 1 s, very grainy
 bin/render -n 400 -s 128                   # ~7 s, the default
-bin/render -n 800 -s 1024 -o out/big.ppm   # ~4 min, clean
+bin/render -n 800 -s 1024 -o out/big.png   # ~4 min, clean
 ```
 (times for the boxes scene on 8 cores; glass, mirrors and big meshes are slower)
 ```sh
 # the loop to learn what a parameter does: change ONE thing, compare the images
-bin/render -s 64 -d 2  -o out/d2.ppm       # direct light + one bounce: dark, hard
-bin/render -s 64 -d 50 -o out/d50.ppm      # full global illumination
+bin/render -s 64 -d 2  -o out/d2.png       # direct light + one bounce: dark, hard
+bin/render -s 64 -d 50 -o out/d50.png      # full global illumination
 ```
 
 **Raster vs path traced, same view**
 ```sh
-bin/render -scene spheres -backend raster -o out/a.ppm
-bin/render -scene spheres -o out/b.ppm     # shadows, reflections, refraction, color bleeding
+bin/render -scene spheres -backend raster -o out/a.png
+bin/render -scene spheres -o out/b.png     # shadows, reflections, refraction, color bleeding
 ```
 
 **Find a view in the window, render it offline**
 1. `bin/view` (add your `-scene ...` options), fly to a nice spot, press **C**.
 2. Copy the printed line, e.g.
-   `bin/render -scene boxes -cam 278.0,278.0,-497.0 -look 278.0,278.0,3.0 -fov 40 -n 640 -s 512 -o out/from_viewer.ppm`,
+   `bin/render -scene boxes -cam 278.0,278.0,-497.0 -look 278.0,278.0,3.0 -fov 40 -n 640 -s 512 -o out/from_viewer.png`,
    and change `-n` / `-s` as you like.
 
 **Your own model**
@@ -445,8 +445,8 @@ Or press **B** in `view` (path tracing) and watch "ms/pass" in the title bar.
 **float vs double**
 ```sh
 make && make DOUBLE=1
-time bin/render -scene mesh -n 256 -s 256 -o out/f.ppm
-time bin/double/render -scene mesh -n 256 -s 256 -o out/d.ppm
+time bin/render -scene mesh -n 256 -s 256 -o out/f.png
+time bin/double/render -scene mesh -n 256 -s 256 -o out/d.png
 ```
 
 **A cloud**
@@ -537,10 +537,10 @@ These have no command-line option. Change them and run `make` again.
 ## 7. The rasterizer milestones
 
 ```sh
-bin/raster_milestones [model.obj] [texture.ppm]   # default: models/torus.obj + a checkerboard
+bin/raster_milestones [model.obj] [texture.png]   # default: models/torus.obj + a checkerboard
 ```
 
-Writes `out/0_gradient.ppm` ... `out/9_near_clipping.ppm`, one per milestone, and prints
+Writes `out/0_gradient.png` ... `out/9_near_clipping.png`, one per milestone, and prints
 the render time of each shading mode. For the rasterizer in real time, use
 `bin/view -backend raster` (key `V` cycles the shading).
 
