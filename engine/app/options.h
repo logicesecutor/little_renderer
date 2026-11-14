@@ -75,6 +75,8 @@ typedef struct {
     int denoise;           // GPU path tracing: denoise the image (view and sim 1, render 0)
     int wavefront;         // GPU path tracing: the wavefront kernels (1) or the single kernel (0)
     MarchParams march;     // -march (steps), -lightres
+    int probe;             // the rasterizers light with a light probe of the room (rt/probe.h), default on
+    int probe_res, probe_spp;   // its width in texels, paths per texel
 
     // scene
     SceneOptions scene;
@@ -110,6 +112,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv);
 // structure (not for `render -backend raster`, which does not need one), sets the thread
 // count, and prints what it did. Returns 0 on success.
 int options_setup_scene(const Options *o, Scene *s);
+
+// Bakes the scene's light probe (Scene.probe) if the rasterizer will draw it: the view, or
+// -backend raster; a scene with a lamp; -probe on. Prints the time it took.
+void options_bake_probe(const Options *o, Scene *s);
 
 // The AccelKind that "-accel auto" (or the explicit choice) gives for this scene.
 AccelKind options_resolve_accel(const Options *o, const Scene *s);

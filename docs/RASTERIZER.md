@@ -54,8 +54,12 @@ rasterizer only knows triangles, so `render_scene` converts on the fly, every fr
 - **spheres** are tessellated into a 16 × 32 latitude / longitude grid, with the exact
   sphere normal at every vertex.
 
-Then the same second half of the pipeline as `render_mesh` (`draw_clip_triangle`: near
-clip, perspective divide, viewport, cull, rasterize) draws them.
+Then the same second half of the pipeline as `render_mesh` (`draw_clip_triangle`: clip,
+perspective divide, viewport, cull, rasterize) draws them. Triangles are clipped against
+the near plane and, when a corner is far off screen, against a guard band twice the
+screen's size (|x|, |y| ≤ 2w): a floor seen to the horizon has its corner by the camera
+millions of pixels away, and edge functions of such coordinates round badly enough to leave
+holes along its far edge.
 
 **Lighting.** A rasterizer sees one triangle at a time, so it cannot know what is between
 a point and the lamp (shadows), or what light bounces off the walls (color bleeding).
@@ -73,25 +77,45 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
     nearest the reflected ray (Karis's representative point) over the lobe's own solid
     angle, so a mirror shows the lamp with its edges; in between they are blended;
   - no shadows: the lamp lights everything in front of it;
-- an **ambient** light for what bounces around the room: a uniform environment of
-  radiance 0.06 plus 0.025 · (n·v) from the camera's side (`RENDER_SCENE_AMBIENT`, `_FILL`),
-  through the BSDF's albedo for that environment (`bsdf_albedo_uniform`). With it the
-  spheres' room has the path tracer's mean brightness; `LR_RASTER_AMBIENT=0` turns it off
-  (to compare with the path tracer's direct light, `-d 1`);
+- the **environment** (PBR4): everything else that lights the surface, from a **light
+  probe** (`rt/probe.c`: the path tracer's radiance arriving at one point from every
+  direction, the lamp seen directly left out, made when the scene loads and again with the
+  viewer's `L`; `-probe off`: none) or else the scene's **sky**. Split-sum (Karis 2013):
+  - the BSDF's albedo under a uniform environment in three parts (`bsdf_albedo_parts`):
+    the specular lobes' (with their Fresnel), the diffuse layer's and the metal's multiple
+    scattering, and what goes through;
+  - the specular part times the environment **prefiltered** with GGX for the material's
+    roughness (`env_level`: six maps, one per roughness 0, 0.2, ... 1, trilinear between
+    them), looked up along the lobe's direction (between the reflected ray and the normal,
+    nearer the normal the rougher: Lagarde & de Rousiers 2014);
+  - the diffuse part times the **irradiance** from 9 spherical harmonics;
+  - the transmitted part along the ray **through** the object (refracted in, and out
+    where it would leave a sphere: exact for spheres, close for convex shapes);
+  - a probe of a room knows the room's box: a lookup from a point follows its direction
+    to the wall and looks at that wall point from the probe's centre (**parallax
+    correction**), so the mirror sphere in the corner reflects the walls where they are.
+    The open scene's probe is above its spheres, its "box" the floor and the sky far away;
+  - without an environment (`-probe off` in a room without a sky): the ambient light of
+    PBR3, a uniform environment of radiance 0.06 plus 0.025 · (n·v) from the camera's side
+    (`RENDER_SCENE_AMBIENT`, `_FILL`) through `bsdf_albedo_uniform`. `LR_RASTER_AMBIENT=0`
+    turns the environment and the ambient off (the path tracer's direct light, `-d 1`);
+- the **sky** drawn where nothing was (the z-buffer still at its far value), along each
+  pixel's view direction;
 - **two-sided** surfaces: the normal is turned towards the camera first, because the
   scene's quads have no "outside" (the walls are seen from inside the box);
-- mirrors and glass reflect the lamp and the ambient light, not the room (PBR4's
-  environment); glass shows no refraction; **lights** are drawn as their colour at full
-  brightness;
-- what depends on one cosine alone (the ambient albedo, the diffuse lobes' Fresnel
-  factors) is tabulated per material once per frame (33 cosines), the rest computed per
-  pixel: ~160 ns per pixel on one core;
+- **lights** are drawn as their colour at full brightness;
+- what depends on one cosine alone (the environment's three albedo parts, the diffuse
+  lobes' Fresnel factors) is tabulated per material once per frame (33 cosines), the rest
+  computed per pixel: ~110 ns per pixel on one core for the lamp, ~110 more for the
+  environment (its lookups' map coordinates by polynomial atan2 and acos);
 - colors are linear like the path tracer's, and are sRGB-encoded at the end
   (`image_pack_srgb`), so both backends show the same wall colors.
 
 The GPU rasterizer (`gpu/raster_gpu.c`) does the same in WGSL, with the path tracer's
-`GPU_WGSL_BSDF` and its tables; its images match the CPU's within 1/255 but for a few
-pixels on triangle edges (ties).
+`GPU_WGSL_BSDF` and its tables, the environment's maps in a storage buffer (read with the
+same bilinear lookups as the C) and the sky behind drawn by a screen-filling triangle at
+the far depth; its images match the CPU's (a mean difference of 0.05-0.2 of 255, a few
+pixels on triangle edges differ: ties).
 
 Shading modes: `phong` (per pixel), `gouraud` (per vertex), `flat` (per triangle; a quad's
 two halves are shaded at the quad's center so they match), `wireframe`.

@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "core/brdf.h"
+#include "core/env.h"
 #include "core/sampler.h"
 #include "core/volume.h"
 #include "rt/accel.h"
@@ -54,6 +55,7 @@ struct TP {
     lt: vec4f,     /* light tracing: 2^32 / light paths per pass, the screen area of a pixel */
     ins: vec4u,    /* instances: how many, the first record in prims, the top-level BVH's root;
                       the world BVH's root */
+    sky: vec4f,    /* the sky (SKY, SKYC): its scale, cos and sin of its turn, 1 = there is one */
     mats: array<TMat, 16>,
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -74,6 +76,11 @@ fn bsdf_tab(k: u32) -> f32 { return TB.tab[k >> 2u][k & 3u]; }
 /* the light tracer's caustics (ltrace; bound instead of accum): per pixel and channel, a 64-bit
    32.32 fixed-point sum as two u32 (low, high) */
 @group(0) @binding(11) var<storage, read_write> caus: array<atomic<u32>>;
+/* the sky (core/env.h): SKY rgb = the radiance (times T.sky.x), a = the pixel's probability;
+   SKYC the cumulative distributions, rows 0..h-1 each row's (entry x: up to pixel x, with it),
+   row h the rows' (entry y: up to row y) */
+@group(0) @binding(16) var SKY: texture_2d<f32>;
+@group(0) @binding(17) var SKYC: texture_2d<f32>;
 
 const NONE: u32 = 0xffffffffu;
 const PI_: f32 = 3.14159265;
@@ -610,6 +617,91 @@ fn power_heuristic(pa: f32, pb: f32) -> f32 {
 }
 fn light_pdf(area: f32, dist2: f32, cos_light: f32) -> f32 { return dist2 / (cos_light * area); }
 
+/* ---- the sky (core/env.c): lookups, its pdf, directions drawn by its luminance ---- */
+/* SKY_ON: a constant the module is compiled with (two variants: the sky's code costs
+   registers, so the kernels of scenes without one leave it out) */
+fn sky_on() -> bool { return SKY_ON && T.sky.w > 0.5; }
+fn sky_uv(d: vec3f) -> vec2f {
+    let x = d.x * T.sky.y - d.z * T.sky.z;           /* turned back by the sky's turn */
+    let z = d.x * T.sky.z + d.z * T.sky.y;
+    let u = 0.5 + atan2(x, z) * (0.5 / PI_);
+    return vec2f(u - floor(u), acos(clamp(d.y, -1.0, 1.0)) / PI_);
+}
+fn sky_dir(u: f32, v: f32) -> vec3f {
+    let ph = (u - 0.5) * 2.0 * PI_;
+    let th = v * PI_;
+    let st = sin(th);
+    let x = st * sin(ph);
+    let z = st * cos(ph);
+    return vec3f(x * T.sky.y + z * T.sky.z, cos(th), -x * T.sky.z + z * T.sky.y);
+}
+fn sky_eval(d: vec3f) -> vec3f {
+    let dims = vec2i(textureDimensions(SKY));
+    let w = dims.x;
+    let h = dims.y;
+    let uv = sky_uv(d);
+    let x = uv.x * f32(w) - 0.5;
+    let y = uv.y * f32(h) - 0.5;
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let ya = clamp(y0, 0, h - 1);
+    let yb = clamp(y0 + 1, 0, h - 1);
+    let xa = ((x0 % w) + w) % w;
+    let xb = (xa + 1) % w;
+    let a = textureLoad(SKY, vec2i(xa, ya), 0).rgb;
+    let b = textureLoad(SKY, vec2i(xb, ya), 0).rgb;
+    let c = textureLoad(SKY, vec2i(xa, yb), 0).rgb;
+    let e = textureLoad(SKY, vec2i(xb, yb), 0).rgb;
+    return ((1.0 - fy) * ((1.0 - fx) * a + fx * b) + fy * ((1.0 - fx) * c + fx * e)) * T.sky.x;
+}
+fn sky_pdf(d: vec3f) -> f32 {
+    let dims = vec2i(textureDimensions(SKY));
+    let uv = sky_uv(d);
+    let st = sin(uv.y * PI_);
+    if (st < 1e-6) { return 0.0; }
+    let x = min(i32(uv.x * f32(dims.x)), dims.x - 1);
+    let y = min(i32(uv.y * f32(dims.y)), dims.y - 1);
+    return textureLoad(SKY, vec2i(x, y), 0).a * f32(dims.x) * f32(dims.y) / (2.0 * PI_ * PI_ * st);
+}
+/* the first of n entries of row `row` of SKYC above x (n - 1 if none) */
+fn sky_search(row: i32, n: i32, x: f32) -> i32 {
+    var lo = 0;
+    var hi = n;
+    while (lo < hi) {
+        let mid = (lo + hi) / 2;
+        if (textureLoad(SKYC, vec2i(mid, row), 0).r <= x) { lo = mid + 1; } else { hi = mid; }
+    }
+    return min(lo, n - 1);
+}
+/* a direction drawn by the sky's luminance: xyz, w = its pdf (0: none) */
+fn sky_sample(u: vec2f) -> vec4f {
+    let dims = vec2i(textureDimensions(SKY));
+    let w = dims.x;
+    let h = dims.y;
+    let y = sky_search(h, h, u.y);
+    let m0 = select(0.0, textureLoad(SKYC, vec2i(y - 1, h), 0).r, y > 0);
+    let m1 = textureLoad(SKYC, vec2i(y, h), 0).r;
+    let dv = select(0.5, (u.y - m0) / (m1 - m0), m1 > m0);
+    let x = sky_search(y, w, u.x);
+    let c0 = select(0.0, textureLoad(SKYC, vec2i(x - 1, y), 0).r, x > 0);
+    let c1 = textureLoad(SKYC, vec2i(x, y), 0).r;
+    let du = select(0.5, (u.x - c0) / (c1 - c0), c1 > c0);
+    let v = (f32(y) + clamp(dv, 0.0, 0.9999)) / f32(h);
+    let st = sin(v * PI_);
+    if (st < 1e-6) { return vec4f(0.0); }
+    let d = sky_dir((f32(x) + clamp(du, 0.0, 0.9999)) / f32(w), v);
+    let p = textureLoad(SKY, vec2i(x, y), 0).a * f32(w) * f32(h) / (2.0 * PI_ * PI_ * st);
+    return vec4f(d, p);
+}
+/* the numbers for the sky's sample: the lamp's pair without a lamp, else plain ones */
+fn sky_u(sm: Smp, depth: i32, rng: ptr<function, u32>) -> vec2f {
+    if (T.opt.w == NONE) { return s2(sm, 1u + 3u * u32(depth), rng); }
+    let a = rnd(rng);
+    return vec2f(a, rnd(rng));
+}
+
 /* a material's BSDF (GPU_WGSL_BSDF), seen from the side `outside` says */
 fn mat_bsdf(m: TMat, outside: bool) -> Bsdf {
     return bsdf_make(m.albedo.rgb, m.pbr.x, m.pbr.y, m.emission.w, m.pbr.z, outside);
@@ -661,6 +753,35 @@ fn direct_medium(p: vec3f, d: vec3f, g: f32, u: vec2f, rng: ptr<function, u32>) 
     var w = ph * tr * cos_light * lt.v.w / dist2;
     if (T.opt.y != 0u) { w *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), ph); }
     return le * w;
+}
+
+/* next event estimation towards the sky (rt/tracer.c sample_direct_env) */
+fn direct_sky(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f, rng: ptr<function, u32>) -> vec3f {
+    let sp = sky_sample(u);
+    if (!(sp.w > 0.0)) { return vec3f(0.0); }
+    let wi = sp.xyz;
+    let fp = bsdf_eval(b, h.n, v, wi);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return vec3f(0.0); }
+    let le = sky_eval(wi);
+    let shadow = Ray(h.p, wi);
+    if (traverse(shadow, T.f.y, 1e30, true).id != NONE) { return vec3f(0.0); }
+    var g = abs(dot(h.n, wi)) / sp.w;
+    if (T.cnt.w > 0u) { g *= transmittance(shadow, 0.0, 1e6, rng); }
+    if (T.opt.y != 0u) { g *= power_heuristic(sp.w, fp.w); }
+    return fp.xyz * le * g;
+}
+fn direct_sky_medium(p: vec3f, d: vec3f, g: f32, u: vec2f, rng: ptr<function, u32>) -> vec3f {
+    let sp = sky_sample(u);
+    if (!(sp.w > 0.0)) { return vec3f(0.0); }
+    let wi = sp.xyz;
+    let shadow = Ray(p, wi);
+    if (traverse(shadow, T.f.y, 1e30, true).id != NONE) { return vec3f(0.0); }
+    let tr = transmittance(shadow, 0.0, 1e6, rng);
+    if (tr <= 0.0) { return vec3f(0.0); }
+    let ph = hg(dot(d, wi), g);
+    var w = ph * tr / sp.w;
+    if (T.opt.y != 0u) { w *= power_heuristic(sp.w, ph); }
+    return sky_eval(wi) * w;
 }
 
 fn refract_dir(d: vec3f, n: vec3f, eta: f32) -> vec3f {
@@ -796,6 +917,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
                 thr *= vol.albedo.xyz;
                 let dd = 3u * u32(depth);
                 radiance += thr * direct_medium(p, ray.d, vol.p.x, s2(sm, 1u + dd, rng), rng);
+                if (sky_on()) { radiance += thr * direct_sky_medium(p, ray.d, vol.p.x, sky_u(sm, depth, rng), rng); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, rng));
                 bounce_pdf = hg(dot(ray.d, nd), vol.p.x);
                 ray = Ray(p, nd);
@@ -805,7 +927,14 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
                 continue;
             }
         }
-        if (!found) { break; }
+        if (!found) {                     /* escaped: the sky (black without one) */
+            if (sky_on() && emit != 1) {
+                var le = sky_eval(ray.d);
+                if (emit == 2) { le *= power_heuristic(bounce_pdf, sky_pdf(ray.d)); }
+                radiance += thr * le;
+            }
+            break;
+        }
         let h = make_hit(ray, f);
         let m = T.mats[hit_mat(f)];
         let kind = u32(m.albedo.w);
@@ -830,7 +959,10 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         let v = -ray.d;
         var b = mat_bsdf(m, h.front);
         let bo = surface_bounce(&b, h, v, depth, sm, rng);
-        if (bsdf_rough_part(&b)) { radiance += thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng); }
+        if (bsdf_rough_part(&b)) {
+            radiance += thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng);
+            if (sky_on()) { radiance += thr * direct_sky(h, &b, v, sky_u(sm, depth, rng), rng); }
+        }
         if (!bo.s.ok) { break; }
         thr *= bo.s.w;
         if (bo.s.delta) {                 /* a perfect mirror or refraction */
@@ -1194,8 +1326,32 @@ fn wf_shadow_ray(p: u32, o: vec3f, wi: vec3f, dist: f32, c: vec3f, seed: u32) {
 }
 
 /* direct_surface / direct_medium without the shadow ray: the light sample, and what it brings
-   if the lamp is in sight (w = 0: nothing to send) */
+   if the lamp is in sight (w = 0: nothing to send). One shadow ray per bounce: with both a
+   lamp and a sky, one of the two, each half the time (its light twice, its density in MIS
+   half: wf_sel) */
 struct LS { wi: vec3f, dist: f32, c: vec3f };
+fn wf_sel() -> f32 { return select(1.0, 0.5, T.opt.w != NONE && sky_on()); }
+fn wf_sky_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f) -> LS {
+    var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
+    let sp = sky_sample(u);
+    if (!(sp.w > 0.0)) { return r; }
+    let fp = bsdf_eval(b, h.n, v, sp.xyz);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return r; }
+    let sel = wf_sel();
+    var g = abs(dot(h.n, sp.xyz)) / (sp.w * sel);
+    if (T.opt.y != 0u) { g *= power_heuristic(sp.w * sel, fp.w); }
+    return LS(sp.xyz, 1e6, fp.xyz * sky_eval(sp.xyz) * g);
+}
+fn wf_sky_medium(p: vec3f, d: vec3f, gg: f32, u: vec2f) -> LS {
+    var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
+    let sp = sky_sample(u);
+    if (!(sp.w > 0.0)) { return r; }
+    let sel = wf_sel();
+    let ph = hg(dot(d, sp.xyz), gg);
+    var w = ph / (sp.w * sel);
+    if (T.opt.y != 0u) { w *= power_heuristic(sp.w * sel, ph); }
+    return LS(sp.xyz, 1e6, sky_eval(sp.xyz) * w);
+}
 fn wf_light_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f) -> LS {
     var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
     if (T.opt.w == NONE) { return r; }
@@ -1210,8 +1366,9 @@ fn wf_light_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f) -> LS {
     if (cos_light <= 0.0) { return r; }
     let fp = bsdf_eval(b, h.n, v, wi);
     if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return r; }
-    var g = abs(cos_surf) * cos_light * lt.v.w / dist2;
-    if (T.opt.y != 0u) { g *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), fp.w); }
+    let sel = wf_sel();
+    var g = abs(cos_surf) * cos_light * lt.v.w / (dist2 * sel);
+    if (T.opt.y != 0u) { g *= power_heuristic(sel * light_pdf(lt.v.w, dist2, cos_light), fp.w); }
     return LS(wi, dist, fp.xyz * le * g);
 }
 fn wf_light_medium(p: vec3f, d: vec3f, gg: f32, u: vec2f) -> LS {
@@ -1226,8 +1383,9 @@ fn wf_light_medium(p: vec3f, d: vec3f, gg: f32, u: vec2f) -> LS {
     let cos_light = -dot(lt.n.xyz, wi);
     if (cos_light <= 0.0) { return r; }
     let ph = hg(dot(d, wi), gg);
-    var w = ph * cos_light * lt.v.w / dist2;
-    if (T.opt.y != 0u) { w *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), ph); }
+    let sel = wf_sel();
+    var w = ph * cos_light * lt.v.w / (dist2 * sel);
+    if (T.opt.y != 0u) { w *= power_heuristic(sel * light_pdf(lt.v.w, dist2, cos_light), ph); }
     return LS(wi, dist, le * w);
 }
 
@@ -1273,7 +1431,9 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 let pp = ray.o + ray.d * ts;
                 thr *= vol.albedo.xyz;
                 let dd = 3u * u32(depth);
-                let ls = wf_light_medium(pp, ray.d, vol.p.x, s2(sm, 1u + dd, &rng));
+                var ls: LS;
+                if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_medium(pp, ray.d, vol.p.x, sky_u(sm, depth, &rng)); }
+                else { ls = wf_light_medium(pp, ray.d, vol.p.x, s2(sm, 1u + dd, &rng)); }
                 if (ls.dist > 0.0) { wf_shadow_ray(p, pp, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, &rng));
                 s.pdf = hg(dot(ray.d, nd), vol.p.x);
@@ -1282,6 +1442,11 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 if (roulette(&thr, depth, sm, &rng)) { go_on = true; nxt_o = pp; nxt_d = nd; }
             }
         }
+    }
+    if (!done && !found && sky_on() && emit != 1) {   /* escaped: the sky */
+        var le = sky_eval(ray.d);
+        if (emit == 2) { le *= power_heuristic(s.pdf, wf_sel() * sky_pdf(ray.d)); }
+        s.rad += thr * le;
     }
     if (!done && found) {
         let h = make_hit(ray, f);
@@ -1295,7 +1460,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                     let lt = prims[T.opt.w];
                     let cos_light = -dot(lt.n.xyz, ray.d);
                     if (cos_light > 0.0) {
-                        s.rad += thr * m.emission.rgb * power_heuristic(s.pdf, light_pdf(lt.v.w, h.t * h.t, cos_light));
+                        s.rad += thr * m.emission.rgb * power_heuristic(s.pdf, wf_sel() * light_pdf(lt.v.w, h.t * h.t, cos_light));
                     }
                 }
             }
@@ -1304,7 +1469,9 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
             var b = mat_bsdf(m, h.front);
             let bo = surface_bounce(&b, h, v, depth, sm, &rng);
             if (bsdf_rough_part(&b)) {
-                let ls = wf_light_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), &rng));
+                var ls: LS;
+                if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_surface(h, &b, v, sky_u(sm, depth, &rng)); }
+                else { ls = wf_light_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), &rng)); }
                 if (ls.dist > 0.0) { wf_shadow_ray(p, h.p, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
             }
             if (bo.s.ok) {
@@ -2084,6 +2251,7 @@ typedef struct {
     uint32_t ext[4];
     float lt[4];
     uint32_t ins[4];
+    float sky[4];
     float mats[MAX_MATS][12];
 } GTP;
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
@@ -2134,6 +2302,14 @@ struct GpuTrace {
     double pc_paths;         // light paths in the grid, faded as the grid is
     float cell;              // its cells' size
     WGPUBuffer nodes, aux, prims, tris;
+    // the sky (bindings 16, 17): its radiance and probabilities, its distributions; a 1 x 1
+    // pair when the scene has none. sky_id: the Env's id they hold (0: none)
+    WGPUTexture sky_tex, skyc_tex;
+    WGPUTextureView sky_view, skyc_view;
+    unsigned sky_id;
+    // the kernels compiled with the sky (SKY_ON), made when a scene first has one
+    WGPUComputePipeline pipe_sky, wf_shade_sky;
+    int pipe_sky_failed, wf_sky_failed;
     size_t nodes_cap, aux_cap, prims_cap, tris_cap;
     uint32_t nnodes, normals_at;   // (nnodes: the world's, in slots)
     int world_wide;
@@ -2215,6 +2391,21 @@ void gpu_trace_after_submit(GpuTrace *t){
     check_builds(t);
 }
 
+// the path tracer's module: types, media, the BSDF, TRACE (with the sky's code or without),
+// and the wavefront's kernels (wave); free() it
+static char *trace_source(GpuTrace *t, int sky, int wave){
+    const char *parts[] = {sky ? "const SKY_ON: bool = true;\n" : "const SKY_ON: bool = false;\n",
+                           t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", TRACE, "\n", wave ? WAVE : ""};
+    const int n = (int)(sizeof(parts) / sizeof(parts[0]));
+    size_t len = 1;
+    for (int i = 0; i < n; i++) len += strlen(parts[i]);
+    char *src = malloc(len);
+    if (!src) return NULL;
+    src[0] = 0;
+    for (int i = 0; i < n; i++) strcat(src, parts[i]);
+    return src;
+}
+
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl){
     if (!g || g->state != GPU_READY) return NULL;
     GpuTrace *t = calloc(1, sizeof(*t));
@@ -2222,16 +2413,14 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->g = g;
     t->w = width;
     t->h = height;
-    char *src = malloc(strlen(types_wgsl) + strlen(media_wgsl) + strlen(GPU_WGSL_BSDF) + strlen(TRACE) + 8);
-    if (!src){ free(t); return NULL; }
-    strcpy(src, types_wgsl); strcat(src, "\n"); strcat(src, media_wgsl); strcat(src, "\n");
-    strcat(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, TRACE);
-    // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
-    // blue noise
-    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU");
-    t->timer = gpu_timer_create(g, 1024, NTS);
     t->types_wgsl = types_wgsl;
     t->media_wgsl = media_wgsl;
+    char *src = trace_source(t, 0, 0);
+    if (!src){ free(t); return NULL; }
+    // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
+    // blue noise
+    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU-----TT");
+    t->timer = gpu_timer_create(g, 1024, NTS);
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
     const char *tlas_env = getenv("LR_GPU_TLAS");
@@ -2868,6 +3057,7 @@ static int upload_world(GpuTrace *t, const Scene *s){
     if (!(t->cell > 0) || t->cell > 1e20f) t->cell = 1.0f;
     t->specular = 0;
     for (int m = 0; m < s->nmats; m++) if (material_has_delta(&s->mats[m])) t->specular = 1;
+    if (s->light < 0) t->specular = 0;      // no lamp: no light tracing (the sky's caustics are path traced)
     t->valid = 1;
     return 1;
 }
@@ -2938,7 +3128,47 @@ static int upload_instances(GpuTrace *t, const Scene *s){
     return 1;
 }
 
+// the sky's textures, again when the scene's sky changed (a 1 x 1 pair without one)
+static void upload_sky(GpuTrace *t, const Scene *s){
+    const Env *e = s->env;
+    unsigned id = e ? e->id : 0;
+    if (t->sky_tex && id == t->sky_id) return;
+    if (t->sky_view) wgpuTextureViewRelease(t->sky_view);
+    if (t->skyc_view) wgpuTextureViewRelease(t->skyc_view);
+    if (t->sky_tex){ wgpuTextureDestroy(t->sky_tex); wgpuTextureRelease(t->sky_tex); }
+    if (t->skyc_tex){ wgpuTextureDestroy(t->skyc_tex); wgpuTextureRelease(t->skyc_tex); }
+    float none[4] = {0, 0, 0, 0};
+    float *rgba = NULL, *cdf = NULL;
+    int w = 1, h = 1;
+    if (e && (rgba = malloc(sizeof(float) * 4 * (size_t)e->w * e->h)) && (cdf = calloc((size_t)e->w * (e->h + 1), sizeof(float)))){
+        w = e->w; h = e->h;
+        for (int y = 0; y < h; y++){
+            for (int x = 0; x < w; x++){
+                const float *c = e->rgb + 3 * ((size_t)y * w + x);
+                float *o = rgba + 4 * ((size_t)y * w + x);
+                o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+                o[3] = (float)env_pixel_prob(e, x, y);
+                cdf[(size_t)y * w + x] = e->cond[(size_t)y * (w + 1) + x + 1];
+            }
+        }
+        for (int y = 0; y < h; y++) cdf[(size_t)h * w + y] = e->marg[y + 1];
+    } else {
+        free(rgba);
+        rgba = NULL;
+        if (e) fprintf(stderr, "GPU: no memory for the sky: the GPU path tracer leaves it out\n");
+        id = 0;
+    }
+    t->sky_tex = gpu_texture_f32(t->g, "sky", w, h, 4, rgba ? rgba : none);
+    t->skyc_tex = gpu_texture_f32(t->g, "sky: distributions", w, rgba ? h + 1 : 1, 1, rgba ? cdf : none);
+    t->sky_view = wgpuTextureCreateView(t->sky_tex, NULL);
+    t->skyc_view = wgpuTextureCreateView(t->skyc_tex, NULL);
+    t->sky_id = id;
+    free(rgba);
+    free(cdf);
+}
+
 int gpu_trace_sync(GpuTrace *t, const Scene *s){
+    upload_sky(t, s);
     if (!geometry_same(t, s)){
         if (!layout_same(t, s) && !upload_layout(t, s)) return 0;
         if (!upload_world(t, s)) return 0;
@@ -2989,6 +3219,12 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
     P.lt[1] = (float)(camera_screen_area(&tp->cam) / ((double)t->w * t->h));
     P.lt[2] = t->cell;
     P.lt[3] = lt_mode;              // 1 = the light paths fill the photon cache
+    if (s->env && t->sky_id == s->env->id){
+        P.sky[0] = (float)s->env->scale;
+        P.sky[1] = (float)r_cos(s->env->rot);
+        P.sky[2] = (float)r_sin(s->env->rot);
+        P.sky[3] = 1;
+    } else P.sky[1] = 1;
     P.ins[0] = (uint32_t)t->ninst;
     P.ins[1] = (uint32_t)s->nprims;
     P.ins[2] = t->tlas_node0;
@@ -3024,12 +3260,18 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
-    WGPUBindGroupEntry e[11];
+    WGPUBindGroupEntry e[13];
     memset(e, 0, sizeof(e));
     for (int i = 0; i < 11; i++){
         e[i].binding = (uint32_t)(light && i == 9 ? 11 : i);
         e[i].buffer = b[i];
         e[i].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;
+    }
+    int nent = 11;
+    if (!light){                    // the path tracer: the sky too (the light tracer has none)
+        e[11].binding = 16; e[11].textureView = t->sky_view;
+        e[12].binding = 17; e[12].textureView = t->skyc_view;
+        nent = 13;
     }
     if (repeats < 1) repeats = 1;
     if (repeats > MAX_REPS) repeats = MAX_REPS;
@@ -3043,7 +3285,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
         WGPUBindGroupDescriptor d;
         memset(&d, 0, sizeof(d));
         d.layout = light ? t->lt_bgl : t->bgl;
-        d.entryCount = 11;
+        d.entryCount = (size_t)nent;
         d.entries = e;
         WGPUBindGroup bg = wgpuDeviceCreateBindGroup(t->g->device, &d);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
@@ -3067,7 +3309,7 @@ static const char *const WF_ENTRY[NWF] = {"wf_gen", "wf_ext", "wf_shade", "wf_ar
 static const char *const WF_LAYOUT[NWF] = {
     "----U----WU-W",      // gen: parameters, samples (their count seeds the path), blue noise, WF
     "----URRRR---W",      // ext: the BVH and shapes, WF
-    "URRRU-RRR-U-WW",     // shade: media, shapes and normals, blue noise, WF, WC
+    "URRRU-RRR-U-WW--TT", // shade: media, shapes and normals, blue noise, WF, WC, the sky
     "------------WWW",    // args: WF, WC, WA
     "URRRURRRR---W",      // shadow: media, the BVH and shapes, WF
     "----U----W--W"};     // resolve: samples, WF
@@ -3107,13 +3349,8 @@ static int wf_ready(GpuTrace *t){
     if ((t->h + t->wf_rows - 1) / t->wf_rows > MAX_WAVES) t->wf_rows = (t->h + MAX_WAVES - 1) / MAX_WAVES;
     size_t n = (size_t)t->wf_rows * t->w;
     size_t wf_bytes = (1 + 8 * n + 3 * ((n + 3) / 4)) * 16;
-    const char *parts[] = {t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", TRACE, "\n", WAVE};
-    size_t len = 1;
-    for (int i = 0; i < 9; i++) len += strlen(parts[i]);
-    char *src = malloc(len);
+    char *src = trace_source(t, 0, 1);
     if (!src){ t->wf_failed = 1; return 0; }
-    src[0] = 0;
-    for (int i = 0; i < 9; i++) strcat(src, parts[i]);
     WGPUShaderModule m = gpu_shader(g, "path tracer: wavefront", src);
     free(src);
     for (int k = 0; k < NWF; k++){
@@ -3137,15 +3374,18 @@ static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame
                              WGPUBuffer vstat){
     WGPUBuffer b[15] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
                         t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa};
-    WGPUBindGroupEntry e[15];
+    WGPUBindGroupEntry e[18];
     memset(e, 0, sizeof(e));
     int n = 0;
     for (int i = 0; WF_LAYOUT[k][i]; i++){
         if (WF_LAYOUT[k][i] == '-') continue;
         e[n].binding = (uint32_t)i;
-        e[n].buffer = b[i];
-        e[n].offset = i == 4 ? toff : 0;
-        e[n].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;
+        if (WF_LAYOUT[k][i] == 'T') e[n].textureView = i == 16 ? t->sky_view : t->skyc_view;
+        else {
+            e[n].buffer = b[i];
+            e[n].offset = i == 4 ? toff : 0;
+            e[n].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;
+        }
         n++;
     }
     WGPUBindGroupDescriptor d;
@@ -3158,6 +3398,31 @@ static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame
 
 static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuTraceParams *tp, int y0, int rows,
                          int nvolumes, uint32_t index, int reps, float lt_mode);
+
+// the scene has a sky (uploaded): the kernels with its code, made now if not yet (the single
+// kernel; the wavefront's shade step if the wavefront is made). 0: the scene has none, or
+// they cannot be made (then the sky is left out)
+static int sky_kernels(GpuTrace *t, const Scene *s){
+    if (!s->env || t->sky_id != s->env->id) return 0;
+    if (!t->pipe_sky && !t->pipe_sky_failed){
+        char *src = trace_source(t, 1, 0);
+        if (src) t->pipe_sky = gpu_compute(t->g, "path tracer (sky)", src, "main", t->bgl);
+        free(src);
+        if (!t->pipe_sky){ t->pipe_sky_failed = 1; fprintf(stderr, "GPU: the path tracer with a sky could not be made\n"); }
+    }
+    if (t->wf_made && !t->wf_shade_sky && !t->wf_sky_failed){
+        char *src = trace_source(t, 1, 1);
+        if (src){
+            WGPUShaderModule m = gpu_shader(t->g, "path tracer: wavefront (sky)", src);
+            t->wf_shade_sky = pipeline_of(t->g, "path tracer: wf_shade (sky)", m, "wf_shade", t->wf_bgl[WF_SHADE]);
+            wgpuShaderModuleRelease(m);
+        }
+        free(src);
+        if (!t->wf_shade_sky) t->wf_sky_failed = 1;
+    }
+    return t->pipe_sky != NULL && (!t->wf_made || t->wf_shade_sky != NULL);
+}
+
 static void fill_params(GpuTrace *t, GTP *P, const Scene *s, const GpuTraceParams *tp, int y0, int rows,
                         int nvolumes, float lt_mode);
 
@@ -3184,6 +3449,7 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     wgpuQueueWriteBuffer(t->g->queue, t->wf_params, 0, buf, used);
     free(buf);
     const int iters = (tp->max_depth > 0 ? (tp->max_depth < 4096 ? tp->max_depth : 4096) : 0) + 1;
+    WGPUComputePipeline shade_sky = sky_kernels(t, s) ? t->wf_shade_sky : NULL;
     static int prof = -1;
     if (prof < 0){ const char *e = getenv("LR_WF_PROFILE"); prof = e && atoi(e) > 0; }
     const double units = (double)t->w * rows * repeats / ((double)t->w * t->h);
@@ -3191,7 +3457,7 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     // (LR_WF_PROFILE=1: every dispatch in a pass of its own, timed by kernel)
 #define WF_STEP(k, call) do { \
         if (prof) pass = timed_pass(t, enc, TS_WF0 + (k), (k) == WF_GEN || (k) == WF_RESOLVE ? units / waves : units / waves / iters); \
-        wgpuComputePassEncoderSetPipeline(pass, t->wf_pipe[k]); \
+        wgpuComputePassEncoderSetPipeline(pass, (k) == WF_SHADE && shade_sky ? shade_sky : t->wf_pipe[k]); \
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg[k], 0, NULL); \
         call; \
         if (prof){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); } \
@@ -3228,7 +3494,7 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
         return;
     }
     write_params(t, t->params, s, tp, y0, rows, nvolumes, index, repeats, 0);
-    dispatch(t, enc, t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
+    dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
 }
 
 void gpu_trace_light(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
@@ -3372,12 +3638,16 @@ void gpu_trace_destroy(GpuTrace *t){
                          t->caus, t->rs_params, t->final, t->lt_params, t->grid, t->dc_params, t->pc_params,
                          t->bd_keys, t->bd_flags, t->bd_boxes, t->bd_par, t->pl_buf, t->pl_args};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
-    WGPUComputePipeline pipes[] = {t->pipe, t->gbuf_pipe, t->rp_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
+    WGPUComputePipeline pipes[] = {t->pipe, t->pipe_sky, t->wf_shade_sky, t->gbuf_pipe, t->rp_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
                                    t->bd_morton, t->bd_sort, t->bd_hier, t->bd_leaves, t->bd_up,
                                    t->pl_init, t->pl_nn, t->pl_mark, t->pl_top, t->pl_scatter, t->pl_small};
     for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) if (pipes[i]) wgpuComputePipelineRelease(pipes[i]);
     WGPUBindGroupLayout bgls[] = {t->bgl, t->rp_bgl, t->lt_bgl, t->rs_bgl, t->dc_bgl, t->bd_bgl, t->pl_bgl, t->pl_bgl_args};
     for (size_t i = 0; i < sizeof(bgls) / sizeof(bgls[0]); i++) if (bgls[i]) wgpuBindGroupLayoutRelease(bgls[i]);
+    if (t->sky_view) wgpuTextureViewRelease(t->sky_view);
+    if (t->skyc_view) wgpuTextureViewRelease(t->skyc_view);
+    if (t->sky_tex){ wgpuTextureDestroy(t->sky_tex); wgpuTextureRelease(t->sky_tex); }
+    if (t->skyc_tex){ wgpuTextureDestroy(t->skyc_tex); wgpuTextureRelease(t->skyc_tex); }
     free(t->mc);
     free(t->arena_boxes);
     free(t->arena_par);

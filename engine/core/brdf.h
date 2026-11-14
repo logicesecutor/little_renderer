@@ -374,22 +374,33 @@ static inline Vec3 bsdf_diffuse_lobes(Bsdf *b, real cl){
     return f;
 }
 
-// What the BSDF sends towards v at cosine cv from a uniform environment of radiance 1 (all
-// lobes, reflected and transmitted): the specular lobes' albedo with their Fresnel (the
-// metal's per channel, F0 (E - B) + B), the diffuse and transmitted light below them, the
-// multiple scattering. The rasterizers' ambient light (and PBR4's environment).
-static inline Vec3 bsdf_albedo_uniform(Bsdf *b, real cv){
+// What the BSDF sends towards v at cosine cv from an environment of radiance 1, in three
+// parts that see different directions of a real environment (split-sum, PBR4):
+//   spec:  the specular lobes' albedo with their Fresnel (the metal's per channel,
+//          F0 (E - B) + B): they see around the reflected ray;
+//   diff:  the diffuse layer below them and the metal's multiple scattering: they see the
+//          hemisphere (the irradiance);
+//   trans: what goes through (transmission): it sees around the refracted ray.
+static inline void bsdf_albedo_parts(Bsdf *b, real cv, Vec3 *spec, Vec3 *diff, Vec3 *trans){
     bsdf_view(b, cv);
-    const real m = b->metallic;
+    const real m = b->metallic, t = b->transmission;
     real es = bsdf_spec_albedo(b, cv);
     real e = b->smooth ? 1 : bsdf_albedo(b, cv);
     real bb;
     if (b->smooth){ real x = 1 - bsdf_clamp01(cv), x2 = x * x; bb = x2 * x2 * x; }
     else bb = bsdf_table(BRDF_B, b->rough, cv);
-    Vec3 a = vec3(es + (1 - es) * b->base.x, es + (1 - es) * b->base.y, es + (1 - es) * b->base.z);
-    Vec3 mt = vec3(b->base.x * (e - bb) + bb + b->ms.x * (1 - e), b->base.y * (e - bb) + bb + b->ms.y * (1 - e),
-                   b->base.z * (e - bb) + bb + b->ms.z * (1 - e));
-    return v_add(v_scale(a, 1 - m), v_scale(mt, m));
+    *spec = vec3((1 - m) * es + m * (b->base.x * (e - bb) + bb), (1 - m) * es + m * (b->base.y * (e - bb) + bb),
+                 (1 - m) * es + m * (b->base.z * (e - bb) + bb));
+    *diff = v_add(v_scale(b->base, (1 - m) * (1 - t) * (1 - es)), v_scale(b->ms, m * (1 - e)));
+    *trans = v_scale(b->base, (1 - m) * t * (1 - es));
+}
+
+// all three: what the BSDF sends towards v from a uniform environment of radiance 1 (the
+// rasterizers' ambient light without an environment)
+static inline Vec3 bsdf_albedo_uniform(Bsdf *b, real cv){
+    Vec3 s, d, t;
+    bsdf_albedo_parts(b, cv, &s, &d, &t);
+    return v_add(v_add(s, d), t);
 }
 
 // the material has perfect (delta) lobes: mirror reflection or refraction

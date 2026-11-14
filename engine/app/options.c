@@ -1,8 +1,12 @@
+#define _POSIX_C_SOURCE 200809L   // clock_gettime
 #include "app/options.h"
 #include "gpu/gpu.h"
+#include "rt/probe.h"
+#include "core/env.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -85,8 +89,14 @@ void options_usage(Program prog, FILE *f){
         "  -o file                    %s (%s)\n"
         "\n"
         "scene\n"
-        "  -scene boxes|spheres|mesh|cloud|empty|showcase  what is in the Cornell box (boxes);\n"
-        "                             showcase: a mirror dragon, a diffuse cube, a glass torus, a cloud\n"
+        "  -scene boxes|spheres|mesh|cloud|empty|showcase|sky  what is in the Cornell box (boxes);\n"
+        "                             showcase: a mirror dragon, a diffuse cube, a glass torus, a cloud;\n"
+        "                             sky: no box, five spheres on a floor under the sky\n"
+        "  -sky file.hdr|procedural   the sky (a Radiance .hdr map; any scene: the box's open front\n"
+        "                             lets it in)                              (none; -scene sky: procedural)\n"
+        "  -skyscale k / -skyrot deg  its strength / turned about the vertical (1 / 0)\n"
+        "  -probe on|off              rasterizer: light with a probe of the room (path traced) (on)\n"
+        "  -proberes n / -probespp n  the probe's width in texels / paths per texel (256, 512 under a sky / 32)\n"
         "  -obj file.obj|file.ply     model for -scene mesh (ASCII .ply)       (models/torus.obj)\n"
         "  -mat diffuse|mirror|glass  material of the model                    (diffuse)\n"
         "  -base r,g,b                its base colour; and the glTF parameters (docs/PBR.md):\n"
@@ -182,6 +192,9 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->gpu_trace = -1;                     // decided when the GPU is known
     o->denoise = prog != PROG_RENDER;      // a still image is the unbiased one unless asked
     o->march = march_default_params();
+    o->probe = 1;
+    o->probe_res = 0;                      // PROBE_RES in a room, PROBE_RES_OPEN under a sky
+    o->probe_spp = PROBE_SPP;
     o->scene.kind = SCENE_BOXES;
     o->scene.obj_path = "models/torus.obj";
     o->scene.mesh_mat = MAT_DIFFUSE;
@@ -255,6 +268,16 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-time"))    o->cloud.time = atof(v);
         else if (!strcmp(a, "-cloudres")){ o->cloud.resolution = atoi(v); cloudres_set = 1; }
         else if (!strcmp(a, "-fog"))     o->scene.fog = atof(v);
+        else if (!strcmp(a, "-sky"))     o->scene.sky = v;
+        else if (!strcmp(a, "-skyscale")) o->scene.sky_scale = (real)atof(v);
+        else if (!strcmp(a, "-skyrot"))  o->scene.sky_rot = (real)atof(v);
+        else if (!strcmp(a, "-proberes")) o->probe_res = atoi(v);
+        else if (!strcmp(a, "-probespp")) o->probe_spp = atoi(v);
+        else if (!strcmp(a, "-probe")){
+            if (!strcmp(v, "on")) o->probe = 1;
+            else if (!strcmp(v, "off")) o->probe = 0;
+            else fail(prog, "expected on or off after -probe, got", v);
+        }
         else if (!strcmp(a, "-photons")) o->photons = atof(v);
         else if (!strcmp(a, "-march"))   o->march.max_steps = atoi(v);
         else if (!strcmp(a, "-lightres")) o->march.light_res = atoi(v);
@@ -365,6 +388,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             else if (!strcmp(v, "cloud")) o->scene.kind = SCENE_CLOUD;
             else if (!strcmp(v, "empty")) o->scene.kind = SCENE_EMPTY;
             else if (!strcmp(v, "showcase")) o->scene.kind = SCENE_SHOWCASE;
+            else if (!strcmp(v, "sky")) o->scene.kind = SCENE_SKY;
             else fail(prog, "unknown scene", v);
         } else if (!strcmp(a, "-mat")){
             if (!strcmp(v, "diffuse")) o->scene.mesh_mat = MAT_DIFFUSE;
@@ -451,16 +475,36 @@ int options_setup_scene(const Options *o, Scene *s){
     if (o->set_look) s->cam_at = o->look;
     if (o->set_fov) s->cam_vfov_deg = o->fov;
 
-    if (o->prog == PROG_RENDER && o->backend == BACKEND_RASTER) return 0;   // no rays, no accel
+    if (s->env) printf("sky: %d x %d%s, mean radiance %.3g\n", s->env->w, s->env->h,
+                       o->scene.sky ? "" : " (procedural)", (double)(s->env->scale * (s->env->mean.x + s->env->mean.y + s->env->mean.z) / 3));
+    int probe = o->probe && (s->light >= 0 || s->env) && (o->prog == PROG_VIEW || o->backend == BACKEND_RASTER);
+    if (o->prog == PROG_RENDER && o->backend == BACKEND_RASTER && !probe) return 0;   // no rays, no accel
     scene_set_accel(s, options_resolve_accel(o, s), &o->ap);
     char buf[256];
     scene_accel_stats(s, buf, sizeof(buf));
     printf("%s\n", buf);
+    options_bake_probe(o, s);
     return 0;
 }
 
+static double now_s(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+void options_bake_probe(const Options *o, Scene *s){
+    if (!o->probe || (s->light < 0 && !s->env) || !(o->prog == PROG_VIEW || o->backend == BACKEND_RASTER)) return;
+    double t0 = now_s();
+    Env *p = probe_bake_scene(s, o->probe_res, o->probe_spp);
+    if (!p) return;
+    env_free(s->probe);
+    s->probe = p;
+    printf("light probe: %d x %d, %d paths per texel, %.0f ms (-probe off: none)\n", p->w, p->h, o->probe_spp, 1000 * (now_s() - t0));
+}
+
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){
-    static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase"};
+    static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase", "sky"};
     static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
     fprintf(f, "bin/render -scene %s", scenes[o->scene.kind]);
     if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
@@ -489,6 +533,9 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (c->resolution != d.resolution) fprintf(f, " -cloudres %d", c->resolution);
     }
     if (o->scene.fog > 0) fprintf(f, " -fog %g", (double)o->scene.fog);
+    if (o->scene.sky) fprintf(f, " -sky %s", o->scene.sky);
+    if (o->scene.sky_scale > 0 && o->scene.sky_scale != 1) fprintf(f, " -skyscale %g", (double)o->scene.sky_scale);
+    if (o->scene.sky_rot != 0) fprintf(f, " -skyrot %g", (double)o->scene.sky_rot);
     fprintf(f, " -cam %.1f,%.1f,%.1f -look %.1f,%.1f,%.1f -fov %g",
             (double)cam.x, (double)cam.y, (double)cam.z, (double)look.x, (double)look.y, (double)look.z, fov);
     if (o->width == o->height) fprintf(f, " -n %d", o->width);

@@ -212,6 +212,11 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-scene mesh` | a model from a file, standing in the middle of the box | |
 | `-scene cloud` | the empty box with a volumetric cloud floating in it (path tracer, see VOLUMES.md) | |
 | `-scene empty` | just the room and the lamp | |
+| `-scene sky` | no room and no lamp: five spheres (white, blue plastic, glass, rough gold, mirror) on a wide floor under the sky | |
+| `-sky file.hdr\|procedural` | the sky (a Radiance `.hdr` equirectangular map, or a clear sky with a sun made here) for any scene: the room's open front lets it in. Test skies (CC0, Poly Haven) go in `models/skies/` | none; `-scene sky`: procedural |
+| `-skyscale k` / `-skyrot deg` | the sky's strength / turned about the vertical axis | 1 / 0 |
+| `-probe on\|off` | the rasterizers light with a light probe (the path tracer's light at the room's centre, made at start; `view`: again with `L`) | on |
+| `-proberes n` / `-probespp n` | the probe's width in texels / paths per texel | 256 in a room, 512 under a sky / 32 |
 | `-obj file` | the model for `-scene mesh`: `.obj`, or ASCII `.ply` (binary PLY is not supported) | `models/torus.obj` |
 | `-mat diffuse\|mirror\|glass` | material of the model: a preset of the PBR model (PBR.md) | diffuse (warm orange) |
 | `-base r,g,b` | the model's base colour: diffuse colour, metal's colour, glass's tint | the preset's |
@@ -365,6 +370,7 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `1` `2` `3` `4` | `rt` mode: preview resolution 1/1, 1/2, 1/4, 1/8 |
 | `R` | back to the starting camera |
 | `X` | path tracing on the GPU: denoiser on / off |
+| `L` | rasterizer: make the light probe again (after things moved) |
 | `P` | save what the window shows as PNG (the path traced image, or the raster frame) |
 | `I` | the frame rate drawn on the image, top left: on / off (on at start; never in screenshots) |
 | `C` | print a `render` command that path traces exactly this view |

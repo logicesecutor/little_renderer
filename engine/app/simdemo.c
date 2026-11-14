@@ -60,6 +60,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
     so.kind = SCENE_EMPTY;
     so.cloud = NULL;
     if (scene_cornell_box(s, &so) != 0) return 1;
+    options_bake_probe(o, s);                  // the empty room's: the bodies move
     if (o->set_cam) s->cam_from = o->cam;
     if (o->set_look) s->cam_at = o->look;
     if (o->set_fov) s->cam_vfov_deg = o->fov;

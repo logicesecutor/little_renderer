@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "core/brdf.h"
+#include "core/env.h"
 #include "core/volume.h"
 #include "rt/accel.h"
 #include "rt/medium.h"
@@ -79,6 +80,48 @@ static Vec3 sample_direct_light(const Scene *s, const Hit *h, Bsdf *b, Vec3 v, i
     return v_scale(v_mul(f, le), g);
 }
 
+// Next event estimation towards the sky: a direction drawn by its luminance (env_sample),
+// the light arriving along it if nothing is in the way:
+//   L_direct = f(v, wi) * L_sky(wi) * |cos| / pdf_sky(wi)
+// with MIS against the BSDF's own sampling of the same direction.
+static Vec3 sample_direct_env(const Scene *s, const Hit *h, Bsdf *b, Vec3 v, int mis, real ua, real ub, Rng *rng){
+    Vec3 wi;
+    real pdf;
+    Vec3 le = env_sample(s->env, ua, ub, &wi, &pdf);
+    if (!(pdf > 0) || !(v_max(le) > 0)) return vec3(0, 0, 0);
+    real bpdf;
+    Vec3 f = bsdf_eval(b, h->n, v, wi, &bpdf);
+    if (!(v_max(f) > 0)) return vec3(0, 0, 0);
+    Ray shadow = {h->p, wi};
+    if (scene_occluded(s, &shadow, RT_EPS, 1e30f)) return vec3(0, 0, 0);
+    real g = r_fabs(v_dot(h->n, wi)) / pdf;
+    if (s->nvolumes) g *= scene_medium_transmittance(s, &shadow, 0, 1e6f, rng);
+    if (mis) g *= power_heuristic(pdf, bpdf);
+    return v_scale(v_mul(f, le), g);
+}
+
+// the same from a point in a medium (the phase function for the BSDF)
+static Vec3 sample_env_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int mis, real ua, real ub, Rng *rng){
+    Vec3 wi;
+    real pdf;
+    Vec3 le = env_sample(s->env, ua, ub, &wi, &pdf);
+    if (!(pdf > 0) || !(v_max(le) > 0)) return vec3(0, 0, 0);
+    Ray shadow = {p, wi};
+    if (scene_occluded(s, &shadow, RT_EPS, 1e30f)) return vec3(0, 0, 0);
+    real tr = scene_medium_transmittance(s, &shadow, 0, 1e6f, rng);
+    if (tr <= 0) return vec3(0, 0, 0);
+    real ph = phase_hg(v_dot(d, wi), g);
+    real w = ph * tr / pdf;
+    if (mis) w *= power_heuristic(pdf, ph);
+    return v_scale(le, w);
+}
+
+// the numbers for the sky's sample: the lamp's pair when there is no lamp, else plain ones
+static void env_numbers(const Scene *s, Sampler *sm, int depth, real *ua, real *ub){
+    if (s->light < 0) sampler_2d(sm, SAMPLE_LIGHT(depth), ua, ub);
+    else { *ua = rng_real(sm->rng); *ub = rng_real(sm->rng); }
+}
+
 // the BSDF has a part next event estimation can find (not only perfect mirror / refraction)
 static inline int bsdf_rough_part(const Bsdf *b){
     return !b->smooth || (1 - b->metallic) * (1 - b->transmission) > 0;
@@ -129,7 +172,7 @@ static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
 }
 
 TraceParams trace_default_params(void){
-    TraceParams p = {50, 1, 0, 1};
+    TraceParams p = {.max_depth = 50, .mis = 1, .skip_caustics = 0, .sampler = 1, .no_lamp_seen = 0};
     return p;
 }
 
@@ -180,10 +223,16 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             Vec3 p = v_add(ray.o, v_scale(ray.d, ts));
             // a real collision scatters with probability sigma_s / sigma_t = albedo (else absorbed)
             throughput = v_mul(throughput, vol->albedo);
-            // 1. light arriving straight from the lamp, through the cloud
+            // 1. light arriving straight from the lamp (and the sky), through the cloud
             real la, lb;
-            sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
-            radiance = v_add(radiance, v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, lb, la, rng)));
+            if (s->light >= 0){
+                sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
+                radiance = v_add(radiance, v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, lb, la, rng)));
+            }
+            if (s->env){
+                env_numbers(s, sm, depth, &la, &lb);
+                radiance = v_add(radiance, v_mul(throughput, sample_env_in_medium(s, p, ray.d, vol->g, mis, la, lb, rng)));
+            }
             // 2. continue in a direction drawn from the phase function. Its pdf equals the
             //    phase function, so the weight phase / pdf is 1: throughput is unchanged.
             real da, db;
@@ -197,12 +246,19 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             if (!russian_roulette(&throughput, depth, sm)) break;
             continue;
         }
-        if (!found) break;                    // escaped: the background is black
+        if (!found){                          // escaped: the sky (black without one)
+            if (s->env && emit != EMIT_NONE){
+                Vec3 le = env_eval(s->env, ray.d);
+                if (emit == EMIT_MIS) le = v_scale(le, power_heuristic(bounce_pdf, env_pdf(s->env, ray.d)));
+                radiance = v_add(radiance, v_mul(throughput, le));
+            }
+            break;
+        }
 
         const Material *m = &s->mats[hit_material(s, &h)];
 
         if (m->type == MAT_LIGHT){
-            if (h.front_face && !(caustic_chain && caustic_spec)){
+            if (h.front_face && !(caustic_chain && caustic_spec) && !(depth == 0 && tp->no_lamp_seen)){
                 if (emit == EMIT_FULL){
                     radiance = v_add(radiance, v_mul(throughput, m->emission));
                 } else if (emit == EMIT_MIS && h.inst < 0 && h.prim == s->light){
@@ -225,11 +281,17 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         // the surface's BSDF (core/brdf.h), seen from v (back along the ray)
         Vec3 v = v_neg(v_norm(ray.d));
         Bsdf b = bsdf_make(m, h.front_face);
-        // 1. light arriving straight from the lamp (the BSDF's rough part)
+        // 1. light arriving straight from the lamp and the sky (the BSDF's rough part)
         if (bsdf_rough_part(&b)){
             real la, lb;
-            sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
-            radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, &b, v, mis, lb, la, rng)));
+            if (s->light >= 0){
+                sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
+                radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, &b, v, mis, lb, la, rng)));
+            }
+            if (s->env){
+                env_numbers(s, sm, depth, &la, &lb);
+                radiance = v_add(radiance, v_mul(throughput, sample_direct_env(s, &h, &b, v, mis, la, lb, rng)));
+            }
         }
         // 2. continue the path in a direction drawn from the BSDF: its weight f cos / pdf.
         //    (The numbers only when they are used: SAMPLE_MISC's pair for Russian roulette

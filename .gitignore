@@ -63,3 +63,4 @@ dkms.conf
 # benchmark images
 /out/bench_*.ppm
 out/*
+models/*

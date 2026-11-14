@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "core/env.h"
 
 static const char *SHADER = WGSL(
 struct RMat {
@@ -42,6 +43,20 @@ struct RU {
     vp: mat4x4f,     /* world -> clip, z in -w..w as on the CPU */
     eye: vec4f,      /* w = mode: 0 wireframe, 1 flat, 2 gouraud, 3 phong */
     lamp: RLamp,
+    /* the environment it lights with (RenderLamp.env; core/env.h): its levels in LV */
+    envp: vec4f,     /* scale, cos and sin of its turn, 1 = there is one */
+    envc: vec4f,     /* a probe's centre, w = 1: lookups corrected by its box */
+    envlo: vec4f,
+    envhi: vec4f,
+    lv: array<vec4u, 6>,   /* level k: its first texel in LV, width, height */
+    sh: array<vec4f, 9>,   /* the irradiance's harmonics (E / pi) */
+    /* the sky behind everything (Scene.env), in BG */
+    sky: vec4f,      /* scale, cos and sin of its turn, 1 = drawn */
+    skyd: vec4u,     /* its width and height */
+    cam_r: vec4f,    /* the camera's right (w: 1 / the projection's x scale), */
+    cam_u: vec4f,    /* up (w: 1 / its y scale), */
+    cam_b: vec4f,    /* back */
+    vps: vec4f,      /* the viewport's width and height */
     mats: array<RMat, 16>,
 };
 @group(0) @binding(0) var<uniform> U: RU;
@@ -55,6 +70,86 @@ struct IX { r0: vec4f, r1: vec4f, r2: vec4f, i0: vec4f, i1: vec4f, i2: vec4f, m:
 struct RT { t: array<vec4f, 528> };
 @group(0) @binding(4) var<uniform> TB: RT;
 fn bsdf_tab(k: u32) -> f32 { return TB.t[k >> 2u][k & 3u]; }
+@group(0) @binding(5) var<storage, read> LV: array<vec4f>;
+@group(0) @binding(6) var<storage, read> BG: array<vec4f>;
+
+/* ---- the environment (core/env.c) ---- */
+fn env_uv(d: vec3f, c: f32, s: f32) -> vec2f {
+    let x = d.x * c - d.z * s;
+    let z = d.x * s + d.z * c;
+    let u = 0.5 + atan2(x, z) * (0.5 / BSDF_PI);
+    return vec2f(u - floor(u), acos(clamp(d.y, -1.0, 1.0)) / BSDF_PI);
+}
+/* bilinear in a w x h map that starts at texel `first` of LV (bg: of BG) */
+fn map_bilerp(first: u32, w: i32, h: i32, uv: vec2f, bg: bool) -> vec3f {
+    let x = uv.x * f32(w) - 0.5;
+    let y = uv.y * f32(h) - 0.5;
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let ya = u32(clamp(y0, 0, h - 1));
+    let yb = u32(clamp(y0 + 1, 0, h - 1));
+    let xa = u32(((x0 % w) + w) % w);
+    let xb = (xa + 1u) % u32(w);
+    let uw = u32(w);
+    var a: vec3f; var b: vec3f; var c: vec3f; var e: vec3f;
+    if (bg) {
+        a = BG[ya * uw + xa].rgb; b = BG[ya * uw + xb].rgb; c = BG[yb * uw + xa].rgb; e = BG[yb * uw + xb].rgb;
+    } else {
+        a = LV[first + ya * uw + xa].rgb; b = LV[first + ya * uw + xb].rgb;
+        c = LV[first + yb * uw + xa].rgb; e = LV[first + yb * uw + xb].rgb;
+    }
+    return (1.0 - fy) * ((1.0 - fx) * a + fx * b) + fy * ((1.0 - fx) * c + fx * e);
+}
+fn env_level(d: vec3f, rough: f32) -> vec3f {
+    let uv = env_uv(d, U.envp.y, U.envp.z);
+    let lod = clamp(rough, 0.0, 1.0) * 5.0;
+    let k = min(u32(lod), 4u);
+    let f = lod - f32(k);
+    let a = map_bilerp(U.lv[k].x, i32(U.lv[k].y), i32(U.lv[k].z), uv, false);
+    let b = map_bilerp(U.lv[k + 1u].x, i32(U.lv[k + 1u].y), i32(U.lv[k + 1u].z), uv, false);
+    return mix(a, b, f) * U.envp.x;
+}
+fn env_irradiance(n0: vec3f) -> vec3f {
+    let n = vec3f(n0.x * U.envp.y - n0.z * U.envp.z, n0.y, n0.x * U.envp.z + n0.z * U.envp.y);
+    var y: array<f32, 9>;
+    y[0] = 0.282095;
+    y[1] = 0.488603 * n.y; y[2] = 0.488603 * n.z; y[3] = 0.488603 * n.x;
+    y[4] = 1.092548 * n.x * n.y; y[5] = 1.092548 * n.y * n.z; y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    y[7] = 1.092548 * n.x * n.z; y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+    var c = vec3f(0.0);
+    for (var i = 0; i < 9; i++) { c += U.sh[i].rgb * y[i]; }
+    return max(c, vec3f(0.0)) * U.envp.x;
+}
+fn env_box_dir(p: vec3f, d: vec3f) -> vec3f {
+    if (U.envc.w < 0.5) { return d; }
+    var t = 1e30;
+    for (var k = 0; k < 3; k++) {
+        if (d[k] > 1e-8) { t = min(t, (U.envhi[k] - p[k]) / d[k]); }
+        else if (d[k] < -1e-8) { t = min(t, (U.envlo[k] - p[k]) / d[k]); }
+    }
+    if (!(t > 0.0) || t >= 1e30) { return d; }
+    let q = p + d * t - U.envc.xyz;
+    let l = length(q);
+    return select(d, q / l, l > 1e-6);
+}
+fn refract_(d: vec3f, n: vec3f, eta: f32) -> vec3f {
+    let cos_i = min(dot(-d, n), 1.0);
+    let perp = (d + n * cos_i) * eta;
+    return perp - n * sqrt(abs(1.0 - dot(perp, perp)));
+}
+/* render.c through_dir: refracted in, out of a sphere */
+fn through_dir(v: vec3f, n: vec3f, eta: f32) -> vec3f {
+    let d = -v;
+    let c = dot(v, n);
+    if (1.0 - eta * eta * (1.0 - c * c) <= 0.0) { return reflect(d, n); }
+    let t = normalize(refract_(d, n, eta));
+    let n2 = n - t * (2.0 * dot(n, t));
+    let c2 = -dot(t, n2);
+    if (1.0 - (1.0 / (eta * eta)) * (1.0 - c2 * c2) <= 0.0) { return reflect(t, -n2); }
+    return normalize(refract_(t, -n2, 1.0 / eta));
+}
 fn to_world(k: u32, p: vec3f) -> vec3f {
     let x = ix[k];
     let q = vec4f(p, 1.0);
@@ -128,7 +223,21 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
     if (dot(n, v) < 0.0) { n = -n; }
     let cv = max(dot(n, v), 1e-4);
     var b = bsdf_make(m.base.rgb, m.pbr.x, m.pbr.y, m.pbr.z, m.pbr.w, true);
-    var c = bsdf_albedo_uniform(&b, cv) * (U.lamp.k.x + U.lamp.k.y * cv);
+    var c: vec3f;
+    if (U.envp.w > 0.5) {
+        /* the environment, split-sum (render.c shade_env) */
+        let ap = bsdf_albedo_parts(&b, cv);
+        let r = select(b.rough, 0.0, b.perfect != 0u);
+        let rr = reflect(-v, n);
+        let sm = 1.0 - r;
+        let rd = normalize(mix(n, rr, sm * (sqrt(sm) + r)));
+        c = ap.spec * env_level(env_box_dir(p, rd), r) + ap.diff * env_irradiance(n);
+        if ((1.0 - b.metallic) * b.transmission > 0.0) {
+            c += ap.trans * env_level(env_box_dir(p, through_dir(v, n, b.eta)), r);
+        }
+    } else {
+        c = bsdf_albedo_uniform(&b, cv) * (U.lamp.k.x + U.lamp.k.y * cv);
+    }
     let center = U.lamp.center.xyz;
     let ln = U.lamp.n.xyz;
     if (U.lamp.q.w < 0.5 || dot(p - center, ln) <= 0.0) { return c; }
@@ -217,6 +326,24 @@ fn fs(i: VO) -> @location(0) vec4f {
     return vec4f(to_srgb(scene_shade(i.mat, i.wp, normalize(i.n))), 1.0);
 }
 
+/* the sky where nothing was drawn: a triangle over the whole screen at the far depth (1),
+   drawn after the scene where the depth is still 1 */
+struct SO { @builtin(position) pos: vec4f };
+@vertex
+fn vs_sky(@builtin(vertex_index) vi: u32) -> SO {
+    let x = select(-1.0, 3.0, vi == 1u);
+    let y = select(-1.0, 3.0, vi == 2u);
+    return SO(vec4f(x, y, 1.0, 1.0));
+}
+@fragment
+fn fs_sky(i: SO) -> @location(0) vec4f {
+    let nx = (2.0 * i.pos.x / U.vps.x - 1.0) * U.cam_r.w;
+    let ny = (1.0 - 2.0 * i.pos.y / U.vps.y) * U.cam_u.w;
+    let d = normalize(U.cam_r.xyz * nx + U.cam_u.xyz * ny - U.cam_b.xyz);
+    let c = map_bilerp(0u, i32(U.skyd.x), i32(U.skyd.y), env_uv(d, U.sky.y, U.sky.z), true) * U.sky.x;
+    return vec4f(to_srgb(c), 1.0);
+}
+
 /* wireframe: the 3 edges of every triangle as lines, 6 vertices per triangle */
 struct WO {
     @builtin(position) pos: vec4f,
@@ -239,6 +366,12 @@ fn fs_wire(i: WO) -> @location(0) vec4f { return vec4f(to_srgb(U.mats[i.mat].bas
 
 typedef struct {
     float vp[16], eye[4], lamp[32];
+    float envp[4], envc[4], envlo[4], envhi[4];
+    uint32_t lv[ENV_LEVELS][4];
+    float sh[9][4];
+    float sky[4];
+    uint32_t skyd[4];
+    float cam_r[4], cam_u[4], cam_b[4], vps[4];
     float mats[MAX_MATS][8];
 } GRU;
 
@@ -256,8 +389,12 @@ struct GpuRaster {
     WGPUTexture color_tex, depth_tex;
     WGPUTextureView color, depth;
     WGPUBuffer uni, tab;                   // the uniforms; the BSDF's tables
+    WGPUBuffer lv, bg;                     // the environment's levels, the sky behind (core/env.h)
+    size_t lv_cap, bg_cap;
+    unsigned lv_id, bg_id;                 // the Env ids they hold (0: none)
+    uint32_t lv_at[ENV_LEVELS];            // where each level starts in lv
     WGPUBindGroupLayout bgl;
-    WGPURenderPipeline fill[2], wire;      // fill[1]: back faces culled
+    WGPURenderPipeline fill[2], wire, sky; // fill[1]: back faces culled
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
     WGPUBuffer ix;                         // the draws' transforms: the world, the instances
     size_t ix_cap;
@@ -276,7 +413,10 @@ struct GpuRaster {
 
 #define CHUNK_TRIS 32768   // mesh triangles converted and uploaded at a time
 
+// wire: 0 the triangles, 1 the wireframe, 2 the sky (a screen-filling triangle at the far
+// depth, where the depth is still the far one)
 static WGPURenderPipeline make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGroupLayout bgl, int wire, int cull){
+    const int sky = wire == 2;
     WGPUPipelineLayoutDescriptor ld;
     memset(&ld, 0, sizeof(ld));
     ld.bindGroupLayoutCount = 1;
@@ -289,7 +429,7 @@ static WGPURenderPipeline make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGrou
     WGPUFragmentState fs;
     memset(&fs, 0, sizeof(fs));
     fs.module = m;
-    fs.entryPoint = gpu_str(wire ? "fs_wire" : "fs");
+    fs.entryPoint = gpu_str(sky ? "fs_sky" : wire ? "fs_wire" : "fs");
     fs.targetCount = 1;
     fs.targets = &target;
     // the CPU's z-buffer: the nearest wins, the first drawn wins a tie. Its wireframe draws
@@ -298,18 +438,18 @@ static WGPURenderPipeline make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGrou
     memset(&ds, 0, sizeof(ds));
     ds.format = WGPUTextureFormat_Depth32Float;
     ds.depthWriteEnabled = wire ? WGPUOptionalBool_False : WGPUOptionalBool_True;
-    ds.depthCompare = wire ? WGPUCompareFunction_Always : WGPUCompareFunction_Less;
+    ds.depthCompare = sky ? WGPUCompareFunction_LessEqual : wire ? WGPUCompareFunction_Always : WGPUCompareFunction_Less;
     ds.stencilFront.compare = ds.stencilBack.compare = WGPUCompareFunction_Always;
     ds.stencilFront.failOp = ds.stencilBack.failOp = WGPUStencilOperation_Keep;
     ds.stencilFront.depthFailOp = ds.stencilBack.depthFailOp = WGPUStencilOperation_Keep;
     ds.stencilFront.passOp = ds.stencilBack.passOp = WGPUStencilOperation_Keep;
     WGPURenderPipelineDescriptor rd;
     memset(&rd, 0, sizeof(rd));
-    rd.label = gpu_str(wire ? "scene wireframe" : "scene");
+    rd.label = gpu_str(sky ? "scene: the sky" : wire ? "scene wireframe" : "scene");
     rd.layout = pl;
     rd.vertex.module = m;
-    rd.vertex.entryPoint = gpu_str(wire ? "vs_wire" : "vs");
-    rd.primitive.topology = wire ? WGPUPrimitiveTopology_LineList : WGPUPrimitiveTopology_TriangleList;
+    rd.vertex.entryPoint = gpu_str(sky ? "vs_sky" : wire ? "vs_wire" : "vs");
+    rd.primitive.topology = wire == 1 ? WGPUPrimitiveTopology_LineList : WGPUPrimitiveTopology_TriangleList;
     rd.primitive.frontFace = WGPUFrontFace_CCW;     // counter-clockwise as seen: the CPU's rule
     rd.primitive.cullMode = cull ? WGPUCullMode_Back : WGPUCullMode_None;
     rd.depthStencil = &ds;
@@ -350,7 +490,10 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     gpu_bsdf_tables(tab);
     r->tab = gpu_buffer(g, "scene: BSDF tables", sizeof(tab), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     wgpuQueueWriteBuffer(g->queue, r->tab, 0, tab, sizeof(tab));
-    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRU");
+    const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    r->lv = gpu_buffer(g, "scene: no environment", 16, st);
+    r->bg = gpu_buffer(g, "scene: no sky", 16, st);
+    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURR");
     char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(SHADER) + 2);
     if (!src){ gpu_raster_destroy(r); return NULL; }
     strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, SHADER);
@@ -359,6 +502,7 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);
     r->fill[1] = make_pipeline(g, m, r->bgl, 0, 1);
     r->wire = make_pipeline(g, m, r->bgl, 1, 0);
+    r->sky = make_pipeline(g, m, r->bgl, 2, 0);
     wgpuShaderModuleRelease(m);
     return r;
 }
@@ -382,8 +526,8 @@ static void geo_bind(GpuRaster *r, Geo *geo){
     if (geo->bg) wgpuBindGroupRelease(geo->bg);
     geo->bg = NULL;
     if (!geo->pos || !r->ix) return;
-    WGPUBuffer b[5] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab};
-    geo->bg = gpu_bind(r->g, r->bgl, b, 5);
+    WGPUBuffer b[7] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab, r->lv, r->bg};
+    geo->bg = gpu_bind(r->g, r->bgl, b, 7);
 }
 
 // room for `verts` vertices in a set; its bind group follows the buffers
@@ -555,9 +699,57 @@ static int upload_instances(GpuRaster *r, const Scene *s){
     return 1;
 }
 
+static void rebind_all(GpuRaster *r){
+    geo_bind(r, &r->prims);
+    geo_bind(r, &r->mesh);
+    for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
+    geo_bind(r, &r->unit[0]);
+    geo_bind(r, &r->unit[1]);
+}
+
+// the environment's levels (all six one after the other) and the sky behind, when they change
+static int upload_env(GpuRaster *r, const Env *env, const Env *sky){
+    const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    int rebind = 0;
+    unsigned id = env ? env->id : 0;
+    if (id && id != r->lv_id){
+        size_t n = 0;
+        for (int k = 0; k < ENV_LEVELS; k++){ r->lv_at[k] = (uint32_t)n; n += (size_t)env->lw[k] * env->lh[k]; }
+        float *d = malloc(n * 16);
+        if (!d) return 0;
+        for (int k = 0; k < ENV_LEVELS; k++)
+            for (size_t i = 0; i < (size_t)env->lw[k] * env->lh[k]; i++){
+                float *o = d + 4 * (r->lv_at[k] + i);
+                const float *c = env->level[k] + 3 * i;
+                o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; o[3] = 0;
+            }
+        rebind |= gpu_buffer_reserve(r->g, &r->lv, &r->lv_cap, n * 16, st, "scene: the environment's levels");
+        wgpuQueueWriteBuffer(r->g->queue, r->lv, 0, d, n * 16);
+        free(d);
+        r->lv_id = id;
+    }
+    id = sky ? sky->id : 0;
+    if (id && id != r->bg_id){
+        size_t n = (size_t)sky->w * sky->h;
+        if (n * 16 > r->g->max_storage) return 0;
+        float *d = malloc(n * 16);
+        if (!d) return 0;
+        for (size_t i = 0; i < n; i++){ d[4 * i] = sky->rgb[3 * i]; d[4 * i + 1] = sky->rgb[3 * i + 1]; d[4 * i + 2] = sky->rgb[3 * i + 2]; d[4 * i + 3] = 0; }
+        rebind |= gpu_buffer_reserve(r->g, &r->bg, &r->bg_cap, n * 16, st, "scene: the sky");
+        wgpuQueueWriteBuffer(r->g->queue, r->bg, 0, d, n * 16);
+        free(d);
+        r->bg_id = id;
+    }
+    if (rebind) rebind_all(r);
+    return 1;
+}
+
 int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p){
     Gpu *g = r->g;
     if (!upload_instances(r, s) || !upload_unit_shapes(r) || !upload_prims(r, s) || !upload_mesh(r, s)) return 0;
+    RenderLamp L = render_scene_lamp(s);
+    const Env *sky = p->mode == MODE_WIREFRAME ? NULL : s->env;
+    if (!upload_env(r, L.env, sky)) return 0;
     RenderMode mode = p->mode == MODE_TEXTURED ? MODE_PHONG : p->mode;
 
     GRU U;
@@ -566,7 +758,6 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     for (int c = 0; c < 4; c++)
         for (int k = 0; k < 4; k++) U.vp[c * 4 + k] = (float)vp.m[k][c];      // WGSL matrices are stored by columns
     put(U.eye, p->eye, mode == MODE_WIREFRAME ? 0.0f : (mode == MODE_FLAT ? 1.0f : (mode == MODE_GOURAUD ? 2.0f : 3.0f)));
-    RenderLamp L = render_scene_lamp(s);
     put(U.lamp, L.q, L.on ? 1.0f : 0.0f);
     put(U.lamp + 4, L.u, (float)L.area);
     put(U.lamp + 8, L.v, 0);
@@ -575,6 +766,23 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     put(U.lamp + 20, L.center, 0);
     put(U.lamp + 24, L.le, 0);
     U.lamp[28] = (float)L.ambient; U.lamp[29] = (float)L.fill;
+    if (L.env){
+        const Env *e = L.env;
+        U.envp[0] = (float)e->scale; U.envp[1] = (float)r_cos(e->rot); U.envp[2] = (float)r_sin(e->rot); U.envp[3] = 1;
+        put(U.envc, e->center, e->boxed ? 1.0f : 0.0f);
+        put(U.envlo, e->bmin, 0);
+        put(U.envhi, e->bmax, 0);
+        for (int k = 0; k < ENV_LEVELS; k++){ U.lv[k][0] = r->lv_at[k]; U.lv[k][1] = (uint32_t)e->lw[k]; U.lv[k][2] = (uint32_t)e->lh[k]; }
+        for (int i = 0; i < 9; i++) for (int k = 0; k < 3; k++) U.sh[i][k] = e->sh[i][k];
+    } else U.envp[1] = 1;
+    if (sky){
+        U.sky[0] = (float)sky->scale; U.sky[1] = (float)r_cos(sky->rot); U.sky[2] = (float)r_sin(sky->rot); U.sky[3] = 1;
+        U.skyd[0] = (uint32_t)sky->w; U.skyd[1] = (uint32_t)sky->h;
+    }
+    put(U.cam_r, vec3(p->view.m[0][0], p->view.m[0][1], p->view.m[0][2]), (float)(1 / p->proj.m[0][0]));
+    put(U.cam_u, vec3(p->view.m[1][0], p->view.m[1][1], p->view.m[1][2]), (float)(1 / p->proj.m[1][1]));
+    put(U.cam_b, vec3(p->view.m[2][0], p->view.m[2][1], p->view.m[2][2]), 0);
+    U.vps[0] = (float)r->w; U.vps[1] = (float)r->h;
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
         RenderMaterial rm = render_scene_material(&s->mats[m]);
         Material res = material_resolved(&s->mats[m]);
@@ -621,6 +829,15 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
         wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, 1, 0, (uint32_t)i + 1);
     }
+    // the sky behind (any set's bind group: the uniforms and buffers are the same in all)
+    if (sky){
+        Geo *any = r->prims.bg ? &r->prims : (r->mesh.bg ? &r->mesh : &r->unit[0]);
+        if (any->bg){
+            wgpuRenderPassEncoderSetPipeline(pass, r->sky);
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, any->bg, 0, NULL);
+            wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        }
+    }
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
     return 1;
@@ -640,6 +857,9 @@ void gpu_raster_destroy(GpuRaster *r){
     if (r->fill[0]) wgpuRenderPipelineRelease(r->fill[0]);
     if (r->fill[1]) wgpuRenderPipelineRelease(r->fill[1]);
     if (r->wire) wgpuRenderPipelineRelease(r->wire);
+    if (r->sky) wgpuRenderPipelineRelease(r->sky);
+    if (r->lv){ wgpuBufferDestroy(r->lv); wgpuBufferRelease(r->lv); }
+    if (r->bg){ wgpuBufferDestroy(r->bg); wgpuBufferRelease(r->bg); }
     if (r->bgl) wgpuBindGroupLayoutRelease(r->bgl);
     if (r->uni){ wgpuBufferDestroy(r->uni); wgpuBufferRelease(r->uni); }
     if (r->tab){ wgpuBufferDestroy(r->tab); wgpuBufferRelease(r->tab); }

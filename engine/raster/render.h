@@ -38,7 +38,8 @@ RenderParams render_params_camera(Vec3 from, Vec3 at, Vec3 up, real vfov_deg, in
 // Draws the mesh into fb. Does NOT clear it: call fb_clear first.
 void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p);
 
-// Draws every primitive of the scene (spheres are tessellated, quads become 2 triangles).
+// Draws every primitive of the scene (spheres are tessellated, quads become 2 triangles),
+// and the sky (Scene.env) where nothing was drawn.
 // The materials' BSDF (core/brdf.h) lit by the scene's lamp and an ambient light
 // (render_shade); output is sRGB-encoded like the path tracer's. Uses p->view, p->proj,
 // p->eye, p->mode (TEXTURED acts as PHONG) and p->cull_backfaces. Does NOT clear fb.
@@ -70,14 +71,22 @@ Vec3 render_scene_light(const Scene *s);
 // the side it shines to (n), w = (u x v) / |u x v|^2 (a point's a, b), its radiance; and
 // the ambient light (RENDER_SCENE_AMBIENT, _FILL; LR_RASTER_AMBIENT=0 turns it off, to
 // compare with the path tracer's direct light, -d 1)
-typedef struct { int on; Vec3 q, u, v, n, w, center, le; real area, ambient, fill; } RenderLamp;
+// and the environment it lights with besides (PBR4; NULL: the ambient light): the scene's
+// light probe, else its sky
+typedef struct {
+    int on; Vec3 q, u, v, n, w, center, le; real area, ambient, fill;
+    const struct Env *env;
+} RenderLamp;
 RenderLamp render_scene_lamp(const Scene *s);
 // The radiance point p (normal n, turned to the eye) sends to the eye: the material's BSDF
 // lit by the lamp - its diffuse-like lobes by the lamp's exact form factor (no shadow), its
 // microfacet lobe by the lamp's centre or 4 quarters when the lobe is wider than the lamp,
 // by the lamp's point nearest the reflected ray over the lobe's own solid angle 4 π α² cos
-// when it is narrower (a mirror shows the lamp itself) - and by the ambient light
-// (bsdf_albedo_uniform). The rasterizer tabulates per material what this recomputes.
+// when it is narrower (a mirror shows the lamp itself) - and by the environment (split-sum:
+// the specular part from env_level around the reflected ray, the diffuse part from the
+// irradiance, the transmitted part around the ray through the object) or, without one, the
+// ambient light (bsdf_albedo_uniform). The rasterizer tabulates per material what this
+// recomputes.
 Vec3 render_shade(const RenderLamp *L, const Material *m, Vec3 p, Vec3 n, Vec3 eye);
 // a material drawn as it is (constant: a lamp, its colour at full brightness), or shaded
 // (render_shade; base: its base colour, for the wireframe)

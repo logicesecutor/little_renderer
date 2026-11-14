@@ -180,12 +180,15 @@ typedef struct {
 } Instance;
 
 // SCENE_EMPTY: just the room and the lamp (e.g. for a physics simulation to fill)
+// SCENE_SKY: no room and no lamp: a wide floor with five spheres (mirror, gold, glass, blue
+// plastic, white) under the sky (SceneOptions.sky, a procedural one if none)
 // SCENE_SHOWCASE: one model of each material, a mirror dragon, a diffuse cube and a glass
 // torus (models/), under a cloud (cloud_default_params() unless SceneOptions.cloud)
-typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY, SCENE_SHOWCASE } SceneKind;
+typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY, SCENE_SHOWCASE, SCENE_SKY } SceneKind;
 
 struct CloudParams;   // core/volume.h
 struct Volume;
+struct Env;           // core/env.h
 
 typedef struct {
     SceneKind kind;
@@ -205,6 +208,11 @@ typedef struct {
     // > 0: also this many instances of obj_path (one mesh, mesh_mat), in a row on the floor
     // (any scene; SCENE_MESH then puts its model in as an instance too)
     int instances;
+    // the sky (any scene; the room's open front lets it in): a Radiance .hdr file, or
+    // "procedural"; NULL = none (black), except SCENE_SKY (procedural). sky_scale multiplies
+    // it (0 = 1), sky_rot turns it about the vertical axis (degrees)
+    const char *sky;
+    real sky_scale, sky_rot;
 } SceneOptions;
 
 typedef struct Scene {
@@ -216,7 +224,15 @@ typedef struct Scene {
     int nnormals, cap_normals;
     Material mats[MAX_MATS];
     int nmats;
-    int light;              // index of the one quad light
+    int light;              // index of the one quad light (-1: none)
+    // The environment (core/env.h), owned by the scene (scene_free frees them):
+    struct Env *env;        // the sky, at infinity: what a ray leaving the scene sees (NULL: black)
+    struct Env *probe;      // the rasterizers' light probe of the room (rt/probe.h), NULL if none
+    // where that probe is made (scene_cornell_box sets it: the room's centre and its box; in
+    // the open scene above the spheres, its "box" the floor and the sky far away)
+    int probe_set;
+    Vec3 probe_at;
+    Aabb probe_box;
 
     // camera
     Vec3 cam_from, cam_at, cam_up;

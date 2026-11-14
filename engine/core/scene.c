@@ -1,5 +1,7 @@
 #include "core/scene.h"
 
+#include "core/env.h"
+
 #include "core/volume.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,7 +195,45 @@ static void add_box(Scene *s, Vec3 size, real deg, Vec3 offset, int mat){
 // The Cornell box, 555 units on each side, with the dimensions and colors used by
 // Peter Shirley's "Ray Tracing: The Next Week" (based on the Cornell measurements).
 // The camera looks down +z, so x = 555 shows up on the LEFT of the image.
+// SCENE_SKY: a floor under the sky, five spheres of five materials on it
+static int open_scene(Scene *s){
+    int ground = scene_add_material(s, diffuse(0.5, 0.5, 0.5));
+    s->light = -1;
+    scene_add_prim(s, make_quad(vec3(-8722, 0, -8722), vec3(0, 0, 18000), vec3(18000, 0, 0), ground));
+    Material m[5] = {
+        material_mirror(vec3(0.95, 0.95, 0.95)),
+        material_pbr(vec3(1.0, 0.78, 0.34), 1, 0.3, 1.5, 0),       // rough gold
+        material_glass(vec3(1, 1, 1), 1.5),
+        material_pbr(vec3(0.1, 0.25, 0.7), 0, 0.4, 1.5, 0),        // blue plastic
+        diffuse(0.8, 0.8, 0.8),
+    };
+    for (int i = 0; i < 5; i++)
+        scene_add_prim(s, make_sphere(vec3(278 + (i - 2) * 165.0f, 70, 300), 70, scene_add_material(s, m[i])));
+    s->probe_set = 1;
+    s->probe_at = vec3(278, 230, 300);
+    s->probe_box = (Aabb){vec3(-8722, 0, -8722), vec3(9278, 1e5f, 9278)};
+    s->cam_from = vec3(278, 300, -640);
+    s->cam_at = vec3(278, 40, 300);
+    s->cam_up = vec3(0, 1, 0);
+    s->cam_vfov_deg = 45.0;
+    return 0;
+}
+
+// the sky of opt (SceneOptions.sky)
+static int scene_sky(Scene *s, const SceneOptions *opt){
+    const char *sky = opt->sky ? opt->sky : (opt->kind == SCENE_SKY ? "procedural" : NULL);
+    if (!sky) return 0;
+    Env *e = strcmp(sky, "procedural") == 0 ? env_procedural_sky(1024, 35, -30) : env_load_hdr(sky);
+    if (!e){ fprintf(stderr, "could not make the sky %s\n", sky); return 1; }
+    e->scale = opt->sky_scale > 0 ? opt->sky_scale : 1;
+    env_set_rot(e, opt->sky_rot * (real)PI / 180);
+    if (s->env) env_free(s->env);
+    s->env = e;
+    return 0;
+}
+
 int scene_cornell_box(Scene *s, const SceneOptions *opt){
+    if (opt->kind == SCENE_SKY) return open_scene(s) || scene_sky(s, opt);
     int red   = scene_add_material(s, diffuse(0.65, 0.05, 0.05));
     int white = scene_add_material(s, diffuse(0.73, 0.73, 0.73));
     int green = scene_add_material(s, diffuse(0.12, 0.45, 0.15));
@@ -204,6 +244,10 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
     scene_add_prim(s, make_quad(vec3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), white));     // floor
     scene_add_prim(s, make_quad(vec3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), white)); // ceiling
     scene_add_prim(s, make_quad(vec3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), white));   // back wall
+
+    s->probe_set = 1;
+    s->probe_at = vec3(278, 278, 278);
+    s->probe_box = (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)};
 
     // ceiling light, 1 unit below the ceiling. u x v points DOWN (-y): that is the side that emits.
     s->light = scene_add_prim(s, make_quad(vec3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), light));
@@ -296,7 +340,7 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
     s->cam_at = vec3(278, 278, 0);
     s->cam_up = vec3(0, 1, 0);
     s->cam_vfov_deg = 40.0;
-    return 0;
+    return scene_sky(s, opt);
 }
 
 Vec3 scene_light_center(const Scene *s){
@@ -489,6 +533,9 @@ void scene_free(Scene *s){
     s->ninsts = s->cap_insts = 0;
     for (int i = 0; i < s->nvolumes; i++) volume_free(s->volumes[i]);
     s->nvolumes = 0;
+    env_free(s->env);
+    env_free(s->probe);
+    s->env = s->probe = NULL;
     if (s->accel && s->accel_free) s->accel_free(s->accel);
     s->accel = NULL;
     s->accel_free = NULL;

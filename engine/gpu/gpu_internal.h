@@ -43,9 +43,13 @@ WGPUBuffer gpu_buffer(Gpu *g, const char *label, size_t size, WGPUBufferUsage us
 int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBufferUsage usage, const char *label);
 
 // compute kernels: a layout of n buffers (binding i of types[i], 'U' uniform, 'R' read-only
-// storage, 'W' read-write storage, '-' no binding i), a pipeline on it, bind groups, and 1-D
+// storage, 'W' read-write storage, 'T' a float texture read with textureLoad, '-' no binding
+// i; up to 24), a pipeline on it, bind groups (of buffers), and 1-D
 // dispatches
 WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types);
+// a w x h float texture (channels 1: R32Float, 4: RGBA32Float) for 'T' bindings, filled with
+// data (rows top to bottom) if not NULL
+WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channels, const float *data);
 WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl);
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n);
 // `threads` invocations of a kernel with @workgroup_size(64): the workgroups are spread over x

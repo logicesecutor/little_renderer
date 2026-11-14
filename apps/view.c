@@ -60,6 +60,7 @@ static const char *CONTROLS =
     "  1 2 3 4          rt mode: preview resolution 1/1, 1/2, 1/4, 1/8\n"
     "  R                back to the starting camera\n"
     "  X                GPU path tracing: denoiser on / off\n"
+    "  L                rasterizer: make the light probe again (things moved)\n"
     "  P                save the current image as PNG\n"
     "  I                the frame rate on the image: on / off\n"
     "  C                print a render command for this exact view\n"
@@ -624,6 +625,12 @@ static int frame(void){
                 fflush(stdout);
                 gpu_shown_passes = -1;
                 force_present = 1;
+                break;
+            case 'l':
+                options_bake_probe(&o, &scene);
+                fflush(stdout);
+                raster_dirty = 1;
+                if (mode == BACKEND_HYBRID) changed = 1;
                 break;
             case 'f': preview_on = !preview_on; break;
             case '1': preview = 1; preview_on = 0; break;

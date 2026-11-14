@@ -22,6 +22,7 @@ typedef double real;
 #define r_cos cos
 #define r_tan tan
 #define r_asin asin
+#define r_acos acos
 #define r_atan2 atan2
 #define r_pow pow
 #define r_fabs fabs
@@ -32,6 +33,7 @@ typedef double real;
 #define r_copysign copysign
 #define r_lround lround
 #define r_log log
+#define r_log2 log2
 #define r_exp exp
 #else
 typedef float real;
@@ -41,6 +43,7 @@ typedef float real;
 #define r_cos cosf
 #define r_tan tanf
 #define r_asin asinf
+#define r_acos acosf
 #define r_atan2 atan2f
 #define r_pow powf
 #define r_fabs fabsf
@@ -51,6 +54,7 @@ typedef float real;
 #define r_copysign copysignf
 #define r_lround lroundf
 #define r_log logf
+#define r_log2 log2f
 #define r_exp expf
 #endif
 

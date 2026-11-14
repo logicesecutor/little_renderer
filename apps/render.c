@@ -151,7 +151,7 @@ static int render_gpu(const Options *opt, Scene *scene){
     } else {
         printf("path tracing %dx%d on the GPU (%s), %d samples/pixel, max %d bounces%s%s\n", W, H, gpu_message(g), opt->spp,
                opt->max_depth, opt->clamp > 0 ? ", clamped" : "", opt->mis ? ", MIS" : "");
-        if (opt->caustics_lt) printf("  caustics: light traced on the GPU, %g light paths per pixel and sample\n", opt->photons);
+        if (opt->caustics_lt && scene->light >= 0) printf("  caustics: light traced on the GPU, %g light paths per pixel and sample\n", opt->photons);
         gpu_view_trace_wavefront(v, opt->wavefront);
         if (opt->wavefront) printf("  wavefront: one step of all paths at a time\n");
         if (opt->denoise && !gpu_view_trace_denoise(v, 1))

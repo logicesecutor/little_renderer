@@ -2,6 +2,7 @@
 
 #include "raster/raster.h"
 #include "core/brdf.h"
+#include "core/env.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,19 +75,48 @@ static ClipVert lerp_vert(const ClipVert *a, const ClipVert *b, real t){
     return r;
 }
 
-// Sutherland-Hodgman against the near plane (z >= -w). A triangle that crosses it becomes
-// a triangle or a quad (3 -> at most 4 vertices). Without this, points behind the camera
-// would get divided by a negative w and explode across the screen.
-static int clip_near(const ClipVert *in, int n, ClipVert *out){
+// Sutherland-Hodgman against the near plane (z >= -w), and against a guard band GUARD
+// times the screen's size around it (|x|, |y| <= GUARD w). Without the near plane, points
+// behind the camera would get divided by a negative w and explode across the screen; without
+// the guard band, a big triangle reaching far off screen (a floor seen to the horizon: its
+// corner by the camera lands millions of pixels away) gets edge functions whose rounding
+// leaves holes along its far edge. Each plane adds at most one vertex: 3 -> at most 8.
+#define GUARD 2.0f
+#define CLIP_MAX 8
+static int clip_plane(const ClipVert *in, int n, ClipVert *out, int plane){
     int m = 0;
     for (int i = 0; i < n; i++){
         const ClipVert *a = &in[i], *b = &in[(i + 1) % n];
-        real da = a->clip.z + a->clip.w;    // >= 0 means inside
-        real db = b->clip.z + b->clip.w;
+        real da, db;                        // >= 0 means inside
+        switch (plane){
+        case 0: da = a->clip.z + a->clip.w; db = b->clip.z + b->clip.w; break;
+        case 1: da = GUARD * a->clip.w - a->clip.x; db = GUARD * b->clip.w - b->clip.x; break;
+        case 2: da = GUARD * a->clip.w + a->clip.x; db = GUARD * b->clip.w + b->clip.x; break;
+        case 3: da = GUARD * a->clip.w - a->clip.y; db = GUARD * b->clip.w - b->clip.y; break;
+        default: da = GUARD * a->clip.w + a->clip.y; db = GUARD * b->clip.w + b->clip.y; break;
+        }
         if (da >= 0) out[m++] = *a;
         if ((da >= 0) != (db >= 0)) out[m++] = lerp_vert(a, b, da / (da - db));
     }
     return m;
+}
+
+// the corner c needs clipping: behind the near plane or outside the guard band
+static inline int clip_needed(Vec4 c){
+    return c.z + c.w < 0 || c.x > GUARD * c.w || -c.x > GUARD * c.w || c.y > GUARD * c.w || -c.y > GUARD * c.w;
+}
+
+// the triangle clipped by all five planes (out: CLIP_MAX vertices); returns how many
+static int clip_triangle(const ClipVert *in, ClipVert *out){
+    ClipVert a[CLIP_MAX], b[CLIP_MAX];
+    int n = clip_plane(in, 3, a, 0);
+    for (int p = 1; p < 5 && n >= 3; p++){
+        n = clip_plane(a, n, b, p);
+        memcpy(a, b, sizeof(ClipVert) * (size_t)n);
+    }
+    if (n < 3) return 0;
+    memcpy(out, a, sizeof(ClipVert) * (size_t)n);
+    return n;
 }
 
 // perspective divide + viewport transform (NDC [-1,1] -> pixels, flipping Y)
@@ -118,13 +148,16 @@ static int poly_area_ok(const ScreenVert *sv, int np, int cull){
 static void draw_clip_triangle(Framebuffer *fb, const ClipVert *cv, RenderMode mode, int cull,
                                FragShader shader, const void *ctx, uint32_t wire_color,
                                int row_lo, int row_hi){
-    // 3. clip against the near plane
-    ClipVert poly[4];
-    int np = clip_near(cv, 3, poly);
-    if (np < 3) return;
+    // 3. clip against the near plane and the guard band (when a corner needs it)
+    ClipVert poly[CLIP_MAX];
+    int np = 3;
+    if (clip_needed(cv[0].clip) || clip_needed(cv[1].clip) || clip_needed(cv[2].clip)){
+        np = clip_triangle(cv, poly);
+        if (np < 3) return;
+    } else memcpy(poly, cv, sizeof(ClipVert) * 3);
 
     // 4. divide by w, map to pixels
-    ScreenVert sv[4];
+    ScreenVert sv[CLIP_MAX];
     for (int k = 0; k < np; k++) sv[k] = to_screen(&poly[k], fb);
 
     // 5. back-face culling
@@ -205,24 +238,24 @@ static inline int ceil_small(real x){ int t = (int)x; return t + (x > (real)t); 
 static int triangle_rows(const TriJob *j, const Framebuffer *fb, int i, int *r0, int *r1){
     Vec3 wp[3];
     j->corners(j, i, wp);
-    ScreenVert sv[4];
+    ScreenVert sv[CLIP_MAX];
     int np = 3;
     Vec4 c[3];
     for (int k = 0; k < 3; k++) c[k] = mat4_mul_vec4(j->view_proj, (Vec4){wp[k].x, wp[k].y, wp[k].z, 1.0f});
-    if (c[0].z + c[0].w >= 0 && c[1].z + c[1].w >= 0 && c[2].z + c[2].w >= 0){
-        // fast path, the usual case: all 3 corners in front of the near plane. Same
-        // formulas as to_screen, without copying the varyings.
+    if (!clip_needed(c[0]) && !clip_needed(c[1]) && !clip_needed(c[2])){
+        // fast path, the usual case: all 3 corners in front of the near plane and inside the
+        // guard band. Same formulas as to_screen, without copying the varyings.
         for (int k = 0; k < 3; k++){
             real iw = 1.0f / c[k].w;
             sv[k].x = (c[k].x * iw * 0.5f + 0.5f) * fb->w;
             sv[k].y = (0.5f - c[k].y * iw * 0.5f) * fb->h;
         }
     } else {
-        ClipVert cv[3], poly[4];
+        ClipVert cv[3], poly[CLIP_MAX];
         memset(cv, 0, sizeof(cv));
         for (int k = 0; k < 3; k++) cv[k].clip = c[k];
-        np = clip_near(cv, 3, poly);
-        if (np < 3) return 0;                               // behind the camera
+        np = clip_triangle(cv, poly);
+        if (np < 3) return 0;                               // behind the camera, or off screen
         for (int k = 0; k < np; k++) sv[k] = to_screen(&poly[k], fb);
     }
     if (!poly_area_ok(sv, np, j->cull)) return 0;           // back face
@@ -448,15 +481,16 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p){
 #define SPHERE_SLICES RENDER_SPHERE_SLICES
 
 // A material as render_shade lights it: its BSDF, and what depends on one cosine alone,
-// tabulated once (SHADE_TAB + 1 cosines over 0..1, linear in between): the ambient's albedo
-// (bsdf_albedo_uniform) and the diffuse-like lobes' two factors, 1 - the layer above them
-// (bsdf_diffuse_lobes: f = base kd gd(cv) gd(cl) + ms kms gm(cv) gm(cl))
+// tabulated once (SHADE_TAB + 1 cosines over 0..1, linear in between): the environment's
+// three parts (bsdf_albedo_parts) and the diffuse-like lobes' two factors, 1 - the layer
+// above them (bsdf_diffuse_lobes: f = base kd gd(cv) gd(cl) + ms kms gm(cv) gm(cl))
 #define SHADE_TAB 32
 typedef struct {
     Bsdf b;
     real kd, kms;
-    Vec3 amb[SHADE_TAB + 1];
+    Vec3 spec[SHADE_TAB + 1], diff[SHADE_TAB + 1], trans[SHADE_TAB + 1];
     real gd[SHADE_TAB + 1], gm[SHADE_TAB + 1];
+    int through;          // it transmits: the environment through it is looked up too
 } ShadeMat;
 
 static void shade_mat_init(ShadeMat *sm, const Material *m){
@@ -465,9 +499,10 @@ static void shade_mat_init(ShadeMat *sm, const Material *m){
     const real mt = b->metallic, t = b->transmission;
     sm->kd = (1 - mt) * (1 - t) > 0 ? (1 - mt) * (1 - t) * b->kd_norm / (real)PI : 0;
     sm->kms = !b->smooth && mt > 0 ? mt * b->kms_norm : 0;
+    sm->through = (1 - mt) * t > 0;
     for (int i = 0; i <= SHADE_TAB; i++){
         real mu = r_fmax((real)i / SHADE_TAB, 1e-4f);
-        sm->amb[i] = bsdf_albedo_uniform(b, mu);
+        bsdf_albedo_parts(b, mu, &sm->spec[i], &sm->diff[i], &sm->trans[i]);
         sm->gd[i] = sm->kd > 0 ? 1 - bsdf_spec_albedo(b, mu) : 0;
         sm->gm[i] = sm->kms > 0 ? 1 - bsdf_albedo(b, mu) : 0;
     }
@@ -543,6 +578,39 @@ static Vec3 lamp_nearest(const RenderLamp *L, Vec3 p, Vec3 r){
     return v_add(L->q, v_add(v_scale(L->u, a), v_scale(L->v, b)));
 }
 
+static inline Vec3 tab_lerp(const Vec3 *t, int i, real f){ return v_add(t[i], v_scale(v_sub(t[i + 1], t[i]), f)); }
+
+// Where the light seen through a transmitting object comes from: refracted in at n, out
+// where the ray leaves a sphere (the exit normal mirrors n about the plane across the
+// inside ray: n2 = n - 2 (n.t) t), refracted out there; reflected inside instead where it
+// cannot leave. Exact for a sphere, close for convex shapes.
+static Vec3 through_dir(Vec3 v, Vec3 n, real eta){
+    Vec3 d = v_neg(v);
+    real c = v_dot(v, n), k = 1 - eta * eta * (1 - c * c);
+    if (k <= 0) return v_reflect(d, n);
+    Vec3 t = v_norm(v_refract(d, n, eta));
+    Vec3 n2 = v_sub(n, v_scale(t, 2 * v_dot(n, t)));         // outward at the exit
+    real c2 = -v_dot(t, n2), k2 = 1 - (1 / eta) * (1 / eta) * (1 - c2 * c2);
+    if (k2 <= 0) return v_reflect(t, v_neg(n2));
+    return v_norm(v_refract(t, v_neg(n2), 1 / eta));
+}
+
+// the environment's light (split-sum): the specular part from the prefiltered map around the
+// lobe's direction (between n and the reflected ray, nearer n the rougher: Lagarde &
+// de Rousiers 2014), the diffuse from the irradiance, the transmitted around the ray
+// through; a probe's lookups corrected by its box (env_box_dir)
+static Vec3 shade_env(const Env *E, const ShadeMat *sm, Vec3 sp, Vec3 df, Vec3 tr, Vec3 p, Vec3 n, Vec3 v){
+    const Bsdf *b = &sm->b;
+    real r = b->smooth ? 0 : b->rough;
+    Vec3 rr = v_reflect(v_neg(v), n);
+    real s = 1 - r, k = s * (r_sqrt(s) + r);
+    Vec3 rd = v_norm(v_add(n, v_scale(v_sub(rr, n), k)));
+    Vec3 c = v_mul(sp, env_level(E, env_box_dir(E, p, rd), r));
+    c = v_add(c, v_mul(df, env_irradiance(E, n)));
+    if (sm->through) c = v_add(c, v_mul(tr, env_level(E, env_box_dir(E, p, through_dir(v, n, b->eta)), r)));
+    return c;
+}
+
 static Vec3 shade_point(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n, Vec3 eye){
     Vec3 v = v_norm(v_sub(eye, p));
     if (v_dot(n, v) < 0) n = v_neg(n);           // both sides lit (the walls have no "outside")
@@ -550,7 +618,9 @@ static Vec3 shade_point(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n,
     const Bsdf *b = &sm->b;
     int iv;
     real fv = shade_tab_at(cv, &iv);
-    Vec3 c = v_scale(v_add(sm->amb[iv], v_scale(v_sub(sm->amb[iv + 1], sm->amb[iv]), fv)), L->ambient + L->fill * cv);
+    Vec3 sp = tab_lerp(sm->spec, iv, fv), df = tab_lerp(sm->diff, iv, fv), tr = tab_lerp(sm->trans, iv, fv);
+    Vec3 c = L->env ? shade_env(L->env, sm, sp, df, tr, p, n, v)
+                    : v_scale(v_add(v_add(sp, df), tr), L->ambient + L->fill * cv);
     if (!L->on || v_dot(v_sub(p, L->center), L->n) <= 0) return c;   // behind the lamp
     // the diffuse-like lobes: the lamp's form factor
     real ff = sm->kd > 0 || sm->kms > 0 ? lamp_form_factor(L, p, n) : 0;
@@ -826,6 +896,7 @@ RenderLamp render_scene_lamp(const Scene *s){
     real k = amb ? (real)atof(amb) : 1;
     L.ambient = RENDER_SCENE_AMBIENT * k;
     L.fill = RENDER_SCENE_FILL * k;
+    L.env = k > 0 ? (s->probe ? s->probe : s->env) : NULL;
     if (s->light < 0 || s->light >= s->nprims || s->prims[s->light].type != PRIM_QUAD) return L;
     const Primitive *l = &s->prims[s->light];
     L.on = 1;
@@ -834,6 +905,27 @@ RenderLamp render_scene_lamp(const Scene *s){
     L.le = s->mats[l->material].emission;
     L.area = l->area;
     return L;
+}
+
+// the sky where nothing was drawn (the z-buffer still at its far value): each pixel's view
+// direction from the camera's axes (the view matrix's rows) and its lens (the projection's
+// scale)
+static void draw_sky(Framebuffer *fb, const Env *env, const RenderParams *p){
+    Vec3 right = vec3(p->view.m[0][0], p->view.m[0][1], p->view.m[0][2]);
+    Vec3 up = vec3(p->view.m[1][0], p->view.m[1][1], p->view.m[1][2]);
+    Vec3 back = vec3(p->view.m[2][0], p->view.m[2][1], p->view.m[2][2]);
+    real sx = 1 / p->proj.m[0][0], sy = 1 / p->proj.m[1][1];
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < fb->h; y++){
+        real ny = (1 - 2 * (y + 0.5f) / fb->h) * sy;
+        for (int x = 0; x < fb->w; x++){
+            size_t i = (size_t)y * fb->w + x;
+            if (fb->depth[i] < 1) continue;
+            real nx = (2 * (x + 0.5f) / fb->w - 1) * sx;
+            Vec3 d = v_norm(v_sub(v_add(v_scale(right, nx), v_scale(up, ny)), back));
+            fb->color[i] = image_pack_srgb(env_eval_fast(env, d));
+        }
+    }
 }
 
 RenderMaterial render_scene_material(const Material *mt){
@@ -901,6 +993,7 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
     j.corners = scene_corners;
     j.vertices = scene_vertices;
     draw_triangles(fb, &j);
+    if (s->env && mode != MODE_WIREFRAME) draw_sky(fb, s->env, p);   // (lines draw no depth)
 
     free(sj->runs);
     free(sj->inst_first);

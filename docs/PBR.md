@@ -93,7 +93,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | PBR1 | The material model, the presets, the C BRDF; the CPU path tracer with VNDF sampling and rough glass; options `-base`, `-metal`, `-rough`, `-ior`, `-transmission` (and `-mat` presets) | white furnace test (a white rough metal and a white dielectric in a uniform environment keep their energy, up to the lost multiple scattering), BRDF reciprocity and sampling-vs-evaluation tests; the reference images remade. **Done** (below) |
 | PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today). **Done** (below) |
 | PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights. **Done** (below) |
-| PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized |
+| PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized. **Done** (below) |
 | PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four |
 | PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers |
 
@@ -179,6 +179,54 @@ Decided on the way (the open questions):
   back wall within 10%.
 - CPU against GPU rasterizer: within 1/255 but for a few pixels on triangle edges, float
   and double. Cost: PERFORMANCE.md.
+
+### PBR4, done (2026-11-14)
+
+- `core/hdr.{c,h}`: Radiance `.hdr` files read (flat, old and new run-length encoding) and
+  written. `core/env.{c,h}`: the environment map: lookups, sampling by luminance, the
+  levels prefiltered with GGX (filtered importance sampling, 128 samples per texel), the
+  irradiance's 9 harmonics, a procedural sky, a probe's box (parallax).
+- The path tracers (CPU, GPU single kernel and wavefront) see the sky where rays leave the
+  scene and sample it as a light (RAYTRACER.md 5.16). On the GPU the sky is a texture
+  (its 8 storage buffers are all used) with its sampling distributions in a second one;
+  the kernels are compiled twice, with the sky's code and without it (`SKY_ON`), the second
+  made only when a scene has a sky: without one the sky's code cost 11% on the boxes.
+- `rt/probe.{c,h}`: light probes, path traced (the lamp seen directly left out; the
+  rasterizers light with it themselves). Each scene says where its probe goes: the room's
+  centre and box; the open scene above its spheres.
+- The rasterizers (CPU and GPU) light with the probe or the sky, split-sum
+  (RASTERIZER.md, "Lighting"), and draw the sky behind. The CPU rasterizer clips against a
+  guard band now (a floor to the horizon left holes).
+- `-scene sky`, `-sky`, `-skyscale`, `-skyrot`, `-probe`, `-proberes`, `-probespp`; the
+  viewer's `L` makes the probe again.
+- Test skies: Poly Haven's `kloofendal_48d_partly_cloudy` and `studio_small_09` (2k, CC0),
+  downloaded into `models/skies/` (not in git).
+- `bin/test_env` (in `make test`): .hdr round trip; the sampling's density (integrates to
+  1, is the one `env_pdf` states, the sky's integral by it equals the quadrature's), on the
+  procedural sky turned and not and on the downloaded skies; a constant environment stays
+  constant through the levels and the harmonics; the harmonics' irradiance and the levels
+  against quadrature for an environment of degree 2 (0.003% and 0.5%); the path tracer's
+  white furnace under a white sky.
+- GPU against CPU path tracing (200 px, 1024 against 256 samples, linear mean): the open
+  scene under the procedural sky, both downloaded skies (one turned), the spheres' room
+  with a sky through its front, the open scene in fog: all within 0.4% (the CPU's noise),
+  the wavefront the same. GPU against CPU rasterizer: a mean difference of 0.05-0.2 of
+  255.
+- Cost: PERFORMANCE.md.
+
+Decided on the way:
+
+- **Equirectangular maps, not cube maps.** One kind of lookup for every pipeline (C and
+  WGSL), the same map the path tracer samples. The prefiltered levels halve down to 64 x
+  32 and then stay (a 16 x 8 level made the roughest lookups 4% wrong near the poles), so
+  they are not one texture's mip levels: on the GPU they are one buffer, read with the C's
+  bilinear lookups.
+- **The probe holds the indirect light only**: the lamp seen directly is left out (the
+  rasterizers light with the lamp exactly), its light reflected by anything is in.
+- **The open scene gets a probe too**: lit by the sky map alone, its spheres reflected the
+  photo's own landscape instead of the scene's floor.
+- **No split-sum table of our own**: the BSDF's tables (`BRDF_E`, `BRDF_B`, the directional
+  albedo and its Fresnel-free part) are that table.
 
 ## Open questions (decided during the phases)
 

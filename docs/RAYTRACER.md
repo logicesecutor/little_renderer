@@ -137,13 +137,16 @@ engine/
 │   ├── mesh.h/c         .obj and ASCII .ply readers, vertex normals, placing a model
 │   ├── scene.h/c        materials, primitives (sphere | quad | triangle), Scene, the Cornell box
 │   ├── image.h/c        Image (linear float pixels) -> sRGB -> PNG; also the rasterizer's Framebuffer
-│   └── png.h/c          PNG writer and reader, with deflate / inflate (no library)
+│   ├── png.h/c          PNG writer and reader, with deflate / inflate (no library)
+│   ├── hdr.h/c          Radiance .hdr (RGBE) reader and writer: the skies
+│   └── env.h/c          the environment map: lookups, sampling by luminance, prefiltered levels, harmonics
 ├── rt/                  the path tracer
 │   ├── intersect.h/c    Hit, ray-box slab test, sphere / quad / triangle intersection
 │   ├── octree.h/c       octree build and front-to-back traversal (closest hit and any hit)
 │   ├── bvh.h/c          BVH build (binned SAH or middle split) and stack-based traversal
 │   ├── accel.h/c        builds none / octree / BVH for a scene; scene_intersect, scene_occluded
-│   └── tracer.h/c       trace_path(): direct light sampling, glass / mirror logic
+│   ├── tracer.h/c       trace_path(): direct light sampling, glass / mirror logic
+│   └── probe.h/c        light probes for the rasterizers (PBR4)
 ├── raster/              the rasterizer (RASTERIZER.md)
 ├── platform/window.h/c  the X11 window (the viewer)
 └── app/options.h/c      command-line options of the two programs
@@ -1049,6 +1052,32 @@ light bouncing between microfacets is not given back). Images with light tracing
 without agree to 0.1 of 255. The GPU path tracer has the same BSDF in WGSL
 (`gpu/brdf_gpu.c`): `bin/test_gpu_brdf` runs both on 65536 cases and finds the same
 values, and GPU and CPU images agree within 0.25% (PBR.md, PBR2).
+
+### 5.16 The sky (PBR4, `core/env.h`)
+
+A scene can have a **sky**: light arriving from infinitely far away, an equirectangular
+map (longitude across, latitude down; a Radiance `.hdr` file read by `core/hdr.c`, or a
+procedural clear sky with a sun). A ray that leaves the scene sees it: `env_eval`,
+bilinear in the map. It is a light like the lamp, and found the same two ways:
+
+- **next event estimation** draws a direction by the map's luminance: a 2D distribution
+  over its pixels (each weighted by `lum · sin θ`, sin θ for the pixel's solid angle;
+  `lum` the largest of the pixel and its 8 neighbours, so that every pixel the bilinear
+  lookup reaches from a bright one is drawn too), a row by its marginal distribution, a
+  pixel in it by the row's own, a point in the pixel uniformly. The density per solid
+  angle is `p_pixel · w · h / (2 π² sin θ)`. A shadow ray to infinity, and the light
+  weighted by MIS against the BSDF's sampling;
+- a **bounce** that escapes sees the sky, weighted by MIS against next event estimation
+  (`env_pdf`), or fully after a perfect mirror or refraction.
+
+With a lamp and a sky both, both are sampled at every rough vertex (the GPU's wavefront
+kernels, which have one shadow ray per bounce, draw one of them, each half the time).
+Light tracing covers the lamp's caustics only: the sky's are path traced (`-caustics`
+does not apply to them). **Checked** by `bin/test_env`: the sampling's density integrates
+to 1 and is the one `env_pdf` states, its estimate of the sky's integral is the
+quadrature's; the white furnace under a uniform white sky (diffuse, plastic, a rough
+metal, glass, a mirror all as bright as the sky, MIS on and off). GPU, wavefront and CPU
+images agree within 0.4% (PBR.md, PBR4).
 
 ---
 

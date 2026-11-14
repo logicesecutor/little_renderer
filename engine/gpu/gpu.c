@@ -356,15 +356,19 @@ int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBu
 }
 
 WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types){
-    WGPUBindGroupLayoutEntry e[16];
+    WGPUBindGroupLayoutEntry e[24];
     memset(e, 0, sizeof(e));
     int n = 0;
-    for (int i = 0; types[i] && i < 16; i++){
+    for (int i = 0; types[i] && i < 24; i++){
         if (types[i] == '-') continue;          // no binding with this number
         e[n].binding = (uint32_t)i;
         e[n].visibility = stage;
-        e[n].buffer.type = types[i] == 'U' ? WGPUBufferBindingType_Uniform
-                         : types[i] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
+        if (types[i] == 'T'){                    // a float texture read with textureLoad
+            e[n].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+            e[n].texture.viewDimension = WGPUTextureViewDimension_2D;
+        } else
+            e[n].buffer.type = types[i] == 'U' ? WGPUBufferBindingType_Uniform
+                             : types[i] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
         n++;
     }
     WGPUBindGroupLayoutDescriptor d;
@@ -519,6 +523,32 @@ void gpu_timer_destroy(GpuTimer *t){
     free(t->stage_of); free(t->pending_stage); free(t->ns); free(t->calls);
     free(t->pass_units); free(t->pending_units); free(t->units);
     free(t);
+}
+
+WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channels, const float *data){
+    WGPUTextureDescriptor td;
+    memset(&td, 0, sizeof(td));
+    td.label = gpu_str(label);
+    td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = (WGPUExtent3D){(uint32_t)w, (uint32_t)h, 1};
+    td.format = channels == 1 ? WGPUTextureFormat_R32Float : WGPUTextureFormat_RGBA32Float;
+    td.mipLevelCount = 1;
+    td.sampleCount = 1;
+    WGPUTexture tex = wgpuDeviceCreateTexture(g->device, &td);
+    if (tex && data){
+        WGPUTexelCopyTextureInfo dst;
+        memset(&dst, 0, sizeof(dst));
+        dst.texture = tex;
+        dst.aspect = WGPUTextureAspect_All;
+        WGPUTexelCopyBufferLayout lay;
+        memset(&lay, 0, sizeof(lay));
+        lay.bytesPerRow = (uint32_t)(w * channels * 4);
+        lay.rowsPerImage = (uint32_t)h;
+        WGPUExtent3D size = {(uint32_t)w, (uint32_t)h, 1};
+        wgpuQueueWriteTexture(g->queue, &dst, data, (size_t)w * h * channels * 4, &lay, &size);
+    }
+    return tex;
 }
 
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){

@@ -354,9 +354,11 @@ fn bsdf_diffuse_lobes(b: ptr<function, Bsdf>, cl: f32) -> vec3f {
     }
     return f;
 }
-fn bsdf_albedo_uniform(b: ptr<function, Bsdf>, cv: f32) -> vec3f {
+struct AlbedoParts { spec: vec3f, diff: vec3f, trans: vec3f };
+fn bsdf_albedo_parts(b: ptr<function, Bsdf>, cv: f32) -> AlbedoParts {
     bsdf_view(b, cv);
     let m = (*b).metallic;
+    let t = (*b).transmission;
     let es = bsdf_spec_albedo(b, cv);
     var e = 1.0;
     var bb = 0.0;
@@ -368,9 +370,15 @@ fn bsdf_albedo_uniform(b: ptr<function, Bsdf>, cv: f32) -> vec3f {
         e = bsdf_albedo(b, cv);
         bb = bsdf_table(BSDF_TAB_B, (*b).rough, cv);
     }
-    let a = vec3f(es) + (1.0 - es) * (*b).base;
-    let mt = (*b).base * (e - bb) + vec3f(bb) + (*b).ms * (1.0 - e);
-    return a * (1.0 - m) + mt * m;
+    var r: AlbedoParts;
+    r.spec = vec3f((1.0 - m) * es) + m * ((*b).base * (e - bb) + vec3f(bb));
+    r.diff = (*b).base * ((1.0 - m) * (1.0 - t) * (1.0 - es)) + (*b).ms * (m * (1.0 - e));
+    r.trans = (*b).base * ((1.0 - m) * t * (1.0 - es));
+    return r;
+}
+fn bsdf_albedo_uniform(b: ptr<function, Bsdf>, cv: f32) -> vec3f {
+    let a = bsdf_albedo_parts(b, cv);
+    return a.spec + a.diff + a.trans;
 }
 );
 

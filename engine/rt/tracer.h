@@ -21,6 +21,9 @@ typedef struct {
     // For the pixel loops (and the GPU): 1 = the numbers of each path from the Sobol sequence
     // with blue noise (core/sampler.h), 0 = from the pixel's Rng (the images of before).
     int sampler;
+    // 1 = the lamp is not counted where the ray itself (before any bounce) meets it: the
+    // light probes (rt/probe.h), whose users light with the lamp themselves
+    int no_lamp_seen;
 } TraceParams;
 
 TraceParams trace_default_params(void);   // max_depth 50, mis on, skip_caustics off, sampler on
@@ -35,6 +38,11 @@ Vec3 trace_path(const Scene *s, Ray ray, Rng *rng, int max_depth);
 // sample, with sampler_make(&rng, x, y, sample_index, image_seed, on), and take the camera
 // ray's jitter from it too: sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy).
 Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *p);
+
+// The sky (Scene.env) is a light like the lamp: next event estimation draws a direction by
+// its luminance (env_sample) at every rough vertex, and a path leaving the scene sees it,
+// the two weighted by MIS. Light tracing covers only the lamp's caustics: the sky's are path
+// traced.
 
 // ---- light tracing for caustics --------------------------------------------------------
 //
