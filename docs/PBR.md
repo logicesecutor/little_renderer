@@ -1,7 +1,7 @@
 # PBR: one physically based material model for every pipeline (plan)
 
-The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)). Status: a plan,
-nothing implemented yet; each phase is marked here as it lands.
+The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)). Status: PBR1
+done (2026-11-14, below); each phase is marked here as it lands.
 
 ## Goals (decided 2026-11-14)
 
@@ -90,7 +90,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 
 | phase | what | done when |
 |---|---|---|
-| PBR1 | The material model, the presets, the C BRDF; the CPU path tracer with VNDF sampling and rough glass; options `-base`, `-metal`, `-rough`, `-ior`, `-transmission` (and `-mat` presets) | white furnace test (a white rough metal and a white dielectric in a uniform environment keep their energy, up to the lost multiple scattering), BRDF reciprocity and sampling-vs-evaluation tests; the reference images remade |
+| PBR1 | The material model, the presets, the C BRDF; the CPU path tracer with VNDF sampling and rough glass; options `-base`, `-metal`, `-rough`, `-ior`, `-transmission` (and `-mat` presets) | white furnace test (a white rough metal and a white dielectric in a uniform environment keep their energy, up to the lost multiple scattering), BRDF reciprocity and sampling-vs-evaluation tests; the reference images remade. **Done** (below) |
 | PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today) |
 | PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights |
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized |
@@ -99,12 +99,47 @@ node with a mesh becomes an instance), the materials above with their textures. 
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
 `make test`; the measurements in [PERFORMANCE.md](PERFORMANCE.md); one commit per phase.
+(PBR1 is the CPU path tracer alone, as its row says: until PBR2 the GPU path tracer and
+until PBR3 the rasterizers draw the preset closest to a material, `material_kind`.)
+
+### PBR1, done (2026-11-14)
+
+- `core/scene.h`: `Material` gains `metallic`, `roughness`, `transmission`; `MAT_PBR` takes
+  them as given, `MAT_DIFFUSE` / `MAT_MIRROR` / `MAT_GLASS` / `MAT_LIGHT` are presets
+  (`material_resolved`), so old code (`{MAT_GLASS, tint, emission, ior}`) keeps working;
+  constructors `material_diffuse`, `material_mirror`, `material_glass`, `material_light`,
+  `material_pbr`.
+- `core/brdf.h`: the BSDF in C (`bsdf_make`, `bsdf_eval`, `bsdf_sample`); its tables in
+  `core/brdf_tables.h`, made by `tools/gen_brdf_tables.py`. RAYTRACER.md 5.15 explains it.
+- `rt/tracer.c`: the path tracer and the light tracer shade with it (NEE and MIS over the
+  BSDF's rough part, perfect lobes as S vertices of the caustics partition).
+- `-base`, `-metal`, `-rough`, `-ior`, `-transmission` change the model's material (`bin/render`,
+  `view`, `sim`; `SceneOptions.mesh_set`, `scene_mesh_material`).
+- `bin/test_brdf` (in `make test`): reciprocity, sampling against evaluation by quadrature,
+  the white furnace.
+- The README's images remade with the CPU path tracer.
+
+Decided on the way (the open questions):
+
+- **Multiple scattering: compensated.** The furnace test showed the loss: a white metal of
+  roughness 1 kept 31% of the light seen straight on, 76% at grazing angles; roughness 0.5
+  86-92%. Kulla & Conty's lobe (two 32 x 32 tables) brings every white metal to 99.9-100%.
+- **The diffuse layer: albedo-scaled, not glTF's `1 - F(v.h)`.** glTF's form returned up to
+  28% more light than arrived (white plastic, roughness 0.3, seen at 84°); scaling the
+  diffuse by what the specular lobe leaves both ways, `(1 - Es(v)) (1 - Es(l)) / (1 - Es_avg)`,
+  keeps exactly what arrives and stays reciprocal. A first try with `F(n.v)` in place of the
+  lobe's albedo kept only 45% of it at grazing angles on a rough white dielectric (its
+  rough specular lobe reflects far less than F there).
+- **Perfectly smooth below roughness 0.02** (delta lobes).
+- **Through glass the BSDF is the radiance one** (`f(v, l) / eta_l^2` reciprocal); the
+  light tracer weighs refractions by `(eta_from / eta_to)^2`.
 
 ## Open questions (decided during the phases)
 
 - The lamp in the rasterizer: representative point first; linearly transformed cosines if
   the highlights differ visibly from the path tracer.
-- Multiple-scattering compensation: only if the furnace test shows the loss.
+- Multiple-scattering compensation: only if the furnace test shows the loss. (Decided in
+  PBR1: it showed, compensated.)
 - Textures on the GPU: atlases or arrays.
 - Test files (Khronos samples, HDR skies) come from outside: downloaded only with the user's
   permission, as usual.

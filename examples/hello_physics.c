@@ -31,7 +31,7 @@ int main(void){
     rigid_set_room(&pw.rigid, room);
     pw.fluid = fluid_create(room, 555.0 / 40, cloud);
     int ball = rigid_add_sphere(&pw.rigid, vec3(278, 500, 278), 40, 7.8);
-    Material steel = {MAT_MIRROR, vec3(0.95, 0.93, 0.9), vec3(0, 0, 0), 1};
+    Material steel = material_mirror(vec3(0.95, 0.93, 0.9));
     phys_add_to_scene(&pw, ball, &scene, scene_add_material(&scene, steel));
 
     Camera cam = camera_make(scene.cam_from, scene.cam_at, scene.cam_up, scene.cam_vfov_deg, 1);

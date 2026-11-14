@@ -10,19 +10,76 @@
 #define MAX_MATS 16
 #define MAX_VOLUMES 8
 
+// A material is glTF 2.0's metallic-roughness model with transmission (docs/PBR.md, the
+// BSDF in core/brdf.h): base colour, metallic, roughness, index of refraction, transmission.
+// MAT_PBR takes them as given; the other types are presets of it (material_resolved), so
+// a material written as {MAT_GLASS, colour, emission, ior} keeps working:
+//   MAT_DIFFUSE  a rough dielectric (roughness 1, ior 1.5): Lambert plus a faint sheen
+//   MAT_MIRROR   a smooth metal: the base colour reflected (whiter at grazing angles)
+//   MAT_GLASS    a smooth clear dielectric of index `ior`, tinted by the base colour
+//   MAT_LIGHT    emits `emission`, reflects nothing
 typedef enum {
-    MAT_DIFFUSE,   // ideal Lambertian: scatters light equally in all directions
-    MAT_MIRROR,    // perfect reflection
-    MAT_GLASS,     // dielectric: reflects or refracts according to Fresnel
-    MAT_LIGHT      // emits light, reflects nothing
+    MAT_DIFFUSE,
+    MAT_MIRROR,
+    MAT_GLASS,
+    MAT_LIGHT,
+    MAT_PBR
 } MatType;
 
 typedef struct {
     MatType type;
-    Vec3 albedo;     // fraction of light reflected per RGB channel
-    Vec3 emission;   // radiance emitted (lights only)
-    real ior;        // index of refraction (glass only)
+    Vec3 albedo;        // base colour: the diffuse colour, a metal's reflectance, glass's tint
+    Vec3 emission;      // radiance emitted (lights only)
+    real ior;           // index of refraction (dielectrics: glass, and the specular of the
+                        // others; MAT_DIFFUSE uses 1.5)
+    real metallic;      // MAT_PBR: 0 dielectric .. 1 metal
+    real roughness;     // MAT_PBR: 0 smooth (mirror, clear) .. 1 rough
+    real transmission;  // MAT_PBR: 0 opaque .. 1 clear: how much of the light a dielectric
+                        // does not reflect goes through (refracted) instead of diffusing
 } Material;
+
+// the presets, and a MAT_PBR material
+static inline Material material_diffuse(Vec3 color){
+    Material m = {MAT_DIFFUSE, color, {0, 0, 0}, 1.5, 0, 1, 0};
+    return m;
+}
+static inline Material material_mirror(Vec3 color){
+    Material m = {MAT_MIRROR, color, {0, 0, 0}, 1.5, 1, 0, 0};
+    return m;
+}
+static inline Material material_glass(Vec3 tint, real ior){
+    Material m = {MAT_GLASS, tint, {0, 0, 0}, ior, 0, 0, 1};
+    return m;
+}
+static inline Material material_light(Vec3 emission){
+    Material m = {MAT_LIGHT, {0, 0, 0}, emission, 1, 0, 1, 0};
+    return m;
+}
+static inline Material material_pbr(Vec3 base, real metallic, real roughness, real ior, real transmission){
+    Material m = {MAT_PBR, base, {0, 0, 0}, ior, metallic, roughness, transmission};
+    return m;
+}
+// the material with all its parameters: a preset's filled in (type stays)
+static inline Material material_resolved(const Material *m){
+    Material r = *m;
+    switch (m->type){
+    case MAT_DIFFUSE: r.metallic = 0; r.roughness = 1; r.ior = 1.5; r.transmission = 0; break;
+    case MAT_MIRROR:  r.metallic = 1; r.roughness = 0; r.ior = 1.5; r.transmission = 0; break;
+    case MAT_GLASS:   r.metallic = 0; r.roughness = 0; r.transmission = 1; if (!(r.ior > 0)) r.ior = 1.5; break;
+    case MAT_LIGHT:   r.metallic = 0; r.roughness = 1; r.transmission = 0; break;
+    default:          if (!(r.ior > 0)) r.ior = 1.5; break;
+    }
+    return r;
+}
+// the preset closest to a material (MAT_PBR: glass if mostly clear, mirror if mostly metal,
+// else diffuse), for the code that knows only the presets (the GPU path tracer until PBR2,
+// the rasterizers until PBR3)
+static inline MatType material_kind(const Material *m){
+    if (m->type != MAT_PBR) return m->type;
+    if (m->transmission >= (real)0.5) return MAT_GLASS;
+    if (m->metallic >= (real)0.5) return MAT_MIRROR;
+    return MAT_DIFFUSE;
+}
 
 // axis-aligned bounding box
 typedef struct { Vec3 lo, hi; } Aabb;
@@ -134,6 +191,11 @@ typedef struct {
     SceneKind kind;
     const char *obj_path;   // SCENE_MESH: the .obj or .ply file to put in the box
     MatType mesh_mat;       // SCENE_MESH: MAT_DIFFUSE, MAT_MIRROR or MAT_GLASS
+    // ... and what changes it (-base, -metal, -rough, -ior, -transmission): the MESH_SET_*
+    // bits say which of these are set; any makes it a MAT_PBR material (scene_mesh_material)
+    int mesh_set;
+    Vec3 mesh_base;
+    real mesh_metal, mesh_rough, mesh_ior, mesh_trans;
     real rot_deg;           // SCENE_MESH: turn the model around the vertical axis
     // A cloud floating in the box (any scene). NULL = no cloud, except SCENE_CLOUD (an
     // empty box with a cloud), which then uses cloud_default_params().
@@ -179,8 +241,12 @@ typedef struct Scene {
     void (*accel_free)(void *accel);
 } Scene;
 
+enum { MESH_SET_BASE = 1, MESH_SET_METAL = 2, MESH_SET_ROUGH = 4, MESH_SET_IOR = 8, MESH_SET_TRANS = 16 };
+
 // fills s (which must start zeroed); returns 0 on success
 int scene_cornell_box(Scene *s, const SceneOptions *opt);
+// the models' material: the preset opt->mesh_mat (diffuse: warm orange), changed as opt says
+Material scene_mesh_material(const SceneOptions *opt);
 int scene_add_prim(Scene *s, Primitive p);          // returns the new primitive's index
 int scene_add_material(Scene *s, Material m);       // returns the new material's index
 // corners a, b, c counter-clockwise seen from outside; normals = 3 vertex normals or NULL.

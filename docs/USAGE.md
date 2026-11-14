@@ -213,7 +213,12 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-scene cloud` | the empty box with a volumetric cloud floating in it (path tracer, see VOLUMES.md) | |
 | `-scene empty` | just the room and the lamp | |
 | `-obj file` | the model for `-scene mesh`: `.obj`, or ASCII `.ply` (binary PLY is not supported) | `models/torus.obj` |
-| `-mat diffuse\|mirror\|glass` | material of the model | diffuse (warm orange) |
+| `-mat diffuse\|mirror\|glass` | material of the model: a preset of the PBR model (PBR.md) | diffuse (warm orange) |
+| `-base r,g,b` | the model's base colour: diffuse colour, metal's colour, glass's tint | the preset's |
+| `-metal m` | metallic, 0 (dielectric: plastic, stone, glass) .. 1 (metal) | the preset's: 0, mirror 1 |
+| `-rough r` | roughness, 0 (polished; up to 0.02 a perfect mirror / refraction) .. 1 (matte) | the preset's: 1, mirror and glass 0 |
+| `-ior x` | index of refraction of the dielectric part | 1.5 |
+| `-transmission t` | 0 (opaque) .. 1 (clear): the share of the light a dielectric does not reflect that goes through it, refracted | the preset's: 0, glass 1 |
 | `-rot degrees` | turns the model around the vertical axis | 0 |
 | `-instances n` | n instances of the model (one mesh placed n times by transforms) in any scene: in a row (`-scene spheres`: beside the spheres first); on the GPU too (WEB.md 2.7) | 0: the model as world triangles, `-scene mesh` only |
 

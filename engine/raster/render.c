@@ -700,8 +700,9 @@ RenderMaterial render_scene_material(const Material *mt){
         rm.base = mx > 0 ? v_scale(mt->emission, 1.0f / mx) : mt->emission;
         rm.constant = 1;
     }
-    if (mt->type == MAT_MIRROR){ rm.base = v_scale(mt->albedo, 0.45f); rm.spec_k = 0.7f; rm.spec_exp = 80; }
-    if (mt->type == MAT_GLASS){  rm.base = v_scale(mt->albedo, 0.25f); rm.spec_k = 0.9f; rm.spec_exp = 120; }
+    MatType kind = material_kind(mt);           // (until PBR3: the preset closest to it)
+    if (kind == MAT_MIRROR){ rm.base = v_scale(mt->albedo, 0.45f); rm.spec_k = 0.7f; rm.spec_exp = 80; }
+    if (kind == MAT_GLASS){  rm.base = v_scale(mt->albedo, 0.25f); rm.spec_k = 0.9f; rm.spec_exp = 120; }
     return rm;
 }
 

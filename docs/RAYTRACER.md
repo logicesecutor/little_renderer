@@ -505,6 +505,10 @@ from everything, where light sampling already wins). The cost is negligible.
 
 ### 5.6 Mirror and glass
 
+(Since PBR1 these, and the diffuse surfaces of 5.4, are presets of one material model with
+a microfacet BSDF: section 5.15. Roughness 0 gives exactly the mirror and glass below,
+with the Fresnel reflectance of the metal and the glass.)
+
 These are *specular* materials: for an incoming direction there is only one outgoing
 direction (or two, for glass), so no hemisphere sampling is needed.
 
@@ -989,6 +993,60 @@ tracing). The glass dragon: −22% RMSE. `-photons x` changes the number of ligh
 (default: one per camera path). The viewer path traces caustics (light tracing would need
 its own progressive buffer); `-caustics pt -mis off -sampler random` reproduces the old images bit for bit.
 The GPU has the same light tracer (and, for real time, a photon cache): WEB.md 2.6.
+
+### 5.15 Physically based materials (PBR1, `core/brdf.h`)
+
+Every material is now one model, glTF 2.0's **metallic-roughness** with transmission
+(docs/PBR.md): a base colour, `metallic` (0 a dielectric like plastic or stone, 1 a metal),
+`roughness` (0 polished, 1 matte), an index of refraction and `transmission` (how much of
+the light a dielectric does not reflect goes through it, refracted). The old materials are
+presets of it: diffuse = a rough dielectric (roughness 1), mirror = a smooth metal of the
+mirror's colour, glass = a smooth clear dielectric. `-metal`, `-rough`, `-ior`,
+`-transmission` and `-base` change the model's material (USAGE.md).
+
+**The BSDF** has four lobes:
+
+- **Specular** reflection off microfacets: tiny mirrors whose normals `h` follow the GGX
+  distribution `D(h)` (width `α = roughness²`), partly hidden from the viewer and from the
+  light by each other (Smith's masking-shadowing `G2`, the height-correlated form), each
+  reflecting a Fresnel share `F(v·h)` (Schlick): `F0 = ((η − 1)/(η + 1))² = 0.04` for a
+  dielectric, the base colour for a metal:
+  $$f_s = rac{F\,D\,G_2}{4\,|n·v|\,|n·l|}$$
+- **Diffuse**: Lambert with the base colour, for the light the specular layer lets in and
+  out again: `(1 − Es(v)) (1 − Es(l)) / (1 − Es_avg)`, where `Es` is how much the specular
+  lobe reflects at that angle (tabulated, `core/brdf_tables.h`). glTF's reference writes
+  `1 − F(v·h)`, which at grazing angles returns up to 30% more light than arrives; this
+  form keeps exactly what arrives and is reciprocal.
+- **Transmission**: refraction through the microfacets (Walter et al. 2007), tinted by the
+  base colour. Roughness 0 is the old glass.
+- **Multiple scattering** (metals): light that bounces between microfacets before leaving is
+  missing from `f_s` (a white metal of roughness 1 keeps only 31% of the light seen straight
+  on). Kulla & Conty's lobe gives it back: a white rough metal keeps all of it.
+
+Roughness up to 0.02 is treated as perfectly smooth: the specular and transmission lobes
+are then a mirror reflection and a refraction (delta lobes, as 5.6).
+
+**Sampling.** A lobe is picked by about the light it reflects from this view. For the
+microfacet lobes, a normal `h` is drawn from the **visible normals** (those facing the
+viewer, weighted by how much of them it sees: Heitz 2018, in the spherical-cap form of
+Dupuy & Benyoub 2023), and `l` is `v` reflected or refracted about it; the diffuse and
+multiple-scattering lobes take a cosine-weighted direction. The density of the direction is
+that of all the lobes together, so the weight `f cos / pdf` stays small whichever lobe
+drew it (one-sample MIS between the lobes). Next event estimation evaluates the rough part
+of the BSDF at the lamp's direction and weighs itself against that density (5.5.1).
+
+**The partition for light tracing (5.14)** follows the lobes: a vertex where a delta lobe
+was taken is an S vertex, any other a D vertex. Light paths start with an S, connect the
+rough part of the BSDF to the camera, and keep bouncing by sampling the BSDF from the
+light's side (through glass weighted by `(η_from/η_to)²`, the adjoint of the radiance's).
+
+**Checked** by `bin/test_brdf` (make test): reciprocity (reflection `f(v,l) = f(l,v)`,
+refraction `f(v,l)/η_l² = f(l,v)/η_v²`); sampling against evaluation (the mean weight of
+the samples equals the integral of `f |cos|` by quadrature, and the density integrates to
+the share of samples it gives, for eight materials at three angles); the white furnace
+(white materials keep 99.9-100% of the light at every angle, rough glass 92-99.9%: its
+light bouncing between microfacets is not given back). Images with light tracing and
+without agree to 0.1 of 255.
 
 ---
 

@@ -2854,7 +2854,7 @@ static int upload_world(GpuTrace *t, const Scene *s){
     t->cell = (float)(e / 256.0);
     if (!(t->cell > 0) || t->cell > 1e20f) t->cell = 1.0f;
     t->specular = 0;
-    for (int m = 0; m < s->nmats; m++) if (s->mats[m].type == MAT_MIRROR || s->mats[m].type == MAT_GLASS) t->specular = 1;
+    for (int m = 0; m < s->nmats; m++) if (material_kind(&s->mats[m]) == MAT_MIRROR || material_kind(&s->mats[m]) == MAT_GLASS) t->specular = 1;
     t->valid = 1;
     return 1;
 }
@@ -2981,7 +2981,7 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
     P.ins[2] = t->tlas_node0;
     P.ins[3] = t->world_node0;
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
-        put(P.mats[m], s->mats[m].albedo, (float)s->mats[m].type);
+        put(P.mats[m], s->mats[m].albedo, (float)material_kind(&s->mats[m]));   // (the presets until PBR2)
         put(P.mats[m] + 4, s->mats[m].emission, (float)s->mats[m].ior);
     }
     *Pp = P;

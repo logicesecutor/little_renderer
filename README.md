@@ -31,7 +31,7 @@ library behind one header (`lr.h`), with no third-party code in the engine.
 
 | | |
 |---|---|
-| **Path tracer** | Next event estimation with multiple importance sampling, mirror and glass, caustics traced from the lamp, Owen-scrambled Sobol with blue noise, volumetric clouds and fog (delta and ratio tracking), SAH BVH (4-wide on the CPU), instanced meshes in a two-level tree |
+| **Path tracer** | Next event estimation with multiple importance sampling, physically based materials (glTF metallic-roughness: GGX microfacets with visible-normal sampling, rough glass, multiple-scattering compensation), caustics traced from the lamp, Owen-scrambled Sobol with blue noise, volumetric clouds and fog (delta and ratio tracking), SAH BVH (4-wide on the CPU), instanced meshes in a two-level tree |
 | **Rasterizer** | Edge functions, perspective-correct shading (flat, Gouraud, Phong, wireframe), multithreaded; clouds and fog raymarched over the frame |
 | **GPU (WebGPU)** | Every backend again in WGSL compute and render shaders: the rasterizer, the path tracer with an SVGF-style denoiser and temporal reprojection for real-time path tracing, light-traced caustics with a photon cache, a GPU BVH builder, the air and the cloud, the rigid bodies |
 | **Physics** | Spheres, boxes, convex hulls and triangle meshes (separating axes, contacts found once per step with speculative margins, sequential impulses with warm starting, sleeping bodies, mass splitting on the GPU), the air as Stable Fluids on a MAC grid with a multigrid pressure solve, a MacCormack-advected cloud, explosions; bodies push the air and the air drags them |

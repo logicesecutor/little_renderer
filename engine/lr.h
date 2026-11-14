@@ -28,6 +28,7 @@
 #include "core/camera.h"
 #include "core/mesh.h"
 #include "core/scene.h"
+#include "core/brdf.h"
 #include "core/noise.h"
 #include "core/volume.h"
 

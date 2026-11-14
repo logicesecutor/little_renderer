@@ -9,11 +9,11 @@
 int main(void){
     static Scene s;   // a Scene must start zeroed (static, or memset to 0)
 
-    Material white  = {MAT_DIFFUSE, vec3(0.75, 0.75, 0.75), vec3(0, 0, 0), 1.0};
-    Material orange = {MAT_DIFFUSE, vec3(0.80, 0.45, 0.15), vec3(0, 0, 0), 1.0};
-    Material lamp   = {MAT_LIGHT,   vec3(0, 0, 0),          vec3(12, 12, 12), 1.0};
-    Material glass  = {MAT_GLASS,   vec3(1, 1, 1),          vec3(0, 0, 0), 1.5};
-    Material mirror = {MAT_MIRROR,  vec3(0.9, 0.9, 0.9),    vec3(0, 0, 0), 1.0};
+    Material white  = material_diffuse(vec3(0.75, 0.75, 0.75));
+    Material orange = material_diffuse(vec3(0.80, 0.45, 0.15));
+    Material lamp   = material_light(vec3(12, 12, 12));
+    Material glass  = material_glass(vec3(1, 1, 1), 1.5);
+    Material mirror = material_mirror(vec3(0.9, 0.9, 0.9));
     int m_white = scene_add_material(&s, white), m_orange = scene_add_material(&s, orange);
     int m_lamp = scene_add_material(&s, lamp), m_glass = scene_add_material(&s, glass);
     int m_mirror = scene_add_material(&s, mirror);

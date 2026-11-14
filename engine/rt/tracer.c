@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 
+#include "core/brdf.h"
 #include "core/volume.h"
 #include "rt/accel.h"
 #include "rt/medium.h"
@@ -37,20 +38,21 @@ static inline real light_pdf(const Primitive *light, real dist2, real cos_light)
     return dist2 / (cos_light * light->area);
 }
 
-// Next event estimation (direct light sampling) for a diffuse surface.
+// Next event estimation (direct light sampling) at a surface.
 // Pick one random point on the light, check it is visible, and return the light it sends
-// towards the hit point, already multiplied by the Lambert BRDF (albedo / pi) and cosines:
+// towards the viewer, already multiplied by the BSDF (core/brdf.h) and the cosines:
 //
-//   L_direct = (albedo / pi) * Le * cos(theta_surface) * cos(theta_light) * area / dist^2
+//   L_direct = f(v, wi) * Le * |cos(theta_surface)| * cos(theta_light) * area / dist^2
 //
 // The area / dist^2 * cos(theta_light) factor converts "pick a point with probability
 // 1 / area" into "probability per unit solid angle", as the rendering equation needs.
-// With MIS the result is weighted against the chance that the cosine-distributed bounce
-// (pdf cos(theta_surface) / pi) would have found the same point.
+// With MIS the result is weighted against the chance that the BSDF's sampling (bsdf_sample)
+// would have found the same point. Only the BSDF's rough part: a perfect mirror or
+// refraction cannot be aimed at a point.
 // (ua, ub: where on the lamp, in [0, 1)^2. The callers pass the pair's second number as ua:
 // the code before the sampler drew both inside one call's arguments, which gcc evaluates
-// last to first, and with the sampler off the images stay those of before, bit for bit.)
-static Vec3 sample_direct_light(const Scene *s, const Hit *h, Vec3 albedo, int mis, real ua, real ub, Rng *rng){
+// last to first.)
+static Vec3 sample_direct_light(const Scene *s, const Hit *h, Bsdf *b, Vec3 v, int mis, real ua, real ub, Rng *rng){
     const Primitive *light = &s->prims[s->light];
     Vec3 le = s->mats[light->material].emission;
 
@@ -62,16 +64,24 @@ static Vec3 sample_direct_light(const Scene *s, const Hit *h, Vec3 albedo, int m
 
     real cos_surf = v_dot(h->n, wi);
     real cos_light = -v_dot(light->normal, wi);   // the light only emits on its normal side
-    if (cos_surf <= 0 || cos_light <= 0) return vec3(0, 0, 0);
+    if (cos_light <= 0) return vec3(0, 0, 0);
+    real pdf;
+    Vec3 f = bsdf_eval(b, h->n, v, wi, &pdf);
+    if (!(v_max(f) > 0)) return vec3(0, 0, 0);
 
     // shadow ray: anything between the point and the light blocks it
     Ray shadow = {h->p, wi};
     if (scene_occluded(s, &shadow, RT_EPS, dist - RT_SHADOW_MARGIN)) return vec3(0, 0, 0);
 
-    real g = cos_surf * cos_light * light->area / dist2;
+    real g = r_fabs(cos_surf) * cos_light * light->area / dist2;
     if (s->nvolumes) g *= scene_medium_transmittance(s, &shadow, 0, dist, rng);   // a cloud in the way
-    if (mis) g *= power_heuristic(light_pdf(light, dist2, cos_light), cos_surf / PI);
-    return v_scale(v_mul(albedo, le), g / PI);
+    if (mis) g *= power_heuristic(light_pdf(light, dist2, cos_light), pdf);
+    return v_scale(v_mul(f, le), g);
+}
+
+// the BSDF has a part next event estimation can find (not only perfect mirror / refraction)
+static inline int bsdf_rough_part(const Bsdf *b){
+    return !b->smooth || (1 - b->metallic) * (1 - b->transmission) > 0;
 }
 
 // The same for a point p inside a medium, reached by a ray travelling along d. There is no
@@ -104,21 +114,18 @@ static Vec3 sample_light_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int m
     return v_scale(le, w);
 }
 
-// Schlick's approximation of the Fresnel reflectance
-static real schlick(real cos_i, real eta){
-    real r0 = (1.0 - eta) / (1.0 + eta);
-    r0 = r0 * r0;
-    return r0 + (1.0 - r0) * r_pow(1.0 - cos_i, 5.0);
-}
-
 // Russian roulette: after a few bounces, stop dim paths at random and boost the survivors
 // by 1/p. On average the result is unchanged (unbiased) but much cheaper. Returns 0 to stop.
-static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
+// u: the number that decides (SAMPLE_MISC's first).
+static int russian_roulette_u(Vec3 *throughput, int depth, real u){
     if (depth < RR_START) return 1;
     real p = r_fmin(v_max(*throughput), 0.95);
-    if (sampler_1d(sm, SAMPLE_MISC(depth), 0) >= p) return 0;
+    if (u >= p) return 0;
     *throughput = v_scale(*throughput, 1.0 / p);
     return 1;
+}
+static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
+    return depth < RR_START || russian_roulette_u(throughput, depth, sampler_1d(sm, SAMPLE_MISC(depth), 0));
 }
 
 TraceParams trace_default_params(void){
@@ -134,9 +141,9 @@ Vec3 trace_path(const Scene *s, Ray ray, Rng *rng, int max_depth){
 
 // What a lamp hit means after the previous vertex:
 enum {
-    EMIT_FULL,   // camera rays, mirror and glass bounces: nothing else could find the lamp
-    EMIT_NONE,   // after a diffuse / medium bounce without MIS: already counted by NEE
-    EMIT_MIS     // after a diffuse / medium bounce with MIS: weight against NEE
+    EMIT_FULL,   // camera rays, perfect mirror and refraction bounces: nothing else could find the lamp
+    EMIT_NONE,   // after a rough / medium bounce without MIS: already counted by NEE
+    EMIT_MIS     // after a rough / medium bounce with MIS: weight against NEE
 };
 
 Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
@@ -215,51 +222,38 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         }
         if (depth >= max_depth) break;
 
-        Vec3 d = v_norm(ray.d);
-        Vec3 next;
-
-        switch (m->type){
-        case MAT_DIFFUSE:
-            // 1. light arriving straight from the lamp
-            real la, lb, da, db;
+        // the surface's BSDF (core/brdf.h), seen from v (back along the ray)
+        Vec3 v = v_neg(v_norm(ray.d));
+        Bsdf b = bsdf_make(m, h.front_face);
+        // 1. light arriving straight from the lamp (the BSDF's rough part)
+        if (bsdf_rough_part(&b)){
+            real la, lb;
             sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
-            radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, m->albedo, mis, lb, la, rng)));
-            // 2. continue the path in a cosine-distributed direction. With pdf = cos/pi and
-            //    BRDF = albedo/pi, the weight  BRDF * cos / pdf  is simply the albedo.
-            sampler_2d(sm, SAMPLE_DIR(depth), &da, &db);
-            next = sample_cosine_hemisphere_u(h.n, da, db);
-            bounce_pdf = v_dot(h.n, next) / PI;
-            throughput = v_mul(throughput, m->albedo);
+            radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, &b, v, mis, lb, la, rng)));
+        }
+        // 2. continue the path in a direction drawn from the BSDF: its weight f cos / pdf.
+        //    (The numbers only when they are used: SAMPLE_MISC's pair for Russian roulette
+        //    and the lobe, SAMPLE_DIR's for a direction that is not fixed.)
+        bsdf_view(&b, v_dot(v, h.n));
+        real ur = 0, ul = 0, da = 0, db = 0;
+        if (depth >= RR_START || bsdf_nlobes(&b) > 1) sampler_2d(sm, SAMPLE_MISC(depth), &ur, &ul);
+        int lobe = bsdf_pick(&b, ul);
+        if (lobe >= 0 && !bsdf_lobe_delta(&b, lobe)) sampler_2d(sm, SAMPLE_DIR(depth), &da, &db);
+        BsdfSample bs;
+        if (!bsdf_sample_lobe(&b, lobe, h.n, v, da, db, &bs)) break;
+        Vec3 next = bs.l;
+        throughput = v_mul(throughput, bs.w);
+        if (bs.delta){                        // a perfect mirror or refraction
+            emit = EMIT_FULL;
+            caustic_spec = 1;
+        } else {
+            bounce_pdf = bs.pdf;
             emit = mis ? EMIT_MIS : EMIT_NONE;
             if (depth == 0) caustic_chain = tp->skip_caustics;
             caustic_spec = 0;
-            break;
-
-        case MAT_MIRROR:
-            next = v_reflect(d, h.n);
-            throughput = v_mul(throughput, m->albedo);
-            emit = EMIT_FULL;
-            caustic_spec = 1;
-            break;
-
-        case MAT_GLASS: {
-            real eta = h.front_face ? 1.0 / m->ior : m->ior;     // entering or leaving the glass
-            real cos_i = r_fmin(v_dot(v_neg(d), h.n), 1.0);
-            real sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
-            // total internal reflection, or reflect with probability = Fresnel reflectance
-            if (sin_t2 > 1.0 || sampler_1d(sm, SAMPLE_MISC(depth), 1) < schlick(cos_i, eta)) next = v_reflect(d, h.n);
-            else next = v_refract(d, h.n, eta);
-            throughput = v_mul(throughput, m->albedo);
-            emit = EMIT_FULL;
-            caustic_spec = 1;
-            break;
         }
 
-        default:
-            next = d;   // not reached
-        }
-
-        if (!russian_roulette(&throughput, depth, sm)) break;
+        if (!russian_roulette_u(&throughput, depth, ur)) break;
 
         ray.o = h.p;
         ray.d = (media || mis) ? v_norm(next) : next;
@@ -304,7 +298,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
 
 static int scene_has_specular(const Scene *s){
     for (int i = 0; i < s->nmats; i++)
-        if (s->mats[i].type == MAT_MIRROR || s->mats[i].type == MAT_GLASS) return 1;
+        if (material_has_delta(&s->mats[i])) return 1;
     return 0;
 }
 
@@ -334,7 +328,6 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
             Ray ray = {xl, sample_cosine_hemisphere(light->normal, &rng)};
             Vec3 beta = v_scale(le, light->area * PI);       // Le cos / (pdf_area * pdf_dir)
             Vec3 thr = vec3(1, 1, 1);                         // for Russian roulette
-            int nspec = 0, ndiff = 0;
 
             for (int depth = 0; depth < tp->max_depth; depth++){
                 Hit hit;
@@ -347,25 +340,31 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                 const Material *m = &s->mats[hit_material(s, &hit)];
                 if (m->type == MAT_LIGHT) break;
 
-                if (m->type == MAT_DIFFUSE){
-                    if (nspec == 0 && ndiff == 0) break;      // lamp -> D: the path tracer's job (NEE)
-                    Vec3 wi = v_neg(ray.d);                   // towards where the light came from
-                    real cg = r_fabs(v_dot(hit.ng, wi)), cs = r_fabs(v_dot(hit.n, wi));
-                    real corr = cg > 0 ? cs / cg : 0;         // smooth normals (adjoint BSDF)
-                    // 1. connect to the camera
+                Bsdf b = bsdf_make(m, hit.front_face);
+                Vec3 wi = v_neg(ray.d);                   // towards where the light came from
+                real cg = r_fabs(v_dot(hit.ng, wi)), cs = r_fabs(v_dot(hit.n, wi));
+                real corr = cg > 0 ? cs / cg : 0;         // smooth normals (adjoint BSDF)
+                // 1. connect the BSDF's rough part to the camera (not at the first vertex:
+                //    lamp -> rough surface is the path tracer's, by NEE)
+                if (depth > 0 && bsdf_rough_part(&b)){
                     Vec3 to_cam = v_sub(cam->origin, hit.p);
                     real dist2 = v_dot(to_cam, to_cam), dist = r_sqrt(dist2);
                     Vec3 wo = v_scale(to_cam, 1.0 / dist);
-                    real cos_o = v_dot(hit.ng, wo);           // the camera must see the lit side
+                    real cos_o = v_dot(hit.ng, wo);           // > 0: the camera on the light's side
+                    // the BSDF seen from the camera (v = wo, l = wi): its side's normal and index
+                    Bsdf bc = cos_o > 0 ? b : bsdf_make(m, !hit.front_face);
+                    Vec3 nc = cos_o > 0 ? hit.n : v_neg(hit.n);
+                    real pdf;
+                    Vec3 f = cos_o != 0 && v_dot(nc, wo) > 0 ? bsdf_eval(&bc, nc, wo, wi, &pdf) : vec3(0, 0, 0);
                     real sx, sy, cos_c;
-                    if (cos_o > 0 && camera_project(cam, hit.p, &sx, &sy, &cos_c) &&
+                    if (v_max(f) > 0 && camera_project(cam, hit.p, &sx, &sy, &cos_c) &&
                         sx >= 0 && sy >= 0 && sx < 1 && sy < 1){
                         int px = (int)(sx * w), py = (int)(sy * h);
                         Ray sh = {hit.p, wo};
                         if (px < w && py < h && !scene_occluded(s, &sh, RT_EPS, dist * (1.0 - 1e-4))){
                             real tr = media ? scene_medium_transmittance(s, &sh, 0, dist, &rng) : 1;
-                            real wgt = corr * cos_o * tr / ((real)PI * dist2 * pix_area * cos_c * cos_c * cos_c);
-                            Vec3 c = v_scale(v_mul(beta, m->albedo), wgt);
+                            real wgt = corr * r_fabs(cos_o) * tr / (dist2 * pix_area * cos_c * cos_c * cos_c);
+                            Vec3 c = v_scale(v_mul(beta, f), wgt);
                             double cc[3] = {c.x * scale, c.y * scale, c.z * scale};
                             size_t idx = ((size_t)py * w + px) * 3;
                             for (int ch = 0; ch < 3; ch++){
@@ -378,46 +377,30 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                             }
                         }
                     }
-                    // 2. keep bouncing (cosine-distributed around the shading normal): the
-                    //    following diffuse vertices are connected to the camera as well.
-                    //    Weight = albedo * |wi.ns| / |wi.ng| * |wo.ng| / |wo.ns|.
-                    Vec3 nd = sample_cosine_hemisphere(hit.n, &rng);
-                    real og = v_dot(hit.ng, nd), os = v_dot(hit.n, nd);
-                    if (og <= 0 || os <= 0) break;            // (only with smooth normals)
-                    Vec3 f = v_scale(m->albedo, corr * og / os);
-                    beta = v_mul(beta, f);
-                    thr = v_mul(thr, f);
-                    if (depth >= RR_START){
-                        real p = r_fmin(v_max(thr), 0.95);
-                        if (rng_real(&rng) >= p) break;
-                        beta = v_scale(beta, 1.0 / p);
-                        thr = v_scale(thr, 1.0 / p);
-                    }
-                    ray.o = hit.p;
-                    ray.d = nd;
-                    ndiff++;
-                    continue;
                 }
-                // mirror or glass: exactly as in the path tracer
-                Vec3 d = ray.d, next;
-                if (m->type == MAT_MIRROR){
-                    next = v_reflect(d, hit.n);
-                } else {
-                    real eta = hit.front_face ? 1.0 / m->ior : m->ior;
-                    real cos_i = r_fmin(v_dot(v_neg(d), hit.n), 1.0);
-                    real sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
-                    if (sin_t2 > 1.0 || rng_real(&rng) < schlick(cos_i, eta)) next = v_reflect(d, hit.n);
-                    else next = v_refract(d, hit.n, eta);
-                }
-                beta = v_mul(beta, m->albedo);
-                thr = v_mul(thr, m->albedo);
-                nspec++;
+                // 2. keep bouncing, in a direction drawn from the BSDF (seen from the light's
+                //    side): the following rough vertices are connected to the camera as well.
+                //    Rough lobes: weight * |wi.ns| / |wi.ng| * |wo.ng| / |wo.ns| (smooth
+                //    normals); through the surface: * (eta_from / eta_to)^2, the adjoint of the
+                //    radiance's (eta_to / eta_from)^2.
+                BsdfSample bs;
+                real ul = rng_real(&rng), u1 = rng_real(&rng), u2 = rng_real(&rng);
+                if (!bsdf_sample(&b, hit.n, wi, ul, u1, u2, &bs)) break;
+                if (depth == 0 && !bs.delta) break;           // lamp -> rough: the path tracer's
+                real og = v_dot(hit.ng, bs.l), os = v_dot(hit.n, bs.l);
+                if (!bs.delta && (bs.through ? og >= 0 : og <= 0)) break;   // (only with smooth normals)
+                Vec3 f = bs.w;
+                if (!bs.delta) f = v_scale(f, os != 0 ? corr * r_fabs(og / os) : 0);
+                if (bs.through) f = v_scale(f, b.eta * b.eta);
+                beta = v_mul(beta, f);
+                thr = v_mul(thr, f);
                 if (depth >= RR_START){
                     real p = r_fmin(v_max(thr), 0.95);
                     if (rng_real(&rng) >= p) break;
                     beta = v_scale(beta, 1.0 / p);
                     thr = v_scale(thr, 1.0 / p);
                 }
+                Vec3 next = bs.l;
                 ray.o = hit.p;
                 ray.d = v_norm(next);
             }

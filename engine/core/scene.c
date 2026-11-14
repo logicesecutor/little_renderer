@@ -148,16 +148,26 @@ int scene_load_mesh(Scene *s, const char *path, int material, real size, Vec3 ba
     return n;
 }
 
-static Material diffuse(real r, real g, real b){
-    Material m = {MAT_DIFFUSE, vec3(r, g, b), vec3(0, 0, 0), 1.0};
-    return m;
-}
+static Material diffuse(real r, real g, real b){ return material_diffuse(vec3(r, g, b)); }
 
 // rotate around the vertical (y) axis
 static Material mesh_material(MatType t){
-    if (t == MAT_MIRROR) return (Material){MAT_MIRROR, vec3(0.95, 0.95, 0.95), vec3(0, 0, 0), 1.0};
-    if (t == MAT_GLASS) return (Material){MAT_GLASS, vec3(1, 1, 1), vec3(0, 0, 0), 1.5};
+    if (t == MAT_MIRROR) return material_mirror(vec3(0.95, 0.95, 0.95));
+    if (t == MAT_GLASS) return material_glass(vec3(1, 1, 1), 1.5);
     return diffuse(0.80, 0.55, 0.25);                       // warm orange
+}
+
+Material scene_mesh_material(const SceneOptions *opt){
+    Material m = mesh_material(opt->mesh_mat);
+    if (!opt->mesh_set) return m;
+    m = material_resolved(&m);
+    m.type = MAT_PBR;
+    if (opt->mesh_set & MESH_SET_BASE) m.albedo = opt->mesh_base;
+    if (opt->mesh_set & MESH_SET_METAL) m.metallic = opt->mesh_metal;
+    if (opt->mesh_set & MESH_SET_ROUGH) m.roughness = opt->mesh_rough;
+    if (opt->mesh_set & MESH_SET_IOR) m.ior = opt->mesh_ior;
+    if (opt->mesh_set & MESH_SET_TRANS) m.transmission = opt->mesh_trans;
+    return m;
 }
 
 static Vec3 rotate_y(Vec3 p, real deg){
@@ -187,8 +197,7 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
     int red   = scene_add_material(s, diffuse(0.65, 0.05, 0.05));
     int white = scene_add_material(s, diffuse(0.73, 0.73, 0.73));
     int green = scene_add_material(s, diffuse(0.12, 0.45, 0.15));
-    Material lm = {MAT_LIGHT, vec3(0, 0, 0), vec3(15, 15, 15), 1.0};
-    int light = scene_add_material(s, lm);
+    int light = scene_add_material(s, material_light(vec3(15, 15, 15)));
 
     scene_add_prim(s, make_quad(vec3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), red));     // left wall
     scene_add_prim(s, make_quad(vec3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), green));     // right wall
@@ -203,13 +212,13 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         add_box(s, vec3(165, 330, 165), 15.0, vec3(265, 0, 295), white);   // tall box, back left
         add_box(s, vec3(165, 165, 165), -18.0, vec3(130, 0, 65), white);   // short box, front right
     } else if (opt->kind == SCENE_SPHERES){
-        Material mirror = {MAT_MIRROR, vec3(0.95, 0.95, 0.95), vec3(0, 0, 0), 1.0};
-        Material glass  = {MAT_GLASS,  vec3(1, 1, 1),          vec3(0, 0, 0), 1.5};
+        Material mirror = material_mirror(vec3(0.95, 0.95, 0.95));
+        Material glass  = material_glass(vec3(1, 1, 1), 1.5);
         scene_add_prim(s, make_sphere(vec3(370, 100, 370), 100, scene_add_material(s, mirror)));
         scene_add_prim(s, make_sphere(vec3(185, 100, 170), 100, scene_add_material(s, glass)));
     } else if (opt->kind == SCENE_MESH && opt->instances <= 0){
         // largest side 330 units, standing on the floor in the middle of the box
-        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, mesh_material(opt->mesh_mat)), 330.0,
+        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, scene_mesh_material(opt)), 330.0,
                                 vec3(278, 0, 278), opt->rot_deg);
         if (n < 0){
             fprintf(stderr, "could not load %s\n", opt->obj_path);
@@ -246,7 +255,7 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         int sph = opt->kind == SCENE_SPHERES;
         real size = sph ? 180.0f : 330.0f;
         if (size > 520.0f / n) size = 520.0f / n;
-        int mesh = scene_load_mesh_object(s, opt->obj_path, scene_add_material(s, mesh_material(opt->mesh_mat)), size);
+        int mesh = scene_load_mesh_object(s, opt->obj_path, scene_add_material(s, scene_mesh_material(opt)), size);
         if (mesh < 0){
             fprintf(stderr, "could not load %s\n", opt->obj_path);
             return 1;

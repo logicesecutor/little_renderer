@@ -602,7 +602,7 @@ phys_init(&pw);
 rigid_set_room(&pw.rigid, room);
 pw.fluid = fluid_create(room, 555.0 / 40, cloud);     // 40^3 cells of air
 int ball = rigid_add_sphere(&pw.rigid, vec3(278, 500, 278), 40, 7.8);   // steel
-Material steel = {MAT_MIRROR, vec3(0.95, 0.93, 0.9), vec3(0, 0, 0), 1};
+Material steel = material_mirror(vec3(0.95, 0.93, 0.9));
 phys_add_to_scene(&pw, ball, &scene, scene_add_material(&scene, steel));
 
 for (int f = 0; f < 30; f++){

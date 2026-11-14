@@ -107,7 +107,7 @@ int main(int argc, char **argv){
                                   {0.35, 0.75, 0.40}, {0.90, 0.85, 0.30}, {0.70, 0.45, 0.80}};
     int ncolors = 0, mats[6];
     for (int k = 0; k < 6; k++){
-        Material m = {MAT_DIFFUSE, colors[k], vec3(0, 0, 0), 1};
+        Material m = material_diffuse(colors[k]);
         int id = scene_add_material(&scene, m);
         if (id >= 0) mats[ncolors++] = id;
     }

@@ -89,6 +89,9 @@ void options_usage(Program prog, FILE *f){
         "                             showcase: a mirror dragon, a diffuse cube, a glass torus, a cloud\n"
         "  -obj file.obj|file.ply     model for -scene mesh (ASCII .ply)       (models/torus.obj)\n"
         "  -mat diffuse|mirror|glass  material of the model                    (diffuse)\n"
+        "  -base r,g,b                its base colour; and the glTF parameters (docs/PBR.md):\n"
+        "  -metal m, -rough r         metallic 0..1, roughness 0 (smooth) ..1\n"
+        "  -ior x, -transmission t    index of refraction, transmission 0..1 (glass 1)\n"
         "  -rot degrees               turn the model around the vertical axis  (0)\n"
         "  -instances n               n instances of the model (one mesh) in any scene (0)\n"
         "\n"
@@ -220,6 +223,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-o"))       o->out = v;
         else if (!strcmp(a, "-obj"))     o->scene.obj_path = v;
         else if (!strcmp(a, "-rot"))     o->scene.rot_deg = atof(v);
+        else if (!strcmp(a, "-base"))    { o->scene.mesh_base = parse_color(prog, v); o->scene.mesh_set |= MESH_SET_BASE; }
+        else if (!strcmp(a, "-metal"))   { o->scene.mesh_metal = atof(v); o->scene.mesh_set |= MESH_SET_METAL; }
+        else if (!strcmp(a, "-rough"))   { o->scene.mesh_rough = atof(v); o->scene.mesh_set |= MESH_SET_ROUGH; }
+        else if (!strcmp(a, "-ior"))     { o->scene.mesh_ior = atof(v); o->scene.mesh_set |= MESH_SET_IOR; }
+        else if (!strcmp(a, "-transmission")) { o->scene.mesh_trans = atof(v); o->scene.mesh_set |= MESH_SET_TRANS; }
         else if (!strcmp(a, "-cam"))     { o->cam = parse_vec3(prog, v); o->set_cam = 1; }
         else if (!strcmp(a, "-look"))    { o->look = parse_vec3(prog, v); o->set_look = 1; }
         else if (!strcmp(a, "-fov"))     { o->fov = atof(v); o->set_fov = 1; }
@@ -459,6 +467,12 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
         fprintf(f, " -obj %s", o->scene.obj_path);
         if (o->scene.mesh_mat != MAT_DIFFUSE) fprintf(f, " -mat %s", mats[o->scene.mesh_mat]);
+        const SceneOptions *so = &o->scene;
+        if (so->mesh_set & MESH_SET_BASE) fprintf(f, " -base %g,%g,%g", (double)so->mesh_base.x, (double)so->mesh_base.y, (double)so->mesh_base.z);
+        if (so->mesh_set & MESH_SET_METAL) fprintf(f, " -metal %g", (double)so->mesh_metal);
+        if (so->mesh_set & MESH_SET_ROUGH) fprintf(f, " -rough %g", (double)so->mesh_rough);
+        if (so->mesh_set & MESH_SET_IOR) fprintf(f, " -ior %g", (double)so->mesh_ior);
+        if (so->mesh_set & MESH_SET_TRANS) fprintf(f, " -transmission %g", (double)so->mesh_trans);
         if (o->scene.rot_deg != 0) fprintf(f, " -rot %g", (double)o->scene.rot_deg);
     }
     if (o->use_cloud || o->scene.kind == SCENE_CLOUD || o->scene.kind == SCENE_SHOWCASE){

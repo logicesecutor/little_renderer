@@ -12,7 +12,7 @@
 #define MAX_PHYS_DT (1.0 / 60.0)
 
 static int add_mat(Scene *s, MatType t, Vec3 albedo, real ior){
-    Material m = {t, albedo, vec3(0, 0, 0), ior};
+    Material m = t == MAT_GLASS ? material_glass(albedo, ior) : t == MAT_MIRROR ? material_mirror(albedo) : material_diffuse(albedo);
     return scene_add_material(s, m);
 }
 
@@ -165,9 +165,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
     // meshes: the model standing in the room (fixed, its triangles collide, the air flows
     // around it), and copies of it falling as convex hulls
     if ((so2->collider || so2->meshes > 0) && o->scene.obj_path){
-        Material mm = {o->scene.mesh_mat, o->scene.mesh_mat == MAT_DIFFUSE ? vec3(0.80, 0.55, 0.25) : vec3(0.95, 0.95, 0.95),
-                       vec3(0, 0, 0), o->scene.mesh_mat == MAT_GLASS ? 1.5f : 1.0f};
-        int mat = scene_add_material(s, mm);
+        int mat = scene_add_material(s, scene_mesh_material(&o->scene));
         if (so2->collider){
             int mesh = scene_load_mesh_object(s, o->scene.obj_path, mat, 260);
             int g = mesh >= 0 ? rigid_geom_mesh(&pw->rigid, s->meshes[mesh].tris, s->meshes[mesh].ntris) : -1;

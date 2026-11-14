@@ -74,7 +74,7 @@ static Vec3 ambient_estimate(const Scene *s, const Lamp *l){
         if (i == s->light || p->type != PRIM_QUAD) continue;
         const Material *m = &s->mats[p->material];
         if (m->type == MAT_LIGHT) continue;
-        Vec3 a = m->type == MAT_DIFFUSE ? m->albedo : v_scale(m->albedo, 0.5f);
+        Vec3 a = material_kind(m) == MAT_DIFFUSE ? m->albedo : v_scale(m->albedo, 0.5f);
         alb = v_add(alb, v_scale(a, p->area));
         area += p->area;
     }
