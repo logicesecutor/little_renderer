@@ -6,6 +6,7 @@
 
 #include "core/lrmath.h"
 #include "core/mesh.h"
+#include "core/texture.h"
 
 #define MAX_MATS 16
 #define MAX_VOLUMES 8
@@ -36,29 +37,37 @@ typedef struct {
     real roughness;     // MAT_PBR: 0 smooth (mirror, clear) .. 1 rough
     real transmission;  // MAT_PBR: 0 opaque .. 1 clear: how much of the light a dielectric
                         // does not reflect goes through (refracted) instead of diffusing
+    // textures (PBR5), each 1 + an index into Scene.texmaps (0 = none), as glTF's: the base
+    // colour (times albedo), metallic in blue and roughness in green (times metallic and
+    // roughness: they make a preset MAT_PBR), the normal map (tangent space, green up)
+    int tex_base, tex_mr, tex_normal;
+    real uv_scale;      // texture coordinates times this (0 = 1)
 } Material;
 
 // the presets, and a MAT_PBR material
 static inline Material material_diffuse(Vec3 color){
-    Material m = {MAT_DIFFUSE, color, {0, 0, 0}, 1.5, 0, 1, 0};
+    Material m = {.type = MAT_DIFFUSE, .albedo = color, .ior = 1.5, .roughness = 1};
     return m;
 }
 static inline Material material_mirror(Vec3 color){
-    Material m = {MAT_MIRROR, color, {0, 0, 0}, 1.5, 1, 0, 0};
+    Material m = {.type = MAT_MIRROR, .albedo = color, .ior = 1.5, .metallic = 1};
     return m;
 }
 static inline Material material_glass(Vec3 tint, real ior){
-    Material m = {MAT_GLASS, tint, {0, 0, 0}, ior, 0, 0, 1};
+    Material m = {.type = MAT_GLASS, .albedo = tint, .ior = ior, .transmission = 1};
     return m;
 }
 static inline Material material_light(Vec3 emission){
-    Material m = {MAT_LIGHT, {0, 0, 0}, emission, 1, 0, 1, 0};
+    Material m = {.type = MAT_LIGHT, .emission = emission, .ior = 1, .roughness = 1};
     return m;
 }
 static inline Material material_pbr(Vec3 base, real metallic, real roughness, real ior, real transmission){
-    Material m = {MAT_PBR, base, {0, 0, 0}, ior, metallic, roughness, transmission};
+    Material m = {.type = MAT_PBR, .albedo = base, .ior = ior, .metallic = metallic, .roughness = roughness,
+                  .transmission = transmission};
     return m;
 }
+// the material has textures
+static inline int material_textured(const Material *m){ return m->tex_base || m->tex_mr || m->tex_normal; }
 // the material with all its parameters: a preset's filled in (type stays)
 static inline Material material_resolved(const Material *m){
     Material r = *m;
@@ -114,6 +123,8 @@ typedef struct {
     Vec3 q, u, v;          // corners q, q + u, q + v (u, v = the two edges leaving q)
     int n[3];              // vertex normals: indices into Scene.normals, or -1 (flat)
     int material;
+    int t[3];              // texture coordinates (and their tangents): indices into
+                           // Scene.uvs / .tangents, or -1 (none)
 } Triangle;
 
 Primitive make_sphere(Vec3 center, real radius, int material);
@@ -158,6 +169,7 @@ Aabb xform_box(const Xform *x, Aabb b);   // the world box around a transformed 
 typedef struct {
     Triangle *tris; int ntris;      // object space; Triangle.n indexes this mesh's normals
     Vec3 *normals; int nnormals;
+    Vec2 *uvs; Vec4 *tangents; int nuvs;   // ... and Triangle.t its texture coordinates
     Aabb box;                       // object-space bounds
     int dynamic;                    // its triangles change: bump version after changing them
     unsigned version;
@@ -180,8 +192,9 @@ typedef struct {
 } Instance;
 
 // SCENE_EMPTY: just the room and the lamp (e.g. for a physics simulation to fill)
-// SCENE_SKY: no room and no lamp: a wide floor with five spheres (mirror, gold, glass, blue
-// plastic, white) under the sky (SceneOptions.sky, a procedural one if none)
+// SCENE_SKY: no room and no lamp: a wide floor (brick paving: textures) with five spheres
+// (mirror, gold, glass, blue plastic, white) under the sky (SceneOptions.sky, a procedural
+// one if none)
 // SCENE_SHOWCASE: one model of each material, a mirror dragon, a diffuse cube and a glass
 // torus (models/), under a cloud (cloud_default_params() unless SceneOptions.cloud)
 typedef enum { SCENE_BOXES, SCENE_SPHERES, SCENE_MESH, SCENE_CLOUD, SCENE_EMPTY, SCENE_SHOWCASE, SCENE_SKY } SceneKind;
@@ -208,6 +221,10 @@ typedef struct {
     // > 0: also this many instances of obj_path (one mesh, mesh_mat), in a row on the floor
     // (any scene; SCENE_MESH then puts its model in as an instance too)
     int instances;
+    // the model's textures (scene_texture's names: a .png file, or a procedural one; "bricks"
+    // as mesh_tex also takes the bricks' normal and metal-roughness maps) and their scale
+    const char *mesh_tex, *mesh_mr, *mesh_normal;
+    real mesh_uv_scale;
     // the sky (any scene; the room's open front lets it in): a Radiance .hdr file, or
     // "procedural"; NULL = none (black), except SCENE_SKY (procedural). sky_scale multiplies
     // it (0 = 1), sky_rot turns it about the vertical axis (degrees)
@@ -225,9 +242,15 @@ typedef struct Scene {
     Material mats[MAX_MATS];
     int nmats;
     int light;              // index of the one quad light (-1: none)
+    // textures (PBR5): the materials' (Material.tex_*); the world triangles' texture
+    // coordinates (Triangle.t), each with a tangent: xyz along +u, w = +-1 the side of the
+    // bitangent w (n x t), which points up the image (towards -v)
+    TexMap *texmaps; int ntexmaps, cap_texmaps;
+    Vec2 *uvs; Vec4 *tangents; int nuvs, cap_uvs;
     // The environment (core/env.h), owned by the scene (scene_free frees them):
     struct Env *env;        // the sky, at infinity: what a ray leaving the scene sees (NULL: black)
     struct Env *probe;      // the rasterizers' light probe of the room (rt/probe.h), NULL if none
+    struct IrrGrid *irr;    // ... and their irradiance grid (its diffuse light), NULL if none
     // where that probe is made (scene_cornell_box sets it: the room's centre and its box; in
     // the open scene above the spheres, its "box" the floor and the sky far away)
     int probe_set;
@@ -262,7 +285,10 @@ enum { MESH_SET_BASE = 1, MESH_SET_METAL = 2, MESH_SET_ROUGH = 4, MESH_SET_IOR =
 // fills s (which must start zeroed); returns 0 on success
 int scene_cornell_box(Scene *s, const SceneOptions *opt);
 // the models' material: the preset opt->mesh_mat (diffuse: warm orange), changed as opt says
+// (its textures are not loaded: scene_mesh_material_tex does that too)
 Material scene_mesh_material(const SceneOptions *opt);
+// the same with its textures (opt->mesh_tex, mesh_mr, mesh_normal) loaded into s
+Material scene_mesh_material_tex(Scene *s, const SceneOptions *opt);
 int scene_add_prim(Scene *s, Primitive p);          // returns the new primitive's index
 int scene_add_material(Scene *s, Material m);       // returns the new material's index
 // corners a, b, c counter-clockwise seen from outside; normals = 3 vertex normals or NULL.
@@ -303,6 +329,29 @@ static inline int scene_shape_material(const Scene *s, int id){
     return id < s->nprims ? s->prims[id].material : s->tris[id - s->nprims].material;
 }
 Aabb scene_shape_bounds(const Scene *s, int id);
+// A texture by name, loaded (or made) once: a .png file, else a procedural one
+// (texmap_procedural); srgb for colour. Returns 1 + its index (for Material.tex_*), 0 if it
+// cannot be had.
+int scene_texture(Scene *s, const char *name, int srgb);
+// The material at texture coordinates uv (Material.uv_scale applied here): its textures
+// applied, as a MAT_PBR (or MAT_LIGHT) material without textures. uv_lod: log2 of the
+// footprint in texture coordinates (material_uv_lod; MATERIAL_LOD0: no filtering, level 0)
+// - each texture reads the mip level of that footprint in its own texels
+Material material_at(const Scene *s, const Material *m, Vec2 uv, real uv_lod);
+// the normal n bent by the material's normal map at uv (tangent t: xyz, w its handedness)
+Vec3 material_normal(const Scene *s, const Material *m, Vec2 uv, real uv_lod, Vec3 n, Vec4 t);
+#define MATERIAL_LOD0 (-1000.0f)
+// the footprint's log2 for a pixel whose texture coordinates change by (dudx, dvdx) and
+// (dudy, dvdy) to the next ones (the longer side)
+static inline real material_uv_lod(real dudx, real dvdx, real dudy, real dvdy){
+    real m = r_fmax(dudx * dudx + dvdx * dvdx, dudy * dudy + dvdy * dvdy);
+    return m > 0 ? 0.5f * r_log2(m) : MATERIAL_LOD0;
+}
+// the tangents of triangles' texture coordinates: for each uv index, the sum over the
+// triangles using it of their dP/du (and the handedness from dP/dv), orthonormalised to
+// nothing yet (the normal is the shading point's): tangents[base .. base + n)
+void scene_compute_tangents(const Triangle *tris, int ntris, const Vec2 *uvs, Vec4 *tangents, int base, int n);
+
 // adds a medium and takes ownership of it; returns its index, or -1 if there are already
 // MAX_VOLUMES (then v is freed)
 int scene_add_volume(Scene *s, struct Volume *v);

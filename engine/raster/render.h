@@ -65,6 +65,13 @@ int render_prim_tri_count(const Primitive *p);
 // normals (*has_n = 0 when it has none: use the face normal) and the point where flat
 // shading is evaluated (a quad's center, so that both halves get one color).
 void render_prim_triangle(const Primitive *p, int sub, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at);
+// its corners' texture coordinates and tangents (PBR5; as rt/intersect.c's hit_texcoords:
+// a sphere's longitude and latitude, unwrapped across the seam so they interpolate; a
+// quad's (a, b))
+void render_prim_texcoords(const Primitive *p, int sub, Vec2 *uv, Vec4 *tg);
+// a mesh triangle's (no texture coordinates: its barycentrics' corners), the tangents
+// turned by xf if not NULL (an instance's)
+void render_tri_texcoords(const Triangle *t, const Vec2 *uvs, const Vec4 *tangents, int nuvs, const Xform *xf, Vec2 *uv, Vec4 *tg);
 // the point light standing in for the scene's lamp
 Vec3 render_scene_light(const Scene *s);
 // The lamp as the rasterizers light with it (PBR3): the quad q + a u + b v (a, b in 0..1),
@@ -76,6 +83,7 @@ Vec3 render_scene_light(const Scene *s);
 typedef struct {
     int on; Vec3 q, u, v, n, w, center, le; real area, ambient, fill;
     const struct Env *env;
+    const struct IrrGrid *irr;   // with the probe: its irradiance grid (the diffuse light), or NULL
 } RenderLamp;
 RenderLamp render_scene_lamp(const Scene *s);
 // The radiance point p (normal n, turned to the eye) sends to the eye: the material's BSDF

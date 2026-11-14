@@ -94,7 +94,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today). **Done** (below) |
 | PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights. **Done** (below) |
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized. **Done** (below) |
-| PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four |
+| PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four. **Done** (below) |
 | PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers |
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
@@ -228,6 +228,71 @@ Decided on the way:
 - **No split-sum table of our own**: the BSDF's tables (`BRDF_E`, `BRDF_B`, the directional
   albedo and its Fresnel-free part) are that table.
 
+### PBR5, done (2026-11-15)
+
+- `core/texture.{c,h}`: `TexMap`, an RGBA8 image with its mip levels (2 x 2 averages, in
+  linear light for colour: a black and white checker averages to half the light, sRGB 188),
+  read from PNG files or made here (`checker`, `bricks` with its `bricks_normal` and
+  `bricks_mr`, `plate_mr`); bilinear and trilinear lookups, repeating, and the level for a
+  pixel's footprint. Texture coordinates as glTF's: v down the image (OBJ's turned over at
+  load).
+- Materials take glTF's three textures: base colour (times the factor), metallic and
+  roughness (blue and green, times the factors) and a normal map (tangent space, green up
+  the image), and `uv_scale`. `material_at` and `material_normal` (core/scene.h) are the one
+  place that reads them; every pipeline calls them (the GPU's copy is WGSL).
+- Meshes keep their `vt` and get a tangent per texture coordinate, from the triangles'
+  texture directions (MikkTSpace's idea: summed per vertex, the handedness from dP/dv, so
+  mirrored coordinates work); spheres, quads and the boxes' faces have their own (a sphere
+  by longitude and latitude). Instances turn their tangents with their transforms.
+- The CPU rasterizer interpolates the coordinates and the tangent, and works out how they
+  change to the next pixel exactly (from the barycentrics' gradients): trilinear filtering
+  at the right level. Phong reads the textures per pixel, Gouraud and flat per vertex.
+- The path tracers (CPU, GPU single kernel and wavefront, light tracing) read level 0
+  bilinearly (no ray differentials yet: at a distance the noise averages the texels).
+- On the GPU every texture's levels go into one RGBA8 atlas (rectangles packed in rows,
+  wrapping inside each, filtered by hand as the C does) with a table of where they are,
+  bound the same way in the rasterizer and the path tracer.
+- `-tex`, `-mrmap`, `-normalmap`, `-uvscale` texture the model; the open scene's floor is
+  brick paving.
+- **The irradiance grid.** One probe gave the whole room its light: a ceiling far from the
+  lamp's bright floor got the same as one close to it, and the mesh scene's probe ended up
+  inside the model. Now each scene with a probe gets a grid too (`IrrGrid`, core/env.h):
+  5 x 5 x 5 probes over the room (5 x 3 x 5 in the open), each 9 harmonics of the light
+  arriving there, path traced (2048 paths), blended trilinearly by the rasterizers for the
+  diffuse light. Probes inside something (a back face of a closed shape seen first, or no
+  ray escaping where the room's centre's do) are left out of the blend. The probe itself
+  (reflections) is placed at the most open of 27 points around where the scene asks. A
+  single path brighter than 4 (the lamp seen through glass) is clamped, but the sky seen
+  directly is not in the paths: it is sampled by its luminance on its own (a sun would
+  have been clamped away: the open floor came out at a third of its light).
+- A normal map can tilt a normal towards a lamp the surface itself faces away from; the
+  path tracer finds no light there, so the rasterizers take only the part of the lamp
+  above the surface's own plane (`lamp_hz`): bricks on the underside of a sphere no longer
+  show lit edges.
+- `bin/test_tex` (in `make test`): the mip chain (odd sides, the last level the image's
+  mean in linear light, sRGB averaging), bilinear exactness and wrapping, the level for a
+  footprint, the tangents and their handedness (mirrored too), a normal map bending the
+  normal up the image, the bricks' map leaning the right way, `material_at`'s factors and
+  `uv_scale`.
+- Checked: GPU against CPU rasterizer on textured models (sphere with bricks, checker cube,
+  a metal torus with `plate_mr`, Gouraud, the rooms, the open scene): a mean difference of
+  0.07-0.12 of 255. GPU, wavefront and CPU path tracing of textured models, instances
+  included: within 0.3%. The CPU rasterizer against the path tracer: the rooms within about
+  5%, the textured floor under the sky alike.
+- Cost: PERFORMANCE.md.
+
+Decided on the way:
+
+- **One atlas, not texture arrays.** An array's layers must all be one size, and the path
+  tracer has no binding to spare for one texture per map: one RGBA8 texture holds every
+  level of every map, and the shaders filter by hand. The rasterizer and the path tracer
+  read it the same way.
+- **The grid for the diffuse light, the probe for reflections.** Reflections need detail
+  (a map), the diffuse light needs where it is: a grid of 9 harmonics each is small and
+  fast to make, and the GPU blends it the same way.
+- **Filtering only where it pays**: trilinear in the rasterizers, level 0 in the path
+  tracers (many samples per pixel average it anyway).
+
 ## Open questions (decided during the phases)
 
 - The lamp in the rasterizer: representative point first; linearly transformed cosines if
@@ -236,7 +301,7 @@ Decided on the way:
   exact form factor for the diffuse: within about 10% of the path tracer.)
 - Multiple-scattering compensation: only if the furnace test shows the loss. (Decided in
   PBR1: it showed, compensated.)
-- Textures on the GPU: atlases or arrays.
+- Textures on the GPU: atlases or arrays. (Decided in PBR5: one RGBA8 atlas, below.)
 - Test files (Khronos samples, HDR skies) come from outside: downloaded only with the user's
   permission, as usual.
 

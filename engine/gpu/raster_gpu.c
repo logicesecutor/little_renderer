@@ -27,6 +27,7 @@ static const char *SHADER = WGSL(
 struct RMat {
     base: vec4f,     /* base colour (a lamp's: its colour at full brightness); w = 1: drawn as it is */
     pbr: vec4f,      /* metallic, roughness, index of refraction, transmission (material_resolved) */
+    tex: vec4u,      /* its textures, 1 + index (0 none): base, metal-roughness, normal; w: the scale's bits */
 };
 /* the lamp (RenderLamp): the quad q + a u + b v, the side it shines to, w = (u x v) / |u x v|^2 */
 struct RLamp {
@@ -57,6 +58,9 @@ struct RU {
     cam_u: vec4f,    /* up (w: 1 / its y scale), */
     cam_b: vec4f,    /* back */
     vps: vec4f,      /* the viewport's width and height */
+    irrn: vec4u,     /* the irradiance grid (IrrGrid, in IG): its probes along x, y, z; w = 1: there is one */
+    irrlo: vec4f,
+    irrhi: vec4f,
     mats: array<RMat, 16>,
 };
 @group(0) @binding(0) var<uniform> U: RU;
@@ -72,6 +76,15 @@ struct RT { t: array<vec4f, 528> };
 fn bsdf_tab(k: u32) -> f32 { return TB.t[k >> 2u][k & 3u]; }
 @group(0) @binding(5) var<storage, read> LV: array<vec4f>;
 @group(0) @binding(6) var<storage, read> BG: array<vec4f>;
+/* per vertex: texture coordinates, the tangent (octahedral; its handedness is vnrm's w) */
+@group(0) @binding(7) var<storage, read> vtex: array<vec4f>;
+/* the irradiance grid: per probe 7 vec4 (9 rgb harmonics, then valid) */
+@group(0) @binding(8) var<storage, read> IG: array<vec4f>;
+/* the textures (gpu/tex_gpu.c) */
+@group(0) @binding(9) var TEXA: texture_2d<f32>;
+struct TT { e: array<vec4u, 512> };
+@group(0) @binding(10) var<uniform> TXT: TT;
+fn tex_entry(k: u32) -> vec4u { return TXT.e[k]; }
 
 /* ---- the environment (core/env.c) ---- */
 fn env_uv(d: vec3f, c: f32, s: f32) -> vec2f {
@@ -122,6 +135,45 @@ fn env_irradiance(n0: vec3f) -> vec3f {
     for (var i = 0; i < 9; i++) { c += U.sh[i].rgb * y[i]; }
     return max(c, vec3f(0.0)) * U.envp.x;
 }
+/* core/env.c irr_grid_irradiance: blended from the 8 probes around p (the unused ones left
+   out); w = 0 when none is near */
+fn irr_grid(p: vec3f, n: vec3f) -> vec4f {
+    let nn = vec3i(U.irrn.xyz);
+    var x = (p - U.irrlo.xyz) / (U.irrhi.xyz - U.irrlo.xyz) * vec3f(nn) - vec3f(0.5);
+    x = clamp(x, vec3f(0.0), vec3f(nn - vec3i(1)));
+    let i0 = min(vec3i(x), max(nn - vec3i(2), vec3i(0)));
+    let f = x - vec3f(i0);
+    var y: array<f32, 9>;
+    y[0] = 0.282095;
+    y[1] = 0.488603 * n.y; y[2] = 0.488603 * n.z; y[3] = 0.488603 * n.x;
+    y[4] = 1.092548 * n.x * n.y; y[5] = 1.092548 * n.y * n.z; y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    y[7] = 1.092548 * n.x * n.z; y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+    var c = vec3f(0.0);
+    var ws = 0.0;
+    for (var corner = 0u; corner < 8u; corner++) {
+        let o = vec3i(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
+        let ii = i0 + o;
+        if (any(ii >= nn)) { continue; }
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1) * select(1.0 - f.z, f.z, o.z == 1);
+        let base = u32((ii.z * nn.y + ii.y) * nn.x + ii.x) * 7u;
+        if (!(IG[base + 6u].w > 0.0) || w <= 0.0) { continue; }
+        for (var i = 0u; i < 9u; i++) {
+            let k = 3u * i;
+            let q = vec3f(IG[base + k / 4u][k % 4u], IG[base + (k + 1u) / 4u][(k + 1u) % 4u], IG[base + (k + 2u) / 4u][(k + 2u) % 4u]);
+            c += w * q * y[i];
+        }
+        ws += w;
+    }
+    if (ws <= 1e-4) { return vec4f(0.0); }
+    return vec4f(max(c / ws, vec3f(0.0)), 1.0);
+}
+fn diffuse_light(p: vec3f, n: vec3f) -> vec3f {
+    if (U.irrn.w != 0u) {
+        let g = irr_grid(p, n);
+        if (g.w > 0.0) { return g.rgb; }
+    }
+    return env_irradiance(n);
+}
 fn env_box_dir(p: vec3f, d: vec3f) -> vec3f {
     if (U.envc.w < 0.5) { return d; }
     var t = 1e30;
@@ -155,6 +207,11 @@ fn to_world(k: u32, p: vec3f) -> vec3f {
     let q = vec4f(p, 1.0);
     return vec3f(dot(x.r0, q), dot(x.r1, q), dot(x.r2, q));
 }
+fn dir_to_world(k: u32, d: vec3f) -> vec3f {
+    let x = ix[k];
+    let q = vec4f(d, 0.0);
+    return normalize(vec3f(dot(x.r0, q), dot(x.r1, q), dot(x.r2, q)));
+}
 fn normal_to_world(k: u32, n: vec3f) -> vec3f {
     let x = ix[k];
     return normalize(n.x * x.i0.xyz + n.y * x.i1.xyz + n.z * x.i2.xyz);
@@ -167,6 +224,8 @@ struct VO {
     @location(1) n: vec3f,
     @location(2) light: vec3f,
     @location(3) @interpolate(flat) mat: u32,
+    @location(4) uv: vec2f,
+    @location(5) tg: vec4f,
 };
 
 /* render_shade (raster/render.c): the lamp's corner i (q, q + u, q + u + v, q + v) */
@@ -215,14 +274,28 @@ fn lamp_nearest(p: vec3f, r: vec3f) -> vec3f {
     let b = clamp(dot(U.lamp.w.xyz, cross(U.lamp.u.xyz, qx)), 0.0, 1.0);
     return q + U.lamp.u.xyz * a + U.lamp.v.xyz * b;
 }
-/* the radiance p (normal n0, turned to the eye), material mi, sends to the eye */
-fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
+/* the radiance p (normal n0, turned to the eye), material mi, sends to the eye; a textured
+   material at uv (tangent tg, footprint 2^uv_lod: render.c shade_textured) */
+fn scene_shade(mi: u32, p: vec3f, n0: vec3f, uv: vec2f, tg: vec4f, uv_lod: f32) -> vec3f {
     let m = U.mats[mi];
     let v = normalize(U.eye.xyz - p);
     var n = n0;
     if (dot(n, v) < 0.0) { n = -n; }
+    let ng = n;
+    var base = m.base.rgb;
+    var metallic = m.pbr.x;
+    var rough = m.pbr.y;
+    if (any(m.tex.xyz != vec3u(0u))) {
+        let tm = tex_material(m.tex, base, metallic, rough, uv, uv_lod);
+        base = tm.base; metallic = tm.metallic; rough = tm.rough;
+        if (m.tex.z != 0u) {
+            n = tex_normal(m.tex, uv, uv_lod, n, tg);
+            let c = dot(n, v);
+            if (c < 1e-3) { n = normalize(n + v * (1e-3 - c)); }
+        }
+    }
     let cv = max(dot(n, v), 1e-4);
-    var b = bsdf_make(m.base.rgb, m.pbr.x, m.pbr.y, m.pbr.z, m.pbr.w, true);
+    var b = bsdf_make(base, metallic, rough, m.pbr.z, m.pbr.w, true);
     var c: vec3f;
     if (U.envp.w > 0.5) {
         /* the environment, split-sum (render.c shade_env) */
@@ -231,7 +304,7 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
         let rr = reflect(-v, n);
         let sm = 1.0 - r;
         let rd = normalize(mix(n, rr, sm * (sqrt(sm) + r)));
-        c = ap.spec * env_level(env_box_dir(p, rd), r) + ap.diff * env_irradiance(n);
+        c = ap.spec * env_level(env_box_dir(p, rd), r) + ap.diff * diffuse_light(p, n);
         if ((1.0 - b.metallic) * b.transmission > 0.0) {
             c += ap.trans * env_level(env_box_dir(p, through_dir(v, n, b.eta)), r);
         }
@@ -241,6 +314,16 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
     let center = U.lamp.center.xyz;
     let ln = U.lamp.n.xyz;
     if (U.lamp.q.w < 0.5 || dot(p - center, ln) <= 0.0) { return c; }
+    /* a bent normal: only the share of the lamp above the surface's own plane (render.c lamp_hz) */
+    var hz = 1.0;
+    if (m.tex.z != 0u) {
+        let tc0 = center - p;
+        let d = length(tc0);
+        let s = max(sqrt(U.lamp.u.w / BSDF_PI) / d, 1e-3);
+        hz = clamp(0.5 + dot(ng, tc0) / (d * 2.0 * s), 0.0, 1.0);
+        if (hz <= 0.0) { return c; }
+    }
+    let base_c = c;
     let ff = lamp_form_factor(p, n);
     if (ff > 0.0) {
         let lc = normalize(center - p);
@@ -273,7 +356,7 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f) -> vec3f {
         let cl = dot(n, l);
         if (cl > 0.0) { spec += bsdf_spec_lobe(&b, n, v, l, b.alpha) * ((1.0 - w) * cl * om * lobe / (om + lobe)); }
     }
-    return c + spec * U.lamp.le.rgb;
+    return base_c + (c - base_c + spec * U.lamp.le.rgb) * hz;
 }
 /* WebGPU keeps z in 0..w: (z + w) / 2 is the same depth the CPU z-buffer stores */
 fn clip_of(p: vec3f) -> vec4f {
@@ -303,27 +386,38 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> VO {
     o.n = n;
     o.mat = mat_of(k, code);
     o.light = vec3f(0.0);
+    let tx = vtex[vi];
+    o.uv = tx.xy;
+    o.tg = vec4f(dir_to_world(k, oct_decode(tx.zw)), vnrm[vi].w);
     if (U.mats[o.mat].base.w > 0.5) { return o; }
     if (mode == 1u) {
         let flag = (code >> 4u) & 3u;
         var at = (p0 + p1 + p2) * (1.0 / 3.0);
         if (flag == 1u) { at = (p0 + p2) * 0.5; }
         if (flag == 2u) { at = (p0 + p1) * 0.5; }
-        o.light = scene_shade(o.mat, at, face_n);
+        let um = (vtex[t].xy + vtex[t + 1u].xy + vtex[t + 2u].xy) * (1.0 / 3.0);
+        let t0 = vec4f(dir_to_world(k, oct_decode(vtex[t].zw)), vnrm[t].w);
+        o.light = scene_shade(o.mat, at, face_n, um, t0, -1000.0);
     } else if (mode == 2u) {
-        o.light = scene_shade(o.mat, p, n);
+        o.light = scene_shade(o.mat, p, n, o.uv, o.tg, -1000.0);
     }
     return o;
 }
 
 @fragment
 fn fs(i: VO) -> @location(0) vec4f {
+    /* (derivatives first: they need every pixel of the quad still here) */
+    let dx = dpdxFine(i.uv);
+    let dy = dpdyFine(i.uv);
     let m = U.mats[i.mat];
     if (m.base.w > 0.5) { return vec4f(to_srgb(m.base.rgb), 1.0); }
     /* flat and gouraud: the vertex stage shaded */
     if (u32(U.eye.w) != 3u) { return vec4f(to_srgb(i.light), 1.0); }
-    /* phong: render_shade at every pixel */
-    return vec4f(to_srgb(scene_shade(i.mat, i.wp, normalize(i.n))), 1.0);
+    /* phong: render_shade at every pixel; a texture's level from how uv changes to the next
+       pixels (raster.c's derivatives) */
+    let mm = max(dot(dx, dx), dot(dy, dy));
+    let uv_lod = select(-1000.0, 0.5 * log2(mm), mm > 0.0);
+    return vec4f(to_srgb(scene_shade(i.mat, i.wp, normalize(i.n), i.uv, i.tg, uv_lod)), 1.0);
 }
 
 /* the sky where nothing was drawn: a triangle over the whole screen at the far depth (1),
@@ -372,13 +466,15 @@ typedef struct {
     float sky[4];
     uint32_t skyd[4];
     float cam_r[4], cam_u[4], cam_b[4], vps[4];
-    float mats[MAX_MATS][8];
+    uint32_t irrn[4];
+    float irrlo[4], irrhi[4];
+    float mats[MAX_MATS][12];          // base, pbr, tex (uint32 bits)
 } GRU;
 
 // one set of triangles on the GPU
 typedef struct {
-    WGPUBuffer pos, nrm;
-    size_t pos_cap, nrm_cap;
+    WGPUBuffer pos, nrm, tex;
+    size_t pos_cap, nrm_cap, tex_cap;
     WGPUBindGroup bg;
     uint32_t nverts;
 } Geo;
@@ -392,6 +488,10 @@ struct GpuRaster {
     WGPUBuffer lv, bg;                     // the environment's levels, the sky behind (core/env.h)
     size_t lv_cap, bg_cap;
     unsigned lv_id, bg_id;                 // the Env ids they hold (0: none)
+    WGPUBuffer ig, txt;                    // the irradiance grid; the textures' table (uniform)
+    size_t ig_cap;
+    unsigned ig_id;
+    GpuTextures gt;                        // the textures' atlas
     uint32_t lv_at[ENV_LEVELS];            // where each level starts in lv
     WGPUBindGroupLayout bgl;
     WGPURenderPipeline fill[2], wire, sky; // fill[1]: back faces culled
@@ -407,7 +507,7 @@ struct GpuRaster {
     const Triangle *mesh_tris;
     const Vec3 *mesh_normals;
     int mesh_ntris;
-    float *tmp_pos, *tmp_nrm;              // scratch for the uploads
+    float *tmp_pos, *tmp_nrm, *tmp_tex;    // scratch for the uploads
     size_t tmp_cap;                        // vertices
 };
 
@@ -493,10 +593,12 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     r->lv = gpu_buffer(g, "scene: no environment", 16, st);
     r->bg = gpu_buffer(g, "scene: no sky", 16, st);
-    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURR");
-    char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(SHADER) + 2);
+    r->ig = gpu_buffer(g, "scene: no irradiance grid", 112, st);
+    r->txt = gpu_buffer(g, "scene: the textures' table", sizeof(r->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURRRRTU");
+    char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(GPU_WGSL_TEX) + strlen(SHADER) + 3);
     if (!src){ gpu_raster_destroy(r); return NULL; }
-    strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, SHADER);
+    strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, GPU_WGSL_TEX); strcat(src, "\n"); strcat(src, SHADER);
     WGPUShaderModule m = gpu_shader(g, "scene", src);
     free(src);
     r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);
@@ -514,10 +616,11 @@ static void put(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y
 
 static int tmp_reserve(GpuRaster *r, size_t verts){
     if (r->tmp_cap >= verts) return 1;
-    float *a = realloc(r->tmp_pos, verts * 16), *b = realloc(r->tmp_nrm, verts * 16);
+    float *a = realloc(r->tmp_pos, verts * 16), *b = realloc(r->tmp_nrm, verts * 16), *c = realloc(r->tmp_tex, verts * 16);
     if (a) r->tmp_pos = a;
     if (b) r->tmp_nrm = b;
-    if (!a || !b) return 0;
+    if (c) r->tmp_tex = c;
+    if (!a || !b || !c) return 0;
     r->tmp_cap = verts;
     return 1;
 }
@@ -525,9 +628,21 @@ static int tmp_reserve(GpuRaster *r, size_t verts){
 static void geo_bind(GpuRaster *r, Geo *geo){
     if (geo->bg) wgpuBindGroupRelease(geo->bg);
     geo->bg = NULL;
-    if (!geo->pos || !r->ix) return;
-    WGPUBuffer b[7] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab, r->lv, r->bg};
-    geo->bg = gpu_bind(r->g, r->bgl, b, 7);
+    if (!geo->pos || !r->ix || !r->gt.view) return;
+    WGPUBuffer b[11] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab, r->lv, r->bg, geo->tex, r->ig, NULL, r->txt};
+    WGPUBindGroupEntry e[11];
+    memset(e, 0, sizeof(e));
+    for (int i = 0; i < 11; i++){
+        e[i].binding = (uint32_t)i;
+        if (i == 9) e[i].textureView = r->gt.view;
+        else { e[i].buffer = b[i]; e[i].size = WGPU_WHOLE_SIZE; }
+    }
+    WGPUBindGroupDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.layout = r->bgl;
+    d.entryCount = 11;
+    d.entries = e;
+    geo->bg = wgpuDeviceCreateBindGroup(r->g->device, &d);
 }
 
 // room for `verts` vertices in a set; its bind group follows the buffers
@@ -536,11 +651,21 @@ static void geo_reserve(GpuRaster *r, Geo *geo, size_t verts, const char *label)
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     int grown = gpu_buffer_reserve(g, &geo->pos, &geo->pos_cap, verts * 16, st, label);
     grown |= gpu_buffer_reserve(g, &geo->nrm, &geo->nrm_cap, verts * 16, st, label);
+    grown |= gpu_buffer_reserve(g, &geo->tex, &geo->tex_cap, verts * 16, st, label);
     if (!grown && geo->bg) return;
     geo_bind(r, geo);
 }
 
 // primitives as triangles into tmp_pos / tmp_nrm (from vertex nv on); returns the new count
+// a vertex's texture coordinates and tangent (vtex: u, v, the tangent octahedral; its
+// handedness into the normal's w)
+static void put_tex(GpuRaster *r, size_t at, Vec2 uv, Vec4 tg){
+    float *o = r->tmp_tex + 4 * at;
+    o[0] = (float)uv.x; o[1] = (float)uv.y;
+    gpu_oct_encode(vec3(tg.x, tg.y, tg.z), o + 2);
+    r->tmp_nrm[4 * at + 3] = (float)tg.w;
+}
+
 static size_t prims_to_tris(GpuRaster *r, const Primitive *pr, int n, size_t nv){
     for (int i = 0; i < n; i++){
         int nt = render_prim_tri_count(&pr[i]);
@@ -548,11 +673,15 @@ static size_t prims_to_tris(GpuRaster *r, const Primitive *pr, int n, size_t nv)
             Vec3 wp[3], wn[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, flat_at;
             int has_n = 0;
             render_prim_triangle(&pr[i], sub, wp, wn, &has_n, &flat_at);
+            Vec2 uv[3];
+            Vec4 tg[3];
+            render_prim_texcoords(&pr[i], sub, uv, tg);
             int flag = pr[i].type == PRIM_QUAD ? (sub == 0 ? 1 : 2) : 0;
             float code = (float)((pr[i].material & 15) + 16 * flag + 64 * (has_n != 0));
             for (int k = 0; k < 3; k++, nv++){
                 put(r->tmp_pos + 4 * nv, wp[k], code);
                 put(r->tmp_nrm + 4 * nv, wn[k], 0);
+                put_tex(r, nv, uv[k], tg[k]);
             }
         }
     }
@@ -571,6 +700,7 @@ static int upload_unit_shapes(GpuRaster *r){
         geo_reserve(r, &r->unit[k], nv, k == 0 ? "unit sphere" : "unit box");
         wgpuQueueWriteBuffer(r->g->queue, r->unit[k].pos, 0, r->tmp_pos, nv * 16);
         wgpuQueueWriteBuffer(r->g->queue, r->unit[k].nrm, 0, r->tmp_nrm, nv * 16);
+        wgpuQueueWriteBuffer(r->g->queue, r->unit[k].tex, 0, r->tmp_tex, nv * 16);
         r->unit[k].nverts = (uint32_t)nv;
     }
     return 1;
@@ -592,11 +722,15 @@ static int upload_prims(GpuRaster *r, const Scene *s){
             Vec3 wp[3], wn[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, flat_at;
             int has_n = 0;
             render_prim_triangle(pr, sub, wp, wn, &has_n, &flat_at);
+            Vec2 uv[3];
+            Vec4 tg[3];
+            render_prim_texcoords(pr, sub, uv, tg);
             int flag = pr->type == PRIM_QUAD ? (sub == 0 ? 1 : 2) : 0;
             float code = (float)((pr->material & 15) + 16 * flag + 64 * (has_n != 0));
             for (int k = 0; k < 3; k++, nv++){
                 put(r->tmp_pos + 4 * nv, wp[k], code);
                 put(r->tmp_nrm + 4 * nv, wn[k], 0);
+                put_tex(r, nv, uv[k], tg[k]);
             }
         }
     }
@@ -604,6 +738,7 @@ static int upload_prims(GpuRaster *r, const Scene *s){
     if (nv){
         wgpuQueueWriteBuffer(r->g->queue, r->prims.pos, 0, r->tmp_pos, nv * 16);
         wgpuQueueWriteBuffer(r->g->queue, r->prims.nrm, 0, r->tmp_nrm, nv * 16);
+        wgpuQueueWriteBuffer(r->g->queue, r->prims.tex, 0, r->tmp_tex, nv * 16);
     }
     r->prims.nverts = (uint32_t)nv;
     Primitive *c = realloc(r->prim_copy, (size_t)(s->nprims ? s->nprims : 1) * sizeof(Primitive));
@@ -616,7 +751,8 @@ static int upload_prims(GpuRaster *r, const Scene *s){
 }
 
 // triangles into a set (as they are: the world's, or a mesh's in its own space)
-static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, const Vec3 *normals, const char *label){
+static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, const Vec3 *normals,
+                       const Vec2 *uvs, const Vec4 *tangents, int nuvs, const char *label){
     size_t nv = (size_t)ntris * 3;
     if (nv * 16 > r->g->max_storage){
         fprintf(stderr, "GPU: the mesh needs a %.0f MB buffer, this GPU allows %.0f MB: the CPU rasterizes\n",
@@ -637,9 +773,16 @@ static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, 
                     put(r->tmp_pos + 4 * (3 * (size_t)i + k), wp[k], code);
                     put(r->tmp_nrm + 4 * (3 * (size_t)i + k), has_n ? normals[t->n[k]] : vec3(0, 0, 0), 0);
                 }
+                {
+                    Vec2 uv[3];
+                    Vec4 tg[3];
+                    render_tri_texcoords(t, uvs, tangents, nuvs, NULL, uv, tg);
+                    for (int k = 0; k < 3; k++) put_tex(r, 3 * (size_t)i + k, uv[k], tg[k]);
+                }
             }
             wgpuQueueWriteBuffer(r->g->queue, geo->pos, (uint64_t)first * 48, r->tmp_pos, (size_t)n * 48);
             wgpuQueueWriteBuffer(r->g->queue, geo->nrm, (uint64_t)first * 48, r->tmp_nrm, (size_t)n * 48);
+            wgpuQueueWriteBuffer(r->g->queue, geo->tex, (uint64_t)first * 48, r->tmp_tex, (size_t)n * 48);
         }
     }
     geo->nverts = (uint32_t)nv;
@@ -649,7 +792,7 @@ static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, 
 // the world's mesh triangles: many, and they stay where they are: uploaded once
 static int upload_mesh(GpuRaster *r, const Scene *s){
     if (r->mesh_tris == s->tris && r->mesh_ntris == s->ntris && r->mesh_normals == s->normals) return 1;
-    if (!upload_tris(r, &r->mesh, s->tris, s->ntris, s->normals, "scene mesh")) return 0;
+    if (!upload_tris(r, &r->mesh, s->tris, s->ntris, s->normals, s->uvs, s->tangents, s->nuvs, "scene mesh")) return 0;
     r->mesh_tris = s->tris;
     r->mesh_normals = s->normals;
     r->mesh_ntris = s->ntris;
@@ -691,7 +834,7 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         const SceneMesh *sm = &s->meshes[m];
         if (r->mg[m].geo.nverts && r->mg[m].tris == sm->tris && r->mg[m].ntris == sm->ntris && r->mg[m].version == sm->version)
             continue;
-        if (!upload_tris(r, &r->mg[m].geo, sm->tris, sm->ntris, sm->normals, "instanced mesh")) return 0;
+        if (!upload_tris(r, &r->mg[m].geo, sm->tris, sm->ntris, sm->normals, sm->uvs, sm->tangents, sm->nuvs, "instanced mesh")) return 0;
         r->mg[m].tris = sm->tris;
         r->mg[m].ntris = sm->ntris;
         r->mg[m].version = sm->version;
@@ -744,12 +887,27 @@ static int upload_env(GpuRaster *r, const Env *env, const Env *sky){
     return 1;
 }
 
+// the irradiance grid, when it changes (core/env.h IrrGrid: per probe 28 floats = 7 vec4)
+static int upload_irr(GpuRaster *r, const IrrGrid *ig){
+    if (!ig || ig->id == r->ig_id) return 1;
+    size_t bytes = (size_t)ig->n[0] * ig->n[1] * ig->n[2] * IRR_FLOATS * 4;
+    if (gpu_buffer_reserve(r->g, &r->ig, &r->ig_cap, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "scene: the irradiance grid"))
+        rebind_all(r);
+    wgpuQueueWriteBuffer(r->g->queue, r->ig, 0, ig->sh, bytes);
+    r->ig_id = ig->id;
+    return 1;
+}
+
 int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p){
     Gpu *g = r->g;
+    if (gpu_textures_sync(g, &r->gt, s)){
+        wgpuQueueWriteBuffer(g->queue, r->txt, 0, r->gt.table, sizeof(r->gt.table));
+        rebind_all(r);
+    }
     if (!upload_instances(r, s) || !upload_unit_shapes(r) || !upload_prims(r, s) || !upload_mesh(r, s)) return 0;
     RenderLamp L = render_scene_lamp(s);
     const Env *sky = p->mode == MODE_WIREFRAME ? NULL : s->env;
-    if (!upload_env(r, L.env, sky)) return 0;
+    if (!upload_env(r, L.env, sky) || !upload_irr(r, L.irr)) return 0;
     RenderMode mode = p->mode == MODE_TEXTURED ? MODE_PHONG : p->mode;
 
     GRU U;
@@ -783,6 +941,12 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     put(U.cam_u, vec3(p->view.m[1][0], p->view.m[1][1], p->view.m[1][2]), (float)(1 / p->proj.m[1][1]));
     put(U.cam_b, vec3(p->view.m[2][0], p->view.m[2][1], p->view.m[2][2]), 0);
     U.vps[0] = (float)r->w; U.vps[1] = (float)r->h;
+    if (L.irr){
+        for (int k = 0; k < 3; k++) U.irrn[k] = (uint32_t)L.irr->n[k];
+        U.irrn[3] = 1;
+        put(U.irrlo, L.irr->lo, 0);
+        put(U.irrhi, L.irr->hi, 0);
+    }
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
         RenderMaterial rm = render_scene_material(&s->mats[m]);
         Material res = material_resolved(&s->mats[m]);
@@ -791,6 +955,15 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         U.mats[m][5] = (float)res.roughness;
         U.mats[m][6] = (float)res.ior;
         U.mats[m][7] = (float)res.transmission;
+        // the textures the GPU has (the first GPU_TEX_MAX), as 1 + index; the scale's bits
+        const Material *mm = &s->mats[m];
+        uint32_t tx[4] = {mm->tex_base > 0 && mm->tex_base <= r->gt.ntex ? (uint32_t)mm->tex_base : 0u,
+                          mm->tex_mr > 0 && mm->tex_mr <= r->gt.ntex ? (uint32_t)mm->tex_mr : 0u,
+                          mm->tex_normal > 0 && mm->tex_normal <= r->gt.ntex ? (uint32_t)mm->tex_normal : 0u, 0};
+        float sc = (float)mm->uv_scale;
+        memcpy(&tx[3], &sc, 4);
+        if (rm.constant) tx[0] = tx[1] = tx[2] = 0;
+        memcpy(&U.mats[m][8], tx, 16);
     }
     wgpuQueueWriteBuffer(g->queue, r->uni, 0, &U, sizeof(U));
 
@@ -851,6 +1024,7 @@ void gpu_raster_destroy(GpuRaster *r){
         if (geo->bg) wgpuBindGroupRelease(geo->bg);
         if (geo->pos){ wgpuBufferDestroy(geo->pos); wgpuBufferRelease(geo->pos); }
         if (geo->nrm){ wgpuBufferDestroy(geo->nrm); wgpuBufferRelease(geo->nrm); }
+        if (geo->tex){ wgpuBufferDestroy(geo->tex); wgpuBufferRelease(geo->tex); }
     }
     free(r->mg);
     if (r->ix){ wgpuBufferDestroy(r->ix); wgpuBufferRelease(r->ix); }
@@ -859,6 +1033,10 @@ void gpu_raster_destroy(GpuRaster *r){
     if (r->wire) wgpuRenderPipelineRelease(r->wire);
     if (r->sky) wgpuRenderPipelineRelease(r->sky);
     if (r->lv){ wgpuBufferDestroy(r->lv); wgpuBufferRelease(r->lv); }
+    if (r->ig){ wgpuBufferDestroy(r->ig); wgpuBufferRelease(r->ig); }
+    if (r->txt){ wgpuBufferDestroy(r->txt); wgpuBufferRelease(r->txt); }
+    gpu_textures_free(&r->gt);
+    free(r->tmp_tex);
     if (r->bg){ wgpuBufferDestroy(r->bg); wgpuBufferRelease(r->bg); }
     if (r->bgl) wgpuBindGroupLayoutRelease(r->bgl);
     if (r->uni){ wgpuBufferDestroy(r->uni); wgpuBufferRelease(r->uni); }

@@ -88,7 +88,10 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
     roughness (`env_level`: six maps, one per roughness 0, 0.2, ... 1, trilinear between
     them), looked up along the lobe's direction (between the reflected ray and the normal,
     nearer the normal the rougher: Lagarde & de Rousiers 2014);
-  - the diffuse part times the **irradiance** from 9 spherical harmonics;
+  - the diffuse part times the **irradiance**: from the scene's **irradiance grid**
+    (PBR5: 5 × 5 × 5 points over the room, each 9 spherical harmonics of the light
+    arriving there, path traced; the 8 around the point blended trilinearly, those inside
+    something left out), else the probe's or the sky's own 9 harmonics;
   - the transmitted part along the ray **through** the object (refracted in, and out
     where it would leave a sphere: exact for spheres, close for convex shapes);
   - a probe of a room knows the room's box: a lookup from a point follows its direction
@@ -99,6 +102,16 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
     PBR3, a uniform environment of radiance 0.06 plus 0.025 · (n·v) from the camera's side
     (`RENDER_SCENE_AMBIENT`, `_FILL`) through `bsdf_albedo_uniform`. `LR_RASTER_AMBIENT=0`
     turns the environment and the ambient off (the path tracer's direct light, `-d 1`);
+- **textures** (PBR5, `material_at`, `material_normal`): the base colour, metallic and
+  roughness, and normal maps of glTF's material, read at the pixel's texture coordinates.
+  The rasterizer interpolates the coordinates and the tangent (with its handedness) like
+  the normal, and how the coordinates change to the next pixel across and down, exactly
+  (from the gradients of the barycentric weights, divided by w as the coordinates are):
+  that footprint chooses the mip level, filtered trilinearly. Gouraud and flat read level 0
+  at their vertices. A material with textures is shaded without the per-material tables
+  (it changes per pixel: `shade_mat_direct`). A normal bent by its map can face a lamp the
+  surface faces away from: only the part of the lamp above the surface's own plane lights
+  it (`lamp_hz`), as in the path tracer;
 - the **sky** drawn where nothing was (the z-buffer still at its far value), along each
   pixel's view direction;
 - **two-sided** surfaces: the normal is turned towards the camera first, because the
@@ -113,8 +126,10 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
 
 The GPU rasterizer (`gpu/raster_gpu.c`) does the same in WGSL, with the path tracer's
 `GPU_WGSL_BSDF` and its tables, the environment's maps in a storage buffer (read with the
-same bilinear lookups as the C) and the sky behind drawn by a screen-filling triangle at
-the far depth; its images match the CPU's (a mean difference of 0.05-0.2 of 255, a few
+same bilinear lookups as the C), the textures in one RGBA8 atlas filtered by hand as the C
+does (`gpu/tex_gpu.c`), the irradiance grid in a storage buffer, the coordinates' change to
+the next pixel from `dpdxFine` / `dpdyFine`, and the sky behind drawn by a screen-filling
+triangle at the far depth; its images match the CPU's (a mean difference of 0.05-0.2 of 255, a few
 pixels on triangle edges differ: ties).
 
 Shading modes: `phong` (per pixel), `gouraud` (per vertex), `flat` (per triangle; a quad's

@@ -491,15 +491,24 @@ typedef struct {
     Vec3 spec[SHADE_TAB + 1], diff[SHADE_TAB + 1], trans[SHADE_TAB + 1];
     real gd[SHADE_TAB + 1], gm[SHADE_TAB + 1];
     int through;          // it transmits: the environment through it is looked up too
+    int direct;           // no tables: the BSDF evaluated as it is (a textured material, per pixel)
 } ShadeMat;
 
-static void shade_mat_init(ShadeMat *sm, const Material *m){
+// the BSDF and its constants, without the tables (sm->direct)
+static void shade_mat_direct(ShadeMat *sm, const Material *m){
     sm->b = bsdf_make(m, 1);
     Bsdf *b = &sm->b;
     const real mt = b->metallic, t = b->transmission;
     sm->kd = (1 - mt) * (1 - t) > 0 ? (1 - mt) * (1 - t) * b->kd_norm / (real)PI : 0;
     sm->kms = !b->smooth && mt > 0 ? mt * b->kms_norm : 0;
     sm->through = (1 - mt) * t > 0;
+    sm->direct = 1;
+}
+
+static void shade_mat_init(ShadeMat *sm, const Material *m){
+    shade_mat_direct(sm, m);
+    sm->direct = 0;
+    Bsdf *b = &sm->b;
     for (int i = 0; i <= SHADE_TAB; i++){
         real mu = r_fmax((real)i / SHADE_TAB, 1e-4f);
         bsdf_albedo_parts(b, mu, &sm->spec[i], &sm->diff[i], &sm->trans[i]);
@@ -520,6 +529,8 @@ static inline real shade_tab_at(real mu, int *i){
 typedef struct {
     const Material *mat;
     ShadeMat sm;
+    const Scene *scene;   // (its textures)
+    int textured;         // the material has textures: evaluated per pixel (vertex), not tabulated
     const RenderLamp *lamp;
     Vec3 eye;             // camera position
     uint32_t flat_color;  // emitters and wireframe lines
@@ -599,38 +610,71 @@ static Vec3 through_dir(Vec3 v, Vec3 n, real eta){
 // lobe's direction (between n and the reflected ray, nearer n the rougher: Lagarde &
 // de Rousiers 2014), the diffuse from the irradiance, the transmitted around the ray
 // through; a probe's lookups corrected by its box (env_box_dir)
-static Vec3 shade_env(const Env *E, const ShadeMat *sm, Vec3 sp, Vec3 df, Vec3 tr, Vec3 p, Vec3 n, Vec3 v){
+static Vec3 shade_env(const Env *E, const IrrGrid *irr, const ShadeMat *sm, Vec3 sp, Vec3 df, Vec3 tr, Vec3 p, Vec3 n, Vec3 v){
     const Bsdf *b = &sm->b;
     real r = b->smooth ? 0 : b->rough;
     Vec3 rr = v_reflect(v_neg(v), n);
     real s = 1 - r, k = s * (r_sqrt(s) + r);
     Vec3 rd = v_norm(v_add(n, v_scale(v_sub(rr, n), k)));
     Vec3 c = v_mul(sp, env_level(E, env_box_dir(E, p, rd), r));
-    c = v_add(c, v_mul(df, env_irradiance(E, n)));
+    int ok = 0;
+    Vec3 e = irr ? irr_grid_irradiance(irr, p, n, &ok) : vec3(0, 0, 0);
+    c = v_add(c, v_mul(df, ok ? e : env_irradiance(E, n)));
     if (sm->through) c = v_add(c, v_mul(tr, env_level(E, env_box_dir(E, p, through_dir(v, n, b->eta)), r)));
     return c;
 }
 
+// lamp_hz: the share of the lamp above the plane of ng, the surface's own normal (turned to
+// the eye), for a normal bent by a normal map: the bent normal can face a lamp the surface
+// itself is turned away from (the path tracer sees none of it there). Taken as the lamp's
+// disc of the same area, seen from p, cut by that plane: linear across its angular radius
+static real lamp_hz(const RenderLamp *L, Vec3 p, Vec3 ng){
+    Vec3 tc = v_sub(L->center, p);
+    real d = v_len(tc);
+    real s = r_fmax(r_sqrt(L->area / (real)PI) / d, 1e-3f);
+    return r_fmin(r_fmax(0.5f + v_dot(ng, tc) / (d * 2 * s), 0), 1);
+}
+
+static Vec3 shade_point_g(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n, const Vec3 *ng, Vec3 eye);
+
 static Vec3 shade_point(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n, Vec3 eye){
+    return shade_point_g(L, sm, p, n, NULL, eye);
+}
+
+// ng: the surface's own normal when n is bent (NULL: n is the surface's)
+static Vec3 shade_point_g(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n, const Vec3 *ng, Vec3 eye){
     Vec3 v = v_norm(v_sub(eye, p));
     if (v_dot(n, v) < 0) n = v_neg(n);           // both sides lit (the walls have no "outside")
     real cv = r_fmax(v_dot(n, v), 1e-4f);
     const Bsdf *b = &sm->b;
-    int iv;
-    real fv = shade_tab_at(cv, &iv);
-    Vec3 sp = tab_lerp(sm->spec, iv, fv), df = tab_lerp(sm->diff, iv, fv), tr = tab_lerp(sm->trans, iv, fv);
-    Vec3 c = L->env ? shade_env(L->env, sm, sp, df, tr, p, n, v)
+    Bsdf bd = sm->b;                              // (direct: the BSDF seen from v)
+    int iv = 0;
+    real fv = 0;
+    Vec3 sp, df, tr;
+    if (sm->direct) bsdf_albedo_parts(&bd, cv, &sp, &df, &tr);
+    else {
+        fv = shade_tab_at(cv, &iv);
+        sp = tab_lerp(sm->spec, iv, fv); df = tab_lerp(sm->diff, iv, fv); tr = tab_lerp(sm->trans, iv, fv);
+    }
+    Vec3 c = L->env ? shade_env(L->env, L->irr, sm, sp, df, tr, p, n, v)
                     : v_scale(v_add(v_add(sp, df), tr), L->ambient + L->fill * cv);
     if (!L->on || v_dot(v_sub(p, L->center), L->n) <= 0) return c;   // behind the lamp
+    real hz = ng ? lamp_hz(L, p, *ng) : 1;
+    if (hz <= 0) return c;
+    Vec3 base = c;
     // the diffuse-like lobes: the lamp's form factor
     real ff = sm->kd > 0 || sm->kms > 0 ? lamp_form_factor(L, p, n) : 0;
     if (ff > 0){
         Vec3 lc = v_norm(v_sub(L->center, p));
-        int il;
-        real fl = shade_tab_at(v_dot(n, lc), &il);
-        real gd = (sm->gd[iv] + fv * (sm->gd[iv + 1] - sm->gd[iv])) * (sm->gd[il] + fl * (sm->gd[il + 1] - sm->gd[il]));
-        real gm = (sm->gm[iv] + fv * (sm->gm[iv + 1] - sm->gm[iv])) * (sm->gm[il] + fl * (sm->gm[il + 1] - sm->gm[il]));
-        Vec3 f = v_add(v_scale(b->base, sm->kd * gd), v_scale(b->ms, sm->kms * gm));
+        Vec3 f;
+        if (sm->direct) f = bsdf_diffuse_lobes(&bd, r_fmax(v_dot(n, lc), 0));
+        else {
+            int il;
+            real fl = shade_tab_at(v_dot(n, lc), &il);
+            real gd = (sm->gd[iv] + fv * (sm->gd[iv + 1] - sm->gd[iv])) * (sm->gd[il] + fl * (sm->gd[il + 1] - sm->gd[il]));
+            real gm = (sm->gm[iv] + fv * (sm->gm[iv + 1] - sm->gm[iv])) * (sm->gm[il] + fl * (sm->gm[il + 1] - sm->gm[il]));
+            f = v_add(v_scale(b->base, sm->kd * gd), v_scale(b->ms, sm->kms * gm));
+        }
         c = v_add(c, v_scale(v_mul(f, L->le), ff));
     }
     // the microfacet lobe. Its solid angle (4 pi alpha^2 cos: where f cos is near its peak,
@@ -665,7 +709,8 @@ static Vec3 shade_point(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 n,
         real cl = v_dot(n, l);
         if (cl > 0) spec = v_add(spec, v_scale(bsdf_spec_lobe(b, n, v, l, b->alpha), (1 - w) * cl * om * lobe / (om + lobe)));
     }
-    return v_add(c, v_mul(spec, L->le));
+    c = v_add(c, v_mul(spec, L->le));
+    return hz < 1 ? v_add(base, v_scale(v_sub(c, base), hz)) : c;
 }
 
 Vec3 render_shade(const RenderLamp *L, const Material *m, Vec3 p, Vec3 n, Vec3 eye){
@@ -680,11 +725,32 @@ static uint32_t shade_scene_light(const real *v, const void *ctx){
     return image_pack_srgb(vec3(v[V_LIGHT], v[V_LIGHT_G], v[V_LIGHT_B]));
 }
 
+// A textured material at one point (PBR5): the material there (its mip levels for a
+// footprint of 2^uv_lod), the normal (turned to the eye) bent by its normal map and tilted
+// back towards the eye if the map turned it away (as the path tracer does), shaded directly
+static Vec3 shade_textured(const SceneShading *s, Vec3 p, Vec3 n, Vec2 uv, Vec4 tg, real uv_lod){
+    Vec3 v = v_norm(v_sub(s->eye, p));
+    if (v_dot(n, v) < 0) n = v_neg(n);
+    Material mt = material_at(s->scene, s->mat, uv, uv_lod);
+    Vec3 ng = n;
+    if (s->mat->tex_normal){
+        n = material_normal(s->scene, s->mat, uv, uv_lod, n, tg);
+        real c = v_dot(n, v);
+        if (c < 1e-3f) n = v_norm(v_add(n, v_scale(v, 1e-3f - c)));
+    }
+    ShadeMat sm;
+    shade_mat_direct(&sm, &mt);
+    return shade_point_g(s->lamp, &sm, p, n, s->mat->tex_normal ? &ng : NULL, s->eye);
+}
+
 // phong: render_shade at every pixel
 static uint32_t shade_scene_phong(const real *v, const void *ctx){
     const SceneShading *s = ctx;
     Vec3 n = v_norm(vec3(v[V_NX], v[V_NY], v[V_NZ]));
     Vec3 p = vec3(v[V_PX], v[V_PY], v[V_PZ]);
+    if (s->textured)
+        return image_pack_srgb(shade_textured(s, p, n, vec2(v[V_U], v[V_V]), (Vec4){v[V_TX], v[V_TY], v[V_TZ], v[V_TW]},
+                                              material_uv_lod(v[V_DUDX], v[V_DVDX], v[V_DUDY], v[V_DVDY])));
     return image_pack_srgb(shade_point(s->lamp, &s->sm, p, n, s->eye));
 }
 
@@ -784,7 +850,9 @@ static int scene_tri_material(const SceneJob *sj, int i){
 
 // Triangle i of the scene: world-space corners, and (if wn is not NULL) vertex normals
 // (*has_n = 0 when it has none) and the point flat shading is evaluated at.
-static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at){
+// triangle i: its corners and (wn not NULL) normals, flat shading's point, and (uv not NULL)
+// its corners' texture coordinates and tangents
+static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at, Vec2 *uv, Vec4 *tg){
     const Scene *s = sj->s;
     if (i >= sj->world_tris){                     // an instance's triangle, moved into the world
         int inst, tri;
@@ -793,6 +861,7 @@ static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n,
         if (in->mesh < 0){                        // a ball or a box: its primitives in the world
             Primitive pr = instance_shape_prim(in, in->mesh == INST_SPHERE ? 0 : tri / 2);
             render_prim_triangle(&pr, in->mesh == INST_SPHERE ? tri : tri % 2, wp, wn, has_n, flat_at);
+            if (uv) render_prim_texcoords(&pr, in->mesh == INST_SPHERE ? tri : tri % 2, uv, tg);
             return;
         }
         const SceneMesh *m = &s->meshes[in->mesh];
@@ -804,6 +873,7 @@ static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n,
         *has_n = t->n[0] >= 0;
         if (*has_n) for (int k = 0; k < 3; k++) wn[k] = xform_normal(&in->inv, m->normals[t->n[k]]);
         *flat_at = v_scale(v_add(v_add(wp[0], wp[1]), wp[2]), 1.0f / 3.0f);
+        if (uv) render_tri_texcoords(t, m->uvs, m->tangents, m->nuvs, &in->xf, uv, tg);
         return;
     }
     int prim, sub;
@@ -815,9 +885,50 @@ static void scene_tri(const SceneJob *sj, int i, Vec3 *wp, Vec3 *wn, int *has_n,
         *has_n = t->n[0] >= 0;
         if (*has_n) for (int k = 0; k < 3; k++) wn[k] = s->normals[t->n[k]];
         *flat_at = v_scale(v_add(v_add(wp[0], wp[1]), wp[2]), 1.0f / 3.0f);
+        if (uv) render_tri_texcoords(t, s->uvs, s->tangents, s->nuvs, NULL, uv, tg);
         return;
     }
     render_prim_triangle(&s->prims[prim], sub, wp, wn, has_n, flat_at);
+    if (uv && wn) render_prim_texcoords(&s->prims[prim], sub, uv, tg);
+}
+
+void render_tri_texcoords(const Triangle *t, const Vec2 *uvs, const Vec4 *tangents, int nuvs, const Xform *xf, Vec2 *uv, Vec4 *tg){
+    int has = t->t[0] >= 0 && t->t[1] >= 0 && t->t[2] >= 0 && t->t[0] < nuvs && t->t[1] < nuvs && t->t[2] < nuvs;
+    Vec3 eu = v_norm(t->u);
+    for (int k = 0; k < 3; k++){
+        uv[k] = has ? uvs[t->t[k]] : vec2(k == 1, k == 2);
+        Vec4 g = has ? tangents[t->t[k]] : (Vec4){eu.x, eu.y, eu.z, 1};
+        if (xf){
+            Vec3 d = v_norm(xform_dir(xf, vec3(g.x, g.y, g.z)));
+            g = (Vec4){d.x, d.y, d.z, g.w};
+        }
+        tg[k] = g;
+    }
+}
+
+void render_prim_texcoords(const Primitive *pr, int sub, Vec2 *uv, Vec4 *tg){
+    if (pr->type == PRIM_QUAD){
+        // corners a = (0, 0), b = (1, 0), c = (1, 1), d = (0, 1); tangent along u, n x u along +v
+        Vec2 a = vec2(0, 0), b = vec2(1, 0), c = vec2(1, 1), d = vec2(0, 1);
+        uv[0] = a; uv[1] = sub == 0 ? b : c; uv[2] = sub == 0 ? c : d;
+        Vec3 t = v_norm(pr->u);
+        for (int k = 0; k < 3; k++) tg[k] = (Vec4){t.x, t.y, t.z, -1};
+        return;
+    }
+    // sphere_dir(i, j)'s longitude: u = 0.75 - j / slices (atan2(x, z) = pi / 2 - phi), kept
+    // unwrapped; at a pole the cell's middle
+    int y, x, upper;
+    sphere_cell(sub, &y, &x, &upper);
+    int ci[3], cj[3];
+    if (upper){ ci[0] = y; cj[0] = x; ci[1] = y; cj[1] = x + 1; ci[2] = y + 1; cj[2] = x + 1; }
+    else      { ci[0] = y; cj[0] = x; ci[1] = y + 1; cj[1] = x + 1; ci[2] = y + 1; cj[2] = x; }
+    for (int k = 0; k < 3; k++){
+        int pole = ci[k] == 0 || ci[k] == SPHERE_STACKS;
+        real u = 0.75f - ((real)cj[k] + (pole ? 0.5f : 0)) / SPHERE_SLICES;
+        uv[k] = vec2(u, (real)ci[k] / SPHERE_STACKS);
+        real ph = (u - 0.5f) * (real)(2 * PI);
+        tg[k] = (Vec4){r_cos(ph), 0, -r_sin(ph), 1};
+    }
 }
 
 void render_prim_triangle(const Primitive *pr, int sub, Vec3 *wp, Vec3 *wn, int *has_n, Vec3 *flat_at){
@@ -846,7 +957,7 @@ void render_prim_triangle(const Primitive *pr, int sub, Vec3 *wp, Vec3 *wn, int 
 }
 
 static void scene_corners(const TriJob *j, int i, Vec3 *wp){
-    scene_tri(j->data, i, wp, NULL, NULL, NULL);
+    scene_tri(j->data, i, wp, NULL, NULL, NULL, NULL, NULL);
 }
 
 // world-space triangle (+ optional vertex normals) -> clip space
@@ -855,21 +966,33 @@ static void scene_vertices(const TriJob *j, int i, ClipVert *cv, FragShader *sha
     int mat = scene_tri_material(sj, i);
     const SceneShading *sh = &sj->sh[mat];
     Vec3 wp[3], wn[3], flat_at;
+    Vec2 uv[3] = {{0, 0}, {0, 0}, {0, 0}};
+    Vec4 tg[3] = {{1, 0, 0, 1}, {1, 0, 0, 1}, {1, 0, 0, 1}};
     int has_n;
-    scene_tri(sj, i, wp, wn, &has_n, &flat_at);
+    scene_tri(sj, i, wp, wn, &has_n, &flat_at, uv, tg);
     RenderMode mode = j->mode;
 
     Vec3 face_n = v_norm(v_cross(v_sub(wp[1], wp[0]), v_sub(wp[2], wp[0])));
     const int lit = sh->mat->type != MAT_LIGHT;
-    Vec3 flat_c = mode == MODE_FLAT && lit ? shade_point(sh->lamp, &sh->sm, flat_at, face_n, sh->eye) : vec3(0, 0, 0);
+    Vec3 flat_c = vec3(0, 0, 0);
+    if (mode == MODE_FLAT && lit){
+        if (sh->textured){                         // at the triangle's middle
+            Vec2 um = vec2((uv[0].x + uv[1].x + uv[2].x) / 3, (uv[0].y + uv[1].y + uv[2].y) / 3);
+            flat_c = shade_textured(sh, flat_at, face_n, um, tg[0], MATERIAL_LOD0);
+        } else flat_c = shade_point(sh->lamp, &sh->sm, flat_at, face_n, sh->eye);
+    }
     for (int k = 0; k < 3; k++){
         Vec3 n = (has_n && mode != MODE_FLAT) ? wn[k] : face_n;
         cv[k].clip = mat4_mul_vec4(j->view_proj, (Vec4){wp[k].x, wp[k].y, wp[k].z, 1.0f});
         real *vy = cv[k].vary;
         vy[V_PX] = wp[k].x; vy[V_PY] = wp[k].y; vy[V_PZ] = wp[k].z;
         vy[V_NX] = n.x;     vy[V_NY] = n.y;     vy[V_NZ] = n.z;
-        vy[V_U] = 0;        vy[V_V] = 0;
-        Vec3 c = mode == MODE_FLAT ? flat_c : (mode == MODE_GOURAUD && lit ? shade_point(sh->lamp, &sh->sm, wp[k], n, sh->eye) : vec3(0, 0, 0));
+        vy[V_U] = uv[k].x;  vy[V_V] = uv[k].y;
+        vy[V_TX] = tg[k].x; vy[V_TY] = tg[k].y; vy[V_TZ] = tg[k].z; vy[V_TW] = tg[k].w;
+        Vec3 c = vec3(0, 0, 0);
+        if (mode == MODE_FLAT) c = flat_c;
+        else if (mode == MODE_GOURAUD && lit)
+            c = sh->textured ? shade_textured(sh, wp[k], n, uv[k], tg[k], MATERIAL_LOD0) : shade_point(sh->lamp, &sh->sm, wp[k], n, sh->eye);
         vy[V_LIGHT] = c.x;  vy[V_LIGHT_G] = c.y;  vy[V_LIGHT_B] = c.z;
     }
     *shader = sj->shader[mat];
@@ -897,6 +1020,7 @@ RenderLamp render_scene_lamp(const Scene *s){
     L.ambient = RENDER_SCENE_AMBIENT * k;
     L.fill = RENDER_SCENE_FILL * k;
     L.env = k > 0 ? (s->probe ? s->probe : s->env) : NULL;
+    L.irr = L.env && L.env == s->probe ? s->irr : NULL;
     if (s->light < 0 || s->light >= s->nprims || s->prims[s->light].type != PRIM_QUAD) return L;
     const Primitive *l = &s->prims[s->light];
     L.on = 1;
@@ -954,6 +1078,8 @@ void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p){
         RenderMaterial rm = render_scene_material(mt);
         sh->eye = p->eye;
         sh->mat = mt;
+        sh->scene = s;
+        sh->textured = !rm.constant && material_textured(mt);
         if (!rm.constant) shade_mat_init(&sh->sm, mt);
         sh->lamp = &sj->lamp;
         sj->shader[m] = rm.constant ? shade_constant : (mode == MODE_PHONG ? shade_scene_phong : shade_scene_light);

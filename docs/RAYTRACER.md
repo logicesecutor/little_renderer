@@ -1079,6 +1079,19 @@ quadrature's; the white furnace under a uniform white sky (diffuse, plastic, a r
 metal, glass, a mirror all as bright as the sky, MIS on and off). GPU, wavefront and CPU
 images agree within 0.4% (PBR.md, PBR4).
 
+### 5.17 Textures (PBR5, `core/texture.h`)
+
+A hit knows where on its shape it is (`Hit.uv`: a sphere's longitude and latitude, a quad's
+two edge fractions, a triangle's barycentrics); `hit_texcoords` turns that into texture
+coordinates and a tangent (a mesh's per vertex, interpolated; an instance's turned by its
+transform). Before shading, `hit_shading` asks the material for its values there
+(`material_at`: base colour, metallic and roughness from glTF's textures) and bends the
+normal by the normal map (`material_normal`), tilted towards the viewer if the map bent it
+away. Level 0, bilinear: without ray differentials a level for the footprint is not known,
+and the many samples of a pixel average the texels it covers anyway. The GPU kernels (the
+single kernel, the wavefront's shading, light tracing) do the same in WGSL from one RGBA8
+atlas (`gpu/tex_gpu.c`); their images agree with the CPU's within 0.3% (PBR.md, PBR5).
+
 ---
 
 ## 6. The scene

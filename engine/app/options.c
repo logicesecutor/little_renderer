@@ -102,6 +102,11 @@ void options_usage(Program prog, FILE *f){
         "  -base r,g,b                its base colour; and the glTF parameters (docs/PBR.md):\n"
         "  -metal m, -rough r         metallic 0..1, roughness 0 (smooth) ..1\n"
         "  -ior x, -transmission t    index of refraction, transmission 0..1 (glass 1)\n"
+        "  -tex file.png|name         its base colour texture; names made here: checker, bricks\n"
+        "                             (bricks: with its normal and metal-roughness maps too) (none)\n"
+        "  -mrmap / -normalmap file.png|name  its metal-roughness (glTF: G rough, B metal) and\n"
+        "                             normal maps (bricks_mr, plate_mr, bricks_normal)  (none)\n"
+        "  -uvscale k                 its texture coordinates times k           (1)\n"
         "  -rot degrees               turn the model around the vertical axis  (0)\n"
         "  -instances n               n instances of the model (one mesh) in any scene (0)\n"
         "\n"
@@ -269,6 +274,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-cloudres")){ o->cloud.resolution = atoi(v); cloudres_set = 1; }
         else if (!strcmp(a, "-fog"))     o->scene.fog = atof(v);
         else if (!strcmp(a, "-sky"))     o->scene.sky = v;
+        else if (!strcmp(a, "-tex"))     o->scene.mesh_tex = v;
+        else if (!strcmp(a, "-mrmap"))   o->scene.mesh_mr = v;
+        else if (!strcmp(a, "-normalmap")) o->scene.mesh_normal = v;
+        else if (!strcmp(a, "-uvscale")) o->scene.mesh_uv_scale = (real)atof(v);
         else if (!strcmp(a, "-skyscale")) o->scene.sky_scale = (real)atof(v);
         else if (!strcmp(a, "-skyrot"))  o->scene.sky_rot = (real)atof(v);
         else if (!strcmp(a, "-proberes")) o->probe_res = atoi(v);
@@ -500,7 +509,10 @@ void options_bake_probe(const Options *o, Scene *s){
     if (!p) return;
     env_free(s->probe);
     s->probe = p;
-    printf("light probe: %d x %d, %d paths per texel, %.0f ms (-probe off: none)\n", p->w, p->h, o->probe_spp, 1000 * (now_s() - t0));
+    irr_grid_free(s->irr);
+    s->irr = probe_grid_bake_scene(s, PROBE_GRID_PATHS);
+    printf("light probe: %d x %d, %d paths per texel, and %d x %d x %d for the diffuse light, %.0f ms (-probe off: none)\n",
+           p->w, p->h, o->probe_spp, s->irr ? s->irr->n[0] : 0, s->irr ? s->irr->n[1] : 0, s->irr ? s->irr->n[2] : 0, 1000 * (now_s() - t0));
 }
 
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){
@@ -518,6 +530,10 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (so->mesh_set & MESH_SET_IOR) fprintf(f, " -ior %g", (double)so->mesh_ior);
         if (so->mesh_set & MESH_SET_TRANS) fprintf(f, " -transmission %g", (double)so->mesh_trans);
         if (o->scene.rot_deg != 0) fprintf(f, " -rot %g", (double)o->scene.rot_deg);
+        if (so->mesh_tex) fprintf(f, " -tex %s", so->mesh_tex);
+        if (so->mesh_mr) fprintf(f, " -mrmap %s", so->mesh_mr);
+        if (so->mesh_normal) fprintf(f, " -normalmap %s", so->mesh_normal);
+        if (so->mesh_uv_scale > 0) fprintf(f, " -uvscale %g", (double)so->mesh_uv_scale);
     }
     if (o->use_cloud || o->scene.kind == SCENE_CLOUD || o->scene.kind == SCENE_SHOWCASE){
         const CloudParams *c = &o->cloud, d = cloud_default_params();

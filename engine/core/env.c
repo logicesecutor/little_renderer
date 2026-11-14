@@ -460,3 +460,70 @@ Vec3 env_box_dir(const Env *e, Vec3 p, Vec3 d){
     real l = v_len(q);
     return l > 1e-6f ? v_scale(q, 1 / l) : d;
 }
+
+// ---- the irradiance grid ----
+
+void irr_grid_free(IrrGrid *g){
+    if (!g) return;
+    free(g->sh);
+    free(g);
+}
+
+Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok){
+    // p in cell-centre units: probe i at (i + 0.5) / n of the box. Its 8 probes (where a
+    // side has one probe, the same one twice with weight 0) blended first, valid ones only
+    // (the 28th float: 1 or 0), then evaluated once for n. No branches: the points of a
+    // frame come in any order
+    real lo[3] = {g->lo.x, g->lo.y, g->lo.z}, hi[3] = {g->hi.x, g->hi.y, g->hi.z};
+    real pc[3] = {p.x, p.y, p.z};
+    float wk[3][2];
+    size_t at = 0, stride[3], st = IRR_FLOATS;
+    for (int k = 0; k < 3; k++){
+        int nk = g->n[k];
+        real x = (pc[k] - lo[k]) / (hi[k] - lo[k]) * nk - 0.5f;
+        x = r_fmin(r_fmax(x, 0), (real)(nk - 1));
+        int i0 = (int)x;
+        i0 = i0 > nk - 2 ? (nk - 2 < 0 ? 0 : nk - 2) : i0;
+        real f = x - i0;
+        int two = i0 + 1 < nk;
+        wk[k][0] = (float)(1 - f); wk[k][1] = two ? (float)f : 0;
+        at += st * (size_t)i0;
+        stride[k] = two ? st : 0;
+        st *= (size_t)nk;
+    }
+    const float *base = g->sh + at;
+    float acc[IRR_FLOATS];
+#if defined(__GNUC__)
+    // 4 at a time (GCC's and clang's vector types: SSE on x86, NEON on ARM, WASM's SIMD or
+    // plain code otherwise; f4u read where a float may start)
+    typedef float f4 __attribute__((vector_size(16)));
+    typedef float f4u __attribute__((vector_size(16), aligned(4)));
+    f4 a4[IRR_FLOATS / 4];
+    for (int i = 0; i < IRR_FLOATS / 4; i++) a4[i] = (f4){0, 0, 0, 0};
+    for (int c = 0; c < 8; c++){
+        const float *q = base + (c & 1) * stride[0] + ((c >> 1) & 1) * stride[1] + (c >> 2) * stride[2];
+        float w = wk[0][c & 1] * wk[1][(c >> 1) & 1] * wk[2][c >> 2] * q[27];
+        f4 w4 = {w, w, w, w};
+        const f4u *q4 = (const f4u *)q;
+        for (int i = 0; i < IRR_FLOATS / 4; i++) a4[i] += w4 * q4[i];
+    }
+    memcpy(acc, a4, sizeof(acc));
+#else
+    for (int i = 0; i < IRR_FLOATS; i++) acc[i] = 0;
+    for (int c = 0; c < 8; c++){
+        const float *q = base + (c & 1) * stride[0] + ((c >> 1) & 1) * stride[1] + (c >> 2) * stride[2];
+        float w = wk[0][c & 1] * wk[1][(c >> 1) & 1] * wk[2][c >> 2] * q[27];
+        for (int i = 0; i < IRR_FLOATS; i++) acc[i] += w * q[i];
+    }
+#endif
+    real wsum = acc[27];
+    *ok = wsum > 1e-4f;
+    if (!*ok) return vec3(0, 0, 0);
+    real y[9];
+    env_sh_basis(n, y);
+    real c[3] = {0, 0, 0};
+    for (int i = 0; i < 9; i++)
+        for (int k = 0; k < 3; k++) c[k] += acc[3 * i + k] * y[i];
+    real iw = 1 / wsum;
+    return vec3(r_fmax(c[0] * iw, 0), r_fmax(c[1] * iw, 0), r_fmax(c[2] * iw, 0));
+}

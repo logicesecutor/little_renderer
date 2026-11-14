@@ -82,6 +82,13 @@ void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *
         pb[k] = b->vary[k] * b->inv_w;
         pc[k] = c->vary[k] * c->inv_w;
     }
+    // How U and V change across the screen: the weights are linear in x and y, so U / w and
+    // 1 / w change by constants, and dU = (d(U / w) - U d(1 / w)) w
+    real g0x = (b->y - c->y) * inv_area, g1x = (c->y - a->y) * inv_area, g2x = (a->y - b->y) * inv_area;
+    real g0y = (c->x - b->x) * inv_area, g1y = (a->x - c->x) * inv_area, g2y = (b->x - a->x) * inv_area;
+    real diw_x = g0x * a->inv_w + g1x * b->inv_w + g2x * c->inv_w, diw_y = g0y * a->inv_w + g1y * b->inv_w + g2y * c->inv_w;
+    real du_x = g0x * pa[V_U] + g1x * pb[V_U] + g2x * pc[V_U], du_y = g0y * pa[V_U] + g1y * pb[V_U] + g2y * pc[V_U];
+    real dv_x = g0x * pa[V_V] + g1x * pb[V_V] + g2x * pc[V_V], dv_y = g0y * pa[V_V] + g1y * pb[V_V] + g2y * pc[V_V];
 
     for (int y = miny; y <= maxy; y++){
         for (int x = minx; x <= maxx; x++){
@@ -101,9 +108,13 @@ void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *
 
             real iw = w0 * a->inv_w + w1 * b->inv_w + w2 * c->inv_w;
             real w = 1.0f / iw;
-            real vary[V_COUNT];
+            real vary[V_ALL];
             for (int k = 0; k < V_COUNT; k++)
                 vary[k] = (w0 * pa[k] + w1 * pb[k] + w2 * pc[k]) * w;
+            vary[V_DUDX] = (du_x - vary[V_U] * diw_x) * w;
+            vary[V_DVDX] = (dv_x - vary[V_V] * diw_x) * w;
+            vary[V_DUDY] = (du_y - vary[V_U] * diw_y) * w;
+            vary[V_DVDY] = (dv_y - vary[V_V] * diw_y) * w;
 
             fb->depth[idx] = z;
             fb->color[idx] = shader(vary, ctx);

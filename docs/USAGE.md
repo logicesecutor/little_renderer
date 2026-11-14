@@ -215,7 +215,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-scene sky` | no room and no lamp: five spheres (white, blue plastic, glass, rough gold, mirror) on a wide floor under the sky | |
 | `-sky file.hdr\|procedural` | the sky (a Radiance `.hdr` equirectangular map, or a clear sky with a sun made here) for any scene: the room's open front lets it in. Test skies (CC0, Poly Haven) go in `models/skies/` | none; `-scene sky`: procedural |
 | `-skyscale k` / `-skyrot deg` | the sky's strength / turned about the vertical axis | 1 / 0 |
-| `-probe on\|off` | the rasterizers light with a light probe (the path tracer's light at the room's centre, made at start; `view`: again with `L`) | on |
+| `-probe on\|off` | the rasterizers light with a light probe (the path tracer's light at the room's centre, made at start; `view`: again with `L`) and, for the diffuse light, an irradiance grid (5 × 5 × 5 points over the room, 5 × 3 × 5 under a sky) | on |
 | `-proberes n` / `-probespp n` | the probe's width in texels / paths per texel | 256 in a room, 512 under a sky / 32 |
 | `-obj file` | the model for `-scene mesh`: `.obj`, or ASCII `.ply` (binary PLY is not supported) | `models/torus.obj` |
 | `-mat diffuse\|mirror\|glass` | material of the model: a preset of the PBR model (PBR.md) | diffuse (warm orange) |
@@ -224,11 +224,19 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-rough r` | roughness, 0 (polished; up to 0.02 a perfect mirror / refraction) .. 1 (matte) | the preset's: 1, mirror and glass 0 |
 | `-ior x` | index of refraction of the dielectric part | 1.5 |
 | `-transmission t` | 0 (opaque) .. 1 (clear): the share of the light a dielectric does not reflect that goes through it, refracted | the preset's: 0, glass 1 |
+| `-tex name` | the model's base colour texture: a `.png` file, or one made here: `checker`, `bricks` (which brings its own `bricks_normal` and `bricks_mr` unless given). The texture multiplies `-base` (white unless given) | none |
+| `-mrmap name` | the model's metallic (blue) and roughness (green) texture, as glTF's: a `.png`, or `bricks_mr`, `plate_mr` (a worn metal plate). They multiply `-metal` and `-rough` (1 unless given) | none |
+| `-normalmap name` | the model's normal map (tangent space, green up the image, as glTF and OpenGL): a `.png`, or `bricks_normal` | none |
+| `-uvscale k` | the model's texture coordinates times k (the texture repeats k times) | 1 |
 | `-rot degrees` | turns the model around the vertical axis | 0 |
 | `-instances n` | n instances of the model (one mesh placed n times by transforms) in any scene: in a row (`-scene spheres`: beside the spheres first); on the GPU too (WEB.md 2.7) | 0: the model as world triangles, `-scene mesh` only |
 
 The model is always scaled so its largest side is 330 units (the box is 555), centered,
 and stood on the floor. Files without normals get smooth normals computed automatically.
+Textures need the file's texture coordinates (`vt`); `models/sphere.obj`, `cube.obj` and
+`torus.obj` have them. For example `render -scene mesh -obj models/sphere.obj -tex bricks
+-uvscale 2`, or a worn metal torus: `-obj models/torus.obj -tex checker -mrmap plate_mr
+-base 1,0.8,0.5 -metal 1`.
 
 ### Cloud (path tracer)
 

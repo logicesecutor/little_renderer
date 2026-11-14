@@ -166,7 +166,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
     // meshes: the model standing in the room (fixed, its triangles collide, the air flows
     // around it), and copies of it falling as convex hulls
     if ((so2->collider || so2->meshes > 0) && o->scene.obj_path){
-        int mat = scene_add_material(s, scene_mesh_material(&o->scene));
+        int mat = scene_add_material(s, scene_mesh_material_tex(s, &o->scene));
         if (so2->collider){
             int mesh = scene_load_mesh_object(s, o->scene.obj_path, mat, 260);
             int g = mesh >= 0 ? rigid_geom_mesh(&pw->rigid, s->meshes[mesh].tris, s->meshes[mesh].ntris) : -1;

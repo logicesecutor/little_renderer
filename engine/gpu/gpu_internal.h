@@ -93,6 +93,27 @@ extern const char *const GPU_WGSL_TYPES, *const GPU_WGSL_MEDIA;
 extern const char *const GPU_WGSL_BSDF;
 #define GPU_BSDF_TABLE_FLOATS 2112
 void gpu_bsdf_tables(float *out);
+
+// The materials' textures (gpu/tex_gpu.c, PBR5): one RGBA8 atlas of every texture's levels
+// and the table of where they are (GPU_TEX_TABLE vec4u: texture t < GPU_TEX_MAX: its first
+// rectangle, levels, srgb, w | h << 16; then the rectangles x, y, w, h), and the WGSL that
+// samples them (the includer declares var TEXA: texture_2d<f32> and fn tex_entry(k: u32) -> vec4u)
+#define GPU_TEX_MAX 32
+#define GPU_TEX_TABLE 512
+typedef struct {
+    WGPUTexture tex;
+    WGPUTextureView view;
+    uint32_t table[GPU_TEX_TABLE][4];
+    int ntex;
+    const void *src, *key;   // the scene's textures it was made from
+    int nsrc;
+} GpuTextures;
+extern const char *const GPU_WGSL_TEX;
+// (re)makes the atlas when the scene's textures changed (or the first time); returns 1 if it did
+int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s);
+void gpu_textures_free(GpuTextures *gt);
+// a unit direction as 2 floats (octahedral; WGSL oct_decode)
+void gpu_oct_encode(Vec3 d, float *out);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);

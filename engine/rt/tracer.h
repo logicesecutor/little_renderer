@@ -24,6 +24,9 @@ typedef struct {
     // 1 = the lamp is not counted where the ray itself (before any bounce) meets it: the
     // light probes (rt/probe.h), whose users light with the lamp themselves
     int no_lamp_seen;
+    // 1 = the same for the sky: not counted where the ray itself leaves the scene (the
+    // irradiance grid samples the sky's direct light on its own)
+    int no_sky_seen;
 } TraceParams;
 
 TraceParams trace_default_params(void);   // max_depth 50, mis on, skip_caustics off, sampler on

@@ -24,8 +24,17 @@
 Env *probe_bake(const Scene *s, Vec3 center, const Aabb *box, int w, int spp);
 
 // The scene's probe: where the scene says (Scene.probe_at, probe_box), else, with a lamp, at
-// the centre of the box around its quads but the lamp; NULL for a scene with neither a lamp
+// the centre of the box around its quads but the lamp - or, if that point is inside
+// something (a model standing in the middle of the room), above it; NULL for a scene with neither a lamp
 // nor a sky, or neither a place nor quads. w = 0: PROBE_RES, or PROBE_RES_OPEN without a lamp.
 Env *probe_bake_scene(const Scene *s, int w, int spp);
+
+// The scene's irradiance grid (core/env.h IrrGrid): over the probe's box (a room), or
+// around the probe (an open scene: 1400 x 400 x 1400 units), 5 x 5 x 5 (5 x 3 x 5 open)
+// probes of `paths` paths each, those inside something marked unused. NULL where
+// probe_bake_scene gives none.
+IrrGrid *probe_grid_bake_scene(const Scene *s, int paths);
+#define PROBE_GRID_PATHS 2048
+#define PROBE_GRID_CLAMP 4.0f   // the largest radiance a grid probe's sample counts
 
 #endif

@@ -43,7 +43,7 @@ struct Prim {
 struct Tri { q: vec3f, n0: u32, u: vec3f, n1: u32, v: vec3f, nm: u32 };   /* nm: normal 2, material in the top 4 bits */
 /* albedo: the base colour, w = the type (3 a lamp); emission, w = ior; pbr: metallic, roughness,
    transmission (material_resolved) */
-struct TMat { albedo: vec4f, emission: vec4f, pbr: vec4f };
+struct TMat { albedo: vec4f, emission: vec4f, pbr: vec4f, tex: vec4u };   /* tex: as RMat's (raster_gpu.c) */
 struct TP {
     origin: vec4f, upper_left: vec4f, horizontal: vec4f, vertical: vec4f,   /* the camera */
     dims: vec4u,   /* image width, height; first row and rows of this band */
@@ -56,6 +56,8 @@ struct TP {
     ins: vec4u,    /* instances: how many, the first record in prims, the top-level BVH's root;
                       the world BVH's root */
     sky: vec4f,    /* the sky (SKY, SKYC): its scale, cos and sin of its turn, 1 = there is one */
+    txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
+                      triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
     mats: array<TMat, 16>,
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -81,6 +83,11 @@ fn bsdf_tab(k: u32) -> f32 { return TB.tab[k >> 2u][k & 3u]; }
    row h the rows' (entry y: up to row y) */
 @group(0) @binding(16) var SKY: texture_2d<f32>;
 @group(0) @binding(17) var SKYC: texture_2d<f32>;
+/* the materials' textures (gpu/tex_gpu.c) */
+@group(0) @binding(18) var TEXA: texture_2d<f32>;
+struct TT { e: array<vec4u, 512> };
+@group(0) @binding(19) var<uniform> TXT: TT;
+fn tex_entry(k: u32) -> vec4u { return TXT.e[k]; }
 
 const NONE: u32 = 0xffffffffu;
 const PI_: f32 = 3.14159265;
@@ -463,6 +470,104 @@ fn make_hit(r: Ray, f: Found) -> Hit {
         if (dot(ns, ns) > 0.5) { h.n = ns; }
     }
     return h;
+}
+
+/* ---- textures (PBR5): where a hit is in its shape's texture (rt/intersect.c hit_texcoords) ---- */
+struct TexCo { uv: vec2f, t: vec4f };
+fn sphere_uv(n: vec3f) -> vec2f {
+    let u = 0.5 + atan2(n.x, n.z) * (0.5 / PI_);
+    return vec2f(u - floor(u), acos(clamp(n.y, -1.0, 1.0)) / PI_);
+}
+fn sphere_tan(uv: vec2f) -> vec4f {
+    let ph = (uv.x - 0.5) * 2.0 * PI_;
+    return vec4f(cos(ph), 0.0, -sin(ph), 1.0);
+}
+fn auxf(i: u32) -> f32 { return bitcast<f32>(aux[i]); }
+fn hit_texco(r: Ray, f: Found, h: Hit) -> TexCo {
+    var c = TexCo(vec2f(0.0), vec4f(1.0, 0.0, 0.0, 1.0));
+    if (f.id >= UNIT_SPHERE) {                /* a ball or a box, in its own space */
+        let o = to_object(f.inst, r);
+        let q = o.o + o.d * f.t;
+        if (f.id == UNIT_SPHERE) {
+            c.uv = sphere_uv(normalize(q));
+            c.t = sphere_tan(c.uv);
+        } else {
+            /* scene.c unit_box_face(2 k + (side > 0)): u, v the next two axes (twice), swapped
+               on the negative side; (a, b) of the point, tangent along u */
+            let aq = abs(q);
+            var k = 2u;
+            if (aq.x >= aq.y && aq.x >= aq.z) { k = 0u; } else if (aq.y >= aq.z) { k = 1u; }
+            let pos = q[k] > 0.0;
+            var eu = vec3f(0.0); eu[(k + 1u) % 3u] = 2.0;
+            var ev = vec3f(0.0); ev[(k + 2u) % 3u] = 2.0;
+            var ek = vec3f(0.0); ek[k] = select(-1.0, 1.0, pos);
+            let q0 = ek - (eu + ev) * 0.5;
+            var u = eu;
+            var v = ev;
+            if (!pos) { u = ev; v = eu; }
+            let rel = q - q0;
+            c.uv = vec2f(dot(rel, u) / dot(u, u), dot(rel, v) / dot(v, v));
+            c.t = vec4f(normalize(u), -1.0);
+        }
+        c.t = vec4f(normal_to_world(f.inst, c.t.xyz), c.t.w);   /* (a rotation and a uniform scale) */
+        return c;
+    }
+    if (f.id < T.opt.z) {
+        let pr = prims[f.id];
+        if (pr.q.w < 0.5) {
+            c.uv = sphere_uv((h.p - pr.c.xyz) / pr.c.w);
+            c.t = sphere_tan(c.uv);
+        } else {
+            let rel = h.p - pr.q.xyz;
+            c.uv = vec2f(dot(pr.w.xyz, cross(rel, pr.v.xyz)), dot(pr.w.xyz, cross(pr.u.xyz, rel)));
+            c.t = vec4f(normalize(pr.u.xyz), -1.0);
+        }
+        return c;
+    }
+    let gi = f.id - T.opt.z;
+    let tr = tris[gi];
+    c.uv = f.b;
+    c.t = vec4f(normalize(tr.u), 1.0);
+    if (T.txl.z != 0u) {
+        let o = T.txl.x + 3u * gi;
+        let i0 = aux[o];
+        if (i0 != NONE) {
+            let w = vec3f(1.0 - f.b.x - f.b.y, f.b.x, f.b.y);
+            var uv = vec2f(0.0);
+            var t = vec3f(0.0);
+            var hand = 1.0;
+            for (var k = 0u; k < 3u; k++) {
+                let e = T.txl.y + 6u * aux[o + k];
+                uv += w[k] * vec2f(auxf(e), auxf(e + 1u));
+                t += w[k] * vec3f(auxf(e + 2u), auxf(e + 3u), auxf(e + 4u));
+                if (k == 0u) { hand = auxf(e + 5u); }
+            }
+            c.uv = uv;
+            c.t = vec4f(t, hand);
+        }
+    }
+    if (f.inst != NONE) { c.t = vec4f(normal_to_world(f.inst, c.t.xyz), c.t.w); }
+    return c;
+}
+/* the material at a hit with its textures (scene.c material_at, level 0), the shading normal
+   bent by its normal map and tilted back towards where the ray came from (rt/tracer.c
+   hit_shading) */
+fn shade_tex(m0: TMat, r: Ray, f: Found, h: ptr<function, Hit>) -> TMat {
+    if (all(m0.tex.xyz == vec3u(0u)) || u32(m0.albedo.w) == 3u) { return m0; }
+    let tc = hit_texco(r, f, *h);
+    var m = m0;
+    let tm = tex_material(m0.tex, m0.albedo.rgb, m0.pbr.x, m0.pbr.y, tc.uv, -1000.0);
+    m.albedo = vec4f(tm.base, m0.albedo.w);
+    m.pbr.x = tm.metallic;
+    m.pbr.y = tm.rough;
+    if (m0.tex.z != 0u) {
+        var n = tex_normal(m0.tex, tc.uv, -1000.0, (*h).n, tc.t);
+        let v = -r.d;
+        let c = dot(n, v);
+        if (c < 1e-3) { n = normalize(n + v * (1e-3 - c)); }
+        (*h).n = n;
+    }
+    return m;
 }
 
 /* ---- media (rt/medium.c) ---- */
@@ -856,8 +961,8 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
             if (tr < 0.5 && nc > 0.0) { zmed = dist + zc / nc; }
         }
         if (!found) { break; }
-        let h = make_hit(ray, f);
-        let m = T.mats[hit_mat(f)];
+        var h = make_hit(ray, f);
+        let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
         if (kind == 3u) { g.n = h.n; g.z = dist + h.t; break; }    /* a lamp: kept for reprojection */
         var b = mat_bsdf(m, h.front);
@@ -935,8 +1040,8 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
             }
             break;
         }
-        let h = make_hit(ray, f);
-        let m = T.mats[hit_mat(f)];
+        var h = make_hit(ray, f);
+        let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
@@ -1148,8 +1253,8 @@ fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
             if (scattered) { break; }
         }
         if (!found) { break; }
-        let h = make_hit(ray, f);
-        let m = T.mats[hit_mat(f)];
+        var h = make_hit(ray, f);
+        let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
         if (kind == 3u) { break; }
         var b = mat_bsdf(m, h.front);
@@ -1449,8 +1554,8 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
         s.rad += thr * le;
     }
     if (!done && found) {
-        let h = make_hit(ray, f);
-        let m = T.mats[hit_mat(f)];
+        var h = make_hit(ray, f);
+        let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
@@ -2252,7 +2357,8 @@ typedef struct {
     float lt[4];
     uint32_t ins[4];
     float sky[4];
-    float mats[MAX_MATS][12];
+    uint32_t txl[4];
+    float mats[MAX_MATS][16];          // albedo, emission, pbr, tex (uint32 bits)
 } GTP;
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
 // aligned (WebGPU's minimum offset alignment for uniform bindings)
@@ -2267,6 +2373,7 @@ typedef struct {
     unsigned version;
     int built;                          // (LR_GPU_BLAS=gpu) its BVH was built on the GPU
     uint32_t node0, ref0, tri0, nrm0;   // its BVH's root, its leaves' shapes, triangles, normals
+    uint32_t uv0;                       // its texture coordinates (with textures)
     uint32_t root;                      // the root as the kernel's stack takes it (WIDE | node0 if 4-wide)
 } GpuMeshCopy;
 
@@ -2307,6 +2414,12 @@ struct GpuTrace {
     WGPUTexture sky_tex, skyc_tex;
     WGPUTextureView sky_view, skyc_view;
     unsigned sky_id;
+    // the materials' textures (bindings 18, 19: the atlas, its table), and the triangles'
+    // texture coordinates in aux (with any texture in the scene)
+    GpuTextures gt;
+    WGPUBuffer txt;
+    uint32_t uvtri_at, uv_at;
+    int textured;
     // the kernels compiled with the sky (SKY_ON), made when a scene first has one
     WGPUComputePipeline pipe_sky, wf_shade_sky;
     int pipe_sky_failed, wf_sky_failed;
@@ -2395,7 +2508,8 @@ void gpu_trace_after_submit(GpuTrace *t){
 // and the wavefront's kernels (wave); free() it
 static char *trace_source(GpuTrace *t, int sky, int wave){
     const char *parts[] = {sky ? "const SKY_ON: bool = true;\n" : "const SKY_ON: bool = false;\n",
-                           t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", TRACE, "\n", wave ? WAVE : ""};
+                           t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", GPU_WGSL_TEX, "\n", TRACE, "\n",
+                           wave ? WAVE : ""};
     const int n = (int)(sizeof(parts) / sizeof(parts[0]));
     size_t len = 1;
     for (int i = 0; i < n; i++) len += strlen(parts[i]);
@@ -2419,7 +2533,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     if (!src){ free(t); return NULL; }
     // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
     // blue noise
-    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU-----TT");
+    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU-----TTTU");
     t->timer = gpu_timer_create(g, 1024, NTS);
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
@@ -2458,7 +2572,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->ploc_small = small_env && atoi(small_env) > 0 ? atoi(small_env) : 1024;
     t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
-    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRR-UW");
+    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRR-UW------TU");
     t->lt_pipe = gpu_compute(g, "light tracer", src, "ltrace", t->lt_bgl);
     t->rs_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWRR");
     t->dc_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UW");
@@ -2895,7 +3009,8 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     GpuMeshCopy *mc = realloc(t->mc, (size_t)(s->nmeshes ? s->nmeshes : 1) * sizeof(GpuMeshCopy));
     if (!mc) return 0;
     t->mc = mc;
-    uint32_t nodes = 0, refs = 0, tris = (uint32_t)s->ntris, nrm = (uint32_t)s->nnormals;
+    uint32_t nodes = 0, refs = 0, tris = (uint32_t)s->ntris, nrm = (uint32_t)s->nnormals, nuv = (uint32_t)s->nuvs;
+    t->textured = s->ntexmaps > 0;
     size_t most_nodes = 1, most_refs = 1;
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
@@ -2907,7 +3022,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
         GpuMeshCopy *c = &mc[m];
         c->tris = sm->tris; c->ntris = sm->ntris; c->normals = sm->normals; c->nnormals = sm->nnormals;
         c->dynamic = sm->dynamic; c->version = sm->version; c->built = 0;
-        c->node0 = nodes; c->ref0 = refs; c->tri0 = tris; c->nrm0 = nrm;
+        c->node0 = nodes; c->ref0 = refs; c->tri0 = tris; c->nrm0 = nrm; c->uv0 = nuv;
         // a dynamic mesh: room for the GPU's BVH of it too (2n - 1 nodes, n leaves of one
         // triangle), binary as the GPU builds it; the others 4-wide when the CPU made them so
         int on_gpu = sm->dynamic || t->blas_gpu;
@@ -2916,7 +3031,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
         c->root = wide ? (GPU_WIDE | c->node0) : c->node0;
         if (on_gpu && (uint32_t)(2 * sm->ntris - 1) > nn) nn = (uint32_t)(2 * sm->ntris - 1);
         if (on_gpu && (uint32_t)sm->ntris > nr) nr = (uint32_t)sm->ntris;
-        nodes += nn; refs += nr; tris += (uint32_t)sm->ntris; nrm += (uint32_t)sm->nnormals;
+        nodes += nn; refs += nr; tris += (uint32_t)sm->ntris; nrm += (uint32_t)sm->nnormals; nuv += (uint32_t)sm->nuvs;
         if ((size_t)gpu_slots(mb, wide) > most_nodes) most_nodes = (size_t)gpu_slots(mb, wide);
         if ((size_t)mb->nrefs > most_refs) most_refs = (size_t)mb->nrefs;
     }
@@ -2929,7 +3044,9 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     if (t->inst_cap){ nodes += (uint32_t)(2 * t->inst_cap - 1); refs += (uint32_t)t->inst_cap; }
     t->normals_at = refs;
     t->world_node0 = nodes;
-    t->world_ref0 = refs + 3 * nrm;
+    t->uvtri_at = refs + 3 * nrm;
+    t->uv_at = t->uvtri_at + (t->textured ? 3 * tris : 0);
+    t->world_ref0 = t->uv_at + (t->textured ? 6 * nuv : 0);
     size_t bytes_tris = (size_t)(tris ? tris : 1) * 48;
     if (too_big(g, bytes_tris)) return 0;
     gpu_buffer_reserve(g, &t->tris, &t->tris_cap, bytes_tris, st, "triangles");
@@ -2971,6 +3088,39 @@ static int upload_layout(GpuTrace *t, const Scene *s){
             wgpuQueueWriteBuffer(g->queue, t->aux, ((uint64_t)t->normals_at + 3 * (uint64_t)mc[m].nrm0) * 4, nf, (size_t)sm->nnormals * 12);
     }
     free(nf);
+    // the texture coordinates: each triangle's 3 indices (NONE: it has none), then the
+    // coordinates and tangents, 6 floats each; the world's, then each mesh's
+    if (t->textured){
+        size_t most_t = (size_t)s->ntris + 1, most_u = (size_t)s->nuvs + 1;
+        for (int m = 0; m < s->nmeshes; m++){
+            if ((size_t)s->meshes[m].ntris > most_t) most_t = (size_t)s->meshes[m].ntris;
+            if ((size_t)s->meshes[m].nuvs > most_u) most_u = (size_t)s->meshes[m].nuvs;
+        }
+        uint32_t *ti = malloc(most_t * 12);
+        float *uf = malloc(most_u * 24);
+        if (!ti || !uf){ free(ti); free(uf); return 0; }
+        for (int m = -1; m < s->nmeshes; m++){
+            const Triangle *tr = m < 0 ? s->tris : s->meshes[m].tris;
+            int nt = m < 0 ? s->ntris : s->meshes[m].ntris, nu = m < 0 ? s->nuvs : s->meshes[m].nuvs;
+            const Vec2 *uv = m < 0 ? s->uvs : s->meshes[m].uvs;
+            const Vec4 *tg = m < 0 ? s->tangents : s->meshes[m].tangents;
+            uint32_t t0 = m < 0 ? 0 : mc[m].tri0, u0 = m < 0 ? 0 : mc[m].uv0;
+            for (int i = 0; i < nt; i++){
+                int has = tr[i].t[0] >= 0 && tr[i].t[1] >= 0 && tr[i].t[2] >= 0 &&
+                          tr[i].t[0] < nu && tr[i].t[1] < nu && tr[i].t[2] < nu;
+                for (int k = 0; k < 3; k++) ti[3 * i + k] = has ? u0 + (uint32_t)tr[i].t[k] : 0xffffffffu;
+            }
+            for (int i = 0; i < nu; i++){
+                float *o = uf + 6 * i;
+                o[0] = (float)uv[i].x; o[1] = (float)uv[i].y;
+                o[2] = (float)tg[i].x; o[3] = (float)tg[i].y; o[4] = (float)tg[i].z; o[5] = (float)tg[i].w;
+            }
+            if (nt) wgpuQueueWriteBuffer(g->queue, t->aux, ((uint64_t)t->uvtri_at + 3 * (uint64_t)t0) * 4, ti, (size_t)nt * 12);
+            if (nu) wgpuQueueWriteBuffer(g->queue, t->aux, ((uint64_t)t->uv_at + 6 * (uint64_t)u0) * 4, uf, (size_t)nu * 24);
+        }
+        free(ti);
+        free(uf);
+    }
     // the triangles: the world's (they are many: only now), then each mesh's
     if (!upload_tris(t, s->tris, s->ntris, 0, 0)) return 0;
     for (int m = 0; m < s->nmeshes; m++)
@@ -3169,6 +3319,9 @@ static void upload_sky(GpuTrace *t, const Scene *s){
 
 int gpu_trace_sync(GpuTrace *t, const Scene *s){
     upload_sky(t, s);
+    if (!t->txt) t->txt = gpu_buffer(t->g, "path tracer: the textures' table", sizeof(t->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    if (gpu_textures_sync(t->g, &t->gt, s)) wgpuQueueWriteBuffer(t->g->queue, t->txt, 0, t->gt.table, sizeof(t->gt.table));
+    if (t->laid_out && t->textured != (s->ntexmaps > 0)) t->laid_out = 0;   // the layout without its texture coordinates
     if (!geometry_same(t, s)){
         if (!layout_same(t, s) && !upload_layout(t, s)) return 0;
         if (!upload_world(t, s)) return 0;
@@ -3234,7 +3387,17 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
         put(P.mats[m], r.albedo, (float)r.type);
         put(P.mats[m] + 4, r.emission, (float)r.ior);
         put(P.mats[m] + 8, vec3(r.metallic, r.roughness, r.transmission), 0);
+        // its textures the GPU has (as 1 + index), the scale's bits (none without the layout's coordinates)
+        const Material *mm = &s->mats[m];
+        int ok = t->textured && mm->type != MAT_LIGHT;
+        uint32_t tx[4] = {ok && mm->tex_base > 0 && mm->tex_base <= t->gt.ntex ? (uint32_t)mm->tex_base : 0u,
+                          ok && mm->tex_mr > 0 && mm->tex_mr <= t->gt.ntex ? (uint32_t)mm->tex_mr : 0u,
+                          ok && mm->tex_normal > 0 && mm->tex_normal <= t->gt.ntex ? (uint32_t)mm->tex_normal : 0u, 0};
+        float sc = (float)mm->uv_scale;
+        memcpy(&tx[3], &sc, 4);
+        memcpy(&P.mats[m][12], tx, 16);
     }
+    P.txl[0] = t->uvtri_at; P.txl[1] = t->uv_at; P.txl[2] = t->textured ? 1u : 0u;
     *Pp = P;
 }
 
@@ -3260,7 +3423,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
-    WGPUBindGroupEntry e[13];
+    WGPUBindGroupEntry e[15];
     memset(e, 0, sizeof(e));
     for (int i = 0; i < 11; i++){
         e[i].binding = (uint32_t)(light && i == 9 ? 11 : i);
@@ -3273,6 +3436,9 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
         e[12].binding = 17; e[12].textureView = t->skyc_view;
         nent = 13;
     }
+    e[nent].binding = 18; e[nent].textureView = t->gt.view;           // the textures
+    e[nent + 1].binding = 19; e[nent + 1].buffer = t->txt; e[nent + 1].size = WGPU_WHOLE_SIZE;
+    nent += 2;
     if (repeats < 1) repeats = 1;
     if (repeats > MAX_REPS) repeats = MAX_REPS;
     // timed: the tracer per full-image pass (1 sample per pixel), the light tracer per pass
@@ -3309,7 +3475,7 @@ static const char *const WF_ENTRY[NWF] = {"wf_gen", "wf_ext", "wf_shade", "wf_ar
 static const char *const WF_LAYOUT[NWF] = {
     "----U----WU-W",      // gen: parameters, samples (their count seeds the path), blue noise, WF
     "----URRRR---W",      // ext: the BVH and shapes, WF
-    "URRRU-RRR-U-WW--TT", // shade: media, shapes and normals, blue noise, WF, WC, the sky
+    "URRRU-RRR-U-WW--TTTU", // shade: media, shapes and normals, blue noise, WF, WC, the sky, the textures
     "------------WWW",    // args: WF, WC, WA
     "URRRURRRR---W",      // shadow: media, the BVH and shapes, WF
     "----U----W--W"};     // resolve: samples, WF
@@ -3372,15 +3538,15 @@ static int wf_ready(GpuTrace *t){
 
 static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks,
                              WGPUBuffer vstat){
-    WGPUBuffer b[15] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
-                        t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa};
-    WGPUBindGroupEntry e[18];
+    WGPUBuffer b[20] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
+                        t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa, NULL, NULL, NULL, NULL, t->txt};
+    WGPUBindGroupEntry e[20];
     memset(e, 0, sizeof(e));
     int n = 0;
     for (int i = 0; WF_LAYOUT[k][i]; i++){
         if (WF_LAYOUT[k][i] == '-') continue;
         e[n].binding = (uint32_t)i;
-        if (WF_LAYOUT[k][i] == 'T') e[n].textureView = i == 16 ? t->sky_view : t->skyc_view;
+        if (WF_LAYOUT[k][i] == 'T') e[n].textureView = i == 16 ? t->sky_view : (i == 17 ? t->skyc_view : t->gt.view);
         else {
             e[n].buffer = b[i];
             e[n].offset = i == 4 ? toff : 0;
@@ -3648,6 +3814,8 @@ void gpu_trace_destroy(GpuTrace *t){
     if (t->skyc_view) wgpuTextureViewRelease(t->skyc_view);
     if (t->sky_tex){ wgpuTextureDestroy(t->sky_tex); wgpuTextureRelease(t->sky_tex); }
     if (t->skyc_tex){ wgpuTextureDestroy(t->skyc_tex); wgpuTextureRelease(t->skyc_tex); }
+    gpu_textures_free(&t->gt);
+    if (t->txt){ wgpuBufferDestroy(t->txt); wgpuBufferRelease(t->txt); }
     free(t->mc);
     free(t->arena_boxes);
     free(t->arena_par);

@@ -108,7 +108,7 @@ static int add_tri(Scene *s, Vec3 a, Vec3 b, Vec3 c, const int *n, int material)
     t->q = a;
     t->u = v_sub(b, a);
     t->v = v_sub(c, a);
-    for (int k = 0; k < 3; k++) t->n[k] = n ? n[k] : -1;
+    for (int k = 0; k < 3; k++){ t->n[k] = n ? n[k] : -1; t->t[k] = -1; }
     t->material = material;
     return s->ntris++;
 }
@@ -131,14 +131,117 @@ int scene_add_mesh(Scene *s, const Mesh *m, int material){
     int base = s->nnormals;
     s->normals = grow(s->normals, &s->cap_normals, s->nnormals + m->nvn, sizeof(Vec3));
     for (int i = 0; i < m->nvn; i++) s->normals[s->nnormals++] = v_norm(m->vn[i]);
+    // its texture coordinates (v turned over: OBJ's v = 0 is the bottom, ours the top)
+    int tbase = s->nuvs;
+    s->uvs = grow(s->uvs, &s->cap_uvs, s->nuvs + m->nvt, sizeof(Vec2));
+    s->tangents = realloc(s->tangents, (size_t)(s->cap_uvs ? s->cap_uvs : 1) * sizeof(Vec4));
+    if (!s->tangents){ perror("realloc"); exit(1); }
+    for (int i = 0; i < m->nvt; i++) s->uvs[s->nuvs++] = vec2(m->vt[i].x, 1 - m->vt[i].y);
+    int first = s->ntris;
     s->tris = grow(s->tris, &s->cap_tris, s->ntris + m->nf, sizeof(Triangle));
     for (int i = 0; i < m->nf; i++){
         const Face *f = &m->f[i];
         int has_n = f->n[0] >= 0 && f->n[1] >= 0 && f->n[2] >= 0;
         int n[3] = {base + f->n[0], base + f->n[1], base + f->n[2]};
-        add_tri(s, m->v[f->v[0]], m->v[f->v[1]], m->v[f->v[2]], has_n ? n : NULL, material);
+        int k = add_tri(s, m->v[f->v[0]], m->v[f->v[1]], m->v[f->v[2]], has_n ? n : NULL, material);
+        if (f->t[0] >= 0 && f->t[1] >= 0 && f->t[2] >= 0)
+            for (int j = 0; j < 3; j++) s->tris[k].t[j] = tbase + f->t[j];
     }
+    scene_compute_tangents(s->tris + first, m->nf, s->uvs, s->tangents, tbase, m->nvt);
     return m->nf;
+}
+
+void scene_compute_tangents(const Triangle *tris, int ntris, const Vec2 *uvs, Vec4 *tangents, int base, int n){
+    if (n <= 0) return;
+    Vec3 *tu = calloc((size_t)n, sizeof(Vec3)), *up = calloc((size_t)n, sizeof(Vec3)), *nn = calloc((size_t)n, sizeof(Vec3));
+    if (!tu || !up || !nn){ perror("calloc"); exit(1); }
+    for (int i = 0; i < ntris; i++){
+        const Triangle *t = &tris[i];
+        if (t->t[0] < base || t->t[0] >= base + n) continue;
+        Vec2 a = uvs[t->t[0]], b = uvs[t->t[1]], c = uvs[t->t[2]];
+        real du1 = b.x - a.x, dv1 = b.y - a.y, du2 = c.x - a.x, dv2 = c.y - a.y;
+        real det = du1 * dv2 - du2 * dv1;
+        if (r_fabs(det) < 1e-12f) continue;
+        real r = 1 / det;
+        // dP/du and dP/dv from the two edges (P = q + s u + t v in the uv plane)
+        Vec3 dpdu = v_scale(v_sub(v_scale(t->u, dv2), v_scale(t->v, dv1)), r);
+        Vec3 dpdv = v_scale(v_sub(v_scale(t->v, du1), v_scale(t->u, du2)), r);
+        Vec3 fn = v_cross(t->u, t->v);
+        for (int k = 0; k < 3; k++){
+            int j = t->t[k] - base;
+            tu[j] = v_add(tu[j], dpdu);
+            up[j] = v_sub(up[j], dpdv);                  // up the image: -dP/dv
+            nn[j] = v_add(nn[j], fn);
+        }
+    }
+    for (int j = 0; j < n; j++){
+        real l = v_len(tu[j]);
+        Vec3 tt = l > 0 ? v_scale(tu[j], 1 / l) : vec3(1, 0, 0);
+        real w = v_dot(v_cross(nn[j], tt), up[j]) < 0 ? -1 : 1;
+        tangents[base + j] = (Vec4){tt.x, tt.y, tt.z, w};
+    }
+    free(tu); free(up); free(nn);
+}
+
+int scene_texture(Scene *s, const char *name, int srgb){
+    if (!name || !*name) return 0;
+    for (int i = 0; i < s->ntexmaps; i++)
+        if (!strcmp(s->texmaps[i].name, name) && s->texmaps[i].srgb == srgb) return i + 1;
+    TexMap t;
+    size_t len = strlen(name);
+    int err = len > 4 && !strcmp(name + len - 4, ".png") ? texmap_load_png(&t, name, srgb) : texmap_procedural(&t, name);
+    if (err) return 0;
+    if (strlen(name) < sizeof(t.name)) snprintf(t.name, sizeof(t.name), "%s", name);
+    s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
+    s->texmaps[s->ntexmaps] = t;
+    return ++s->ntexmaps;
+}
+
+static inline Vec2 uv_scaled(const Material *m, Vec2 uv){
+    real k = m->uv_scale > 0 ? m->uv_scale : 1;
+    return vec2(uv.x * k, uv.y * k);
+}
+
+// texture t at uv for a footprint of 2^uv_lod texture-coordinate units (times the scale)
+static Vec4 tex_at(const TexMap *t, const Material *m, Vec2 uv, real uv_lod){
+    real lod = MATERIAL_LOD0;
+    if (uv_lod > MATERIAL_LOD0 * 0.5f){
+        real k = m->uv_scale > 0 ? m->uv_scale : 1;
+        lod = uv_lod + r_log2(k * (real)(t->w > t->h ? t->w : t->h));
+    }
+    return texmap_sample(t, uv.x, uv.y, lod);
+}
+
+Material material_at(const Scene *s, const Material *m, Vec2 uv, real uv_lod){
+    if (!material_textured(m) || m->type == MAT_LIGHT) return *m;
+    Material r = material_resolved(m);
+    uv = uv_scaled(m, uv);
+    if (m->tex_base > 0 && m->tex_base <= s->ntexmaps){
+        Vec4 c = tex_at(&s->texmaps[m->tex_base - 1], m, uv, uv_lod);
+        r.albedo = vec3(r.albedo.x * c.x, r.albedo.y * c.y, r.albedo.z * c.z);
+    }
+    if (m->tex_mr > 0 && m->tex_mr <= s->ntexmaps){
+        Vec4 c = tex_at(&s->texmaps[m->tex_mr - 1], m, uv, uv_lod);
+        r.roughness *= c.y;
+        r.metallic *= c.z;
+    }
+    r.type = MAT_PBR;
+    r.tex_base = r.tex_mr = r.tex_normal = 0;
+    return r;
+}
+
+Vec3 material_normal(const Scene *s, const Material *m, Vec2 uv, real uv_lod, Vec3 n, Vec4 t){
+    if (!(m->tex_normal > 0 && m->tex_normal <= s->ntexmaps)) return n;
+    uv = uv_scaled(m, uv);
+    Vec4 c = tex_at(&s->texmaps[m->tex_normal - 1], m, uv, uv_lod);
+    Vec3 tt = v_sub(vec3(t.x, t.y, t.z), v_scale(n, v_dot(n, vec3(t.x, t.y, t.z))));
+    real l = v_len(tt);
+    if (!(l > 1e-6f)) return n;
+    tt = v_scale(tt, 1 / l);
+    Vec3 b = v_scale(v_cross(n, tt), t.w);
+    Vec3 out = v_add(v_add(v_scale(tt, 2 * c.x - 1), v_scale(b, 2 * c.y - 1)), v_scale(n, 2 * c.z - 1));
+    real lo = v_len(out);
+    return lo > 1e-6f ? v_scale(out, 1 / lo) : n;
 }
 
 int scene_load_mesh(Scene *s, const char *path, int material, real size, Vec3 base, real rot_y_deg){
@@ -157,6 +260,24 @@ static Material mesh_material(MatType t){
     if (t == MAT_MIRROR) return material_mirror(vec3(0.95, 0.95, 0.95));
     if (t == MAT_GLASS) return material_glass(vec3(1, 1, 1), 1.5);
     return diffuse(0.80, 0.55, 0.25);                       // warm orange
+}
+
+Material scene_mesh_material_tex(Scene *s, const SceneOptions *opt){
+    Material m = scene_mesh_material(opt);
+    if (!opt->mesh_tex && !opt->mesh_mr && !opt->mesh_normal) return m;
+    if (!(opt->mesh_set & MESH_SET_BASE) && m.type != MAT_GLASS) m.albedo = vec3(1, 1, 1);   // the texture's colour as it is
+    int bricks = opt->mesh_tex && !strcmp(opt->mesh_tex, "bricks");
+    m.tex_base = scene_texture(s, opt->mesh_tex, 1);
+    m.tex_mr = scene_texture(s, opt->mesh_mr ? opt->mesh_mr : (bricks ? "bricks_mr" : NULL), 0);
+    m.tex_normal = scene_texture(s, opt->mesh_normal ? opt->mesh_normal : (bricks ? "bricks_normal" : NULL), 0);
+    if (m.tex_mr){                             // its factors: the texture's values as they are
+        m = material_resolved(&m);
+        m.type = MAT_PBR;
+        if (!(opt->mesh_set & MESH_SET_METAL)) m.metallic = 1;
+        if (!(opt->mesh_set & MESH_SET_ROUGH)) m.roughness = 1;
+    }
+    m.uv_scale = opt->mesh_uv_scale;
+    return m;
 }
 
 Material scene_mesh_material(const SceneOptions *opt){
@@ -197,7 +318,14 @@ static void add_box(Scene *s, Vec3 size, real deg, Vec3 offset, int mat){
 // The camera looks down +z, so x = 555 shows up on the LEFT of the image.
 // SCENE_SKY: a floor under the sky, five spheres of five materials on it
 static int open_scene(Scene *s){
-    int ground = scene_add_material(s, diffuse(0.5, 0.5, 0.5));
+    // the floor: brick paving (PBR5's textures: colour, normal map, roughness), a repeat
+    // every 450 units
+    Material floor = material_pbr(vec3(0.85, 0.85, 0.85), 1, 1, 1.5, 0);
+    floor.tex_base = scene_texture(s, "bricks", 1);
+    floor.tex_normal = scene_texture(s, "bricks_normal", 0);
+    floor.tex_mr = scene_texture(s, "bricks_mr", 0);
+    floor.uv_scale = 40;
+    int ground = scene_add_material(s, floor);
     s->light = -1;
     scene_add_prim(s, make_quad(vec3(-8722, 0, -8722), vec3(0, 0, 18000), vec3(18000, 0, 0), ground));
     Material m[5] = {
@@ -262,7 +390,7 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         scene_add_prim(s, make_sphere(vec3(185, 100, 170), 100, scene_add_material(s, glass)));
     } else if (opt->kind == SCENE_MESH && opt->instances <= 0){
         // largest side 330 units, standing on the floor in the middle of the box
-        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, scene_mesh_material(opt)), 330.0,
+        int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, scene_mesh_material_tex(s, opt)), 330.0,
                                 vec3(278, 0, 278), opt->rot_deg);
         if (n < 0){
             fprintf(stderr, "could not load %s\n", opt->obj_path);
@@ -299,7 +427,7 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         int sph = opt->kind == SCENE_SPHERES;
         real size = sph ? 180.0f : 330.0f;
         if (size > 520.0f / n) size = 520.0f / n;
-        int mesh = scene_load_mesh_object(s, opt->obj_path, scene_add_material(s, scene_mesh_material(opt)), size);
+        int mesh = scene_load_mesh_object(s, opt->obj_path, scene_add_material(s, scene_mesh_material_tex(s, opt)), size);
         if (mesh < 0){
             fprintf(stderr, "could not load %s\n", opt->obj_path);
             return 1;
@@ -438,10 +566,19 @@ int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
         Vec3 a = src->v[f->v[0]], b = src->v[f->v[1]], c = src->v[f->v[2]];
         t->q = a; t->u = v_sub(b, a); t->v = v_sub(c, a);
         int has_n = f->n[0] >= 0 && f->n[1] >= 0 && f->n[2] >= 0;
-        for (int k = 0; k < 3; k++) t->n[k] = has_n ? f->n[k] : -1;
+        int has_t = f->t[0] >= 0 && f->t[1] >= 0 && f->t[2] >= 0;
+        for (int k = 0; k < 3; k++){ t->n[k] = has_n ? f->n[k] : -1; t->t[k] = has_t ? f->t[k] : -1; }
         t->material = material;
     }
     m->ntris = src->nf;
+    if (src->nvt > 0){                       // texture coordinates (v turned over) and tangents
+        m->uvs = malloc((size_t)src->nvt * sizeof(Vec2));
+        m->tangents = malloc((size_t)src->nvt * sizeof(Vec4));
+        if (!m->uvs || !m->tangents){ perror("malloc"); exit(1); }
+        for (int i = 0; i < src->nvt; i++) m->uvs[i] = vec2(src->vt[i].x, 1 - src->vt[i].y);
+        m->nuvs = src->nvt;
+        scene_compute_tangents(m->tris, m->ntris, m->uvs, m->tangents, 0, m->nuvs);
+    }
     m->version = 1;
     mesh_bounds(m);
     return s->nmeshes++;
@@ -524,6 +661,8 @@ void scene_free(Scene *s){
         if (m->bvh && m->bvh_free) m->bvh_free(m->bvh);
         free(m->tris);
         free(m->normals);
+        free(m->uvs);
+        free(m->tangents);
     }
     free(s->meshes);
     s->meshes = NULL;
@@ -536,6 +675,8 @@ void scene_free(Scene *s){
     env_free(s->env);
     env_free(s->probe);
     s->env = s->probe = NULL;
+    irr_grid_free(s->irr);
+    s->irr = NULL;
     if (s->accel && s->accel_free) s->accel_free(s->accel);
     s->accel = NULL;
     s->accel_free = NULL;
@@ -548,4 +689,13 @@ void scene_free(Scene *s){
     free(s->normals);
     s->normals = NULL;
     s->nnormals = s->cap_normals = 0;
+    free(s->uvs);
+    free(s->tangents);
+    s->uvs = NULL;
+    s->tangents = NULL;
+    s->nuvs = s->cap_uvs = 0;
+    for (int i = 0; i < s->ntexmaps; i++) texmap_free(&s->texmaps[i]);
+    free(s->texmaps);
+    s->texmaps = NULL;
+    s->ntexmaps = s->cap_texmaps = 0;
 }

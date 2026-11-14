@@ -122,6 +122,26 @@ static void env_numbers(const Scene *s, Sampler *sm, int depth, real *ua, real *
     else { *ua = rng_real(sm->rng); *ub = rng_real(sm->rng); }
 }
 
+// The material at a hit with its textures applied (PBR5; into *tmp when it has any), and
+// the shading normal bent by its normal map. A bent normal that would turn away from v (the
+// direction the ray came from) is tilted back towards it, just past the horizon: the
+// light that gets there must still reach the viewer.
+static const Material *hit_shading(const Scene *s, Hit *h, Vec3 v, Material *tmp){
+    const Material *m = &s->mats[hit_material(s, h)];
+    if (!material_textured(m) || m->type == MAT_LIGHT) return m;
+    Vec2 uv;
+    Vec4 tg;
+    hit_texcoords(s, h, &uv, &tg);
+    *tmp = material_at(s, m, uv, MATERIAL_LOD0);
+    if (m->tex_normal){
+        Vec3 n = material_normal(s, m, uv, MATERIAL_LOD0, h->n, tg);
+        real c = v_dot(n, v);
+        if (c < 1e-3f) n = v_norm(v_add(n, v_scale(v, 1e-3f - c)));
+        h->n = n;
+    }
+    return tmp;
+}
+
 // the BSDF has a part next event estimation can find (not only perfect mirror / refraction)
 static inline int bsdf_rough_part(const Bsdf *b){
     return !b->smooth || (1 - b->metallic) * (1 - b->transmission) > 0;
@@ -172,7 +192,7 @@ static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
 }
 
 TraceParams trace_default_params(void){
-    TraceParams p = {.max_depth = 50, .mis = 1, .skip_caustics = 0, .sampler = 1, .no_lamp_seen = 0};
+    TraceParams p = {.max_depth = 50, .mis = 1, .skip_caustics = 0, .sampler = 1, .no_lamp_seen = 0, .no_sky_seen = 0};
     return p;
 }
 
@@ -247,7 +267,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             continue;
         }
         if (!found){                          // escaped: the sky (black without one)
-            if (s->env && emit != EMIT_NONE){
+            if (s->env && emit != EMIT_NONE && !(depth == 0 && tp->no_sky_seen)){
                 Vec3 le = env_eval(s->env, ray.d);
                 if (emit == EMIT_MIS) le = v_scale(le, power_heuristic(bounce_pdf, env_pdf(s->env, ray.d)));
                 radiance = v_add(radiance, v_mul(throughput, le));
@@ -255,7 +275,8 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             break;
         }
 
-        const Material *m = &s->mats[hit_material(s, &h)];
+        Material mtex;
+        const Material *m = hit_shading(s, &h, v_neg(v_norm(ray.d)), &mtex);
 
         if (m->type == MAT_LIGHT){
             if (h.front_face && !(caustic_chain && caustic_spec) && !(depth == 0 && tp->no_lamp_seen)){
@@ -399,7 +420,8 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                 // a scattering event in a medium: that path is the path tracer's job
                 if (media && scene_medium_collision(s, &ray, 0, found ? hit.t : 1e30, &rng, &ts, &which)) break;
                 if (!found) break;
-                const Material *m = &s->mats[hit_material(s, &hit)];
+                Material mtex;
+                const Material *m = hit_shading(s, &hit, v_neg(ray.d), &mtex);
                 if (m->type == MAT_LIGHT) break;
 
                 Bsdf b = bsdf_make(m, hit.front_face);

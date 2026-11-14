@@ -14,12 +14,21 @@ typedef struct {
     int prim;        // shape id of what was hit (core/scene.h: primitives, then triangles);
                      // for an instance: the triangle's index in its mesh
     int inst;        // the instance hit, or -1 (scene_intersect sets it)
+    Vec2 uv;         // where on the shape: a sphere's longitude / latitude (0..1), a quad's
+                     // (a, b), a triangle's barycentrics (b1, b2) (hit_texcoords turns
+                     // them into texture coordinates)
 } Hit;
 
 // the material of what was hit
 static inline int hit_material(const Scene *s, const Hit *h){
     return h->inst >= 0 ? scene_instance_material(s, h->inst, h->prim) : scene_shape_material(s, h->prim);
 }
+
+// Where a hit is in its shape's textures (PBR5): texture coordinates (a sphere's longitude
+// and latitude, a quad's (a, b), a triangle's from its corners' (Triangle.t; without them,
+// its barycentrics)) and the tangent there in the world (xyz along +u; w the handedness:
+// the bitangent w (n x t) points up the image)
+void hit_texcoords(const Scene *s, const Hit *h, Vec2 *uv, Vec4 *tangent);
 
 // Slab test, used by both acceleration structures. Along each axis the ray is between the
 // box's two planes for t in [(lo - o) / d, (hi - o) / d] (swapped when d < 0); it is inside

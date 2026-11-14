@@ -90,4 +90,21 @@ Vec3 env_box_dir(const Env *e, Vec3 p, Vec3 d);
 // coefficients use)
 void env_sh_basis(Vec3 d, real *y);
 
+// An irradiance grid: n[0] x n[1] x n[2] small probes at the centres of a box's cells, each
+// only the 9 harmonics of the irradiance there (as Env.sh: E / pi; rt/probe.c bakes them).
+// The diffuse light of a point is blended from the 8 probes around it - those that ended up
+// inside something (valid = 0) left out - so a wall near a bright object gets its light and
+// one far from it does not, where one probe would give every point the same.
+typedef struct IrrGrid {
+    int n[3];
+    Vec3 lo, hi;                // the box
+    float *sh;                  // per probe (x fastest, then y, then z): 27 harmonics (9 rgb), valid
+    unsigned id;                // a new number when baked (the GPU uploads it again)
+} IrrGrid;
+#define IRR_FLOATS 28
+// the blended irradiance (E / pi) at p for normal n, times scale; 0 if no valid probe is near
+// (then *ok = 0: use another source)
+Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok);
+void irr_grid_free(IrrGrid *g);
+
 #endif
