@@ -110,6 +110,8 @@ keeps every measurement, and the ideas still to try):
 | [PHYSICS](docs/PHYSICS.md) | rigid bodies, the air, the coupling |
 | [WEB](docs/WEB.md) | the GPU backend and the browser build |
 | [PERFORMANCE](docs/PERFORMANCE.md) | how to measure, what was measured, what is next |
+| [ROADMAP](docs/ROADMAP.md) | the order of the next steps and where each stands |
+| [PBR](docs/PBR.md) | the plan for physically based materials in every pipeline |
 
 ## Credits
 
