@@ -17,6 +17,7 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 | 3 | **P8: a parallel prefix sum for the contact lists** | done | below; PERFORMANCE.md P8 |
 | 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | done | below; PERFORMANCE.md R4b |
 | 5 | **PBR: one physically based material model for all four pipelines** | in progress: PBR1, PBR2 done | [PBR.md](PBR.md), phases PBR1–PBR6 |
+| 6 | **Our own Vulkan backend**: a WGSL → SPIR-V compiler and `webgpu.h` on Vulkan in place of wgpu-native, then native extensions, hardware ray tracing (R6) and remote rendering to browsers | planned (after PBR) | [VULKAN.md](VULKAN.md); PERFORMANCE.md X1, R6, P10 |
 
 Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost per step),
 both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; R7
