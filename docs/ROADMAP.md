@@ -14,8 +14,8 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 |---|---|---|---|
 | 1 | **PNG, and the FPS counter on the image** | done (050baf2, 97091cd) | below |
 | 2 | **P3: a cheaper hull–hull test** | done | below; PERFORMANCE.md P3 |
-| 3 | **P8: a parallel prefix sum for the contact lists** | next | below; PERFORMANCE.md P8 |
-| 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | planned | below; PERFORMANCE.md R4b |
+| 3 | **P8: a parallel prefix sum for the contact lists** | done | below; PERFORMANCE.md P8 |
+| 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | next | below; PERFORMANCE.md R4b |
 | 5 | **PBR: one physically based material model for all four pipelines** | planned | [PBR.md](PBR.md), phases PBR1–PBR6 |
 
 Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost per step),
@@ -74,6 +74,9 @@ needed for now (PERFORMANCE.md P3b). Results in PERFORMANCE.md's Done.
 "Contact lists 1" is one GPU thread adding up the contacts of every body (0.1–0.4 ms).
 A work-efficient scan (Blelloch; or decoupled look-back, Merrill & Garland 2016) over
 workgroups, with a fallback when subgroup operations are missing.
+
+Done (2026-11-14): a single workgroup of 256 threads is enough for the bodies there are
+(each sums a run of them, the 256 sums are scanned together): 0.10–0.14 ms → 0.004 ms.
 
 ## 4. R4b: PLOC
 

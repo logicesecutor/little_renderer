@@ -1332,20 +1332,40 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 );
 
 
-/* where each body's contacts go (one thread: a few thousand bodies at most) */
+/* where each body's contacts go: off[i] = the contacts of the bodies before i (an exclusive
+   prefix sum, P8). One workgroup of 256 threads: each adds up its run of n / 256 bodies,
+   the 256 sums are scanned together (Hillis-Steele, 8 rounds), then each thread writes its
+   run's offsets from its sum's start. A few thousand bodies are a run of 4-16 each. */
 static const char *K_SCAN = WGSL(
 @group(0) @binding(1) var<storage, read_write> cnt: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read_write> off: array<u32>;
 @group(0) @binding(3) var<storage, read_write> cur: array<atomic<u32>>;
-@compute @workgroup_size(1)
-fn main() {
+var<workgroup> part: array<u32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lv: vec3u) {
+    let t = lv.x;
+    let n = P.n.x;
+    let per = (n + 255u) / 256u;
+    let lo = min(t * per, n);
+    let hi = min(lo + per, n);
     var s = 0u;
-    for (var i = 0u; i < P.n.x; i++) {
-        off[i] = s;
-        s += atomicLoad(&cnt[1u + i]);
+    for (var i = lo; i < hi; i++) { s += atomicLoad(&cnt[1u + i]); }
+    part[t] = s;
+    workgroupBarrier();
+    for (var d = 1u; d < 256u; d = d << 1u) {
+        var v = 0u;
+        if (t >= d) { v = part[t - d]; }
+        workgroupBarrier();
+        part[t] += v;
+        workgroupBarrier();
+    }
+    var base = part[t] - s;
+    for (var i = lo; i < hi; i++) {
+        off[i] = base;
+        base += atomicLoad(&cnt[1u + i]);
         atomicStore(&cur[i], 0u);
     }
-    off[P.n.x] = s;
+    if (t == 255u) { off[n] = part[255]; }
 }
 );
 

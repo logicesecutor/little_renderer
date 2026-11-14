@@ -54,7 +54,7 @@ reconstructed and may be refined.
 
 Where the time goes today (`mesh_rain`, 1500 hulls piled in the room, GPU, `LR_GPU_TIMING=1`,
 after P3): 4.1 ms of GPU per physics step, of which 1.8 ms are the hull–hull contacts,
-2.0 ms solve + apply, 0.1 ms the single-thread contact-list scan, 0.02 ms the pairs (broad
+2.0 ms solve + apply, 0.004 ms the contact-list prefix sum (P8), 0.02 ms the pairs (broad
 phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 118, 1500: 20
 (1500 hulls of size 70 overfill the room: new ones appear inside the pile). (Before P1:
 9.9 ms, 7.9 of them the hulls; 1000: 17, 1500: 7–9. After P1: 4.7 ms, 2.6 the hulls.)
@@ -69,7 +69,6 @@ phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 118
 | P5 | **AVBD solver** (Augmented Vertex Block Descent, SIGGRAPH 2025): bodies colored, a 6x6 system per body, 3–4 iterations, hard contacts through an augmented Lagrangian | later (very good to have; a bigger rewrite) | paper, RTX 4090: 110k bodies 3.5 ms of solve vs 14.1 ms sequential impulses, 19.5 ms XPBD; stable at mass ratios where the others crush; a WebGPU port exists. Even there collision detection cost as much as the solve, so P1–P3 come first |
 | P6 | Faster CPU path as in Box2D v3: graph coloring of the contacts, SIMD (AVX2 natively, WASM SIMD in browsers), threads | planned | more than 2x on one thread in Box2D v3, and it scales with cores; matters for builds without a GPU and in the browser (one thread) |
 | P7 | Broad phase with a tree (reuse the tracer's GPU LBVH builder) or sweep-and-prune | when needed | all pairs (n²) still cost only 0.05 ms at 1500 bodies; needed past about 10k |
-| P8 | Parallel prefix sum for the contact lists ("contact lists 1" is one GPU thread) | planned (ROADMAP.md step 3) | 0.36 ms at 1500 bodies |
 
 ### Air and cloud
 
@@ -106,6 +105,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 
 | when | what | measured |
 |---|---|---|
+| 2026-11-14 | **P8: the contact lists' prefix sum in parallel**: one workgroup of 256 threads (each sums a run of bodies, the 256 sums scanned together) instead of one thread | "contact lists 1" 0.10–0.14 → 0.004 ms per step (1000–1500 hulls); `test_gpu_rigid` 1024 bodies 1.17 → 0.98 ms, 2048 bodies 1.56 → 1.23 ms |
 | 2026-11-14 | **P3: hull pairs remembered**, CPU and GPU: each pair of hulls keeps the axis that separated it, or the feature of least overlap with its pose; next step a separating axis is tried first, and a touching pair that barely moved (1% of its size, 1°) takes its contacts from the same feature (PHYSICS.md 1.2b). Fewer corners per hull measured and not taken (the hull leaves too much of round shapes out) | one CPU thread, 250 hulls settling: 30.5 → 9.4 ms per step; `mesh_rain -gpu off -max 150 -endless off -sleep off`: physics 49.8 → 13.0 ms per frame. GPU: `mesh_rain -max 1000`, hull contacts 2.3 → 1.4 ms, 3.9 → 3.1 ms per step, 52 → 118 frames/s at the end; 1500 hulls 2.6 → 1.8 ms (4.7 → 4.1); 600 settled, sleeping off, 2.5 → 1.9 ms |
 | 2026-11-13 | **P2: sleeping**, CPU and GPU: a body still (5 units/s) for 0.5 s falls asleep and is fixed to the others; woken by a body faster than 20 units/s near it, by the program (`Body.dirty`, impulses) or by a change of the air's force; pairs of sleeping bodies not tested (PHYSICS.md 1.5) | settled pile of 1024 balls and boxes (`test_gpu_rigid`), CPU: 22.7 → 3.5–3.7 ms per step (907 asleep); `mesh_rain -gpu off -max 150 -endless off`: physics 49.8 → 0.07 ms per frame, 13 → 40 frames/s (drawing). GPU: `mesh_rain -max 600 -endless off`, 60 s (a third of it filling): 2.52 → 0.90 ms per step on average, hull contacts 1.49 → 0.24 ms; the settled 1024 balls and boxes 1.07–1.33 → 1.07 ms (P10) |
 | 2026-11-13 | **P1: contacts found once per step**, CPU and GPU: each contact's points kept in its bodies' frames and followed through the substeps (Box2D v3's soft step), speculative contacts (a margin of how far a pair can close in the step), the bounce from the speed when the step began, the push out capped at 300 units/s | `mesh_rain` 1500 hulls: 8.9 → 4.7 ms of GPU per step, hull contacts 7.1 → 2.6 ms, 9 → 19 frames/s; 1000 hulls 17 → 52 frames/s. `test_gpu_rigid` GPU: 64 bodies 1.20 → 0.67 ms, 1024 1.73 → 1.07 ms, 2048 2.80 → 1.60 ms; CPU 1024 18.8 → 20.3 ms (P9) |
