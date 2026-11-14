@@ -8,6 +8,7 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){ (void)g; (void)width; (
 void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const RenderParams *p,
                       const MarchParams *mp, int volumes){ (void)v; (void)fb; (void)s; (void)p; (void)mp; (void)volumes; }
 void gpu_view_destroy(GpuView *v){ (void)v; }
+void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){ (void)v; (void)argb; (void)w; (void)h; (void)x; (void)y; }
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     (void)v; (void)s; (void)p; (void)mp; (void)volumes;
@@ -349,6 +350,27 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 );
 
+/* The text over the image (the frame rate; app/hud.c draws it into argb pixels): a rectangle
+   of the canvas, its pixels from the buffer, blended over what the composite pass drew. */
+static const char *HUD = WGSL(
+struct HudU { r: vec4f, s: vec4f };   /* x, y, w, h of the box in pixels; the canvas's size */
+@group(0) @binding(0) var<uniform> U: HudU;
+@group(0) @binding(1) var<storage, read> px: array<u32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    var c = array<vec2f, 6>(vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(0.0, 1.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0));
+    let p = U.r.xy + c[i] * U.r.zw;
+    return vec4f(p.x / U.s.x * 2.0 - 1.0, 1.0 - p.y / U.s.y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let x = u32(pos.x - U.r.x);
+    let y = u32(pos.y - U.r.y);
+    let c = px[y * u32(U.r.z) + x];
+    return vec4f(f32((c >> 16u) & 255u), f32((c >> 8u) & 255u), f32(c & 255u), f32(c >> 24u)) / 255.0;
+}
+);
+
 /* What volume_update does on the CPU, for media whose densities live on the GPU (and, the
    same way, for all the others): the majorant of every brick (with the voxel of interpolation
    around it), and, with atomics, the box of the voxels with density > 0 and their maximum. */
@@ -447,6 +469,12 @@ struct GpuView {
     WGPUBuffer vstat, acc;      // per medium: active box and max (VStat), and the atomics that make it
     WGPUComputePipeline light_pipe, stats_pipe, finish_pipe;
     WGPURenderPipeline comp_pipe, comp_gpu_pipe;   // over a CPU framebuffer / over the GPU rasterizer's frame
+    // the text over the image (gpu_view_hud): its pixels, where, and the pass that blends it
+    WGPURenderPipeline hud_pipe;
+    WGPUBindGroupLayout hud_bgl;
+    WGPUBuffer hud_u, hud_px;
+    size_t hud_cap;
+    int hud_w, hud_h, hud_x, hud_y;
     // explicit: "auto" would drop the bindings a shader does not read
     WGPUBindGroupLayout light_bgl, comp_bgl, comp_gpu_bgl, stats_bgl, finish_bgl;
     GpuRaster *raster;          // the scene's surfaces drawn on the GPU (created when first used)
@@ -649,6 +677,28 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     rd.vertex.module = mcg;
     fs.module = mcg;
     v->comp_gpu_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+    {   // the text over the image: blended by its alpha
+        WGPUShaderModule mh = gpu_shader(g, "text over the image", HUD);
+        v->hud_bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "UR");
+        WGPUPipelineLayout hud_pl = make_pipeline_layout(g, v->hud_bgl);
+        WGPUBlendState blend;
+        memset(&blend, 0, sizeof(blend));
+        blend.color.operation = blend.alpha.operation = WGPUBlendOperation_Add;
+        blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+        blend.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        blend.alpha.srcFactor = WGPUBlendFactor_One;
+        blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        target.blend = &blend;
+        rd.label = gpu_str("text over the image");
+        rd.layout = hud_pl;
+        rd.vertex.module = mh;
+        fs.module = mh;
+        v->hud_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+        target.blend = NULL;
+        v->hud_u = gpu_buffer(g, "text over the image: where", 32, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+        wgpuShaderModuleRelease(mh);
+        wgpuPipelineLayoutRelease(hud_pl);
+    }
     wgpuShaderModuleRelease(mcg);
     wgpuPipelineLayoutRelease(comp_gpu_pl);
     wgpuShaderModuleRelease(ml);
@@ -939,6 +989,15 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
         wgpuRenderPassEncoderSetPipeline(pass, pipe);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        if (target == 0 && v->hud_w > 0 && v->hud_pipe){
+            // the text, on the canvas only (screenshots stay clean)
+            WGPUBuffer hb[2] = {v->hud_u, v->hud_px};
+            WGPUBindGroup hg = gpu_bind(g, v->hud_bgl, hb, 2);
+            wgpuRenderPassEncoderSetPipeline(pass, v->hud_pipe);
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, hg, 0, NULL);
+            wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+            wgpuBindGroupRelease(hg);
+        }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
         if (target == 1){
@@ -1244,14 +1303,29 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
     return present_gpu_frame(v, s, p, mp, volumes, 1, v->t_done == 0);
 }
 
+void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
+    if (!v) return;
+    if (!argb || w <= 0 || h <= 0 || x + w > v->w || y + h > v->h || x < 0 || y < 0){ v->hud_w = 0; return; }
+    Gpu *g = v->g;
+    size_t bytes = (size_t)w * h * 4;
+    if (gpu_buffer_reserve(g, &v->hud_px, &v->hud_cap, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
+                           "text over the image") < 0) return;
+    wgpuQueueWriteBuffer(g->queue, v->hud_px, 0, argb, bytes);
+    float u[8] = {(float)x, (float)y, (float)w, (float)h, (float)v->w, (float)v->h, 0, 0};
+    wgpuQueueWriteBuffer(g->queue, v->hud_u, 0, u, sizeof(u));
+    v->hud_w = w; v->hud_h = h; v->hud_x = x; v->hud_y = y;
+}
+
 void gpu_view_destroy(GpuView *v){
     if (!v) return;
     WGPUBuffer bufs[] = {v->frame_u, v->sel_u[0], v->sel_u[1], v->dens, v->bricks, v->light, v->color, v->depth,
-                         v->vstat, v->acc};
+                         v->vstat, v->acc, v->hud_u, v->hud_px};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
     if (v->light_pipe) wgpuComputePipelineRelease(v->light_pipe);
     if (v->comp_pipe) wgpuRenderPipelineRelease(v->comp_pipe);
     if (v->comp_gpu_pipe) wgpuRenderPipelineRelease(v->comp_gpu_pipe);
+    if (v->hud_pipe) wgpuRenderPipelineRelease(v->hud_pipe);
+    if (v->hud_bgl) wgpuBindGroupLayoutRelease(v->hud_bgl);
     gpu_raster_destroy(v->raster);
     gpu_trace_destroy(v->trace);
     gpu_denoise_destroy(v->den);

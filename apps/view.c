@@ -33,6 +33,7 @@
 
 #include "app/options.h"
 #include "app/simdemo.h"
+#include "app/hud.h"
 #include "lr.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
@@ -60,6 +61,7 @@ static const char *CONTROLS =
     "  R                back to the starting camera\n"
     "  X                GPU path tracing: denoiser on / off\n"
     "  P                save the current image as PNG\n"
+    "  I                the frame rate on the image: on / off\n"
     "  C                print a render command for this exact view\n"
     "  H                print these controls\n"
     "  Esc              quit\n";
@@ -275,6 +277,36 @@ static double sim_last;
 // the GPU (-gpu on, the default in a browser): frames are shown and clouds raymarched there
 static Gpu *gpu;
 static GpuView *gview;
+
+// the frame rate drawn over the image (app/hud.c): the text's pixels, made again with the
+// title (twice a second); on the GPU they are blended over each frame by gpu_view_hud
+#define HUD_X 8
+#define HUD_Y 8
+static int hud_on = 1;
+static uint32_t *hud_px;
+static int hud_w, hud_h;
+
+static void hud_update(double fps){
+    char text[64];
+    static char last[64];
+    snprintf(text, sizeof(text), "%.0f fps  %.1f ms", fps, fps > 0 ? 1000.0 / fps : 0.0);
+    if (hud_px && !strcmp(text, last)) return;
+    snprintf(last, sizeof(last), "%s", text);
+    free(hud_px);
+    int scale = fb && fb->w >= 1280 ? 3 : 2;
+    hud_px = hud_text(text, scale, &hud_w, &hud_h);
+    if (gview) gpu_view_hud(gview, hud_on ? hud_px : NULL, hud_w, hud_h, HUD_X, HUD_Y);
+    if (hud_on) force_present = 1;            // shown even when nothing else changes
+}
+
+// a CPU frame shown with the text over it (put on just for the window, then taken off again)
+static void present_with_hud(Framebuffer *f){
+    uint32_t *saved = NULL;
+    int on = hud_on && hud_px && f->w >= HUD_X + hud_w && f->h >= HUD_Y + hud_h;
+    if (on) hud_draw(f, hud_px, hud_w, hud_h, HUD_X, HUD_Y, &saved);
+    window_present(win, f);
+    if (on) hud_restore(f, hud_w, hud_h, HUD_X, HUD_Y, saved);
+}
 static GpuFluid *gfluid;     // -sim on: the air and the cloud stepped on the GPU
 static GpuRigid *grigid;     // -sim on: the balls and boxes stepped on the GPU
 
@@ -383,7 +415,7 @@ static void on_gpu_frame(void *user, const uint32_t *px, int w, int h){
         if (!gfb) gfb = fb_create(w, h);
         if (gfb && gfb->w == w && gfb->h == h){
             memcpy(gfb->color, px, (size_t)w * h * sizeof(uint32_t));
-            window_present(win, gfb);
+            present_with_hud(gfb);
         }
     }
 #ifdef __EMSCRIPTEN__
@@ -539,6 +571,11 @@ static int frame(void){
             switch (ev.key){
             case LR_KEY_ESCAPE: running = 0; break;
             case 'r': view = home; changed = 1; break;
+            case 'i':
+                hud_on = !hud_on;
+                if (gview) gpu_view_hud(gview, hud_on ? hud_px : NULL, hud_w, hud_h, HUD_X, HUD_Y);
+                raster_dirty = 1;
+                break;
             case 'p':
 #ifdef __EMSCRIPTEN__
                 if (gview){ do_capture(1); break; }   // a PNG download
@@ -811,7 +848,7 @@ static int frame(void){
                     gpu_view_present(gview, fb, &scene, &last_rp, &o.march, frame_volumes);
                 }
             } else gpu_view_present(gview, fb, &scene, &last_rp, &o.march, use_raster && frame_volumes);
-        } else window_present(win, fb);
+        } else present_with_hud(fb);
         showing_raster = use_raster;
         last_present = tn;
         frames++;
@@ -863,6 +900,7 @@ static int frame(void){
         snprintf(shown, sizeof(shown), "view | %.0f fps (%.1f ms)%s", fps, fps > 0 ? 1000.0 / fps : 0.0,
                  strncmp(title, "view", 4) == 0 ? title + 4 : title);
         window_set_title(win, shown);
+        hud_update(fps);
         title_frames = frames;
         last_title = tn;
     }

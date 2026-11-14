@@ -356,6 +356,7 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `R` | back to the starting camera |
 | `X` | path tracing on the GPU: denoiser on / off |
 | `P` | save what the window shows as PNG (the path traced image, or the raster frame) |
+| `I` | the frame rate drawn on the image, top left: on / off (on at start; never in screenshots) |
 | `C` | print a `render` command that path traces exactly this view |
 | `H` | print the controls in the terminal |
 | `Esc` | quit |
@@ -369,10 +370,11 @@ With `-sim on`:
 | `N` | drop a steel ball |
 | `T` | restart the demo |
 
-The title bar always starts with the frame rate (frames shown per second, and the time of
-one), then shows the mode and either the raster shading and frame time, or (path
-tracing) the acceleration structure, samples per pixel so far (/ the `-s` limit), time
-per full pass, current resolution (1/1 when still), bounces and speed.
+The frame rate (frames shown per second, and the time of one) is drawn on the image, top
+left (key `I`), and starts the title bar, which then shows the mode and either the raster
+shading and frame time, or (path tracing) the acceleration structure, samples per pixel so
+far (/ the `-s` limit), time per full pass, current resolution (1/1 when still), bounces
+and speed.
 
 **How it works.**
 - `hybrid` (default): while you move, the rasterizer draws every frame. About 0.1 s after

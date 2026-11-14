@@ -28,6 +28,9 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 // p->proj, p->eye, p->mode, p->cull_backfaces), then the media over them. Returns 0 if this
 // GPU cannot draw the scene (a mesh too big for one buffer): then draw it on the CPU and
 // show it with gpu_view_present.
+// A rectangle of text drawn over every frame shown on the canvas (not in screenshots):
+// w x h pixels 0xAARRGGBB (app/hud.h makes them) at (x, y); argb = NULL removes it.
+void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y);
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);
 
 // ---- path tracing on the GPU (gpu/trace_gpu.c: the light transport of rt/tracer.c) -------
