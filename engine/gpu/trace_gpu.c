@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "core/brdf.h"
 #include "core/sampler.h"
 #include "core/volume.h"
 #include "rt/accel.h"
@@ -39,7 +40,9 @@ struct Prim {
     w: vec4f,      /* (u x v) / |u x v|^2 */
 };
 struct Tri { q: vec3f, n0: u32, u: vec3f, n1: u32, v: vec3f, nm: u32 };   /* nm: normal 2, material in the top 4 bits */
-struct TMat { albedo: vec4f, emission: vec4f };             /* albedo.w = type, emission.w = ior */
+/* albedo: the base colour, w = the type (3 a lamp); emission, w = ior; pbr: metallic, roughness,
+   transmission (material_resolved) */
+struct TMat { albedo: vec4f, emission: vec4f, pbr: vec4f };
 struct TP {
     origin: vec4f, upper_left: vec4f, horizontal: vec4f, vertical: vec4f,   /* the camera */
     dims: vec4u,   /* image width, height; first row and rows of this band */
@@ -64,7 +67,10 @@ struct TP {
    sample over the albedo), plane 2 the first diffuse surface's normal and distance, plane 3
    its albedo and what the pixel is (0 a surface, 1 a lamp or nothing, 2 seen through a medium) */
 @group(0) @binding(9) var<storage, read_write> accum: array<vec4f>;
-@group(0) @binding(10) var<uniform> BN: array<vec4u, 512>;   /* the blue-noise mask: 4096 ranks, 16 bits each */
+/* the blue-noise mask (4096 ranks, 16 bits each), then the BSDF's tables (gpu_bsdf_tables) */
+struct TBN { bn: array<vec4u, 512>, tab: array<vec4f, 528> };
+@group(0) @binding(10) var<uniform> TB: TBN;
+fn bsdf_tab(k: u32) -> f32 { return TB.tab[k >> 2u][k & 3u]; }
 /* the light tracer's caustics (ltrace; bound instead of accum): per pixel and channel, a 64-bit
    32.32 fixed-point sum as two u32 (low, high) */
 @group(0) @binding(11) var<storage, read_write> caus: array<atomic<u32>>;
@@ -92,7 +98,7 @@ fn hash32(x0: u32) -> u32 {
 /* ---- the sampler (core/sampler.c): Owen-scrambled Sobol, shifted per pixel by blue noise ---- */
 fn bn_value(x: u32, y: u32) -> f32 {
     let i = (y & 63u) * 64u + (x & 63u);
-    let w = BN[i >> 3u][(i >> 1u) & 3u];
+    let w = TB.bn[i >> 3u][(i >> 1u) & 3u];
     return (f32((w >> ((i & 1u) * 16u)) & 0xffffu) + 0.5) / 4096.0;
 }
 fn owen(x0: u32, seed: u32) -> u32 {
@@ -604,9 +610,14 @@ fn power_heuristic(pa: f32, pb: f32) -> f32 {
 }
 fn light_pdf(area: f32, dist2: f32, cos_light: f32) -> f32 { return dist2 / (cos_light * area); }
 
-/* next event estimation for a diffuse surface: one point of the lamp */
-/* (u: where on the lamp) */
-fn direct_surface(h: Hit, albedo: vec3f, u: vec2f, rng: ptr<function, u32>) -> vec3f {
+/* a material's BSDF (GPU_WGSL_BSDF), seen from the side `outside` says */
+fn mat_bsdf(m: TMat, outside: bool) -> Bsdf {
+    return bsdf_make(m.albedo.rgb, m.pbr.x, m.pbr.y, m.emission.w, m.pbr.z, outside);
+}
+
+/* next event estimation at a surface: one point of the lamp, the BSDF's rough part towards it
+   (v: towards the viewer; u: where on the lamp) */
+fn direct_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f, rng: ptr<function, u32>) -> vec3f {
     if (T.opt.w == NONE) { return vec3f(0.0); }
     let lt = prims[T.opt.w];
     let le = T.mats[u32(lt.u.w)].emission.rgb;
@@ -618,13 +629,15 @@ fn direct_surface(h: Hit, albedo: vec3f, u: vec2f, rng: ptr<function, u32>) -> v
     let wi = to_light / dist;
     let cos_surf = dot(h.n, wi);
     let cos_light = -dot(lt.n.xyz, wi);
-    if (cos_surf <= 0.0 || cos_light <= 0.0) { return vec3f(0.0); }
+    if (cos_light <= 0.0) { return vec3f(0.0); }
+    let fp = bsdf_eval(b, h.n, v, wi);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return vec3f(0.0); }
     let shadow = Ray(h.p, wi);
     if (traverse(shadow, T.f.y, dist - T.f.z, true).id != NONE) { return vec3f(0.0); }
-    var g = cos_surf * cos_light * lt.v.w / dist2;
+    var g = abs(cos_surf) * cos_light * lt.v.w / dist2;
     if (T.cnt.w > 0u) { g *= transmittance(shadow, 0.0, dist, rng); }
-    if (T.opt.y != 0u) { g *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), cos_surf / PI_); }
-    return albedo * le * (g / PI_);
+    if (T.opt.y != 0u) { g *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), fp.w); }
+    return fp.xyz * le * g;
 }
 
 /* the same for a point inside a medium, reached along d: the phase function replaces the BRDF */
@@ -650,25 +663,39 @@ fn direct_medium(p: vec3f, d: vec3f, g: f32, u: vec2f, rng: ptr<function, u32>) 
     return le * w;
 }
 
-fn schlick(cos_i: f32, eta: f32) -> f32 {
-    let r0 = (1.0 - eta) / (1.0 + eta);
-    return r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cos_i, 5.0);
-}
-
 fn refract_dir(d: vec3f, n: vec3f, eta: f32) -> vec3f {
     let cos_i = min(dot(-d, n), 1.0);
     let perp = (d + n * cos_i) * eta;
     return perp - n * sqrt(abs(1.0 - dot(perp, perp)));
 }
 
-/* Russian roulette after 3 bounces: false = the path stops */
-fn roulette(thr: ptr<function, vec3f>, depth: i32, sm: Smp, rng: ptr<function, u32>) -> bool {
+/* Russian roulette after 3 bounces: false = the path stops (u: the number that decides) */
+fn roulette_u(thr: ptr<function, vec3f>, depth: i32, u: f32) -> bool {
     if (depth < 3) { return true; }
     let c = *thr;
     let p = min(max(c.x, max(c.y, c.z)), 0.95);
-    if (s1(sm, 3u + 3u * u32(depth), 0u, rng) >= p) { return false; }
+    if (u >= p) { return false; }
     *thr = c / p;
     return true;
+}
+fn roulette(thr: ptr<function, vec3f>, depth: i32, sm: Smp, rng: ptr<function, u32>) -> bool {
+    if (depth < 3) { return true; }
+    return roulette_u(thr, depth, s1(sm, 3u + 3u * u32(depth), 0u, rng));
+}
+
+/* a surface's bounce (rt/tracer.c): the lobe and the direction from the BSDF, the numbers drawn
+   only when used (SAMPLE_MISC's pair for Russian roulette and the lobe, SAMPLE_DIR's for a
+   direction that is not fixed); u.x of the result: Russian roulette's number */
+struct Bounce { s: BsdfSample, ur: f32 };
+fn surface_bounce(b: ptr<function, Bsdf>, h: Hit, v: vec3f, depth: i32, sm: Smp, rng: ptr<function, u32>) -> Bounce {
+    bsdf_view(b, dot(v, h.n));
+    let dd = 3u * u32(depth);
+    var mu = vec2f(0.0);
+    if (depth >= 3 || bsdf_nlobes(b) > 1u) { mu = s2(sm, 3u + dd, rng); }
+    let lobe = bsdf_pick(b, mu.y);
+    var du = vec2f(0.0);
+    if (lobe >= 0 && !bsdf_lobe_delta(b, lobe)) { du = s2(sm, 2u + dd, rng); }
+    return Bounce(bsdf_sample_lobe(b, lobe, h.n, v, du), mu.x);
 }
 
 /* The denoiser's guide for one pixel, along the ray through its centre: the first diffuse
@@ -712,7 +739,8 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
         let m = T.mats[hit_mat(f)];
         let kind = u32(m.albedo.w);
         if (kind == 3u) { g.n = h.n; g.z = dist + h.t; break; }    /* a lamp: kept for reprojection */
-        if (kind == 0u) {
+        var b = mat_bsdf(m, h.front);
+        if (bsdf_rough_part(&b)) {     /* a surface the light scatters on (not only a mirror or glass) */
             g.n = h.n; g.z = dist + h.t; g.a = a * m.albedo.rgb; g.kind = 0.0;
             if (i == 0) { g.pos = h.p; g.pt = max(tr, 1e-6); }
             break;
@@ -720,10 +748,9 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
         a *= m.albedo.rgb;
         dist += h.t;
         var nxt = reflect(ray.d, h.n);
-        if (kind == 2u) {
-            let eta = select(m.emission.w, 1.0 / m.emission.w, h.front);
+        if (b.transmission > 0.5 && b.metallic < 0.5) {
             let cos_i = min(dot(-ray.d, h.n), 1.0);
-            if (eta * eta * (1.0 - cos_i * cos_i) <= 1.0) { nxt = refract_dir(ray.d, h.n, eta); }
+            if (b.eta * b.eta * (1.0 - cos_i * cos_i) <= 1.0) { nxt = refract_dir(ray.d, h.n, b.eta); }
         }
         ray = Ray(h.p, normalize(nxt));
     }
@@ -797,34 +824,26 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
             break;
         }
         if (depth >= max_depth) { break; }
-        let d = ray.d;
-        var nxt = d;
-        if (kind == 0u) {
-            let dd = 3u * u32(depth);
-            radiance += thr * direct_surface(h, m.albedo.rgb, s2(sm, 1u + dd, rng), rng);
-            nxt = cosine_hemisphere(h.n, s2(sm, 2u + dd, rng));
-            bounce_pdf = dot(h.n, nxt) / PI_;
-            thr *= m.albedo.rgb;
-            emit = after_bounce;
-            if (depth == 0) { chain = T.ext.z != 0u; }
-            spec = false;
-        } else if (kind == 1u) {
-            nxt = reflect(d, h.n);
-            thr *= m.albedo.rgb;
+        /* the surface's BSDF, seen from v (back along the ray): a direction drawn from it,
+           weighted f cos / pdf, and light from the lamp (its rough part). (In this order the
+           BSDF's state is done with before the shadow ray's walk: fewer registers held.) */
+        let v = -ray.d;
+        var b = mat_bsdf(m, h.front);
+        let bo = surface_bounce(&b, h, v, depth, sm, rng);
+        if (bsdf_rough_part(&b)) { radiance += thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng); }
+        if (!bo.s.ok) { break; }
+        thr *= bo.s.w;
+        if (bo.s.delta) {                 /* a perfect mirror or refraction */
             emit = 0;
             spec = true;
         } else {
-            let ior = m.emission.w;
-            let eta = select(ior, 1.0 / ior, h.front);
-            let cos_i = min(dot(-d, h.n), 1.0);
-            let sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
-            if (sin_t2 > 1.0 || s1(sm, 3u + 3u * u32(depth), 1u, rng) < schlick(cos_i, eta)) { nxt = reflect(d, h.n); } else { nxt = refract_dir(d, h.n, eta); }
-            thr *= m.albedo.rgb;
-            emit = 0;
-            spec = true;
+            bounce_pdf = bo.s.pdf;
+            emit = after_bounce;
+            if (depth == 0) { chain = T.ext.z != 0u; }
+            spec = false;
         }
-        if (!roulette(&thr, depth, sm, rng)) { break; }
-        ray = Ray(h.p, normalize(nxt));
+        if (!roulette_u(&thr, depth, bo.ur)) { break; }
+        ray = Ray(h.p, normalize(bo.s.l));
     }
     return radiance;
 }
@@ -984,8 +1003,6 @@ fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
     var ray = Ray(lt.q.xyz + lt.u.xyz * a0 + lt.v.xyz * a1, cosine_hemisphere(lt.n.xyz, vec2f(b0, b1)));
     var beta = le * (lt.v.w * PI_);          /* Le cos / (pdf_area pdf_dir) */
     var thr = vec3f(1.0);
-    var nspec = 0;
-    var ndiff = 0;
     let center = T.upper_left.xyz + 0.5 * T.horizontal.xyz - 0.5 * T.vertical.xyz;
     let fw = center - T.origin.xyz;           /* the screen is 1 unit away */
     for (var depth = 0; depth < i32(T.opt.x); depth++) {
@@ -1003,28 +1020,34 @@ fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
         let m = T.mats[hit_mat(f)];
         let kind = u32(m.albedo.w);
         if (kind == 3u) { break; }
-        if (kind == 0u) {
-            if (nspec == 0 && ndiff == 0) { break; }       /* lamp -> diffuse: the path tracer's (NEE) */
-            let wi = -ray.d;
-            let cg = abs(dot(h.ng, wi));
-            let cs = abs(dot(h.n, wi));
-            let corr = select(0.0, cs / cg, cg > 0.0);    /* smooth normals: the adjoint BSDF */
+        var b = mat_bsdf(m, h.front);
+        let wi = -ray.d;                                   /* towards where the light came from */
+        let cg = abs(dot(h.ng, wi));
+        let cs = abs(dot(h.n, wi));
+        let corr = select(0.0, cs / cg, cg > 0.0);        /* smooth normals: the adjoint BSDF */
+        /* 1. the BSDF's rough part to the camera (not at the first vertex: lamp -> rough surface
+              is the path tracer's, by NEE) */
+        if (depth > 0 && bsdf_rough_part(&b)) {
             if (T.lt.w > 0.5) {
                 deposit(h.p, h.n, beta * corr);            /* photon cache mode: no camera */
             } else {
-            /* 1. to the camera */
             let to_cam = T.origin.xyz - h.p;
             let dist2 = dot(to_cam, to_cam);
             let dist = sqrt(dist2);
             let wo = to_cam / dist;
-            let cos_o = dot(h.ng, wo);
+            let cos_o = dot(h.ng, wo);                     /* > 0: the camera on the light's side */
             let q = -to_cam;
             let z = dot(q, fw);
-            if (cos_o > 0.0 && z > 0.0) {
+            /* the BSDF seen from the camera (v = wo, l = wi): its side's normal and index */
+            var bc = b;
+            var nc = h.n;
+            if (cos_o < 0.0) { bc = mat_bsdf(m, !h.front); nc = -h.n; }
+            if (cos_o != 0.0 && dot(nc, wo) > 0.0 && z > 0.0) {
+                let fp = bsdf_eval(&bc, nc, wo, wi);
                 let e = q / z - fw;
                 let sx = 0.5 + dot(e, T.horizontal.xyz) / dot(T.horizontal.xyz, T.horizontal.xyz);
                 let sy = 0.5 - dot(e, T.vertical.xyz) / dot(T.vertical.xyz, T.vertical.xyz);
-                if (sx >= 0.0 && sy >= 0.0 && sx < 1.0 && sy < 1.0) {
+                if (max(fp.x, max(fp.y, fp.z)) > 0.0 && sx >= 0.0 && sy >= 0.0 && sx < 1.0 && sy < 1.0) {
                     let px = min(u32(sx * f32(W)), W - 1u);
                     let py = min(u32(sy * f32(H)), H - 1u);
                     let sh = Ray(h.p, wo);
@@ -1032,38 +1055,30 @@ fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
                         var tr = 1.0;
                         if (T.cnt.w > 0u) { tr = transmittance(sh, 0.0, dist, &rng); }
                         let cos_c = z / dist;
-                        let wgt = corr * cos_o * tr / (PI_ * dist2 * T.lt.y * cos_c * cos_c * cos_c);
-                        splat(py * W + px, beta * m.albedo.rgb * wgt);
+                        let wgt = corr * abs(cos_o) * tr / (dist2 * T.lt.y * cos_c * cos_c * cos_c);
+                        splat(py * W + px, beta * fp.xyz * wgt);
                     }
                 }
             }
             }
-            /* 2. bounce on (cosine around the shading normal): later diffuse vertices count too */
-            let c0 = rnd(&rng);
-            let nd = cosine_hemisphere(h.n, vec2f(c0, rnd(&rng)));
-            let og = dot(h.ng, nd);
-            let os = dot(h.n, nd);
-            if (og <= 0.0 || os <= 0.0) { break; }
-            let fb = m.albedo.rgb * (corr * og / os);
-            beta *= fb;
-            thr *= fb;
-            if (!rr_light(&beta, &thr, depth, &rng)) { break; }
-            ray = Ray(h.p, nd);
-            ndiff++;
-            continue;
         }
-        /* mirror or glass, as in the path tracer */
-        let d = ray.d;
-        var nxt = reflect(d, h.n);
-        if (kind == 2u) {
-            let eta = select(m.emission.w, 1.0 / m.emission.w, h.front);
-            let cos_i = min(dot(-d, h.n), 1.0);
-            let sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
-            if (!(sin_t2 > 1.0 || rnd(&rng) < schlick(cos_i, eta))) { nxt = refract_dir(d, h.n, eta); }
-        }
-        beta *= m.albedo.rgb;
-        thr *= m.albedo.rgb;
-        nspec++;
+        /* 2. bounce on, in a direction drawn from the BSDF (seen from the light's side): later
+              rough vertices count too. Rough lobes: * |wi.ns| / |wi.ng| * |wo.ng| / |wo.ns|;
+              through the surface: * (eta_from / eta_to)^2 */
+        let ul = rnd(&rng);
+        let u1 = rnd(&rng);
+        let bs = bsdf_sample(&b, h.n, wi, ul, vec2f(u1, rnd(&rng)));
+        if (!bs.ok) { break; }
+        if (depth == 0 && !bs.delta) { break; }            /* lamp -> rough: the path tracer's */
+        let og = dot(h.ng, bs.l);
+        let os = dot(h.n, bs.l);
+        if (!bs.delta && select(og <= 0.0, og >= 0.0, bs.through)) { break; }
+        var fb = bs.w;
+        if (!bs.delta) { fb *= select(0.0, corr * abs(og / os), os != 0.0); }
+        if (bs.through) { fb *= b.eta * b.eta; }
+        beta *= fb;
+        thr *= fb;
+        let nxt = bs.l;
         if (!rr_light(&beta, &thr, depth, &rng)) { break; }
         ray = Ray(h.p, normalize(nxt));
     }
@@ -1181,7 +1196,7 @@ fn wf_shadow_ray(p: u32, o: vec3f, wi: vec3f, dist: f32, c: vec3f, seed: u32) {
 /* direct_surface / direct_medium without the shadow ray: the light sample, and what it brings
    if the lamp is in sight (w = 0: nothing to send) */
 struct LS { wi: vec3f, dist: f32, c: vec3f };
-fn wf_light_surface(h: Hit, albedo: vec3f, u: vec2f) -> LS {
+fn wf_light_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f) -> LS {
     var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
     if (T.opt.w == NONE) { return r; }
     let lt = prims[T.opt.w];
@@ -1192,10 +1207,12 @@ fn wf_light_surface(h: Hit, albedo: vec3f, u: vec2f) -> LS {
     let wi = to_light / dist;
     let cos_surf = dot(h.n, wi);
     let cos_light = -dot(lt.n.xyz, wi);
-    if (cos_surf <= 0.0 || cos_light <= 0.0) { return r; }
-    var g = cos_surf * cos_light * lt.v.w / dist2;
-    if (T.opt.y != 0u) { g *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), cos_surf / PI_); }
-    return LS(wi, dist, albedo * le * (g / PI_));
+    if (cos_light <= 0.0) { return r; }
+    let fp = bsdf_eval(b, h.n, v, wi);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return r; }
+    var g = abs(cos_surf) * cos_light * lt.v.w / dist2;
+    if (T.opt.y != 0u) { g *= power_heuristic(light_pdf(lt.v.w, dist2, cos_light), fp.w); }
+    return LS(wi, dist, fp.xyz * le * g);
 }
 fn wf_light_medium(p: vec3f, d: vec3f, gg: f32, u: vec2f) -> LS {
     var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
@@ -1283,34 +1300,26 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 }
             }
         } else if (depth < max_depth) {
-            let d = ray.d;
-            var nxt = d;
-            if (kind == 0u) {
-                let dd = 3u * u32(depth);
-                let ls = wf_light_surface(h, m.albedo.rgb, s2(sm, 1u + dd, &rng));
+            let v = -ray.d;
+            var b = mat_bsdf(m, h.front);
+            let bo = surface_bounce(&b, h, v, depth, sm, &rng);
+            if (bsdf_rough_part(&b)) {
+                let ls = wf_light_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), &rng));
                 if (ls.dist > 0.0) { wf_shadow_ray(p, h.p, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
-                nxt = cosine_hemisphere(h.n, s2(sm, 2u + dd, &rng));
-                s.pdf = dot(h.n, nxt) / PI_;
-                thr *= m.albedo.rgb;
-                emit = after_bounce;
-                if (depth == 0) { chain = T.ext.z != 0u; }
-                spec = false;
-            } else if (kind == 1u) {
-                nxt = reflect(d, h.n);
-                thr *= m.albedo.rgb;
-                emit = 0;
-                spec = true;
-            } else {
-                let ior = m.emission.w;
-                let eta = select(ior, 1.0 / ior, h.front);
-                let cos_i = min(dot(-d, h.n), 1.0);
-                let sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
-                if (sin_t2 > 1.0 || s1(sm, 3u + 3u * u32(depth), 1u, &rng) < schlick(cos_i, eta)) { nxt = reflect(d, h.n); } else { nxt = refract_dir(d, h.n, eta); }
-                thr *= m.albedo.rgb;
-                emit = 0;
-                spec = true;
             }
-            if (roulette(&thr, depth, sm, &rng)) { go_on = true; nxt_o = h.p; nxt_d = normalize(nxt); }
+            if (bo.s.ok) {
+                thr *= bo.s.w;
+                if (bo.s.delta) {
+                    emit = 0;
+                    spec = true;
+                } else {
+                    s.pdf = bo.s.pdf;
+                    emit = after_bounce;
+                    if (depth == 0) { chain = T.ext.z != 0u; }
+                    spec = false;
+                }
+                if (roulette_u(&thr, depth, bo.ur)) { go_on = true; nxt_o = h.p; nxt_d = normalize(bo.s.l); }
+            }
         }
     }
     s.thr = thr;
@@ -2075,7 +2084,7 @@ typedef struct {
     uint32_t ext[4];
     float lt[4];
     uint32_t ins[4];
-    float mats[MAX_MATS][8];
+    float mats[MAX_MATS][12];
 } GTP;
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
 // aligned (WebGPU's minimum offset alignment for uniform bindings)
@@ -2213,9 +2222,10 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->g = g;
     t->w = width;
     t->h = height;
-    char *src = malloc(strlen(types_wgsl) + strlen(media_wgsl) + strlen(TRACE) + 8);
+    char *src = malloc(strlen(types_wgsl) + strlen(media_wgsl) + strlen(GPU_WGSL_BSDF) + strlen(TRACE) + 8);
     if (!src){ free(t); return NULL; }
-    strcpy(src, types_wgsl); strcat(src, "\n"); strcat(src, media_wgsl); strcat(src, "\n"); strcat(src, TRACE);
+    strcpy(src, types_wgsl); strcat(src, "\n"); strcat(src, media_wgsl); strcat(src, "\n");
+    strcat(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, TRACE);
     // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
     // blue noise
     t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU");
@@ -2276,12 +2286,15 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     free(src);
     t->params = gpu_buffer(g, "path tracer parameters", GTP_STRIDE * MAX_REPS, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     {
-        // the blue-noise mask (core/sampler.c), 2 ranks per 32 bits
+        // the blue-noise mask (core/sampler.c), 2 ranks per 32 bits, then the BSDF's tables
         const uint16_t *m = blue_noise_mask();
         uint32_t packed[BLUE_NOISE_SIZE * BLUE_NOISE_SIZE / 2];
         for (int i = 0; i < BLUE_NOISE_SIZE * BLUE_NOISE_SIZE / 2; i++) packed[i] = (uint32_t)m[2 * i] | ((uint32_t)m[2 * i + 1] << 16);
-        t->blue = gpu_buffer(g, "blue noise", sizeof(packed), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+        float tab[GPU_BSDF_TABLE_FLOATS];
+        gpu_bsdf_tables(tab);
+        t->blue = gpu_buffer(g, "blue noise and BSDF tables", sizeof(packed) + sizeof(tab), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
         wgpuQueueWriteBuffer(g->queue, t->blue, 0, packed, sizeof(packed));
+        wgpuQueueWriteBuffer(g->queue, t->blue, sizeof(packed), tab, sizeof(tab));
     }
     t->acc[0] = gpu_buffer(g, "path tracer samples", (size_t)width * height * 16 * t->planes,
                            WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
@@ -2854,7 +2867,7 @@ static int upload_world(GpuTrace *t, const Scene *s){
     t->cell = (float)(e / 256.0);
     if (!(t->cell > 0) || t->cell > 1e20f) t->cell = 1.0f;
     t->specular = 0;
-    for (int m = 0; m < s->nmats; m++) if (material_kind(&s->mats[m]) == MAT_MIRROR || material_kind(&s->mats[m]) == MAT_GLASS) t->specular = 1;
+    for (int m = 0; m < s->nmats; m++) if (material_has_delta(&s->mats[m])) t->specular = 1;
     t->valid = 1;
     return 1;
 }
@@ -2981,8 +2994,10 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
     P.ins[2] = t->tlas_node0;
     P.ins[3] = t->world_node0;
     for (int m = 0; m < s->nmats && m < MAX_MATS; m++){
-        put(P.mats[m], s->mats[m].albedo, (float)material_kind(&s->mats[m]));   // (the presets until PBR2)
-        put(P.mats[m] + 4, s->mats[m].emission, (float)s->mats[m].ior);
+        Material r = material_resolved(&s->mats[m]);
+        put(P.mats[m], r.albedo, (float)r.type);
+        put(P.mats[m] + 4, r.emission, (float)r.ior);
+        put(P.mats[m] + 8, vec3(r.metallic, r.roughness, r.transmission), 0);
     }
     *Pp = P;
 }
@@ -3092,13 +3107,13 @@ static int wf_ready(GpuTrace *t){
     if ((t->h + t->wf_rows - 1) / t->wf_rows > MAX_WAVES) t->wf_rows = (t->h + MAX_WAVES - 1) / MAX_WAVES;
     size_t n = (size_t)t->wf_rows * t->w;
     size_t wf_bytes = (1 + 8 * n + 3 * ((n + 3) / 4)) * 16;
-    const char *parts[] = {t->types_wgsl, "\n", t->media_wgsl, "\n", TRACE, "\n", WAVE};
+    const char *parts[] = {t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", TRACE, "\n", WAVE};
     size_t len = 1;
-    for (int i = 0; i < 7; i++) len += strlen(parts[i]);
+    for (int i = 0; i < 9; i++) len += strlen(parts[i]);
     char *src = malloc(len);
     if (!src){ t->wf_failed = 1; return 0; }
     src[0] = 0;
-    for (int i = 0; i < 7; i++) strcat(src, parts[i]);
+    for (int i = 0; i < 9; i++) strcat(src, parts[i]);
     WGPUShaderModule m = gpu_shader(g, "path tracer: wavefront", src);
     free(src);
     for (int k = 0; k < NWF; k++){

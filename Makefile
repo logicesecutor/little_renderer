@@ -75,7 +75,7 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/hello_physics \
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_gpu_brdf $(BIN)/hello_physics \
                               $(BIN)/mesh_rain)
 
 all: lib apps examples
@@ -170,11 +170,12 @@ view-dragon: $(BIN)/view$(EXE)
 	mkdir -p out
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
-# the unit tests: the medium sampling, PNG files, the BSDF, the physics (CPU and GPU)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
+# the unit tests: the medium sampling, PNG files, the BSDF (and its WGSL), the physics (CPU and GPU)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
 	$(BIN)/test_medium
 	$(BIN)/test_png
 	$(BIN)/test_brdf
+	$(BIN)/test_gpu_brdf
 	$(BIN)/test_physics
 	$(BIN)/test_gpu_rigid
 

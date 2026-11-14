@@ -1046,7 +1046,9 @@ the samples equals the integral of `f |cos|` by quadrature, and the density inte
 the share of samples it gives, for eight materials at three angles); the white furnace
 (white materials keep 99.9-100% of the light at every angle, rough glass 92-99.9%: its
 light bouncing between microfacets is not given back). Images with light tracing and
-without agree to 0.1 of 255.
+without agree to 0.1 of 255. The GPU path tracer has the same BSDF in WGSL
+(`gpu/brdf_gpu.c`): `bin/test_gpu_brdf` runs both on 65536 cases and finds the same
+values, and GPU and CPU images agree within 0.25% (PBR.md, PBR2).
 
 ---
 

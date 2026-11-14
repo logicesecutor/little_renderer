@@ -84,6 +84,11 @@ void gpu_raster_destroy(GpuRaster *r);
 // frame's types and of the media's densities, and the buffers passed to gpu_trace_encode.
 typedef struct GpuTrace GpuTrace;
 extern const char *const GPU_WGSL_TYPES, *const GPU_WGSL_MEDIA;
+// the BSDF of core/brdf.h in WGSL (gpu/brdf_gpu.c): a module that includes it defines
+// fn bsdf_tab(k: u32) -> f32, float k of the tables gpu_bsdf_tables packs
+extern const char *const GPU_WGSL_BSDF;
+#define GPU_BSDF_TABLE_FLOATS 2112
+void gpu_bsdf_tables(float *out);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);

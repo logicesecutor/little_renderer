@@ -130,11 +130,13 @@ static inline Vec3 bsdf_fresnel_metal(Vec3 f0, real c){
     return vec3(f0.x + (1 - f0.x) * x5, f0.y + (1 - f0.y) * x5, f0.z + (1 - f0.z) * x5);
 }
 
-// GGX: the distribution of microfacet normals (nh = n.h)
-static inline real ggx_d(real nh, real a){
-    real a2 = a * a, d = nh * nh * (a2 - 1) + 1;
+// GGX: the distribution of microfacet normals (nh = n.h, s2 = |n x h|^2 = 1 - nh^2: from the
+// cross product, which keeps its digits where 1 - nh^2 would lose them, at a sharp lobe's peak)
+static inline real ggx_d(real nh, real s2, real a){
+    real a2 = a * a, d = s2 + a2 * nh * nh;
     return a2 / ((real)PI * d * d);
 }
+static inline real ggx_s2(Vec3 n, Vec3 h){ Vec3 c = v_cross(n, h); return v_dot(c, c); }
 // Smith masking of one direction at cosine c
 static inline real ggx_g1(real c, real a){
     c = r_fabs(c);
@@ -245,7 +247,7 @@ static inline Vec3 bsdf_eval(Bsdf *b, Vec3 n, Vec3 v, Vec3 l, real *pdf){
             *pdf += p[BSDF_MS] * cl / (real)PI;
         }
         if (!b->smooth && nh > 0){
-            real d = ggx_d(nh, a);
+            real d = ggx_d(nh, ggx_s2(n, h), a);
             Vec3 fm = bsdf_fresnel_metal(b->base, vh);
             real s = d * ggx_vis(cv, cl, a);
             f = v_add(f, vec3(((1 - m) * fd + m * fm.x) * s, ((1 - m) * fd + m * fm.y) * s, ((1 - m) * fd + m * fm.z) * s));
@@ -260,7 +262,7 @@ static inline Vec3 bsdf_eval(Bsdf *b, Vec3 n, Vec3 v, Vec3 l, real *pdf){
         den *= den;
         if (vh > 0 && lh < 0 && nh > 0 && den > (real)1e-12){
             real fd = bsdf_fresnel_dielectric(vh, eta);
-            real d = ggx_d(nh, a);
+            real d = ggx_d(nh, ggx_s2(n, h), a);
             real g2 = ggx_vis(cv, cl, a) * 4 * cv * -cl;
             real ft = vh * -lh * (1 - fd) * d * g2 / (cv * -cl * den);
             f = v_scale(b->base, (1 - m) * t * ft);

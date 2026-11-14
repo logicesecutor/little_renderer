@@ -1,7 +1,7 @@
 # PBR: one physically based material model for every pipeline (plan)
 
 The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)). Status: PBR1
-done (2026-11-14, below); each phase is marked here as it lands.
+and PBR2 done (2026-11-14, below); each phase is marked here as it lands.
 
 ## Goals (decided 2026-11-14)
 
@@ -91,7 +91,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | phase | what | done when |
 |---|---|---|
 | PBR1 | The material model, the presets, the C BRDF; the CPU path tracer with VNDF sampling and rough glass; options `-base`, `-metal`, `-rough`, `-ior`, `-transmission` (and `-mat` presets) | white furnace test (a white rough metal and a white dielectric in a uniform environment keep their energy, up to the lost multiple scattering), BRDF reciprocity and sampling-vs-evaluation tests; the reference images remade. **Done** (below) |
-| PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today) |
+| PBR2 | The GPU path tracer with the WGSL copy | the C/WGSL comparison test; CPU and GPU images agree (mean radiance within 1%, as today). **Done** (below) |
 | PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights |
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized |
 | PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four |
@@ -99,8 +99,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
 `make test`; the measurements in [PERFORMANCE.md](PERFORMANCE.md); one commit per phase.
-(PBR1 is the CPU path tracer alone, as its row says: until PBR2 the GPU path tracer and
-until PBR3 the rasterizers draw the preset closest to a material, `material_kind`.)
+(Until PBR3 the rasterizers draw the preset closest to a material, `material_kind`.)
 
 ### PBR1, done (2026-11-14)
 
@@ -133,6 +132,29 @@ Decided on the way (the open questions):
 - **Perfectly smooth below roughness 0.02** (delta lobes).
 - **Through glass the BSDF is the radiance one** (`f(v, l) / eta_l^2` reciprocal); the
   light tracer weighs refractions by `(eta_from / eta_to)^2`.
+
+### PBR2, done (2026-11-14)
+
+- `gpu/brdf_gpu.c`: `GPU_WGSL_BSDF`, the C of `core/brdf.h` function by function in WGSL
+  (`smooth` is a WGSL keyword: the flag is `perfect` there). A module that includes it
+  defines `bsdf_tab(k)`; the path tracer keeps the tables after the blue-noise mask in its
+  binding 10 (no new binding: its 8 storage buffers are all used).
+- `gpu/trace_gpu.c`: the materials go up resolved (base colour, metallic, roughness, ior,
+  transmission); the path tracer, the wavefront tracer, the light tracer (and the photon
+  cache it fills) and the denoiser's guide (which walks through perfect mirrors and glass
+  to the first surface with a rough part) shade with it, as `rt/tracer.c` does.
+- The GGX distribution now takes `|n x h|^2` from the cross product instead of `1 - (n.h)^2`
+  (C and WGSL): at the peak of a sharp lobe the subtraction lost the digits that the
+  C/WGSL comparison then saw as up to 12% different densities.
+- `bin/test_gpu_brdf` (in `make test`): 65536 cases (materials of every kind, views and
+  lights in every direction, the sampling's numbers): the same evaluation, density,
+  decision, direction and weight in WGSL and C, all of them (worst relative difference
+  2e-4 for the evaluation, 1e-3 for the weights).
+- GPU against CPU images (256×256, 4096 against 512 samples, linear mean): the boxes,
+  the spheres, gold, a rough white metal, frosted glass, blue plastic, smooth red plastic,
+  a half-metal half-clear material, a copper dragon, a metal torus in fog: all within
+  0.25% (the CPU's noise).
+- Cost on the GPU: PERFORMANCE.md (+2% to +28%).
 
 ## Open questions (decided during the phases)
 

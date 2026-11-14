@@ -58,7 +58,7 @@ errors); the title line under the heading is the window title of `bin/view`.
 |---|---|---|
 | the rasterizer (`-gpuraster on`) | the same triangles, lamp, materials and 4 shading modes as `render_scene`, by a WebGPU render pipeline (`gpu/raster_gpu.c`) | `render_scene` |
 | clouds and fog in the rasterizer (`-rastercloud on`) | the light grid (one compute thread per cell) and the march (one thread per pixel), the same model as `raster/volume_march.c` | `raster_draw_volumes` |
-| the path tracer (`-gputrace on`) | the light transport of `trace_path_ex` (NEE + MIS, mirror, glass, Russian roulette, media by delta and ratio tracking) in one compute kernel over the scene's BVH (`gpu/trace_gpu.c`) | `trace_path_ex` |
+| the path tracer (`-gputrace on`) | the light transport of `trace_path_ex` (NEE + MIS, the materials' BSDF of `core/brdf.h` in WGSL (`gpu/brdf_gpu.c`, PBR.md), Russian roulette, media by delta and ratio tracking) in one compute kernel over the scene's BVH (`gpu/trace_gpu.c`) | `trace_path_ex` |
 | the air and the cloud of `-sim on` (`-gpufluid on`) | every kernel of `fluid_step`: obstacles, walls, forces, vorticity, advection, the multigrid pressure solve, MacCormack for the cloud | `fluid_step` |
 | showing a CPU frame | the framebuffer is uploaded and drawn by one full-screen pass | `putImageData` on a 2D canvas |
 | rigid bodies of `-sim on` (`-gpurigid on`) | forces, pairs, contacts (balls, boxes, hulls, fixed meshes, walls), the contact solver with mass splitting (2.8) | `rigid_step` |
