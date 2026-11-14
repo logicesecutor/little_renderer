@@ -331,7 +331,11 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
 | `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary) |
-| `LR_GPU_TLAS=lbvh` | the GPU builds the top level over the instances itself every frame (default: it takes the CPU's SAH tree) |
+| `LR_GPU_TLAS=gpu` | the GPU builds the top level over the instances itself every frame (default: it takes the CPU's SAH tree); `lbvh`, the old name, works too |
+| `LR_GPU_BVH=ploc\|lbvh` | the GPU's tree builder for everything it builds (default: PLOC for meshes' trees, the LBVH for the top level) |
+| `LR_GPU_BLAS=gpu` | every mesh's tree is built once on the GPU instead of the CPU's being uploaded (to measure the GPU builders) |
+| `LR_GPU_PLOC_SMALL=n` | PLOC: from this many clusters down, one workgroup finishes the tree (default 1024) |
+| `LR_GPU_BVH_CHECK=1` | every tree the GPU builds is read back and checked (one tree over all its items); its cost (`bvh_cost`) and depth are printed at the end |
 | `LR_TLAS_REFIT=1` | the top level is refit while the instances only move, instead of rebuilt |
 
 ---

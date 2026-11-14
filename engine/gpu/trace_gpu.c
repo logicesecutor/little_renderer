@@ -19,6 +19,7 @@
 
 #ifdef LR_GPU
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1738,6 +1739,331 @@ fn up(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: ve
 }
 );
 
+// ---- the BVH builder, PLOC (Meister & Bittner 2018, "Parallel Locally-Ordered Clustering
+// for Bounding Volume Hierarchy Construction"): the leaves in Morton order (morton, bsort,
+// leaves above) are the first clusters; then, in rounds until one is left, each cluster
+// finds its nearest among the R clusters on each side (the least surface area of the two
+// boxes joined; ties: the lower pair of positions), and mutual nearest pairs merge (the
+// lower one becomes their node, the higher one leaves the list). The list keeps its order.
+// A cluster is a node of the tree being made: internal k (0 .. n - 2) or leaf j (n - 1 + j);
+// a merge makes internal (n - 2) - (the merges before it), so the last one is 0, the root.
+// The nodes are laid out as they are made: internal k's two children side by side at
+// node0 + 1 + 2 k and + 2 k (one cache line for both boxes, as the LBVH's), the root at
+// node0; the clusters' boxes meanwhile in pl. Deterministic: no atomics.
+// Many clusters: rounds of four dispatches (U.m.x: the round)
+//   nn:      the nearest of each cluster
+//   mark:    who stays and who merges; their counts summed in each block of 256
+//   top:     the blocks' sums (one workgroup), the next round's count (and the sizes of its
+//            dispatches, when they are indirect)
+//   scatter: the merges write their nodes; the clusters left move, in order, to the other list
+// Few clusters (U.m.w or less): small, one workgroup doing every round (barriers between
+// the steps): the whole build (U.m.y = 0) or the rest after the rounds (U.m.y = 1).
+// pl: [0], [1]: the count of the lists 0 and 1, [2] the list in use, [3] its count | the two
+// lists (2 n) | the nearest (n) | the marks' sums in their block (n) | the blocks' sums (2 per
+// 256) | the clusters' boxes (8 words each: 2 n - 1)
+static const char *PLOC = WGSL(
+struct Node { lo: vec3f, a: u32, hi: vec3f, b: u32 };
+struct BP { n: vec4u, m: vec4u, lo: vec4f, ext: vec4f };
+@group(0) @binding(0) var<uniform> U: BP;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> pl: array<u32>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+
+const R = 16u;
+const WG = 256u;
+fn par() -> u32 { return U.m.x & 1u; }
+fn cl(p: u32, i: u32) -> u32 { return 16u + p * U.n.x + i; }
+fn nn_at(i: u32) -> u32 { return 16u + 2u * U.n.x + i; }
+fn sc_at(i: u32) -> u32 { return 16u + 3u * U.n.x + i; }
+fn nblocks() -> u32 { return (U.n.x + WG - 1u) / WG; }
+fn bk_at(b: u32) -> u32 { return 16u + 4u * U.n.x + b; }
+fn bm_at(b: u32) -> u32 { return 16u + 4u * U.n.x + nblocks() + b; }
+fn area(lo: vec3f, hi: vec3f) -> f32 { let e = hi - lo; return e.x * e.y + e.y * e.z + e.z * e.x; }
+fn bx_at(x: u32) -> u32 { return 16u + 4u * U.n.x + 2u * nblocks() + 8u * x; }
+fn bx_lo(x: u32) -> vec3f { let o = bx_at(x); return bitcast<vec3f>(vec3u(pl[o], pl[o + 1u], pl[o + 2u])); }
+fn bx_hi(x: u32) -> vec3f { let o = bx_at(x) + 4u; return bitcast<vec3f>(vec3u(pl[o], pl[o + 1u], pl[o + 2u])); }
+fn put_bx(x: u32, lo: vec3f, hi: vec3f) {
+    let o = bx_at(x);
+    let l = bitcast<vec3u>(lo);
+    let h = bitcast<vec3u>(hi);
+    pl[o] = l.x; pl[o + 1u] = l.y; pl[o + 2u] = l.z;
+    pl[o + 4u] = h.x; pl[o + 5u] = h.y; pl[o + 6u] = h.z;
+}
+fn leaf_in(i: u32) {
+    let x = U.n.x - 1u + i;
+    let nd = nodes[U.n.z + x];
+    put_bx(x, nd.lo, nd.hi);
+}
+fn final_node(x: u32) -> Node {
+    let n = U.n.x;
+    if (x < n - 1u) { return Node(bx_lo(x), U.n.z + 1u + 2u * x, bx_hi(x), U.n.z + 2u + 2u * x); }
+    return Node(bx_lo(x), U.n.w + x - (n - 1u), bx_hi(x), 0x80000001u);
+}
+fn merge(k: u32, c: u32, d: u32) {
+    let lo = min(bx_lo(c), bx_lo(d));
+    let hi = max(bx_hi(c), bx_hi(d));
+    put_bx(k, lo, hi);
+    nodes[U.n.z + 1u + 2u * k] = final_node(c);
+    nodes[U.n.z + 2u + 2u * k] = final_node(d);
+    if (k == 0u) { nodes[U.n.z] = Node(lo, U.n.z + 1u, hi, U.n.z + 2u); }
+}
+fn live(nc: u32) -> u32 { return select(nc, 0u, nc <= U.m.w); }
+
+fn set_args(slot: u32, nc: u32) {
+    var g = (nc + WG - 1u) / WG;
+    if (nc <= U.m.w) { g = 0u; }
+    let gx = min(g, 65535u);
+    var gy = 1u;
+    if (gx > 0u) { gy = (g + gx - 1u) / gx; }
+    args[slot * 4u] = gx;
+    args[slot * 4u + 1u] = gy;
+    args[slot * 4u + 2u] = 1u;
+}
+
+fn nearer(d: f32, i: u32, j: u32, bd: f32, bj: u32) -> bool {
+    if (bj == 0xffffffffu || d < bd) { return true; }
+    if (d > bd) { return false; }
+    let mn = min(i, j);
+    let bmn = min(i, bj);
+    return mn < bmn || (mn == bmn && max(i, j) < max(i, bj));
+}
+
+@compute @workgroup_size(256)
+fn init(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let i = gid.x + gid.y * nw.x * WG;
+    let n = U.n.x;
+    if (i >= n) { return; }
+    leaf_in(i);
+    pl[cl(0u, i)] = n - 1u + i;
+    if (i == 0u) {
+        pl[0] = n;
+        pl[1] = 0u;
+        pl[2] = 0u;
+        pl[3] = n;
+        set_args(0u, n);
+    }
+}
+
+var<workgroup> slo: array<vec3f, 288>;
+var<workgroup> shi: array<vec3f, 288>;
+
+// the boxes of clusters base - R .. base + 256 + R of list p into slo, shi
+fn boxes_in(p: u32, base: u32, nc: u32, lid: u32) {
+    for (var l = lid; l < WG + 2u * R; l += WG) {
+        let g = i32(base + l) - i32(R);
+        if (g >= 0 && g < i32(nc)) {
+            let x = pl[cl(p, u32(g))];
+            slo[l] = bx_lo(x);
+            shi[l] = bx_hi(x);
+        }
+    }
+}
+
+// cluster i's nearest (i = base + lid, its neighbours' boxes in slo, shi)
+fn nearest(i: u32, base: u32, nc: u32, lid: u32) -> u32 {
+    let lo = slo[lid + R];
+    let hi = shi[lid + R];
+    let j0 = u32(max(i32(i) - i32(R), 0));
+    let j1 = min(i + R, nc - 1u);
+    var bd = 0.0f;
+    var bj = 0xffffffffu;
+    for (var j = j0; j <= j1; j++) {
+        if (j == i) { continue; }
+        let l = j + R - base;
+        let d = area(min(lo, slo[l]), max(hi, shi[l]));
+        if (nearer(d, i, j, bd, bj)) {
+            bd = d;
+            bj = j;
+        }
+    }
+    return bj;
+}
+
+@compute @workgroup_size(256)
+fn nn(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32, @builtin(num_workgroups) nw: vec3u) {
+    let p = par();
+    let nc = live(pl[p]);
+    let base = (wid.x + wid.y * nw.x) * WG;
+    boxes_in(p, base, nc, lid);
+    workgroupBarrier();
+    let i = base + lid;
+    if (i < nc) { pl[nn_at(i)] = nearest(i, base, nc, lid); }
+}
+
+fn keep_merge(i: u32, nc: u32) -> vec2u {
+    let j = pl[nn_at(i)];
+    var mu = false;
+    if (j < nc) { mu = pl[nn_at(j)] == i; }
+    return vec2u(select(1u, 0u, mu && i > j), select(0u, 1u, mu && i < j));
+}
+
+var<workgroup> sk: array<u32, 256>;
+var<workgroup> sm: array<u32, 256>;
+
+fn scan2(lid: u32) {
+    for (var o = 1u; o < WG; o <<= 1u) {
+        var xk = 0u;
+        var xm = 0u;
+        if (lid >= o) {
+            xk = sk[lid - o];
+            xm = sm[lid - o];
+        }
+        workgroupBarrier();
+        sk[lid] += xk;
+        sm[lid] += xm;
+        workgroupBarrier();
+    }
+}
+
+@compute @workgroup_size(256)
+fn mark(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32, @builtin(num_workgroups) nw: vec3u) {
+    let nc = live(pl[par()]);
+    let blk = wid.x + wid.y * nw.x;
+    let i = blk * WG + lid;
+    var km = vec2u(0u);
+    if (i < nc) { km = keep_merge(i, nc); }
+    sk[lid] = km.x;
+    sm[lid] = km.y;
+    workgroupBarrier();
+    scan2(lid);
+    if (i < nc) { pl[sc_at(i)] = (sk[lid] - km.x) | ((sm[lid] - km.y) << 9u) | (km.x << 18u) | (km.y << 19u); }
+    if (lid == WG - 1u && blk * WG < nc) {
+        pl[bk_at(blk)] = sk[lid];
+        pl[bm_at(blk)] = sm[lid];
+    }
+}
+
+@compute @workgroup_size(256)
+fn top(@builtin(local_invocation_index) lid: u32) {
+    let p = par();
+    let nc = pl[p];
+    let nbc = (live(nc) + WG - 1u) / WG;
+    var ck = 0u;
+    var cm = 0u;
+    let chunks = (nblocks() + WG - 1u) / WG;
+    for (var c = 0u; c < chunks; c++) {
+        let b = c * WG + lid;
+        var vk = 0u;
+        var vm = 0u;
+        if (b < nbc) {
+            vk = pl[bk_at(b)];
+            vm = pl[bm_at(b)];
+        }
+        sk[lid] = vk;
+        sm[lid] = vm;
+        workgroupBarrier();
+        scan2(lid);
+        if (b < nbc) {
+            pl[bk_at(b)] = ck + sk[lid] - vk;
+            pl[bm_at(b)] = cm + sm[lid] - vm;
+        }
+        ck += sk[WG - 1u];
+        cm += sm[WG - 1u];
+        workgroupBarrier();
+    }
+    if (lid == 0u) {
+        let q = 1u - p;
+        var next = nc;
+        if (nc > U.m.w) {
+            next = ck;
+            pl[2] = q;
+            pl[3] = ck;
+        }
+        pl[q] = next;
+        set_args(q, next);
+    }
+}
+
+@compute @workgroup_size(256)
+fn scatter(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let p = par();
+    let nc = live(pl[p]);
+    let i = gid.x + gid.y * nw.x * WG;
+    if (i >= nc) { return; }
+    let s = pl[sc_at(i)];
+    if (((s >> 18u) & 1u) == 0u) { return; }
+    let blk = i / WG;
+    let dest = pl[bk_at(blk)] + (s & 0x1ffu);
+    let c = pl[cl(p, i)];
+    var out = c;
+    if (((s >> 19u) & 1u) != 0u) {
+        let n = U.n.x;
+        let d = pl[cl(p, pl[nn_at(i)])];
+        let k = (n - 2u) - (n - nc + pl[bm_at(blk)] + ((s >> 9u) & 0x1ffu));
+        merge(k, c, d);
+        out = k;
+    }
+    pl[cl(1u - p, dest)] = out;
+}
+
+var<workgroup> wnc: u32;
+
+@compute @workgroup_size(256)
+fn small(@builtin(local_invocation_index) lid: u32) {
+    let n = U.n.x;
+    var p = 0u;
+    if (U.m.y == 0u) {
+        for (var i = lid; i < n; i += WG) {
+            leaf_in(i);
+            pl[cl(0u, i)] = n - 1u + i;
+        }
+        if (lid == 0u) { wnc = n; }
+    } else {
+        p = pl[2];
+        if (lid == 0u) { wnc = pl[3]; }
+    }
+    storageBarrier();
+    loop {
+        let nc = workgroupUniformLoad(&wnc);
+        if (nc <= 1u) { break; }
+        for (var c = 0u; c < (nc + WG - 1u) / WG; c++) {
+            workgroupBarrier();
+            boxes_in(p, c * WG, nc, lid);
+            workgroupBarrier();
+            let i = c * WG + lid;
+            if (i < nc) { pl[nn_at(i)] = nearest(i, c * WG, nc, lid); }
+        }
+        storageBarrier();
+        let per = (nc + WG - 1u) / WG;
+        let s0 = min(lid * per, nc);
+        let s1 = min(s0 + per, nc);
+        var ck = 0u;
+        var cm = 0u;
+        for (var i = s0; i < s1; i++) {
+            let km = keep_merge(i, nc);
+            ck += km.x;
+            cm += km.y;
+        }
+        sk[lid] = ck;
+        sm[lid] = cm;
+        workgroupBarrier();
+        scan2(lid);
+        var dk = sk[lid] - ck;
+        var dm = sm[lid] - cm;
+        let total = sk[WG - 1u];
+        let q = 1u - p;
+        for (var i = s0; i < s1; i++) {
+            let km = keep_merge(i, nc);
+            if (km.x == 0u) { continue; }
+            let c = pl[cl(p, i)];
+            var out = c;
+            if (km.y == 1u) {
+                let d = pl[cl(p, pl[nn_at(i)])];
+                let k = (n - 2u) - (n - nc + dm);
+                dm++;
+                merge(k, c, d);
+                out = k;
+            }
+            pl[cl(q, dk)] = out;
+            dk++;
+        }
+        storageBarrier();
+        if (lid == 0u) { wnc = total; }
+        p = q;
+    }
+}
+);
+
 #define RT_EPS_F 2e-3f           // rt/tracer.c, float build: minimum ray distance
 #define RT_SHADOW_MARGIN_F 2e-2f // shadow rays stop this far before the lamp
 #define CHUNK_TRIS 32768
@@ -1762,6 +2088,7 @@ typedef struct {
     const Vec3 *normals; int nnormals;
     int dynamic;
     unsigned version;
+    int built;                          // (LR_GPU_BLAS=gpu) its BVH was built on the GPU
     uint32_t node0, ref0, tri0, nrm0;   // its BVH's root, its leaves' shapes, triangles, normals
     uint32_t root;                      // the root as the kernel's stack takes it (WIDE | node0 if 4-wide)
 } GpuMeshCopy;
@@ -1772,6 +2099,7 @@ typedef struct {
     uint32_t node0, ref0, ref_add;      // a leaf's shape id: its item + ref_add
     size_t box_at, par_at;              // its boxes and parameters, in the arena
     int npar;
+    int ploc;                           // built by PLOC (else LBVH)
 } GpuBuild;
 
 struct GpuTrace {
@@ -1802,7 +2130,10 @@ struct GpuTrace {
     int world_wide;
     int wide_ok;             // LR_GPU_WIDE=1: the CPU's 4-wide trees as such (else binary: faster here)
     int tlas_mode;           // the top level: 1 the CPU's (SAH, refit) when it is current, else
-                             // (or LR_GPU_TLAS=lbvh: 0) built here (LBVH)
+                             // (or LR_GPU_TLAS=gpu: 0) built here
+    int builder;             // how the GPU builds its BVHs (LR_GPU_BVH=ploc|lbvh): 1 PLOC, 0 LBVH,
+                             // -1 PLOC for meshes (better trees), LBVH for the top level (as good there, faster)
+    int blas_gpu;            // LR_GPU_BLAS=gpu: every mesh's BVH built on the GPU once (to measure the builders)
     // the layout (see "the scene on the GPU"): instanced meshes, instances, the top level
     GpuMeshCopy *mc;
     int nmc, laid_out;
@@ -1814,6 +2145,20 @@ struct GpuTrace {
     WGPUComputePipeline bd_morton, bd_sort, bd_hier, bd_leaves, bd_up;
     WGPUBuffer bd_keys, bd_flags, bd_boxes, bd_par;
     size_t bd_keys_cap, bd_flags_cap, bd_boxes_cap, bd_par_cap;
+    // PLOC: layouts without and with the dispatch sizes, pipelines, its lists, the sizes
+    WGPUBindGroupLayout pl_bgl, pl_bgl_args;
+    WGPUComputePipeline pl_init, pl_nn, pl_mark, pl_top, pl_scatter, pl_small;
+    int ploc_small;          // this many clusters or fewer: PLOC in one workgroup (LR_GPU_PLOC_SMALL)
+    WGPUBuffer pl_buf, pl_args;
+    size_t pl_cap;
+    // LR_GPU_BVH_CHECK=1: the builds read back, checked (one tree over all the items) and
+    // their cost (bvh_cost) and depth summed, by their order in the frame
+    int check, ck_count, ck_pending, ck_mapped, ck_n[8], ck_depth[8];
+    uint32_t ck_node0[8];
+    size_t ck_at[8], ck_cap;
+    WGPUBuffer ck_buf;
+    double ck_cost[8];
+    long ck_builds[8], ck_bad;
     GpuBuild builds[8];
     int nbuild;
     unsigned char *arena_boxes, *arena_par;
@@ -1854,7 +2199,12 @@ static WGPUComputePassEncoder timed_pass(GpuTrace *t, WGPUCommandEncoder enc, in
 }
 
 void gpu_trace_before_submit(GpuTrace *t, WGPUCommandEncoder enc){ if (t) gpu_timer_finish(t->timer, enc); }
-void gpu_trace_after_submit(GpuTrace *t){ if (t) gpu_timer_submitted(t->timer); }
+static void check_builds(GpuTrace *t);
+void gpu_trace_after_submit(GpuTrace *t){
+    if (!t) return;
+    gpu_timer_submitted(t->timer);
+    check_builds(t);
+}
 
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl){
     if (!g || g->state != GPU_READY) return NULL;
@@ -1875,7 +2225,13 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
     const char *tlas_env = getenv("LR_GPU_TLAS");
-    t->tlas_mode = tlas_env && !strcmp(tlas_env, "lbvh") ? 0 : 1;
+    t->tlas_mode = tlas_env && (!strcmp(tlas_env, "gpu") || !strcmp(tlas_env, "lbvh")) ? 0 : 1;
+    const char *bvh_env = getenv("LR_GPU_BVH");
+    t->builder = !bvh_env ? -1 : !strcmp(bvh_env, "lbvh") ? 0 : !strcmp(bvh_env, "ploc") ? 1 : -1;
+    const char *blas_env = getenv("LR_GPU_BLAS");
+    t->blas_gpu = blas_env && !strcmp(blas_env, "gpu");
+    const char *check_env = getenv("LR_GPU_BVH_CHECK");
+    t->check = check_env && atoi(check_env) > 0;
     t->pipe = gpu_compute(g, "path tracer", src, "main", t->bgl);
     t->planes = (uint64_t)width * height * 80 <= g->max_storage ? 5 : 1;
     if (t->planes == 5){
@@ -1891,6 +2247,17 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->bd_hier = gpu_compute(g, "BVH builder: hierarchy", BUILD, "hier", t->bd_bgl);
     t->bd_leaves = gpu_compute(g, "BVH builder: leaves", BUILD, "leaves", t->bd_bgl);
     t->bd_up = gpu_compute(g, "BVH builder: boxes", BUILD, "up", t->bd_bgl);
+    t->pl_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UWW");
+    t->pl_bgl_args = gpu_layout(g, WGPUShaderStage_Compute, "UWWW");
+    t->pl_init = gpu_compute(g, "BVH builder (PLOC): init", PLOC, "init", t->pl_bgl_args);
+    t->pl_nn = gpu_compute(g, "BVH builder (PLOC): nearest", PLOC, "nn", t->pl_bgl);
+    t->pl_mark = gpu_compute(g, "BVH builder (PLOC): mark", PLOC, "mark", t->pl_bgl);
+    t->pl_top = gpu_compute(g, "BVH builder (PLOC): sums", PLOC, "top", t->pl_bgl_args);
+    t->pl_scatter = gpu_compute(g, "BVH builder (PLOC): merge", PLOC, "scatter", t->pl_bgl);
+    t->pl_small = gpu_compute(g, "BVH builder (PLOC): one workgroup", PLOC, "small", t->pl_bgl);
+    const char *small_env = getenv("LR_GPU_PLOC_SMALL");
+    t->ploc_small = small_env && atoi(small_env) > 0 ? atoi(small_env) : 1024;
+    t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
     t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRR-UW");
     t->lt_pipe = gpu_compute(g, "light tracer", src, "ltrace", t->lt_bgl);
@@ -1932,6 +2299,12 @@ typedef struct { uint32_t n[4], m[4]; float lo[4], ext[4]; } BuildParams;
 
 static uint32_t pow2_at_least(uint32_t n){ uint32_t p = 2; while (p < n) p <<= 1; return p; }
 static int up_passes(int n){ int k = 0; while ((1 << k) < n) k++; return n > 1 ? 34 + k : 0; }
+// PLOC's rounds of four dispatches from n clusters down to `small` (then one workgroup does
+// the rest): a round leaves about 5/6 of them (measured: 0.71-0.83), two more to be safe
+static int ploc_rounds(int n, int small){ int r = 0; for (int64_t m = n; m > small; m = m * 5 / 6) r++; return r ? r + 2 : 0; }
+#define PLOC_DIRECT_MAX 262144   // up to this many items the rounds' dispatches are sized by n,
+                                 // else by the round's count (indirect: slower per dispatch)
+static size_t ploc_words(int n){ return 16 + 4 * (size_t)n + 2 * (((size_t)n + 255) / 256) + 8 * (2 * (size_t)n - 1); }
 static int sort_passes(uint32_t p){ int c = 0; for (uint32_t k = 2; k <= p; k <<= 1) for (uint32_t j = k >> 1; j > 0; j >>= 1) c++; return c; }
 
 static void *arena_put(unsigned char **buf, size_t *len, size_t *cap, const void *data, size_t bytes){
@@ -1949,7 +2322,8 @@ static void *arena_put(unsigned char **buf, size_t *len, size_t *cap, const void
 }
 
 // a BVH over n boxes (2 x vec4 each: lo, hi) to build on the GPU at the next gpu_trace_build
-static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, uint32_t ref0, uint32_t ref_add, Aabb bounds){
+// (`mesh`: a mesh's triangles, where the tree's quality pays: PLOC unless told otherwise)
+static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, uint32_t ref0, uint32_t ref_add, Aabb bounds, int mesh){
     if (n <= 0 || t->nbuild >= (int)(sizeof(t->builds) / sizeof(t->builds[0]))) return;
     if (t->nbuild == 0) t->arena_nboxes = t->arena_npar = 0;
     GpuBuild *b = &t->builds[t->nbuild];
@@ -1967,8 +2341,13 @@ static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, 
     base.ext[0] = ext.x > 0 ? (float)(1.0 / ext.x) : 0.0f;
     base.ext[1] = ext.y > 0 ? (float)(1.0 / ext.y) : 0.0f;
     base.ext[2] = ext.z > 0 ? (float)(1.0 / ext.z) : 0.0f;
-    // parameters: the base one, one per sort step, one per pass up
-    int npar = 1 + sort_passes(p) + up_passes(n);
+    // parameters: the base one, one per sort step, then one per pass up (LBVH) or (PLOC, when
+    // more than `small` items) one per round (m.x) and one for the rest (m.y = 1)
+    int ploc = t->builder == 1 || (t->builder < 0 && mesh);
+    b->ploc = ploc && n > 2 ? (n <= t->ploc_small ? 2 : 1) : 0;
+    if (b->ploc) base.m[3] = (uint32_t)t->ploc_small;
+    int nlast = b->ploc == 2 ? 0 : b->ploc ? ploc_rounds(n, t->ploc_small) + 1 : up_passes(n);
+    int npar = 1 + sort_passes(p) + nlast;
     size_t first = (t->arena_npar + 255) / 256 * 256;
     unsigned char *par = arena_put(&t->arena_par, &t->arena_npar, &t->arena_par_cap, NULL, (size_t)npar * BP_STRIDE);
     if (!par) return;
@@ -1981,9 +2360,11 @@ static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, 
             q.m[0] = j; q.m[1] = kk;
             memcpy(par + (size_t)k++ * BP_STRIDE, &q, sizeof(q));
         }
-    for (int u = 1; u <= up_passes(n); u++){
+    for (int u = 1; u <= nlast; u++){
         BuildParams q = base;
-        q.m[1] = (uint32_t)u;
+        if (!b->ploc) q.m[1] = (uint32_t)u;
+        else if (u < nlast) q.m[0] = (uint32_t)(u - 1);
+        else q.m[1] = 1;
         memcpy(par + (size_t)k++ * BP_STRIDE, &q, sizeof(q));
     }
     b->par_at = first;
@@ -2013,17 +2394,72 @@ static void build_dispatch(GpuTrace *t, WGPUComputePassEncoder pass, WGPUCompute
     wgpuBindGroupRelease(bg);
 }
 
+// PLOC's bind group: parameters `par`, the nodes, its lists (and the dispatch sizes)
+static WGPUBindGroup ploc_group(GpuTrace *t, const GpuBuild *b, int par, int with_args){
+    WGPUBindGroupEntry e[4];
+    memset(e, 0, sizeof(e));
+    WGPUBuffer bufs[4] = {t->bd_par, t->nodes, t->pl_buf, t->pl_args};
+    for (int i = 0; i < 4; i++){ e[i].binding = (uint32_t)i; e[i].buffer = bufs[i]; e[i].size = WGPU_WHOLE_SIZE; }
+    e[0].offset = b->par_at + (size_t)par * BP_STRIDE; e[0].size = sizeof(BuildParams);
+    e[2].size = ploc_words(b->n) * 4;
+    WGPUBindGroupDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.layout = with_args ? t->pl_bgl_args : t->pl_bgl;
+    d.entryCount = with_args ? 4 : 3;
+    d.entries = e;
+    return wgpuDeviceCreateBindGroup(t->g->device, &d);
+}
+
+static void ploc_dispatch(WGPUComputePassEncoder pass, WGPUComputePipeline pipe, WGPUBindGroup bg, size_t threads, WGPUBuffer args, uint64_t at){
+    wgpuComputePassEncoderSetPipeline(pass, pipe);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+    if (args){ wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, args, at); return; }
+    size_t groups = (threads + 255) / 256;
+    uint32_t gx = groups < 65535 ? (uint32_t)groups : 65535u;
+    wgpuComputePassEncoderDispatchWorkgroups(pass, gx, (uint32_t)((groups + gx - 1) / gx), 1);
+}
+
+// PLOC over a build's leaves (in Morton order: after morton, bsort and leaves)
+static void ploc_build(GpuTrace *t, WGPUComputePassEncoder pass, const GpuBuild *b, int par){
+    if (b->ploc == 2){                  // in one workgroup
+        WGPUBindGroup gs = ploc_group(t, b, 0, 0);
+        ploc_dispatch(pass, t->pl_small, gs, 1, NULL, 0);
+        wgpuBindGroupRelease(gs);
+        return;
+    }
+    int rounds = ploc_rounds(b->n, t->ploc_small);
+    WGPUBuffer ia = b->n <= PLOC_DIRECT_MAX ? NULL : t->pl_args;
+    WGPUBindGroup g0 = ploc_group(t, b, par, 1);
+    ploc_dispatch(pass, t->pl_init, g0, (size_t)b->n, NULL, 0);
+    wgpuBindGroupRelease(g0);
+    for (int r = 0; r < rounds; r++){
+        WGPUBindGroup ga = ploc_group(t, b, par + r, 1), gs = ploc_group(t, b, par + r, 0);
+        uint64_t at = (uint64_t)(r & 1) * 16;
+        ploc_dispatch(pass, t->pl_nn, gs, (size_t)b->n, ia, at);
+        ploc_dispatch(pass, t->pl_mark, gs, (size_t)b->n, ia, at);
+        ploc_dispatch(pass, t->pl_top, ga, 1, NULL, 0);
+        ploc_dispatch(pass, t->pl_scatter, gs, (size_t)b->n, ia, at);
+        wgpuBindGroupRelease(gs);
+        wgpuBindGroupRelease(ga);
+    }
+    WGPUBindGroup gs = ploc_group(t, b, par + rounds, 0);   // the rest, in one workgroup
+    ploc_dispatch(pass, t->pl_small, gs, 1, NULL, 0);
+    wgpuBindGroupRelease(gs);
+}
+
 // the BVHs queued since the last call (the top level over the instances, dynamic meshes')
 static void gpu_trace_build(GpuTrace *t, WGPUCommandEncoder enc){
     if (t->nbuild == 0) return;
     Gpu *g = t->g;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
-    size_t keys_bytes = 8, flags_bytes = 8;
+    size_t keys_bytes = 8, flags_bytes = 8, pl_bytes = 0;
     for (int i = 0; i < t->nbuild; i++){
         size_t kb = (size_t)pow2_at_least((uint32_t)t->builds[i].n) * 8, fb = (size_t)t->builds[i].n * 8;
         if (kb > keys_bytes) keys_bytes = kb;
         if (fb > flags_bytes) flags_bytes = fb;
+        if (t->builds[i].ploc && ploc_words(t->builds[i].n) * 4 > pl_bytes) pl_bytes = ploc_words(t->builds[i].n) * 4;
     }
+    if (pl_bytes) gpu_buffer_reserve(g, &t->pl_buf, &t->pl_cap, pl_bytes, st, "BVH builder (PLOC): lists");
     gpu_buffer_reserve(g, &t->bd_keys, &t->bd_keys_cap, keys_bytes, st, "BVH builder: keys");
     gpu_buffer_reserve(g, &t->bd_flags, &t->bd_flags_cap, flags_bytes, st, "BVH builder: flags");
     gpu_buffer_reserve(g, &t->bd_boxes, &t->bd_boxes_cap, t->arena_nboxes, st, "BVH builder: boxes");
@@ -2039,13 +2475,105 @@ static void gpu_trace_build(GpuTrace *t, WGPUCommandEncoder enc){
         build_dispatch(t, pass, t->bd_morton, b, par++, p, keys_bytes, flags_bytes);
         for (uint32_t kk = 2; kk <= p; kk <<= 1)
             for (uint32_t j = kk >> 1; j > 0; j >>= 1) build_dispatch(t, pass, t->bd_sort, b, par++, p, keys_bytes, flags_bytes);
+        if (b->ploc){
+            build_dispatch(t, pass, t->bd_leaves, b, 0, (size_t)b->n, keys_bytes, flags_bytes);
+            ploc_build(t, pass, b, par);
+            continue;
+        }
         if (b->n > 1) build_dispatch(t, pass, t->bd_hier, b, 0, (size_t)b->n - 1, keys_bytes, flags_bytes);
         build_dispatch(t, pass, t->bd_leaves, b, 0, (size_t)b->n, keys_bytes, flags_bytes);
         for (int u = 0; u < up_passes(b->n); u++) build_dispatch(t, pass, t->bd_up, b, par++, (size_t)b->n - 1, keys_bytes, flags_bytes);
     }
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
+    if (t->check && !t->ck_pending){
+        size_t total = 0;
+        for (int i = 0; i < t->nbuild; i++){
+            t->ck_at[i] = total;
+            t->ck_n[i] = t->builds[i].n;
+            t->ck_node0[i] = t->builds[i].node0;
+            total += (2 * (size_t)t->builds[i].n - 1) * 32;
+        }
+        gpu_buffer_reserve(g, &t->ck_buf, &t->ck_cap, total, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, "BVH check: readback");
+        for (int i = 0; i < t->nbuild; i++)
+            wgpuCommandEncoderCopyBufferToBuffer(enc, t->nodes, (uint64_t)t->ck_node0[i] * 32, t->ck_buf, t->ck_at[i],
+                                                 (2 * (size_t)t->ck_n[i] - 1) * 32);
+        t->ck_count = t->nbuild;
+        t->ck_pending = 1;
+    }
     t->nbuild = 0;
+}
+
+// (LR_GPU_BVH_CHECK) one built tree: n items, nodes as the tracer's (8 words), children
+// absolute (from node0); its cost (bvh_cost) and depth; 0 if it is not one tree over them all
+static int check_tree(const uint32_t *w, int n, uint32_t node0, double *cost, int *depth){
+    size_t nn = 2 * (size_t)n - 1;
+    unsigned char *seen = calloc(nn, 1);
+    uint32_t *stack = malloc(nn * 2 * sizeof(uint32_t));
+    if (!seen || !stack){ free(seen); free(stack); return 0; }
+    float f[8];
+    double sum = 0, root = 0;
+    int leaves = 0, ok = 1, top = 0, deep = 0;
+    stack[top++] = 0; stack[top++] = 1;
+    seen[0] = 1;
+    while (top > 0 && ok){
+        uint32_t d = stack[--top], i = stack[--top];
+        if ((int)d > deep) deep = (int)d;
+        memcpy(f, w + 8 * (size_t)i, 32);
+        double ex = (double)f[4] - f[0], ey = (double)f[5] - f[1], ez = (double)f[6] - f[2];
+        double area = 2 * (ex * ey + ey * ez + ez * ex);
+        if (!(area >= 0)) ok = 0;
+        sum += area;
+        if (i == 0) root = area;
+        uint32_t a = w[8 * (size_t)i + 3], b = w[8 * (size_t)i + 7];
+        if (b & 0x80000000u){ leaves++; continue; }
+        uint32_t c[2] = {a - node0, b - node0};
+        for (int k = 0; k < 2; k++){
+            if (c[k] >= nn || seen[c[k]]){ ok = 0; break; }
+            seen[c[k]] = 1;
+            float g[8];
+            memcpy(g, w + 8 * (size_t)c[k], 32);
+            for (int x = 0; x < 3; x++)
+                if (g[x] < f[x] - 1e-3f * (1 + fabsf(f[x])) || g[4 + x] > f[4 + x] + 1e-3f * (1 + fabsf(f[4 + x]))) ok = 0;
+            stack[top++] = c[k]; stack[top++] = d + 1;
+        }
+    }
+    free(seen);
+    free(stack);
+    *cost = root > 0 ? sum / root : 0;
+    *depth = deep;
+    return ok && leaves == n;
+}
+
+static void on_check(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
+    (void)msg; (void)u2;
+    ((GpuTrace *)u1)->ck_mapped = status == WGPUMapAsyncStatus_Success ? 1 : -1;
+}
+
+static void check_builds(GpuTrace *t){
+    if (t->ck_pending != 1) return;
+    t->ck_pending = 0;
+    if (t->ck_count == 0) return;
+    size_t total = t->ck_at[t->ck_count - 1] + (2 * (size_t)t->ck_n[t->ck_count - 1] - 1) * 32;
+    WGPUBufferMapCallbackInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.mode = WGPUCallbackMode_AllowSpontaneous;
+    mi.callback = on_check;
+    mi.userdata1 = t;
+    t->ck_mapped = 0;
+    wgpuBufferMapAsync(t->ck_buf, WGPUMapMode_Read, 0, total, mi);
+    for (int k = 0; k < 4000 && t->ck_mapped == 0; k++) gpu_wait(t->g);
+    if (t->ck_mapped != 1) return;
+    const uint32_t *w = wgpuBufferGetConstMappedRange(t->ck_buf, 0, total);
+    for (int i = 0; w && i < t->ck_count; i++){
+        double cost = 0;
+        int depth = 0;
+        if (!check_tree(w + t->ck_at[i] / 4, t->ck_n[i], t->ck_node0[i], &cost, &depth)){ t->ck_bad++; continue; }
+        t->ck_cost[i] += cost;
+        t->ck_builds[i]++;
+        if (depth > t->ck_depth[i]) t->ck_depth[i] = depth;
+    }
+    wgpuBufferUnmap(t->ck_buf);
 }
 
 // ---- the scene on the GPU ----------------------------------------------------------------
@@ -2176,15 +2704,16 @@ static int upload_layout(GpuTrace *t, const Scene *s){
         }
         GpuMeshCopy *c = &mc[m];
         c->tris = sm->tris; c->ntris = sm->ntris; c->normals = sm->normals; c->nnormals = sm->nnormals;
-        c->dynamic = sm->dynamic; c->version = sm->version;
+        c->dynamic = sm->dynamic; c->version = sm->version; c->built = 0;
         c->node0 = nodes; c->ref0 = refs; c->tri0 = tris; c->nrm0 = nrm;
         // a dynamic mesh: room for the GPU's BVH of it too (2n - 1 nodes, n leaves of one
         // triangle), binary as the GPU builds it; the others 4-wide when the CPU made them so
-        int wide = t->wide_ok && mb->wide && !sm->dynamic;
+        int on_gpu = sm->dynamic || t->blas_gpu;
+        int wide = t->wide_ok && mb->wide && !on_gpu;
         uint32_t nn = gpu_slots(mb, wide), nr = (uint32_t)mb->nrefs;
         c->root = wide ? (GPU_WIDE | c->node0) : c->node0;
-        if (sm->dynamic && (uint32_t)(2 * sm->ntris - 1) > nn) nn = (uint32_t)(2 * sm->ntris - 1);
-        if (sm->dynamic && (uint32_t)sm->ntris > nr) nr = (uint32_t)sm->ntris;
+        if (on_gpu && (uint32_t)(2 * sm->ntris - 1) > nn) nn = (uint32_t)(2 * sm->ntris - 1);
+        if (on_gpu && (uint32_t)sm->ntris > nr) nr = (uint32_t)sm->ntris;
         nodes += nn; refs += nr; tris += (uint32_t)sm->ntris; nrm += (uint32_t)sm->nnormals;
         if ((size_t)gpu_slots(mb, wide) > most_nodes) most_nodes = (size_t)gpu_slots(mb, wide);
         if ((size_t)mb->nrefs > most_refs) most_refs = (size_t)mb->nrefs;
@@ -2205,7 +2734,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     // (the node and shape buffers: sized with the world's part, by upload_world)
     t->layout_nodes = nodes;
     t->layout_aux = t->world_ref0;
-    gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, ((size_t)nodes + t->nnodes + 1) * 32, st, "BVH nodes");
+    gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, ((size_t)nodes + t->nnodes + 1) * 32, st | WGPUBufferUsage_CopySrc, "BVH nodes");
     gpu_buffer_reserve(g, &t->aux, &t->aux_cap, ((size_t)t->world_ref0 + 2 * (size_t)t->nnodes + 1) * 4, st, "BVH shapes and normals");
 
     uint32_t *nd = malloc(most_nodes * 32);
@@ -2275,7 +2804,7 @@ static int upload_world(GpuTrace *t, const Scene *s){
     size_t bytes_prims = ((size_t)s->nprims + 2 * (size_t)t->inst_cap + 1) * 96;
     if (too_big(g, bytes_nodes) || too_big(g, bytes_aux)) return 0;
     WGPUBuffer old_nodes = t->nodes, old_aux = t->aux;
-    gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, bytes_nodes, st, "BVH nodes");
+    gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, bytes_nodes, st | WGPUBufferUsage_CopySrc, "BVH nodes");
     gpu_buffer_reserve(g, &t->aux, &t->aux_cap, bytes_aux, st, "BVH shapes and normals");
     gpu_buffer_reserve(g, &t->prims, &t->prims_cap, bytes_prims, st, "primitives and instances");
     if (t->nodes != old_nodes || t->aux != old_aux){
@@ -2372,15 +2901,15 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             free(nd);
             free(ax);
         } else tl = NULL;
-        if (!tl) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all);   // the top level: instance ids
+        if (!tl) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
         free(box);
     }
     // dynamic meshes: their new triangles, and a BVH of them built on the GPU in their place
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
         GpuMeshCopy *c = &t->mc[m];
-        if (!sm->dynamic || c->version == sm->version) continue;
-        if (!upload_tris(t, sm->tris, sm->ntris, c->tri0, c->nrm0)) return 0;
+        if (sm->dynamic ? c->version == sm->version : !t->blas_gpu || c->built) continue;
+        if (sm->dynamic && !upload_tris(t, sm->tris, sm->ntris, c->tri0, c->nrm0)) return 0;
         float *box = malloc((size_t)(sm->ntris ? sm->ntris : 1) * 32);
         if (!box) return 0;
         for (int i = 0; i < sm->ntris; i++){
@@ -2388,9 +2917,10 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             put(box + 8 * (size_t)i, bb.lo, 0);
             put(box + 8 * (size_t)i + 4, bb.hi, 0);
         }
-        build_queue(t, box, sm->ntris, c->node0, c->ref0, c->tri0, sm->box);
+        build_queue(t, box, sm->ntris, c->node0, c->ref0, c->tri0, sm->box, 1);
         free(box);
         c->version = sm->version;
+        c->built = 1;
     }
     return 1;
 }
@@ -2803,6 +3333,11 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
 
 void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;
+    if (t->check){
+        for (int i = 0; i < 8; i++)
+            if (t->ck_builds[i]) printf("GPU BVH check, build %d: %d items, cost %.3f (mean of %ld), depth %d\n", i, t->ck_n[i], t->ck_cost[i] / t->ck_builds[i], t->ck_builds[i], t->ck_depth[i]);
+        printf("GPU BVH check: %ld builds were not one tree over their items\n", t->ck_bad);
+    }
     if (t->timer){
         for (int k = 0; k < NTS; k++){
             double ms = gpu_timer_ms_per_unit(t->timer, k);
@@ -2817,14 +3352,16 @@ void gpu_trace_destroy(GpuTrace *t){
     }
     WGPUBuffer wfb[] = {t->wf, t->wfc, t->wfa, t->wf_params};
     for (int i = 0; i < 4; i++) if (wfb[i]){ wgpuBufferDestroy(wfb[i]); wgpuBufferRelease(wfb[i]); }
+    if (t->ck_buf){ wgpuBufferDestroy(t->ck_buf); wgpuBufferRelease(t->ck_buf); }
     WGPUBuffer bufs[] = {t->params, t->rp_params, t->blue, t->acc[0], t->acc[1], t->nodes, t->aux, t->prims, t->tris,
                          t->caus, t->rs_params, t->final, t->lt_params, t->grid, t->dc_params, t->pc_params,
-                         t->bd_keys, t->bd_flags, t->bd_boxes, t->bd_par};
+                         t->bd_keys, t->bd_flags, t->bd_boxes, t->bd_par, t->pl_buf, t->pl_args};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
     WGPUComputePipeline pipes[] = {t->pipe, t->gbuf_pipe, t->rp_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
-                                   t->bd_morton, t->bd_sort, t->bd_hier, t->bd_leaves, t->bd_up};
+                                   t->bd_morton, t->bd_sort, t->bd_hier, t->bd_leaves, t->bd_up,
+                                   t->pl_init, t->pl_nn, t->pl_mark, t->pl_top, t->pl_scatter, t->pl_small};
     for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) if (pipes[i]) wgpuComputePipelineRelease(pipes[i]);
-    WGPUBindGroupLayout bgls[] = {t->bgl, t->rp_bgl, t->lt_bgl, t->rs_bgl, t->dc_bgl, t->bd_bgl};
+    WGPUBindGroupLayout bgls[] = {t->bgl, t->rp_bgl, t->lt_bgl, t->rs_bgl, t->dc_bgl, t->bd_bgl, t->pl_bgl, t->pl_bgl_args};
     for (size_t i = 0; i < sizeof(bgls) / sizeof(bgls[0]); i++) if (bgls[i]) wgpuBindGroupLayoutRelease(bgls[i]);
     free(t->mc);
     free(t->arena_boxes);

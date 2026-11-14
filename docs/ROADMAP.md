@@ -15,7 +15,7 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 | 1 | **PNG, and the FPS counter on the image** | done (050baf2, 97091cd) | below |
 | 2 | **P3: a cheaper hull–hull test** | done | below; PERFORMANCE.md P3 |
 | 3 | **P8: a parallel prefix sum for the contact lists** | done | below; PERFORMANCE.md P8 |
-| 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | next | below; PERFORMANCE.md R4b |
+| 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | done | below; PERFORMANCE.md R4b |
 | 5 | **PBR: one physically based material model for all four pipelines** | planned | [PBR.md](PBR.md), phases PBR1–PBR6 |
 
 Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost per step),
@@ -84,6 +84,11 @@ Meister & Bittner, "Parallel Locally-Ordered Clustering for Bounding Volume Hier
 Construction" (2018): a GPU builder close to SAH quality, for when the CPU has no top-level
 tree and for meshes that change. Compared with today's LBVH and the CPU's SAH tree on build
 time, tree cost (bvh_cost) and ray speed.
+
+Done (2026-11-14): meshes' trees 8-9% cheaper than the LBVH's and rays 3-4% faster, built
+1.3-1.8x slower (the 871k-triangle dragon: 10.5 ms instead of 8.4); the top level as good
+either way. So PLOC builds meshes' trees and the LBVH the top level (`LR_GPU_BVH`); the
+CPU's SAH trees are still the fastest to trace, and are used whenever they are current.
 
 ## 5. PBR
 

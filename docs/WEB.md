@@ -270,12 +270,15 @@ spheres). Moving one changes only its transform, never its triangles.
   primitives two records per instance (its inverse and forward transforms, its mesh's BVH
   root, material, world box). A ray walks the world's BVH, then the top-level BVH over the
   instances, moving into each instance it reaches.
-- **The top level is built on the GPU every frame**, by a linear BVH builder (Karras 2012,
-  `BUILD` in `trace_gpu.c`): 30-bit Morton codes of the box centres, a bitonic sort (one
-  dispatch per step), the hierarchy from the codes' common prefixes (each internal node
-  independently), then the boxes from the leaves up, one pass per tree level. The same
-  builder rebuilds a dynamic mesh's BVH after its triangles changed (`scene_mesh_changed`),
-  in place of the CPU's; that one is bit-identical in the image (only how fast rays find
+- **The top level** is the CPU's SAH tree when it is current (`scene_tlas`); otherwise it
+  is built on the GPU every frame, by a linear BVH builder (Karras 2012, `BUILD` in
+  `trace_gpu.c`): 30-bit Morton codes of the box centres, a bitonic sort (one dispatch per
+  step), the hierarchy from the codes' common prefixes (each internal node independently),
+  then the boxes from the leaves up, one pass per tree level. A dynamic mesh's BVH is
+  rebuilt on the GPU after its triangles changed (`scene_mesh_changed`), in place of the
+  CPU's, by PLOC (Meister & Bittner 2018, `PLOC` in `trace_gpu.c`): from the same sorted
+  leaves, clusters merge with their nearest of 16 neighbours on each side, round after
+  round (PERFORMANCE.md R4b). Either way the image is the same (only how fast rays find
   the triangles changes).
 - **One traversal loop** walks all of it: a stack entry is a node and the instance whose
   space it is in, the ray is moved into an instance's space when its entries come up. So the
