@@ -857,8 +857,16 @@ static int frame(void){
             } else gpu_view_present(gview, fb, &scene, &last_rp, &o.march, use_raster && frame_volumes);
         } else present_with_hud(fb);
         showing_raster = use_raster;
-        last_present = tn;
-        frames++;
+        if (gpu_frame_owed){
+            // nothing was shown: not a frame (it was counted once: "318998 frames/s"). Let
+            // the frame on its way arrive (its callback) and wait a little, instead of asking
+            // again at once and keeping a core busy
+            gpu_poll(gpu);
+            idle(1);
+        } else {
+            last_present = tn;
+            frames++;
+        }
         force_present = gpu_frame_owed;
     }
     if (prof_on){

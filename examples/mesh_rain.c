@@ -111,7 +111,7 @@ int main(int argc, char **argv){
         int id = scene_add_material(&scene, m);
         if (id >= 0) mats[ncolors++] = id;
     }
-    if (ncolors == 0){ fprintf(stderr, "no room for materials\n"); return 1; }
+    if (ncolors == 0){ fprintf(stderr, "no room for materials\n"); phys_free(&pw); scene_free(&scene); return 1; }
 
     const char *paths[] = {"models/dragon_recon/dragon_vrip_res4.ply", "models/torus.obj",
                            "models/cube.obj", "models/sphere.obj"};
@@ -130,13 +130,17 @@ int main(int argc, char **argv){
         printf("model %s: %d triangles, hull of %d corners\n", path, scene.meshes[mesh].ntris,
                pw.rigid.geoms[geom]->hull.nv);
     }
-    if (nmodels == 0){ fprintf(stderr, "no model to drop (run from the repository's folder; make models)\n"); return 1; }
+    if (nmodels == 0){
+        fprintf(stderr, "no model to drop (run from the repository's folder; make models)\n");
+        phys_free(&pw); scene_free(&scene);
+        return 1;
+    }
 
-    // ---- the window, and the GPU in it if there is one
+    // ---- the window, and the GPU in it if there is one (without them: what was made freed)
     LrWindow *win = window_open(W, H, "mesh rain");
-    if (!win) return 1;
+    if (!win){ phys_free(&pw); scene_free(&scene); return 1; }
     Framebuffer *fb = fb_create(W, H);
-    if (!fb){ fprintf(stderr, "out of memory\n"); return 1; }
+    if (!fb){ fprintf(stderr, "out of memory\n"); window_close(win); phys_free(&pw); scene_free(&scene); return 1; }
     Gpu *gpu = NULL;
     GpuView *gview = NULL;
     GpuRigid *grigid = NULL;

@@ -1672,6 +1672,15 @@ static void make_groups(GpuRigid *gr){
     }
 }
 
+// the buffers sized by the capacity (reserve makes them, again when it grows): one list for
+// reserve and gpu_rigid_destroy, so that neither forgets one (six once leaked on destroy)
+static void release_sized(GpuRigid *gr){
+    WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
+                         &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
+                         &gr->tris, &gr->store, &gr->scount, &gr->memo};
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
+}
+
 // room for nb bodies (and their contacts); 1 = the buffers were made again (their bodies lost)
 static int reserve(GpuRigid *gr, int nb){
     size_t want = (size_t)(nb > 0 ? nb : 1);
@@ -1679,10 +1688,7 @@ static int reserve(GpuRigid *gr, int nb){
     size_t cap = 64;
     while (cap < want) cap *= 2;
     Gpu *g = gr->g;
-    WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
-                         &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
-                         &gr->tris, &gr->store, &gr->scount, &gr->memo};
-    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
+    release_sized(gr);
     gr->cap_bodies = cap;
     gr->cap_contacts = 32 * cap;
     gr->bodies = storage(g, "bodies", cap * BODY_BYTES);
@@ -2057,9 +2063,9 @@ void gpu_rigid_destroy(GpuRigid *gr){
     for (int i = 0; i < 4; i++) if (live[i] == gr) live[i] = NULL;
     if (gr->pw && gr->pw->rigid_user == gr){ gr->pw->rigid_step = NULL; gr->pw->rigid_user = NULL; }
     release_groups(gr);
-    WGPUBuffer *all[] = {&gr->par, &gr->shapes, &gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
-                         &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->rb, &gr->memo};
-    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
+    release_sized(gr);
+    WGPUBuffer *own[] = {&gr->par, &gr->shapes, &gr->rb};
+    for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); i++) release(own[i]);
     for (int k = 0; k < NR; k++){
         if (gr->pipe[k]) wgpuComputePipelineRelease(gr->pipe[k]);
         if (gr->bgl[k]) wgpuBindGroupLayoutRelease(gr->bgl[k]);

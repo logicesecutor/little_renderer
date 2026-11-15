@@ -29,6 +29,12 @@ Reference machine for the numbers below: Windows, RTX 3070, 8-core CPU, native b
 run (or hour) to the next: compare two versions in the same session, alternating, and take
 the fastest of a few runs (the benchmark script does 3).
 
+Before 2026-11-15, `view -gpu offscreen` counted a frame even when it drew nothing (the
+previous frame still coming back from the GPU), so the frames per second it printed were too
+high, sometimes absurdly ("318998 frames/s"); the per-stage CPU times were right. Frame rates
+recorded that way above should be measured again; from then on only frames shown count
+(the helmet rasterized, orbiting: 63 frames/s; 1000 bodies in the viewer: 65).
+
 ## Status of the ideas
 
 `next` = chosen as the next step · `planned` = agreed, waiting its turn · `assess` = do it

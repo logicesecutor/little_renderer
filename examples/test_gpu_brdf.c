@@ -21,7 +21,11 @@ static double rel(double a, double b){ return fabs(a - b) / fmax(1e-3, fmax(fabs
 int main(void){
     Gpu *g = gpu_create(NULL, 64, 64);
     for (int k = 0; k < 20000 && g && gpu_state(g) == GPU_PENDING; k++) gpu_poll(g);
-    if (!g || gpu_state(g) != GPU_READY){ printf("test_gpu_brdf: no GPU (%s): skipped\n", g ? gpu_message(g) : "none"); return 0; }
+    if (!g || gpu_state(g) != GPU_READY){
+        printf("test_gpu_brdf: no GPU (%s): skipped\n", g ? gpu_message(g) : "none");
+        if (g) gpu_destroy(g);
+        return 0;
+    }
     float *in = malloc((size_t)N * GPU_BSDF_IN * sizeof(float)), *out = malloc((size_t)N * GPU_BSDF_OUT * sizeof(float));
     if (!in || !out) return 1;
     Rng r;
