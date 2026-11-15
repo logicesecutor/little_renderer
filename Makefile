@@ -100,6 +100,7 @@ $(BUILD)/%.o: engine/%.c $(HDR)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
+	rm -f $@
 	ar rcs $@ $^
 
 # ---- apps and examples (one .c file each, linked with the library) -----------------------
