@@ -20,17 +20,63 @@ WGPUCommandEncoder wgpuDeviceCreateCommandEncoder(WGPUDevice device, WGPUCommand
     e->dev = device;
     e->cb = vk_cb_get(device);
     if (!e->cb){ free(e); return NULL; }
+    e->pend_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    e->pend_write = VK_ACCESS_MEMORY_WRITE_BIT;
     return e;
 }
 
 void wgpuCommandEncoderRelease(WGPUCommandEncoder e){ if (e) obj_unref(&e->o); }
 
-// before a command: the ones before it done (vk_impl.h: a full barrier)
-void vk_before(WGPUCommandEncoder e){
-    if (e->dirty) vk_barrier(e->cb);
-    e->dirty = 1;
+// Before a command: the commands before it done, as far as it can see. Each command waits
+// for the ones since the last barrier: only their stages (compute, transfer, a build, a
+// render pass), only for their writes, and only at its own stages. (A full ALL_COMMANDS
+// barrier drains everything: it made a small physics step 0.71 ms where wgpu takes 0.26.)
+// An encoder starts as if after everything (an earlier command buffer may still be writing).
+static void kind_masks(WGPUDevice dev, int kind, VkFlags *stage, VkFlags *read, VkFlags *write){
+    VkFlags as_read = dev->rt ? VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR : 0;
+    switch (kind){
+    case VK_CMD_DISPATCH: case VK_CMD_INDIRECT:
+        *stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (kind == VK_CMD_INDIRECT ? VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT : 0);
+        *read = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | as_read |
+                (kind == VK_CMD_INDIRECT ? VK_ACCESS_INDIRECT_COMMAND_READ_BIT : 0);
+        *write = VK_ACCESS_SHADER_WRITE_BIT;
+        break;
+    case VK_CMD_TRANSFER:
+        *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        *read = VK_ACCESS_TRANSFER_READ_BIT;
+        *write = VK_ACCESS_TRANSFER_WRITE_BIT;
+        break;
+    case VK_CMD_BUILD:
+        *stage = VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        *read = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        *write = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        break;
+    default:   // a render pass: its shaders and attachments
+        *stage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        *read = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | as_read;
+        *write = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+    }
 }
-#define before vk_before
+
+void vk_before(WGPUCommandEncoder e, int kind){
+    VkFlags stage, read, write;
+    kind_masks(e->dev, kind, &stage, &read, &write);
+    if (e->pend_stage){
+        VkMemoryBarrier b;
+        memset(&b, 0, sizeof(b));
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = e->pend_write;
+        b.dstAccessMask = read | write;
+        vk.vkCmdPipelineBarrier(e->cb, e->pend_stage, stage, 0, 1, &b, 0, NULL, 0, NULL);
+    }
+    e->pend_stage = stage;
+    e->pend_write = write;
+}
+#define before(e) vk_before(e, VK_CMD_TRANSFER)
 
 static void cmdbuf_free(Obj *o){
     WGPUCommandBuffer c = (WGPUCommandBuffer)o;
@@ -121,10 +167,12 @@ WGPUComputePassEncoder wgpuCommandEncoderBeginComputePass(WGPUCommandEncoder e, 
         p->ts = tw->querySet;
         p->ts_end = tw->endOfPassWriteIndex;
         refs_add(&e->refs, &tw->querySet->o);
-        before(e);
+        // (no barrier: queries are reset and written in order.) The start is taken when the
+        // compute work before has finished, not when this pass is first seen: else a pass
+        // would count the end of the one before it (sums of passes counted that time twice)
         if (tw->beginningOfPassWriteIndex != WGPU_QUERY_SET_INDEX_UNDEFINED){
             vk.vkCmdResetQueryPool(e->cb, tw->querySet->vk, tw->beginningOfPassWriteIndex, 1);
-            vk.vkCmdWriteTimestamp(e->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, tw->querySet->vk, tw->beginningOfPassWriteIndex);
+            vk.vkCmdWriteTimestamp(e->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tw->querySet->vk, tw->beginningOfPassWriteIndex);
         }
         if (tw->endOfPassWriteIndex != WGPU_QUERY_SET_INDEX_UNDEFINED)
             vk.vkCmdResetQueryPool(e->cb, tw->querySet->vk, tw->endOfPassWriteIndex, 1);
@@ -166,20 +214,19 @@ static int flush(WGPUComputePassEncoder p){
 
 void wgpuComputePassEncoderDispatchWorkgroups(WGPUComputePassEncoder p, uint32_t x, uint32_t y, uint32_t z){
     if (!x || !y || !z || !flush(p)) return;
-    before(p->enc);
+    vk_before(p->enc, VK_CMD_DISPATCH);
     vk.vkCmdDispatch(p->enc->cb, x, y, z);
 }
 
 void wgpuComputePassEncoderDispatchWorkgroupsIndirect(WGPUComputePassEncoder p, WGPUBuffer buffer, uint64_t offset){
     if (!flush(p)) return;
-    before(p->enc);
+    vk_before(p->enc, VK_CMD_INDIRECT);
     refs_add(&p->enc->refs, &buffer->o);
     vk.vkCmdDispatchIndirect(p->enc->cb, buffer->vk, offset);
 }
 
 void wgpuComputePassEncoderEnd(WGPUComputePassEncoder p){
     if (p->ts && p->ts_end != WGPU_QUERY_SET_INDEX_UNDEFINED){
-        before(p->enc);
         vk.vkCmdWriteTimestamp(p->enc->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, p->ts->vk, p->ts_end);
     }
 }

@@ -7,7 +7,7 @@
 // sees it: a WebGPU counter-clockwise front face is a clockwise one here.
 //
 // No barrier can go inside a dynamic render pass, so the one before the pass (vk_before)
-// covers all of its draws, and the command after the pass gets its own.
+// covers all of its draws, and the command after the pass waits for the whole pass.
 #include "gpu/vk/vk_impl.h"
 
 #include <stdio.h>
@@ -258,7 +258,7 @@ WGPURenderPassEncoder wgpuCommandEncoderBeginRenderPass(WGPUCommandEncoder e, WG
         da.clearValue.depthStencil.depth = dsa->depthClearValue;
         if (!w){ w = dsa->view->tex->w; h = dsa->view->tex->h; }
     }
-    vk_before(e);
+    vk_before(e, VK_CMD_RENDER);
     VkRenderingInfo ri;
     memset(&ri, 0, sizeof(ri));
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -314,7 +314,6 @@ void wgpuRenderPassEncoderDraw(WGPURenderPassEncoder p, uint32_t nverts, uint32_
 
 void wgpuRenderPassEncoderEnd(WGPURenderPassEncoder p){
     vk.vkCmdEndRendering(p->enc->cb);
-    p->enc->dirty = 1;
 }
 
 void wgpuRenderPassEncoderRelease(WGPURenderPassEncoder p){ if (p) obj_unref(&p->o); }

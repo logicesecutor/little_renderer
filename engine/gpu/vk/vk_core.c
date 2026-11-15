@@ -118,8 +118,18 @@ WGPUInstance wgpuCreateInstance(WGPUInstanceDescriptor const *descriptor){
         if (has_layer("VK_LAYER_KHRONOS_validation")){ layers[nlayers++] = "VK_LAYER_KHRONOS_validation"; in->validation = 1; }
         else fprintf(stderr, "Vulkan layer: LR_VK_VALIDATE set, but no validation layer installed\n");
     }
-    const char *exts[4];
+    const char *exts[5];
     uint32_t nexts = 0;
+    // LR_VK_VALIDATE=sync: the layer's synchronization validation too (hazards between commands)
+    static const uint32_t sync_feature = 4;   // VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+    struct { VkStructureType sType; const void *pNext; uint32_t nenabled; const uint32_t *enabled; uint32_t ndisabled; const uint32_t *disabled; } vf;
+    memset(&vf, 0, sizeof(vf));
+    if (in->validation && !strcmp(val, "sync")){
+        exts[nexts++] = "VK_EXT_validation_features";
+        vf.sType = (VkStructureType)1000247000;   // VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT
+        vf.nenabled = 1;
+        vf.enabled = &sync_feature;
+    }
     if (has_instance_ext("VK_KHR_surface")){
         exts[nexts++] = "VK_KHR_surface";
 #ifdef _WIN32
@@ -136,6 +146,7 @@ WGPUInstance wgpuCreateInstance(WGPUInstanceDescriptor const *descriptor){
     ci.ppEnabledLayerNames = layers;
     ci.enabledExtensionCount = nexts;
     ci.ppEnabledExtensionNames = exts;
+    if (vf.sType) ci.pNext = &vf;
     VkResult r = vk.vkCreateInstance(&ci, NULL, &in->vk);
     if (r != VK_SUCCESS){ fprintf(stderr, "Vulkan layer: vkCreateInstance failed (%d)\n", r); free(in); return NULL; }
 #define X(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(in->vk, #f); \

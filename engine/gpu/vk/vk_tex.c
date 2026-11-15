@@ -232,7 +232,7 @@ void wgpuCommandEncoderCopyTextureToBuffer(WGPUCommandEncoder e, WGPUTexelCopyTe
                                            WGPUTexelCopyBufferInfo const *dst, WGPUExtent3D const *size){
     WGPUTexture t = src->texture;
     if (!t || !size->width || !size->height) return;
-    vk_before(e);
+    vk_before(e, VK_CMD_TRANSFER);
     refs_add(&e->refs, &t->o);
     refs_add(&e->refs, &dst->buffer->o);
     VkBufferImageCopy r;
@@ -244,7 +244,7 @@ void wgpuCommandEncoderCopyBufferToTexture(WGPUCommandEncoder e, WGPUTexelCopyBu
                                            WGPUTexelCopyTextureInfo const *dst, WGPUExtent3D const *size){
     WGPUTexture t = dst->texture;
     if (!t || !size->width || !size->height) return;
-    vk_before(e);
+    vk_before(e, VK_CMD_TRANSFER);
     refs_add(&e->refs, &t->o);
     refs_add(&e->refs, &src->buffer->o);
     VkBufferImageCopy r;

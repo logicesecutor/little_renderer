@@ -3,7 +3,7 @@
 // Each structure has its own memory and its own scratch memory, sized once at creation (by
 // vkGetAccelerationStructureBuildSizesKHR for the largest it will hold) and kept, so building
 // again (a top level every frame) allocates nothing. A build is a command like any other:
-// the full barrier before it (vk_before) orders it after what wrote its inputs, and the one
+// the barrier before it (vk_before) orders it after what wrote its inputs, and the one
 // before the next command orders the queries after it.
 #include "gpu/vk/vk_impl.h"
 
@@ -154,7 +154,7 @@ void lrCommandEncoderBuildBlas(WGPUCommandEncoder e, LRBlas b){
     info.pGeometries = g;
     info.scratchData.deviceAddress = b->a.scratch_at;
     const VkAccelerationStructureBuildRangeInfoKHR *pr = r;
-    vk_before(e);
+    vk_before(e, VK_CMD_BUILD);
     vk.vkCmdBuildAccelerationStructuresKHR(e->cb, 1, &info, &pr);
     free(g); free(counts); free(r);
 }
@@ -217,7 +217,7 @@ void lrCommandEncoderBuildTlas(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instan
     const VkAccelerationStructureBuildRangeInfoKHR *pr = &r;
     refs_add(&e->refs, &t->o);
     if (instances) refs_add(&e->refs, &instances->o);
-    vk_before(e);
+    vk_before(e, VK_CMD_BUILD);
     vk.vkCmdBuildAccelerationStructuresKHR(e->cb, 1, &info, &pr);
 }
 

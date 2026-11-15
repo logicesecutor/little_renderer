@@ -51,6 +51,15 @@ BVH on our layer → ray queries): boxes 2.08 → 1.35, a sphere mesh 3.36 → 1
 Next: the WGSL out of the C files into files of their own (asked for 2026-11-15); then the
 native extensions (below) where measurements show a gain.
 
+Barriers: a command waits only for the commands since the last barrier, at their stages
+(compute, transfer, a build, a render pass) and for their writes, not for everything
+(`ALL_COMMANDS`, as at first: a small physics step took 0.71 ms of GPU time where wgpu takes
+0.26; now 0.32-0.36, and `mesh_rain`'s 1500 hulls 4.63 ms per step against wgpu's 4.66).
+Skipping barriers between dispatches that touch different buffers would gain at most a
+further 0.03 ms there (measured with no barriers at all), so it is not done.
+`LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
+commands): the tests, `render`, `sim` and `view` run clean.
+
 Building: `make VK=1` (binaries in `bin/vk`; the webgpu.h header still comes from `make
 deps`). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed
 (MSYS2: `mingw-w64-ucrt-x86_64-vulkan-validation-layers`; then `VK_ADD_LAYER_PATH` to its

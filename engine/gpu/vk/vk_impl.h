@@ -220,7 +220,7 @@ struct WGPUCommandEncoderImpl {
     WGPUDevice dev;
     VkCommandBuffer cb;
     Refs refs;
-    int dirty;                       // a command recorded since the last barrier
+    VkFlags pend_stage, pend_write;  // what the commands since the last barrier did (vk_before)
     int finished;
 };
 
@@ -312,7 +312,9 @@ void vk_image_layout(VkCommandBuffer cb, VkImage img, VkFlags aspect, uint32_t f
 void vk_texture_ready(WGPUDevice dev, VkCommandBuffer cb, WGPUTexture t);   // into GENERAL, once
 VkCommandBuffer vk_upload_cb(WGPUDevice dev);                 // the upload command buffer (a barrier first)
 int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr);
-void vk_before(WGPUCommandEncoder e);                        // a command into e: a barrier first if needed
+// the kinds of command, for the barriers between them (vk_before)
+enum { VK_CMD_DISPATCH, VK_CMD_INDIRECT, VK_CMD_TRANSFER, VK_CMD_BUILD, VK_CMD_RENDER };
+void vk_before(WGPUCommandEncoder e, int kind);              // a command of this kind into e: a barrier first
 // a submission of cb (ended; given back when done) after the uploads, signalling `signal` too
 uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal);
 VkDeviceAddress vk_buffer_address(WGPUBuffer b);
