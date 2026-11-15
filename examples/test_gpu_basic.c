@@ -13,12 +13,12 @@
 
 static int failures;
 
+#ifdef LR_GPU
 static void check(const char *what, int ok){
     printf("  %-60s %s\n", what, ok ? "ok" : "FAIL");
     if (!ok) failures++;
 }
 
-#ifdef LR_GPU
 static void on_map(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     *(int *)u1 = status == WGPUMapAsyncStatus_Success ? 1 : -1;
