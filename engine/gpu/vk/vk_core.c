@@ -142,6 +142,9 @@ WGPUInstance wgpuCreateInstance(WGPUInstanceDescriptor const *descriptor){
              if (!vk.f){ fprintf(stderr, "Vulkan layer: no %s\n", #f); instance_free(&in->o); return NULL; }
     VK_INSTANCE_FNS(X)
 #undef X
+#define X(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(in->vk, #f);
+    VK_SURFACE_FNS(X)
+#undef X
     return in;
 }
 
@@ -424,6 +427,9 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
              if (!vk.f){ fprintf(stderr, "Vulkan layer: no %s\n", #f); }
     VK_DEVICE_FNS(X)
 #undef X
+#define X(f) vk.f = nexts ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
+    VK_SWAPCHAIN_FNS(X)
+#undef X
     vk.vkGetDeviceQueue(d->vk, adapter->family, 0, &d->q);
     obj_init(&d->queue.o, NULL);
     d->queue.dev = d;
@@ -658,7 +664,7 @@ static int sub_push(WGPUDevice dev, Sub *s){
     return 1;
 }
 
-static uint64_t submit(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs){
+static uint64_t submit_ex(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs, VkCommandBuffer extra, VkSemaphore signal){
     Sub s;
     memset(&s, 0, sizeof(s));
     if (dev->up_open){
@@ -679,26 +685,34 @@ static uint64_t submit(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs){
         c->cb = NULL;
         c->submitted = 1;
     }
+    if (extra && s.ncb < 16) s.cbs[s.ncb++] = extra;
     uint64_t value = ++dev->submitted;
+    // the timeline, and a binary semaphore (a window's image presentable) if asked (its
+    // value is not used)
+    VkSemaphore sig[2] = {dev->tl, signal};
+    uint64_t sigv[2] = {value, 0};
     VkTimelineSemaphoreSubmitInfo ts;
     memset(&ts, 0, sizeof(ts));
     ts.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    ts.signalSemaphoreValueCount = 1;
-    ts.pSignalSemaphoreValues = &value;
+    ts.signalSemaphoreValueCount = signal ? 2 : 1;
+    ts.pSignalSemaphoreValues = sigv;
     VkSubmitInfo si;
     memset(&si, 0, sizeof(si));
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.pNext = &ts;
     si.commandBufferCount = (uint32_t)s.ncb;
     si.pCommandBuffers = s.cbs;
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &dev->tl;
+    si.signalSemaphoreCount = signal ? 2 : 1;
+    si.pSignalSemaphores = sig;
     VkResult r = vk.vkQueueSubmit(dev->q, 1, &si, 0);
     if (r != VK_SUCCESS){ vk_error(dev, WGPUErrorType_Internal, "vkQueueSubmit failed (%d)", r); dev->lost = 1; }
     s.value = value;
     sub_push(dev, &s);
     return value;
 }
+
+static uint64_t submit(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs){ return submit_ex(dev, n, cbs, NULL, 0); }
+uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal){ return submit_ex(dev, 0, NULL, cb, signal); }
 
 void wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const *commands){
     submit(queue->dev, commandCount, commands);

@@ -43,12 +43,20 @@
     X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
     X(vkCreateImageView) X(vkDestroyImageView) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCreateGraphicsPipelines) X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdSetViewport) \
-    X(vkCmdSetScissor) X(vkCmdDraw)
+    X(vkCmdSetScissor) X(vkCmdDraw) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences)
+
+// (these may be missing: a machine without a display, a device without a swapchain)
+#define VK_SURFACE_FNS(X) \
+    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
+    X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkCreateWin32SurfaceKHR)
+#define VK_SWAPCHAIN_FNS(X) \
+    X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) \
+    X(vkQueuePresentKHR)
 
 typedef struct {
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 #define X(f) PFN_##f f;
-    VK_GLOBAL_FNS(X) VK_INSTANCE_FNS(X) VK_DEVICE_FNS(X)
+    VK_GLOBAL_FNS(X) VK_INSTANCE_FNS(X) VK_DEVICE_FNS(X) VK_SURFACE_FNS(X) VK_SWAPCHAIN_FNS(X)
 #undef X
 } VkFns;
 extern VkFns vk;
@@ -243,6 +251,23 @@ struct WGPUComputePassEncoderImpl {
     WGPUQuerySet ts; uint32_t ts_end;
 };
 
+#define VK_SURFACE_IMAGES 8
+struct WGPUSurfaceImpl {
+    Obj o;
+    WGPUInstance inst;
+    VkSurfaceKHR vk;
+    void *hinstance, *hwnd;
+    WGPUDevice dev;                  // configured for it (0: not configured)
+    WGPUSurfaceConfiguration cfg;
+    VkSwapchainKHR sc;
+    int stale;                       // out of date: made again before the next image
+    uint32_t n;
+    WGPUTexture tex[VK_SURFACE_IMAGES];
+    VkSemaphore presentable[VK_SURFACE_IMAGES];
+    VkFence acquired;                // an image free to draw on (waited for on the CPU)
+    int cur;                         // the image handed out (-1: none)
+};
+
 // ---- between the files ----
 void vk_error(WGPUDevice dev, WGPUErrorType type, const char *fmt, ...);
 VkCommandBuffer vk_cb_get(WGPUDevice dev);                 // a command buffer, begun
@@ -259,6 +284,8 @@ void vk_texture_ready(WGPUDevice dev, VkCommandBuffer cb, WGPUTexture t);   // i
 VkCommandBuffer vk_upload_cb(WGPUDevice dev);                 // the upload command buffer (a barrier first)
 int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr);
 void vk_before(WGPUCommandEncoder e);                        // a command into e: a barrier first if needed
+// a submission of cb (ended; given back when done) after the uploads, signalling `signal` too
+uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal);
 // WGSL -> SPIR-V (engine/gpu/wgsl): 0 and the words (free them) or 1 and a message
 int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
 

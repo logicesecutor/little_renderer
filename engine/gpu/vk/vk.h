@@ -665,6 +665,48 @@ typedef struct VkRenderingInfo {
     const VkRenderingAttachmentInfo *pStencilAttachment;
 } VkRenderingInfo;
 
+typedef struct VkFenceCreateInfo { VkStructureType sType; const void *pNext; VkFlags flags; } VkFenceCreateInfo;
+
+// ---- window surfaces and swapchains (VK_KHR_surface, VK_KHR_win32_surface, VK_KHR_swapchain) ----
+typedef struct VkSurfaceCapabilitiesKHR {
+    uint32_t minImageCount, maxImageCount;
+    VkExtent2D currentExtent, minImageExtent, maxImageExtent;
+    uint32_t maxImageArrayLayers;
+    VkFlags supportedTransforms; uint32_t currentTransform;
+    VkFlags supportedCompositeAlpha, supportedUsageFlags;
+} VkSurfaceCapabilitiesKHR;
+typedef struct VkSurfaceFormatKHR { VkFormat format; uint32_t colorSpace; } VkSurfaceFormatKHR;
+#define VK_COLOR_SPACE_SRGB_NONLINEAR_KHR 0
+#define VK_PRESENT_MODE_IMMEDIATE_KHR 0
+#define VK_PRESENT_MODE_MAILBOX_KHR 1
+#define VK_PRESENT_MODE_FIFO_KHR 2
+#define VK_PRESENT_MODE_FIFO_RELAXED_KHR 3
+#define VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR 0x1
+#define VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR 0x2
+#define VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR 0x4
+#define VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR 0x8
+
+typedef struct VkWin32SurfaceCreateInfoKHR {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    void *hinstance; void *hwnd;
+} VkWin32SurfaceCreateInfoKHR;
+
+typedef struct VkSwapchainCreateInfoKHR {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkSurfaceKHR surface; uint32_t minImageCount; VkFormat imageFormat; uint32_t imageColorSpace;
+    VkExtent2D imageExtent; uint32_t imageArrayLayers; VkFlags imageUsage; uint32_t imageSharingMode;
+    uint32_t queueFamilyIndexCount; const uint32_t *pQueueFamilyIndices;
+    uint32_t preTransform, compositeAlpha, presentMode; VkBool32 clipped;
+    VkSwapchainKHR oldSwapchain;
+} VkSwapchainCreateInfoKHR;
+
+typedef struct VkPresentInfoKHR {
+    VkStructureType sType; const void *pNext;
+    uint32_t waitSemaphoreCount; const VkSemaphore *pWaitSemaphores;
+    uint32_t swapchainCount; const VkSwapchainKHR *pSwapchains; const uint32_t *pImageIndices;
+    VkResult *pResults;
+} VkPresentInfoKHR;
+
 // ---- the functions (pointer types; vk_load.c fills a table of them) ----
 typedef void (VKAPI_PTR *PFN_vkVoidFunction)(void);
 typedef PFN_vkVoidFunction (VKAPI_PTR *PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
@@ -747,5 +789,21 @@ typedef void (VKAPI_PTR *PFN_vkCmdEndRendering)(VkCommandBuffer);
 typedef void (VKAPI_PTR *PFN_vkCmdSetViewport)(VkCommandBuffer, uint32_t, uint32_t, const VkViewport *);
 typedef void (VKAPI_PTR *PFN_vkCmdSetScissor)(VkCommandBuffer, uint32_t, uint32_t, const VkRect2D *);
 typedef void (VKAPI_PTR *PFN_vkCmdDraw)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
+
+typedef VkResult (VKAPI_PTR *PFN_vkCreateFence)(VkDevice, const VkFenceCreateInfo *, const void *, VkFence *);
+typedef void (VKAPI_PTR *PFN_vkDestroyFence)(VkDevice, VkFence, const void *);
+typedef VkResult (VKAPI_PTR *PFN_vkWaitForFences)(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
+typedef VkResult (VKAPI_PTR *PFN_vkResetFences)(VkDevice, uint32_t, const VkFence *);
+typedef void (VKAPI_PTR *PFN_vkDestroySurfaceKHR)(VkInstance, VkSurfaceKHR, const void *);
+typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfaceSupportKHR)(VkPhysicalDevice, uint32_t, VkSurfaceKHR, VkBool32 *);
+typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)(VkPhysicalDevice, VkSurfaceKHR, VkSurfaceCapabilitiesKHR *);
+typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)(VkPhysicalDevice, VkSurfaceKHR, uint32_t *, VkSurfaceFormatKHR *);
+typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)(VkPhysicalDevice, VkSurfaceKHR, uint32_t *, uint32_t *);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateWin32SurfaceKHR)(VkInstance, const VkWin32SurfaceCreateInfoKHR *, const void *, VkSurfaceKHR *);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateSwapchainKHR)(VkDevice, const VkSwapchainCreateInfoKHR *, const void *, VkSwapchainKHR *);
+typedef void (VKAPI_PTR *PFN_vkDestroySwapchainKHR)(VkDevice, VkSwapchainKHR, const void *);
+typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainImagesKHR)(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
+typedef VkResult (VKAPI_PTR *PFN_vkAcquireNextImageKHR)(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t *);
+typedef VkResult (VKAPI_PTR *PFN_vkQueuePresentKHR)(VkQueue, const VkPresentInfoKHR *);
 
 #endif
