@@ -48,6 +48,8 @@ Fluid *fluid_create(Aabb bounds, real cell, Volume *density){
         size_t nd = (size_t)density->nx * density->ny * density->nz;
         f->d0 = falloc(nd);
         f->d1 = falloc(nd);
+        f->dvel = malloc(nd * sizeof(Vec3));
+        if (!f->dvel){ perror("malloc"); exit(1); }
     }
     f->wind = vec3(0, 0, 0);
     f->wind_rate = 0.3f;
@@ -63,7 +65,7 @@ void fluid_free(Fluid *f){
     if (!f) return;
     free(f->u); free(f->v); free(f->w); free(f->tu); free(f->tv); free(f->tw);
     free(f->p); free(f->div); free(f->scratch); poisson_free(&f->poisson); free(f->su); free(f->sv); free(f->sw); free(f->solid);
-    free(f->d0); free(f->d1);
+    free(f->d0); free(f->d1); free(f->dvel);
     free(f);
 }
 
@@ -467,14 +469,18 @@ static void advect_density(Fluid *f, real dt){
     int lo1[3], hi1[3], lo2[3], hi2[3];
     voxel_range(v, v->active, disp + 2 * vox, lo1, hi1);
     voxel_range(v, v->active, 2 * disp + 3 * vox, lo2, hi2);
-    // phi_hat: one step backwards
+    // phi_hat: one step backwards. The air's velocity at each voxel is kept for the second
+    // pass (whose voxels are among these): it was sampled twice, 6 of the 9 trilinear
+    // samples per voxel
     PFOR
     for (int z = lo2[2]; z <= hi2[2]; z++)
         for (int y = lo2[1]; y <= hi2[1]; y++)
             for (int x = lo2[0]; x <= hi2[0]; x++){
+                size_t i = ((size_t)z * ny + y) * nx + x;
                 Vec3 c = voxgrid_center(&vg, x, y, z);
-                Vec3 from = v_sub(c, v_scale(fluid_velocity(f, c), dt));
-                f->d1[((size_t)z * ny + y) * nx + x] = voxgrid_sample(&vg, f->d0, from, NULL, NULL);
+                Vec3 vel = fluid_velocity(f, c);
+                f->dvel[i] = vel;
+                f->d1[i] = voxgrid_sample(&vg, f->d0, v_sub(c, v_scale(vel, dt)), NULL, NULL);
             }
     // correction, clamp, obstacles
     PFOR
@@ -487,7 +493,7 @@ static void advect_density(Fluid *f, real dt){
                 int fx = (int)r_floor((c.x - f->bounds.lo.x) * f->inv_h), fy = (int)r_floor((c.y - f->bounds.lo.y) * f->inv_h),
                     fz = (int)r_floor((c.z - f->bounds.lo.z) * f->inv_h);
                 if (solid_at(f, fx, fy, fz)){ v->density[i] = 0; continue; }
-                Vec3 vel = fluid_velocity(f, c);
+                Vec3 vel = f->dvel[i];
                 float mn, mx;
                 voxgrid_sample(&vg, f->d0, v_sub(c, v_scale(vel, dt)), &mn, &mx);
                 float back = voxgrid_sample(&vg, f->d1, v_add(c, v_scale(vel, dt)), NULL, NULL);

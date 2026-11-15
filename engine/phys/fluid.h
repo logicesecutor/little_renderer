@@ -40,6 +40,7 @@ typedef struct {
     float *su, *sv, *sw;       // per cell: the body's velocity in those cells
     Volume *density;           // the cloud (not owned: the scene owns it), or NULL
     float *d0, *d1;            // scratch for the density advection
+    Vec3 *dvel;                // ... and the air's velocity at each voxel's centre
 
     // parameters (fluid_create sets the defaults)
     Vec3 wind;                 // the air drifts towards this velocity...
