@@ -367,6 +367,7 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     e13.dynamicRendering = VK_TRUE;
     e13.synchronization2 = f13.synchronization2;
     e13.maintenance4 = f13.maintenance4;
+    e13.shaderZeroInitializeWorkgroupMemory = f13.shaderZeroInitializeWorkgroupMemory;   // (WGSL's workgroup memory starts at zero)
     VkPhysicalDeviceVulkan12Features e12;
     memset(&e12, 0, sizeof(e12));
     e12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;

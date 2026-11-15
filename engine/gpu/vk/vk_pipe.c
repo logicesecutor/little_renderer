@@ -32,6 +32,18 @@ WGPUShaderModule wgpuDeviceCreateShaderModule(WGPUDevice device, WGPUShaderModul
                 return NULL;
             }
             code = words;
+            // LR_VK_DUMP=dir: each WGSL module and its SPIR-V saved there (to check with spirv-val)
+            const char *dump = getenv("LR_VK_DUMP");
+            if (dump && *dump){
+                static int k;
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%03d.wgsl", dump, k);
+                FILE *f = fopen(path, "wb");
+                if (f){ fwrite(s->code.data, 1, sv_len(s->code), f); fclose(f); }
+                snprintf(path, sizeof(path), "%s/%03d.spv", dump, k++);
+                f = fopen(path, "wb");
+                if (f){ fwrite(words, 4, nwords, f); fclose(f); }
+            }
         }
     }
     if (!code){ vk_error(device, WGPUErrorType_Validation, "shader module without WGSL or SPIR-V"); return NULL; }
