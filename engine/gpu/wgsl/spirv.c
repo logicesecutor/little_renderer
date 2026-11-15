@@ -1,4 +1,4 @@
-// spirv.c - the checked WGSL module as SPIR-V 1.3 for Vulkan (wgsl_impl.h): types and their
+// spirv.c - the checked WGSL module as SPIR-V 1.4 for Vulkan (wgsl_impl.h): types and their
 // layout, constants, module-scope variables, expressions, statements, entry points. One pass:
 // each expression's type is worked out as it is emitted.
 #include "gpu/wgsl/wgsl_impl.h"
@@ -34,7 +34,7 @@ enum {
     OpDPdyCoarse = 214, OpControlBarrier = 224, OpAtomicLoad = 227, OpAtomicStore = 228, OpAtomicExchange = 229,
     OpAtomicCompareExchange = 230, OpAtomicIAdd = 234, OpAtomicISub = 235, OpAtomicSMin = 236,
     OpAtomicUMin = 237, OpAtomicSMax = 238, OpAtomicUMax = 239, OpAtomicAnd = 240, OpAtomicOr = 241,
-    OpAtomicXor = 242, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249,
+    OpAtomicXor = 242, OpCopyLogical = 400, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249,
     OpBranchConditional = 250, OpKill = 252, OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255
 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Workgroup = 4, SC_Private = 6,
@@ -80,6 +80,8 @@ struct Type {
     int sc;                          // pointers: the storage class
     StructInfo *s;
     uint32_t id;                     // its SPIR-V id (0: not yet)
+    uint32_t lid;                    // the same with its memory layout decorated (buffers only: Vulkan
+                                     // forbids the decorations in function, private, workgroup memory)
     Type *nextt;
 };
 
@@ -207,7 +209,72 @@ static uint32_t size_of(Type *t){
 }
 static uint32_t stride_of(Type *t){ return round_up(align_of(t->e), size_of(t->e)); }
 
-// a type's SPIR-V id (made on first use, its layout decorated: one type for every address space)
+static uint32_t tid_l(Sp *S, Type *t);
+static uint32_t tid(Sp *S, Type *t);
+static int layout_differs(Type *t){ return t->k == T_ARRAY || t->k == T_RTARRAY || t->k == T_STRUCT; }
+
+// the length of an array type: a u32 constant (made here: constants come after their types)
+static uint32_t array_len(Sp *S, Type *t){
+    uint32_t ut = 0;
+    Type *u = mk(S, T_U32, NULL, 0, 0, NULL);
+    if (!u->id){ u->id = new_id(S); OP(S, &S->globals, OpTypeInt, u->id, 32, 0); }
+    ut = u->id;
+    uint32_t len = new_id(S);
+    OP(S, &S->globals, OpConstant, ut, len, (uint32_t)t->n);
+    return len;
+}
+
+// a composite's SPIR-V type, plain (lay = 0) or with its memory layout (lay = 1)
+static uint32_t composite(Sp *S, Type *t, int lay){
+    uint32_t id;
+    if (t->k == T_ARRAY){
+        uint32_t e = lay ? tid_l(S, t->e) : tid(S, t->e), len = array_len(S, t);
+        id = new_id(S);
+        OP(S, &S->globals, OpTypeArray, id, e, len);
+        if (lay) OP(S, &S->decos, OpDecorate, id, DecArrayStride, stride_of(t));
+        return id;
+    }
+    if (t->k == T_RTARRAY){
+        uint32_t e = tid_l(S, t->e);
+        id = new_id(S);
+        OP(S, &S->globals, OpTypeRuntimeArray, id, e);
+        OP(S, &S->decos, OpDecorate, id, DecArrayStride, stride_of(t));
+        return id;
+    }
+    StructInfo *si = t->s;
+    uint32_t *m = malloc((size_t)(si->n ? si->n : 1) * sizeof(uint32_t));
+    if (!m) wgsl_fail(S->W, 0, "out of memory");
+    for (int i = 0; i < si->n; i++) m[i] = lay ? tid_l(S, si->mt[i]) : tid(S, si->mt[i]);
+    id = new_id(S);
+    put(S->W, &S->globals, ((uint32_t)(2 + si->n) << 16) | OpTypeStruct);
+    put(S->W, &S->globals, id);
+    for (int i = 0; i < si->n; i++) put(S->W, &S->globals, m[i]);
+    free(m);
+    op_str(S, &S->names, OpName, 1, &id, si->name, si->nlen, 0, NULL);
+    for (int i = 0; i < si->n; i++){
+        uint32_t pre[2] = {id, (uint32_t)i};
+        op_str(S, &S->names, OpMemberName, 2, pre, si->mname[i], si->mlen[i], 0, NULL);
+        if (!lay) continue;
+        OP(S, &S->decos, OpMemberDecorate, id, (uint32_t)i, DecOffset, si->off[i]);
+        Type *mt = si->mt[i];
+        while (mt->k == T_ARRAY || mt->k == T_RTARRAY) mt = mt->e;
+        if (mt->k == T_MAT){
+            OP(S, &S->decos, OpMemberDecorate, id, (uint32_t)i, DecColMajor);
+            OP(S, &S->decos, OpMemberDecorate, id, (uint32_t)i, DecMatrixStride, round_up(align_of(mt->e), size_of(mt->e)));
+        }
+    }
+    return id;
+}
+
+static uint32_t tid_l(Sp *S, Type *t){
+    if (!layout_differs(t)) return tid(S, t);
+    if (!t->lid) t->lid = composite(S, t, 1);
+    return t->lid;
+}
+
+static int buffer_sc(int sc){ return sc == SC_Uniform || sc == SC_StorageBuffer; }
+
+// a type's SPIR-V id (made on first use; arrays and structs: the plain one)
 static uint32_t tid(Sp *S, Type *t){
     if (t->id) return t->id;
     switch (t->k){
@@ -220,55 +287,11 @@ static uint32_t tid(Sp *S, Type *t){
     case T_VEC: { uint32_t e = tid(S, t->e); t->id = new_id(S); OP(S, &S->globals, OpTypeVector, t->id, e, (uint32_t)t->n); break; }
     case T_MAT: { uint32_t e = tid(S, t->e); t->id = new_id(S); OP(S, &S->globals, OpTypeMatrix, t->id, e, (uint32_t)t->n); break; }
     case T_ATOMIC: t->id = tid(S, t->e); break;
-    case T_ARRAY: {
-        uint32_t e = tid(S, t->e);
-        uint32_t len = 0;
-        {   // its length: a u32 constant (made here: constants come after their types)
-            Type *u = t_u32(S);
-            uint32_t ut = tid(S, u);
-            len = new_id(S);
-            OP(S, &S->globals, OpConstant, ut, len, (uint32_t)t->n);
-        }
-        t->id = new_id(S);
-        OP(S, &S->globals, OpTypeArray, t->id, e, len);
-        OP(S, &S->decos, OpDecorate, t->id, DecArrayStride, stride_of(t));
-        break;
-    }
-    case T_RTARRAY: {
-        uint32_t e = tid(S, t->e);
-        t->id = new_id(S);
-        OP(S, &S->globals, OpTypeRuntimeArray, t->id, e);
-        OP(S, &S->decos, OpDecorate, t->id, DecArrayStride, stride_of(t));
-        break;
-    }
-    case T_STRUCT: {
-        StructInfo *si = t->s;
-        uint32_t *m = malloc((size_t)(si->n ? si->n : 1) * sizeof(uint32_t));
-        if (!m) wgsl_fail(S->W, 0, "out of memory");
-        for (int i = 0; i < si->n; i++) m[i] = tid(S, si->mt[i]);
-        t->id = new_id(S);
-        put(S->W, &S->globals, ((uint32_t)(2 + si->n) << 16) | OpTypeStruct);
-        put(S->W, &S->globals, t->id);
-        for (int i = 0; i < si->n; i++) put(S->W, &S->globals, m[i]);
-        free(m);
-        uint32_t nid = t->id;
-        op_str(S, &S->names, OpName, 1, &nid, si->name, si->nlen, 0, NULL);
-        for (int i = 0; i < si->n; i++){
-            uint32_t pre[2] = {t->id, (uint32_t)i};
-            op_str(S, &S->names, OpMemberName, 2, pre, si->mname[i], si->mlen[i], 0, NULL);
-            OP(S, &S->decos, OpMemberDecorate, t->id, (uint32_t)i, DecOffset, si->off[i]);
-            Type *mt = si->mt[i];
-            while (mt->k == T_ARRAY || mt->k == T_RTARRAY) mt = mt->e;
-            if (mt->k == T_MAT){
-                OP(S, &S->decos, OpMemberDecorate, t->id, (uint32_t)i, DecColMajor);
-                OP(S, &S->decos, OpMemberDecorate, t->id, (uint32_t)i, DecMatrixStride, round_up(align_of(mt->e), size_of(mt->e)));
-            }
-        }
-        break;
-    }
+    case T_ARRAY: case T_STRUCT: t->id = composite(S, t, 0); break;
+    case T_RTARRAY: t->id = tid_l(S, t); break;
     case T_PTR: {
         if (t->e->k == T_ATOMIC){ t->id = tid(S, t_ptr(S, t->e->e, t->sc)); break; }   // (the same SPIR-V type)
-        uint32_t e = tid(S, t->e);
+        uint32_t e = buffer_sc(t->sc) ? tid_l(S, t->e) : tid(S, t->e);
         t->id = new_id(S);
         OP(S, &S->globals, OpTypePointer, t->id, (uint32_t)t->sc, e);
         break;
@@ -338,6 +361,8 @@ typedef struct {
 
 typedef struct {
     FnDecl *d;
+    uint8_t *uses, *calls;           // the globals it uses, the functions it calls
+    uint32_t *io; int nio;           // an entry point's inputs and outputs
     uint32_t id, type_id;
     Type *ret;
     Type **pt;                       // the parameters' types
@@ -601,7 +626,12 @@ static uint32_t load(Cx *c, Val *v){
     if (!v->ref) return value(c, v);
     if (v->t->k == T_ATOMIC) wgsl_fail(c->W, 0, "an atomic must be read with atomicLoad");
     uint32_t r = nid(c);
-    E(c, OpLoad, tid(SP(c), v->t), r, v->id);
+    if (buffer_sc(v->sc) && layout_differs(v->t)){
+        // (a buffer's array or struct: read with its layout, then as the plain type)
+        uint32_t x = nid(c);
+        E(c, OpLoad, tid_l(SP(c), v->t), x, v->id);
+        E(c, OpCopyLogical, tid(SP(c), v->t), r, x);
+    } else E(c, OpLoad, tid(SP(c), v->t), r, v->id);
     Val x;
     memset(&x, 0, sizeof(x));
     x.t = v->t; x.id = r;
@@ -1307,6 +1337,7 @@ static int builtin(Cx *c, Node *call, Val *out){
             StructInfo *si = gi->t->s;
             member = si->n - 1;
         } else if (!gi->wrapped) wgsl_fail(c->W, line, "arrayLength: not a runtime array");
+        if (c->fn) c->fn->uses[sym->index] = 1;
         uint32_t r = nid(c);
         E(c, OpArrayLength, tid(S, t_u32(S)), r, gi->var, (uint32_t)member);
         *out = mkval(t_u32(S), r);
@@ -1350,6 +1381,7 @@ static Val call_fn(Cx *c, Node *call, Sym *sym){
     resolve_fn(c, sym->index);
     FnInfo *f = &c->fns[sym->index];
     if (f->d->stage) wgsl_fail(c->W, call->line, "an entry point cannot be called");
+    if (c->fn) c->fn->calls[sym->index] = 1;
     if (call->n != f->d->np) wgsl_fail(c->W, call->line, "%.*s takes %d arguments", f->d->nlen, f->d->name, f->d->np);
     uint32_t *a = wgsl_alloc(c->W, (size_t)(3 + call->n) * sizeof(uint32_t));
     a[0] = tid(S, f->ret); a[1] = nid(c); a[2] = f->id;
@@ -1427,6 +1459,7 @@ static Val eval(Cx *c, Node *e){
             resolve_global(c, sym->index);
             GlobalInfo *g = &c->gl[sym->index];
             if (c->W->globals[sym->index].is_const) return g->cv;
+            if (c->fn) c->fn->uses[sym->index] = 1;
             Val v; memset(&v, 0, sizeof(v));
             v.t = g->t; v.ref = 1; v.sc = g->sc;
             if (g->wrapped){
@@ -1478,7 +1511,13 @@ static void store(Cx *c, Val dst, Val v, int line){
     if (v.ref) load(c, &v);
     if (is_abstract(v.t)) v = as_type(c, v, dst.t, line);
     if (v.t != dst.t){ char p[64], q[64]; type_name(v.t, p, sizeof(p)); type_name(dst.t, q, sizeof(q)); wgsl_fail(c->W, line, "cannot assign %s to %s", p, q); }
-    E(c, OpStore, dst.id, value(c, &v));
+    uint32_t x = value(c, &v);
+    if (buffer_sc(dst.sc) && layout_differs(dst.t)){
+        uint32_t y = nid(c);
+        E(c, OpCopyLogical, tid_l(SP(c), dst.t), y, x);
+        x = y;
+    }
+    E(c, OpStore, dst.id, x);
 }
 
 static void block_stmts(Cx *c, Node *b){
@@ -1693,7 +1732,7 @@ static void resolve_global(Cx *c, int i){
             vt = mk(S, T_STRUCT, NULL, 0, 0, si);
             g->wrapped = 1;
         }
-        uint32_t vid = tid(S, vt);
+        uint32_t vid = tid_l(S, vt);
         OP(S, &S->decos, OpDecorate, vid, DecBlock);
         if (sc == SC_StorageBuffer && d->access == AC_READ)
             for (int k = 0; k < vt->s->n; k++) OP(S, &S->decos, OpMemberDecorate, vid, (uint32_t)k, DecNonWritable);
@@ -1712,7 +1751,7 @@ static void resolve_global(Cx *c, int i){
             free(S->fbody.w);
             S->fbody = saved;
             init = const_id(c, t, v.cv);
-        } else init = (is_scalar(t) || t->k == T_VEC) ? const_id(c, t, mkconst(t, 0).cv) : c_null(S, t);
+        } else init = (sc != SC_Workgroup && (is_scalar(t) || t->k == T_VEC)) ? const_id(c, t, mkconst(t, 0).cv) : c_null(S, t);
         OP(S, &S->globals, OpVariable, tid(S, t_ptr(S, t, sc)), var, (uint32_t)sc, init);
     }
     if (d->group >= 0) OP(S, &S->decos, OpDecorate, var, DecDescriptorSet, (uint32_t)d->group);
@@ -1918,9 +1957,9 @@ static void emit_fn(Cx *c, int i){
     memset(&S->fbody, 0, sizeof(S->fbody));
     // the entry point itself
     if (d->stage){
-        uint32_t model = d->stage == ST_COMPUTE ? 5 : d->stage == ST_VERTEX ? 0 : 4;
-        uint32_t pre[2] = {model, f->id};
-        op_str(S, &S->entries, OpEntryPoint, 2, pre, d->name, d->nlen, c->niface, c->iface);
+        f->io = wgsl_alloc(c->W, (size_t)(c->niface + 1) * sizeof(uint32_t));
+        memcpy(f->io, c->iface, (size_t)c->niface * sizeof(uint32_t));
+        f->nio = c->niface;
         if (d->stage == ST_COMPUTE){
             uint32_t wg[3] = {1, 1, 1};
             Words saved = S->fbody;
@@ -1966,6 +2005,8 @@ void wgsl_emit(Wgsl *W, uint32_t **words, size_t *nwords){
     c->fns = wgsl_alloc(W, (size_t)(W->nfns + 1) * sizeof(FnInfo));
     for (int i = 0; i < W->nfns; i++){
         c->fns[i].d = &W->fns[i];
+        c->fns[i].uses = wgsl_alloc(W, (size_t)(W->nglobals + 1));
+        c->fns[i].calls = wgsl_alloc(W, (size_t)(W->nfns + 1));
         Sym s; memset(&s, 0, sizeof(s));
         s.name = W->fns[i].name; s.nlen = W->fns[i].nlen; s.kind = SYM_FN; s.index = i;
         sym_push(c, s);
@@ -1973,10 +2014,33 @@ void wgsl_emit(Wgsl *W, uint32_t **words, size_t *nwords){
     S->glsl = new_id(S);
     for (int i = 0; i < W->nglobals; i++) resolve_global(c, i);
     for (int i = 0; i < W->nfns; i++) emit_fn(c, i);
+    // the entry points: each with its inputs, outputs and every global its calls reach
+    uint8_t *reach = wgsl_alloc(W, (size_t)(W->nfns + 1)), *used = wgsl_alloc(W, (size_t)(W->nglobals + 1));
+    int *stack = wgsl_alloc(W, (size_t)(W->nfns + 1) * sizeof(int));
+    for (int i = 0; i < W->nfns; i++){
+        FnInfo *f = &c->fns[i];
+        if (!f->d->stage) continue;
+        memset(reach, 0, (size_t)W->nfns);
+        memset(used, 0, (size_t)W->nglobals);
+        int sp = 0;
+        stack[sp++] = i; reach[i] = 1;
+        while (sp){
+            FnInfo *g = &c->fns[stack[--sp]];
+            for (int k = 0; k < W->nglobals; k++) if (g->uses[k]) used[k] = 1;
+            for (int k = 0; k < W->nfns; k++) if (g->calls[k] && !reach[k]){ reach[k] = 1; stack[sp++] = k; }
+        }
+        uint32_t *ifc = wgsl_alloc(W, (size_t)(f->nio + W->nglobals + 1) * sizeof(uint32_t));
+        int n = 0;
+        for (int k = 0; k < f->nio; k++) ifc[n++] = f->io[k];
+        for (int k = 0; k < W->nglobals; k++) if (used[k] && !W->globals[k].is_const) ifc[n++] = c->gl[k].var;
+        uint32_t model = f->d->stage == ST_COMPUTE ? 5 : f->d->stage == ST_VERTEX ? 0 : 4;
+        uint32_t pre[2] = {model, f->id};
+        op_str(S, &S->entries, OpEntryPoint, 2, pre, f->d->name, f->d->nlen, n, ifc);
+    }
     // the words, in SPIR-V's order
     Words out;
     memset(&out, 0, sizeof(out));
-    put(W, &out, 0x07230203); put(W, &out, 0x00010300); put(W, &out, 0); put(W, &out, S->bound + 1); put(W, &out, 0);
+    put(W, &out, 0x07230203); put(W, &out, 0x00010400); put(W, &out, 0); put(W, &out, S->bound + 1); put(W, &out, 0);
     OP(S, &out, OpCapability, 1);                                      // Shader
     if (S->cap_image_query) OP(S, &out, OpCapability, 50);
     if (S->cap_derivative) OP(S, &out, OpCapability, 51);

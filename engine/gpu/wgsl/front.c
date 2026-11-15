@@ -174,6 +174,7 @@ static int templated(const char *s, int n){
 }
 
 static Node *expr(Wgsl *w);
+static Node *binary(Wgsl *w, int min);
 static Node *type(Wgsl *w);
 
 // a type: a name, perhaps with template arguments (types, expressions, address spaces)
@@ -196,7 +197,7 @@ static Node *type(Wgsl *w){
                                             peek2(w)->k == TK_GE || peek2(w)->k == TK_SHREQ ||
                                             (peek2(w)->k == TK_LT && templated(a->s, a->len)))){
                 arg = type(w);                          // a type, or a constant's name (an array's length)
-            } else arg = expr(w);                       // an array's length: a constant expression
+            } else arg = binary(w, 9);                  // an array's length (no comparisons or shifts: '>', '>>' end the list)
             list_add(w, &n->list, &n->n, arg);
         } while (accept(w, TK_COMMA));
         expect_close(w);
