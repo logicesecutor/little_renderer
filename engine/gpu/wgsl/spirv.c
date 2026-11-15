@@ -37,6 +37,13 @@ enum {
     OpAtomicXor = 242, OpCopyLogical = 400, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249,
     OpBranchConditional = 250, OpKill = 252, OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255,
     OpExtension = 10,
+    // subgroups (SPIR-V 1.3's group non-uniform operations)
+    OpGroupNonUniformElect = 333, OpGroupNonUniformAll = 334, OpGroupNonUniformAny = 335,
+    OpGroupNonUniformBroadcast = 337, OpGroupNonUniformBallot = 339, OpGroupNonUniformShuffle = 345,
+    OpGroupNonUniformShuffleXor = 346, OpGroupNonUniformShuffleUp = 347, OpGroupNonUniformShuffleDown = 348,
+    OpGroupNonUniformIAdd = 349, OpGroupNonUniformFAdd = 350, OpGroupNonUniformSMin = 353,
+    OpGroupNonUniformUMin = 354, OpGroupNonUniformFMin = 355, OpGroupNonUniformSMax = 356,
+    OpGroupNonUniformUMax = 357, OpGroupNonUniformFMax = 358,
     // ray queries (SPV_KHR_ray_query)
     OpTypeRayQueryKHR = 4472, OpRayQueryInitializeKHR = 4473, OpRayQueryTerminateKHR = 4474,
     OpRayQueryGenerateIntersectionKHR = 4475, OpRayQueryConfirmIntersectionKHR = 4476, OpRayQueryProceedKHR = 4477,
@@ -115,6 +122,7 @@ typedef struct {
     uint32_t glsl;                   // the GLSL.std.450 import
     Type *types;
     int cap_image_query, cap_derivative, cap_ray_query;
+    int cap_group;                   // subgroups: bits of 1 basic, 2 vote, 4 arithmetic, 8 ballot, 16 shuffle, 32 relative
     // constants already made: (type, bits) -> id; vectors: (type, components) -> id
     struct { Type *t; uint64_t bits; uint32_t id; } *consts; int nconsts, cap_consts;
     struct { Type *t; double v[16]; uint32_t id; } *cc; int ncc, cap_cc;
@@ -1199,6 +1207,74 @@ static int ray_query_builtin(Cx *c, Node *call, Val *out){
     return 0;
 }
 
+// ---- subgroups (WGSL's `enable subgroups`): Vulkan's group non-uniform operations, scope Subgroup ----
+static int subgroup_builtin(Cx *c, Node *call, Val *out){
+    Sp *S = SP(c);
+    const char *s = call->name; int l = call->nlen, n = call->n, line = call->line;
+#define IS(x) wgsl_name_is(s, l, x)
+    uint32_t scope = c_u32(S, 3);                                   // Subgroup
+    if (IS("subgroupElect")){
+        uint32_t r = nid(c);
+        E(c, OpGroupNonUniformElect, tid(S, t_bool(S)), r, scope);
+        S->cap_group |= 1;
+        *out = mkval(t_bool(S), r);
+        return 1;
+    }
+    if (n < 1) wgsl_fail(c->W, line, "%.*s needs a value", l, s);
+    Val v = loaded(c, call->list[0]);
+    if (is_abstract(v.t)) v = as_type(c, v, concrete(c, v.t), line);
+    uint32_t x = value(c, &v), r = nid(c);
+    if (IS("subgroupAll") || IS("subgroupAny")){
+        if (v.t->k != T_BOOL) wgsl_fail(c->W, line, "%.*s takes a bool", l, s);
+        E(c, IS("subgroupAll") ? OpGroupNonUniformAll : OpGroupNonUniformAny, tid(S, t_bool(S)), r, scope, x);
+        S->cap_group |= 2;
+        *out = mkval(t_bool(S), r);
+        return 1;
+    }
+    if (IS("subgroupBallot")){
+        if (v.t->k != T_BOOL) wgsl_fail(c->W, line, "subgroupBallot takes a bool");
+        Type *v4 = t_vec(S, t_u32(S), 4);
+        E(c, OpGroupNonUniformBallot, tid(S, v4), r, scope, x);
+        S->cap_group |= 8;
+        *out = mkval(v4, r);
+        return 1;
+    }
+    if (IS("subgroupShuffle") || IS("subgroupBroadcast")){
+        if (n != 2) wgsl_fail(c->W, line, "%.*s(value, invocation)", l, s);
+        Val id = convert(c, loaded(c, call->list[1]), t_u32(S), line);
+        int bc = IS("subgroupBroadcast");
+        if (bc && !id.has_cv) wgsl_fail(c->W, line, "subgroupBroadcast's invocation must be a constant");
+        E(c, bc ? OpGroupNonUniformBroadcast : OpGroupNonUniformShuffle, tid(S, v.t), r, scope, x, value(c, &id));
+        S->cap_group |= bc ? 8 : 16;
+        *out = mkval(v.t, r);
+        return 1;
+    }
+    if (IS("subgroupShuffleXor") || IS("subgroupShuffleUp") || IS("subgroupShuffleDown")){
+        if (n != 2) wgsl_fail(c->W, line, "%.*s(value, delta)", l, s);
+        Val d = convert(c, loaded(c, call->list[1]), t_u32(S), line);
+        int xr = IS("subgroupShuffleXor");
+        E(c, xr ? OpGroupNonUniformShuffleXor : IS("subgroupShuffleUp") ? OpGroupNonUniformShuffleUp : OpGroupNonUniformShuffleDown,
+          tid(S, v.t), r, scope, x, value(c, &d));
+        S->cap_group |= xr ? 16 : 32;
+        *out = mkval(v.t, r);
+        return 1;
+    }
+    // arithmetic: a reduction or a scan over the subgroup
+    uint32_t group = IS("subgroupAdd") || IS("subgroupMin") || IS("subgroupMax") ? 0 : IS("subgroupInclusiveAdd") ? 1 :
+                     IS("subgroupExclusiveAdd") ? 2 : 99;
+    if (group == 99) wgsl_fail(c->W, line, "'%.*s' is not supported", l, s);
+    int f = is_float(v.t), si = is_sint(v.t);
+    if (!f && !is_int(v.t)) wgsl_fail(c->W, line, "%.*s takes numbers", l, s);
+    uint32_t o = IS("subgroupMin") ? (f ? OpGroupNonUniformFMin : si ? OpGroupNonUniformSMin : OpGroupNonUniformUMin)
+               : IS("subgroupMax") ? (f ? OpGroupNonUniformFMax : si ? OpGroupNonUniformSMax : OpGroupNonUniformUMax)
+               : (f ? OpGroupNonUniformFAdd : OpGroupNonUniformIAdd);
+    E(c, o, tid(S, v.t), r, scope, group, x);
+    S->cap_group |= 4;
+    *out = mkval(v.t, r);
+    return 1;
+#undef IS
+}
+
 static int builtin(Cx *c, Node *call, Val *out){
     Sp *S = SP(c);
     const char *s = call->name; int l = call->nlen, n = call->n, line = call->line;
@@ -1451,6 +1527,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (l > 8 && !memcmp(s, "rayQuery", 8)) return ray_query_builtin(c, call, out);
+    if (l > 8 && !memcmp(s, "subgroup", 8)) return subgroup_builtin(c, call, out);
     if (IS("textureLoad") || IS("textureDimensions")){
         Val tex = eval(c, call->list[0]);
         if (!tex.ref || (tex.t->k != T_TEX && tex.t->k != T_TEXDEPTH)) wgsl_fail(c->W, line, "%.*s on a texture", l, s);
@@ -1912,6 +1989,7 @@ static uint32_t bi_code(int b, int output, int stage){
     case BI_NUM_WORKGROUPS: return 24; case BI_VERTEX_INDEX: return 42; case BI_INSTANCE_INDEX: return 43;
     case BI_POSITION: return (output || stage == ST_VERTEX) ? 0 : 15;
     case BI_FRONT_FACING: return 17; case BI_FRAG_DEPTH: return 22;
+    case BI_SUBGROUP_ID: return 41; case BI_SUBGROUP_SIZE: return 36;
     }
     return 0;
 }
@@ -1927,6 +2005,7 @@ static uint32_t io_var(Cx *c, Type *t, Attrs at, int output, int line){
     if (!at.builtin && (at.flat || is_int(t)) && ((c->stage == ST_FRAGMENT && !output) || (c->stage == ST_VERTEX && output)))
         OP(S, &S->decos, OpDecorate, v, DecFlat);
     if (at.builtin == BI_FRAG_DEPTH) c->uses_frag_depth = 1;
+    if (at.builtin == BI_SUBGROUP_ID || at.builtin == BI_SUBGROUP_SIZE) S->cap_group |= 1;
     iface_add(c, v);
     return v;
 }
@@ -2153,6 +2232,14 @@ void wgsl_emit(Wgsl *W, uint32_t **words, size_t *nwords){
     OP(S, &out, OpCapability, 1);                                      // Shader
     if (S->cap_image_query) OP(S, &out, OpCapability, 50);
     if (S->cap_derivative) OP(S, &out, OpCapability, 51);
+    if (S->cap_group){
+        OP(S, &out, OpCapability, 61);                                 // GroupNonUniform
+        if (S->cap_group & 2) OP(S, &out, OpCapability, 62);           // ...Vote
+        if (S->cap_group & 4) OP(S, &out, OpCapability, 63);           // ...Arithmetic
+        if (S->cap_group & 8) OP(S, &out, OpCapability, 64);           // ...Ballot
+        if (S->cap_group & 16) OP(S, &out, OpCapability, 65);          // ...Shuffle
+        if (S->cap_group & 32) OP(S, &out, OpCapability, 66);          // ...ShuffleRelative
+    }
     if (S->cap_ray_query){
         OP(S, &out, OpCapability, 4472);                               // RayQueryKHR
         op_str(S, &out, OpExtension, 0, NULL, "SPV_KHR_ray_query", 17, 0, NULL);

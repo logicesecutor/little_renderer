@@ -110,6 +110,8 @@ struct WGPUAdapterImpl {
     uint32_t family;                 // a queue family with graphics and compute
     uint32_t ts_bits;                // its timestamp bits (0: none)
     int rt;                          // acceleration structures and ray queries (webgpu_rt.h)
+    int subgroups;                   // WGSL's subgroups in compute shaders
+    uint32_t sg_min, sg_max;         // the subgroups' sizes
     uint32_t as_scratch_align;
 };
 

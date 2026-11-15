@@ -57,6 +57,16 @@ Barriers: a command waits only for the commands since the last barrier, at their
 0.26; now 0.32-0.36, and `mesh_rain`'s 1500 hulls 4.63 ms per step against wgpu's 4.66).
 Skipping barriers between dispatches that touch different buffers would gain at most a
 further 0.03 ms there (measured with no barriers at all), so it is not done.
+Subgroups: the layer offers WebGPU's `subgroups` feature (with the sizes in the adapter's
+info) and the compiler takes `subgroup_invocation_id`, `subgroup_size` and the subgroup
+functions (`subgroupAdd`, the scans, `Min` / `Max`, `Broadcast`, `Shuffle` / `ShuffleXor` /
+`Up` / `Down`, `Ballot`, `All` / `Any`, `Elect`). Tried on 2026-11-16 where the physics
+combines its threads' values (the solver's 8 threads per body; the hull test's largest of 64:
+2 barriers instead of 7), with exactly the same results: no gain, on our layer or on wgpu
+(`mesh_rain` 1500 hulls: the solver 1.40 / 1.41 ms, the hull test 2.91 / 3.03 ms, without /
+with), since those kernels wait on memory, not on their barriers. So the engine does not use
+them; the support stays for kernels that will.
+
 `LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
 commands): the tests, `render`, `sim` and `view` run clean.
 

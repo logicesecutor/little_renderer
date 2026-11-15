@@ -677,6 +677,24 @@ typedef struct VkRenderingInfo {
     const VkRenderingAttachmentInfo *pStencilAttachment;
 } VkRenderingInfo;
 
+// ---- subgroups (core in Vulkan 1.1, sizes in 1.3) ----
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES 1000094000
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES 1000225000
+#define VK_SUBGROUP_FEATURE_BASIC_BIT 0x1
+#define VK_SUBGROUP_FEATURE_VOTE_BIT 0x2
+#define VK_SUBGROUP_FEATURE_ARITHMETIC_BIT 0x4
+#define VK_SUBGROUP_FEATURE_BALLOT_BIT 0x8
+#define VK_SUBGROUP_FEATURE_SHUFFLE_BIT 0x10
+#define VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT 0x20
+typedef struct VkPhysicalDeviceSubgroupProperties {
+    VkStructureType sType; void *pNext;
+    uint32_t subgroupSize; VkFlags supportedStages, supportedOperations; VkBool32 quadOperationsInAllStages;
+} VkPhysicalDeviceSubgroupProperties;
+typedef struct VkPhysicalDeviceSubgroupSizeControlProperties {
+    VkStructureType sType; void *pNext;
+    uint32_t minSubgroupSize, maxSubgroupSize, maxComputeWorkgroupSubgroups; VkFlags requiredSubgroupSizeStages;
+} VkPhysicalDeviceSubgroupSizeControlProperties;
+
 // ---- acceleration structures and ray queries (VK_KHR_acceleration_structure, VK_KHR_ray_query) ----
 #define VK_FORMAT_R32G32B32_SFLOAT 106
 #define VK_INDEX_TYPE_NONE_KHR 1000165000

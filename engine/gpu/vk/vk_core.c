@@ -176,6 +176,28 @@ static int has_device_ext(VkPhysicalDevice pd, const char *name){
     return found;
 }
 
+// subgroups: what compute shaders can do with them (WebGPU's feature: basic, vote, arithmetic,
+// ballot, shuffle, relative shuffle), and their sizes
+static void adapter_subgroups(WGPUAdapter ad){
+    VkPhysicalDeviceSubgroupSizeControlProperties sz;
+    memset(&sz, 0, sizeof(sz));
+    sz.sType = (VkStructureType)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+    VkPhysicalDeviceSubgroupProperties sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.sType = (VkStructureType)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    sp.pNext = &sz;
+    VkPhysicalDeviceProperties2 p;
+    memset(&p, 0, sizeof(p));
+    p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p.pNext = &sp;
+    vk.vkGetPhysicalDeviceProperties2(ad->pd, &p);
+    const VkFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+                         VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;
+    ad->subgroups = (sp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) && (sp.supportedOperations & need) == need;
+    ad->sg_min = sz.minSubgroupSize ? sz.minSubgroupSize : sp.subgroupSize;
+    ad->sg_max = sz.maxSubgroupSize ? sz.maxSubgroupSize : sp.subgroupSize;
+}
+
 // hardware ray tracing (webgpu_rt.h): the extensions, the features, the scratch alignment
 static void adapter_rt(WGPUAdapter ad){
     if (!has_device_ext(ad->pd, "VK_KHR_acceleration_structure") || !has_device_ext(ad->pd, "VK_KHR_ray_query") ||
@@ -259,6 +281,7 @@ WGPUFuture wgpuInstanceRequestAdapter(WGPUInstance instance, WGPURequestAdapterO
         return fut;
     }
     adapter_rt(ad);
+    adapter_subgroups(ad);
     callbackInfo.callback(WGPURequestAdapterStatus_Success, ad, sv(""), callbackInfo.userdata1, callbackInfo.userdata2);
     return fut;
 }
@@ -312,6 +335,7 @@ WGPUStatus wgpuAdapterGetLimits(WGPUAdapter adapter, WGPULimits *l){
 WGPUBool wgpuAdapterHasFeature(WGPUAdapter adapter, WGPUFeatureName feature){
     if (feature == WGPUFeatureName_TimestampQuery) return adapter->ts_bits > 0 && adapter->props.limits.timestampComputeAndGraphics;
     if ((int)feature == (int)WGPUNativeFeature_RayQuery) return adapter->rt;
+    if (feature == WGPUFeatureName_Subgroups) return adapter->subgroups;
     return 0;
 }
 
@@ -343,6 +367,8 @@ WGPUStatus wgpuAdapterGetInfo(WGPUAdapter adapter, WGPUAdapterInfo *info){
                         p->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? WGPUAdapterType_CPU : WGPUAdapterType_Unknown;
     info->vendorID = p->vendorID;
     info->deviceID = p->deviceID;
+    info->subgroupMinSize = adapter->sg_min;
+    info->subgroupMaxSize = adapter->sg_max;
     return WGPUStatus_Success;
 }
 

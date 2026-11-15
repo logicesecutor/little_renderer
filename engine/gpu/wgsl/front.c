@@ -446,7 +446,7 @@ static int builtin_of(Wgsl *w, Tok *t){
         {"local_invocation_index", BI_LOCAL_INDEX}, {"workgroup_id", BI_WORKGROUP_ID},
         {"num_workgroups", BI_NUM_WORKGROUPS}, {"vertex_index", BI_VERTEX_INDEX},
         {"instance_index", BI_INSTANCE_INDEX}, {"position", BI_POSITION}, {"front_facing", BI_FRONT_FACING},
-        {"frag_depth", BI_FRAG_DEPTH}};
+        {"frag_depth", BI_FRAG_DEPTH}, {"subgroup_invocation_id", BI_SUBGROUP_ID}, {"subgroup_size", BI_SUBGROUP_SIZE}};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) if (wgsl_name_is(t->s, t->len, names[i].s)) return names[i].b;
     wgsl_fail(w, t->line, "unknown built-in '%.*s'", t->len, t->s);
     return 0;
