@@ -153,6 +153,51 @@ void wgpuInstanceRelease(WGPUInstance instance){ if (instance) obj_unref(&instan
 // ---- adapter ----
 static void adapter_free(Obj *o){ free(o); }
 
+static int has_device_ext(VkPhysicalDevice pd, const char *name){
+    uint32_t n = 0;
+    if (vk.vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL) != VK_SUCCESS || !n) return 0;
+    VkExtensionProperties *p = malloc(n * sizeof(*p));
+    if (!p) return 0;
+    int found = 0;
+    if (vk.vkEnumerateDeviceExtensionProperties(pd, NULL, &n, p) == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; i++) if (!strcmp(p[i].extensionName, name)) found = 1;
+    free(p);
+    return found;
+}
+
+// hardware ray tracing (webgpu_rt.h): the extensions, the features, the scratch alignment
+static void adapter_rt(WGPUAdapter ad){
+    if (!has_device_ext(ad->pd, "VK_KHR_acceleration_structure") || !has_device_ext(ad->pd, "VK_KHR_ray_query") ||
+        !has_device_ext(ad->pd, "VK_KHR_deferred_host_operations")) return;
+    VkPhysicalDeviceRayQueryFeaturesKHR rq;
+    memset(&rq, 0, sizeof(rq));
+    rq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR as;
+    memset(&as, 0, sizeof(as));
+    as.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    as.pNext = &rq;
+    VkPhysicalDeviceVulkan12Features f12;
+    memset(&f12, 0, sizeof(f12));
+    f12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    f12.pNext = &as;
+    VkPhysicalDeviceFeatures2 f;
+    memset(&f, 0, sizeof(f));
+    f.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f.pNext = &f12;
+    vk.vkGetPhysicalDeviceFeatures2(ad->pd, &f);
+    if (!as.accelerationStructure || !rq.rayQuery || !f12.bufferDeviceAddress) return;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR ap;
+    memset(&ap, 0, sizeof(ap));
+    ap.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    VkPhysicalDeviceProperties2 p;
+    memset(&p, 0, sizeof(p));
+    p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p.pNext = &ap;
+    vk.vkGetPhysicalDeviceProperties2(ad->pd, &p);
+    ad->as_scratch_align = ap.minAccelerationStructureScratchOffsetAlignment ? ap.minAccelerationStructureScratchOffsetAlignment : 256;
+    ad->rt = 1;
+}
+
 WGPUFuture wgpuInstanceRequestAdapter(WGPUInstance instance, WGPURequestAdapterOptions const *options,
                                       WGPURequestAdapterCallbackInfo callbackInfo){
     (void)options;
@@ -202,6 +247,7 @@ WGPUFuture wgpuInstanceRequestAdapter(WGPUInstance instance, WGPURequestAdapterO
         callbackInfo.callback(WGPURequestAdapterStatus_Unavailable, NULL, sv("no graphics and compute queue"), callbackInfo.userdata1, callbackInfo.userdata2);
         return fut;
     }
+    adapter_rt(ad);
     callbackInfo.callback(WGPURequestAdapterStatus_Success, ad, sv(""), callbackInfo.userdata1, callbackInfo.userdata2);
     return fut;
 }
@@ -254,6 +300,7 @@ WGPUStatus wgpuAdapterGetLimits(WGPUAdapter adapter, WGPULimits *l){
 
 WGPUBool wgpuAdapterHasFeature(WGPUAdapter adapter, WGPUFeatureName feature){
     if (feature == WGPUFeatureName_TimestampQuery) return adapter->ts_bits > 0 && adapter->props.limits.timestampComputeAndGraphics;
+    if ((int)feature == (int)WGPUNativeFeature_RayQuery) return adapter->rt;
     return 0;
 }
 
@@ -342,8 +389,10 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     d->ad = adapter;
     if (descriptor){
         d->on_error = descriptor->uncapturedErrorCallbackInfo;
-        for (size_t i = 0; i < descriptor->requiredFeatureCount; i++)
+        for (size_t i = 0; i < descriptor->requiredFeatureCount; i++){
             if (descriptor->requiredFeatures[i] == WGPUFeatureName_TimestampQuery) d->timestamps = 1;
+            if ((int)descriptor->requiredFeatures[i] == (int)WGPUNativeFeature_RayQuery) d->rt = adapter->rt;
+        }
     }
     // Vulkan 1.2 (timeline semaphores, buffer addresses) and 1.3 (dynamic rendering) features
     VkPhysicalDeviceVulkan13Features f13;
@@ -396,7 +445,18 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     qi.queueFamilyIndex = adapter->family;
     qi.queueCount = 1;
     qi.pQueuePriorities = &prio;
-    const char *exts[4];
+    // ray queries, when asked for: their extensions and features after Vulkan 1.3's
+    VkPhysicalDeviceRayQueryFeaturesKHR erq;
+    memset(&erq, 0, sizeof(erq));
+    erq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    erq.rayQuery = VK_TRUE;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR eas;
+    memset(&eas, 0, sizeof(eas));
+    eas.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    eas.pNext = &erq;
+    eas.accelerationStructure = VK_TRUE;
+    if (d->rt){ e13.pNext = &eas; e12.bufferDeviceAddress = VK_TRUE; }
+    const char *exts[8];
     uint32_t nexts = 0;
     exts[nexts++] = "VK_KHR_swapchain";
     {   // (only if the device has it: an offscreen-only device may not)
@@ -408,6 +468,12 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
             for (uint32_t i = 0; i < n; i++) if (!strcmp(p[i].extensionName, "VK_KHR_swapchain")) found = 1;
         free(p);
         if (!found) nexts = 0;
+    }
+    int has_swapchain = nexts > 0;
+    if (d->rt){
+        exts[nexts++] = "VK_KHR_acceleration_structure";
+        exts[nexts++] = "VK_KHR_ray_query";
+        exts[nexts++] = "VK_KHR_deferred_host_operations";
     }
     VkDeviceCreateInfo ci;
     memset(&ci, 0, sizeof(ci));
@@ -427,8 +493,11 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
              if (!vk.f){ fprintf(stderr, "Vulkan layer: no %s\n", #f); }
     VK_DEVICE_FNS(X)
 #undef X
-#define X(f) vk.f = nexts ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
+#define X(f) vk.f = has_swapchain ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
     VK_SWAPCHAIN_FNS(X)
+#undef X
+#define X(f) vk.f = d->rt ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
+    VK_RT_FNS(X)
 #undef X
     vk.vkGetDeviceQueue(d->vk, adapter->family, 0, &d->q);
     obj_init(&d->queue.o, NULL);
@@ -558,6 +627,9 @@ WGPUBuffer wgpuDeviceCreateBuffer(WGPUDevice device, WGPUBufferDescriptor const 
     b->usage = d->usage;
     VkFlags usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (d->usage & WGPUBufferUsage_Storage) usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    // (with ray queries a storage buffer can be read by a build: geometry, instances)
+    if ((d->usage & WGPUBufferUsage_Storage) && device->rt)
+        usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     if (d->usage & WGPUBufferUsage_Uniform) usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     if (d->usage & WGPUBufferUsage_Indirect) usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (d->usage & WGPUBufferUsage_Vertex) usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;

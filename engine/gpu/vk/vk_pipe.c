@@ -93,7 +93,11 @@ WGPUBindGroupLayout wgpuDeviceCreateBindGroupLayout(WGPUDevice device, WGPUBindG
         const WGPUBindGroupLayoutEntry *e = &d->entries[i];
         VkDescriptorType t;
         int dyn = 0;
-        if (e->buffer.type != WGPUBufferBindingType_BindingNotUsed){
+        int tlas = 0;
+        for (const WGPUChainedStruct *c = e->nextInChain; c; c = c->next) if (c->sType == LRSType_BindGroupLayoutEntryTlas) tlas = 1;
+        if (tlas){
+            t = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        } else if (e->buffer.type != WGPUBufferBindingType_BindingNotUsed){
             dyn = e->buffer.hasDynamicOffset != 0;
             int uniform = e->buffer.type == WGPUBufferBindingType_Uniform || e->buffer.type == WGPUBufferBindingType_Undefined;
             t = uniform ? (dyn ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
@@ -162,13 +166,14 @@ static VkDescriptorPool new_pool(WGPUDevice dev){
     static const VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 512}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 256},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256}, {VK_DESCRIPTOR_TYPE_SAMPLER, 64}};
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256}, {VK_DESCRIPTOR_TYPE_SAMPLER, 64},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64}};   // (the last only with ray queries)
     VkDescriptorPoolCreateInfo ci;
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     ci.maxSets = 1024;
-    ci.poolSizeCount = sizeof(sizes) / sizeof(sizes[0]);
+    ci.poolSizeCount = sizeof(sizes) / sizeof(sizes[0]) - (dev->rt ? 0 : 1);
     ci.pPoolSizes = sizes;
     VkDescriptorPool p = 0;
     if (vk.vkCreateDescriptorPool(dev->vk, &ci, NULL, &p) != VK_SUCCESS) return 0;
@@ -213,8 +218,9 @@ WGPUBindGroup wgpuDeviceCreateBindGroup(WGPUDevice device, WGPUBindGroupDescript
     VkWriteDescriptorSet *w = calloc(d->entryCount ? d->entryCount : 1, sizeof(*w));
     VkDescriptorBufferInfo *bi = calloc(d->entryCount ? d->entryCount : 1, sizeof(*bi));
     VkDescriptorImageInfo *ii = calloc(d->entryCount ? d->entryCount : 1, sizeof(*ii));
+    VkWriteDescriptorSetAccelerationStructureKHR *wa = calloc(d->entryCount ? d->entryCount : 1, sizeof(*wa));
     int n = 0;
-    for (size_t i = 0; w && bi && ii && i < d->entryCount; i++){
+    for (size_t i = 0; w && bi && ii && wa && i < d->entryCount; i++){
         const WGPUBindGroupEntry *e = &d->entries[i];
         VkDescriptorType t = VK_DESCRIPTOR_TYPE_MAX_ENUM;
         for (int k = 0; k < d->layout->n; k++) if (d->layout->e[k].binding == e->binding) t = d->layout->e[k].type;
@@ -224,7 +230,16 @@ WGPUBindGroup wgpuDeviceCreateBindGroup(WGPUDevice device, WGPUBindGroupDescript
         w[n].dstBinding = e->binding;
         w[n].descriptorCount = 1;
         w[n].descriptorType = t;
-        if (e->buffer){
+        const LRBindGroupEntryTlas *te = NULL;
+        for (const WGPUChainedStruct *c = e->nextInChain; c; c = c->next)
+            if (c->sType == LRSType_BindGroupEntryTlas) te = (const LRBindGroupEntryTlas *)c;
+        if (te && te->tlas && t == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR){
+            wa[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+            wa[n].accelerationStructureCount = 1;
+            wa[n].pAccelerationStructures = &te->tlas->a.as;
+            w[n].pNext = &wa[n];
+            refs_add(&g->held, &te->tlas->o);
+        } else if (e->buffer){
             bi[n].buffer = e->buffer->vk;
             bi[n].offset = e->offset;
             bi[n].range = e->size == WGPU_WHOLE_SIZE ? VK_WHOLE_SIZE : e->size;
@@ -239,7 +254,7 @@ WGPUBindGroup wgpuDeviceCreateBindGroup(WGPUDevice device, WGPUBindGroupDescript
         n++;
     }
     if (n) vk.vkUpdateDescriptorSets(device->vk, (uint32_t)n, w, 0, NULL);
-    free(w); free(bi); free(ii);
+    free(w); free(bi); free(ii); free(wa);
     return g;
 }
 

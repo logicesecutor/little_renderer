@@ -128,6 +128,18 @@ typedef enum {
     VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO = 1000044001,
     VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO = 1000044002,
     VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR = 1000001000,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR = 1000150000,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR = 1000150002,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR = 1000150003,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR = 1000150004,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR = 1000150005,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR = 1000150006,
+    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR = 1000150007,
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR = 1000150013,
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR = 1000150014,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR = 1000150017,
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR = 1000150020,
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR = 1000348013,
     VK_STRUCTURE_TYPE_PRESENT_INFO_KHR = 1000001001,
     VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR = 1000004000,
     VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR = 1000009000,
@@ -665,6 +677,86 @@ typedef struct VkRenderingInfo {
     const VkRenderingAttachmentInfo *pStencilAttachment;
 } VkRenderingInfo;
 
+// ---- acceleration structures and ray queries (VK_KHR_acceleration_structure, VK_KHR_ray_query) ----
+#define VK_FORMAT_R32G32B32_SFLOAT 106
+#define VK_INDEX_TYPE_NONE_KHR 1000165000
+#define VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR 0
+#define VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR 1
+#define VK_GEOMETRY_TYPE_TRIANGLES_KHR 0
+#define VK_GEOMETRY_TYPE_AABBS_KHR 1
+#define VK_GEOMETRY_TYPE_INSTANCES_KHR 2
+#define VK_GEOMETRY_OPAQUE_BIT_KHR 0x1
+#define VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR 0x1
+#define VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR 0x4
+#define VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR 0x8
+#define VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR 0
+#define VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR 1
+
+typedef struct VkPhysicalDeviceAccelerationStructureFeaturesKHR {
+    VkStructureType sType; void *pNext;
+    VkBool32 accelerationStructure, accelerationStructureCaptureReplay, accelerationStructureIndirectBuild;
+    VkBool32 accelerationStructureHostCommands, descriptorBindingAccelerationStructureUpdateAfterBind;
+} VkPhysicalDeviceAccelerationStructureFeaturesKHR;
+typedef struct VkPhysicalDeviceRayQueryFeaturesKHR { VkStructureType sType; void *pNext; VkBool32 rayQuery; } VkPhysicalDeviceRayQueryFeaturesKHR;
+typedef struct VkPhysicalDeviceAccelerationStructurePropertiesKHR {
+    VkStructureType sType; void *pNext;
+    uint64_t maxGeometryCount, maxInstanceCount, maxPrimitiveCount;
+    uint32_t maxPerStageDescriptorAccelerationStructures, maxPerStageDescriptorUpdateAfterBindAccelerationStructures;
+    uint32_t maxDescriptorSetAccelerationStructures, maxDescriptorSetUpdateAfterBindAccelerationStructures;
+    uint32_t minAccelerationStructureScratchOffsetAlignment;
+} VkPhysicalDeviceAccelerationStructurePropertiesKHR;
+
+typedef union VkDeviceOrHostAddressConstKHR { VkDeviceAddress deviceAddress; const void *hostAddress; } VkDeviceOrHostAddressConstKHR;
+typedef union VkDeviceOrHostAddressKHR { VkDeviceAddress deviceAddress; void *hostAddress; } VkDeviceOrHostAddressKHR;
+
+typedef struct VkAccelerationStructureCreateInfoKHR {
+    VkStructureType sType; const void *pNext; VkFlags createFlags;
+    VkBuffer buffer; VkDeviceSize offset, size; uint32_t type; VkDeviceAddress deviceAddress;
+} VkAccelerationStructureCreateInfoKHR;
+typedef struct VkAccelerationStructureGeometryTrianglesDataKHR {
+    VkStructureType sType; const void *pNext;
+    VkFormat vertexFormat; VkDeviceOrHostAddressConstKHR vertexData; VkDeviceSize vertexStride;
+    uint32_t maxVertex; uint32_t indexType;
+    VkDeviceOrHostAddressConstKHR indexData, transformData;
+} VkAccelerationStructureGeometryTrianglesDataKHR;
+typedef struct VkAccelerationStructureGeometryAabbsDataKHR {
+    VkStructureType sType; const void *pNext; VkDeviceOrHostAddressConstKHR data; VkDeviceSize stride;
+} VkAccelerationStructureGeometryAabbsDataKHR;
+typedef struct VkAccelerationStructureGeometryInstancesDataKHR {
+    VkStructureType sType; const void *pNext; VkBool32 arrayOfPointers; VkDeviceOrHostAddressConstKHR data;
+} VkAccelerationStructureGeometryInstancesDataKHR;
+typedef union VkAccelerationStructureGeometryDataKHR {
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles;
+    VkAccelerationStructureGeometryAabbsDataKHR aabbs;
+    VkAccelerationStructureGeometryInstancesDataKHR instances;
+} VkAccelerationStructureGeometryDataKHR;
+typedef struct VkAccelerationStructureGeometryKHR {
+    VkStructureType sType; const void *pNext; uint32_t geometryType;
+    VkAccelerationStructureGeometryDataKHR geometry; VkFlags flags;
+} VkAccelerationStructureGeometryKHR;
+typedef struct VkAccelerationStructureBuildGeometryInfoKHR {
+    VkStructureType sType; const void *pNext;
+    uint32_t type; VkFlags flags; uint32_t mode;
+    VkAccelerationStructureKHR srcAccelerationStructure, dstAccelerationStructure;
+    uint32_t geometryCount; const VkAccelerationStructureGeometryKHR *pGeometries;
+    const VkAccelerationStructureGeometryKHR *const *ppGeometries;
+    VkDeviceOrHostAddressKHR scratchData;
+} VkAccelerationStructureBuildGeometryInfoKHR;
+typedef struct VkAccelerationStructureBuildRangeInfoKHR {
+    uint32_t primitiveCount, primitiveOffset, firstVertex, transformOffset;
+} VkAccelerationStructureBuildRangeInfoKHR;
+typedef struct VkAccelerationStructureBuildSizesInfoKHR {
+    VkStructureType sType; void *pNext;
+    VkDeviceSize accelerationStructureSize, updateScratchSize, buildScratchSize;
+} VkAccelerationStructureBuildSizesInfoKHR;
+typedef struct VkAccelerationStructureDeviceAddressInfoKHR {
+    VkStructureType sType; const void *pNext; VkAccelerationStructureKHR accelerationStructure;
+} VkAccelerationStructureDeviceAddressInfoKHR;
+typedef struct VkWriteDescriptorSetAccelerationStructureKHR {
+    VkStructureType sType; const void *pNext;
+    uint32_t accelerationStructureCount; const VkAccelerationStructureKHR *pAccelerationStructures;
+} VkWriteDescriptorSetAccelerationStructureKHR;
+
 typedef struct VkFenceCreateInfo { VkStructureType sType; const void *pNext; VkFlags flags; } VkFenceCreateInfo;
 
 // ---- window surfaces and swapchains (VK_KHR_surface, VK_KHR_win32_surface, VK_KHR_swapchain) ----
@@ -790,6 +882,14 @@ typedef void (VKAPI_PTR *PFN_vkCmdSetViewport)(VkCommandBuffer, uint32_t, uint32
 typedef void (VKAPI_PTR *PFN_vkCmdSetScissor)(VkCommandBuffer, uint32_t, uint32_t, const VkRect2D *);
 typedef void (VKAPI_PTR *PFN_vkCmdDraw)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
 
+typedef void (VKAPI_PTR *PFN_vkGetPhysicalDeviceProperties2)(VkPhysicalDevice, VkPhysicalDeviceProperties2 *);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateAccelerationStructureKHR)(VkDevice, const VkAccelerationStructureCreateInfoKHR *, const void *, VkAccelerationStructureKHR *);
+typedef void (VKAPI_PTR *PFN_vkDestroyAccelerationStructureKHR)(VkDevice, VkAccelerationStructureKHR, const void *);
+typedef void (VKAPI_PTR *PFN_vkGetAccelerationStructureBuildSizesKHR)(VkDevice, uint32_t, const VkAccelerationStructureBuildGeometryInfoKHR *,
+                                                                    const uint32_t *, VkAccelerationStructureBuildSizesInfoKHR *);
+typedef void (VKAPI_PTR *PFN_vkCmdBuildAccelerationStructuresKHR)(VkCommandBuffer, uint32_t, const VkAccelerationStructureBuildGeometryInfoKHR *,
+                                                                const VkAccelerationStructureBuildRangeInfoKHR *const *);
+typedef VkDeviceAddress (VKAPI_PTR *PFN_vkGetAccelerationStructureDeviceAddressKHR)(VkDevice, const VkAccelerationStructureDeviceAddressInfoKHR *);
 typedef VkResult (VKAPI_PTR *PFN_vkCreateFence)(VkDevice, const VkFenceCreateInfo *, const void *, VkFence *);
 typedef void (VKAPI_PTR *PFN_vkDestroyFence)(VkDevice, VkFence, const void *);
 typedef VkResult (VKAPI_PTR *PFN_vkWaitForFences)(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);

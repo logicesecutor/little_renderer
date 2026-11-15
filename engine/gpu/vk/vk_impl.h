@@ -17,6 +17,7 @@
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>
 #include "gpu/vk/vk.h"
+#include "gpu/vk/webgpu_rt.h"
 
 // ---- the Vulkan functions, looked up at run time (vk_core.c) ----
 #define VK_GLOBAL_FNS(X) \
@@ -25,7 +26,7 @@
     X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) \
     X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) X(vkEnumerateDeviceExtensionProperties) X(vkCreateDevice) \
-    X(vkGetDeviceProcAddr)
+    X(vkGetDeviceProcAddr) X(vkGetPhysicalDeviceProperties2)
 #define VK_DEVICE_FNS(X) \
     X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) X(vkQueueWaitIdle) X(vkQueueSubmit) \
     X(vkAllocateMemory) X(vkFreeMemory) X(vkMapMemory) X(vkUnmapMemory) \
@@ -43,12 +44,15 @@
     X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
     X(vkCreateImageView) X(vkDestroyImageView) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCreateGraphicsPipelines) X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdSetViewport) \
-    X(vkCmdSetScissor) X(vkCmdDraw) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences)
+    X(vkCmdSetScissor) X(vkCmdDraw) X(vkGetBufferDeviceAddress) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences)
 
 // (these may be missing: a machine without a display, a device without a swapchain)
 #define VK_SURFACE_FNS(X) \
     X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkCreateWin32SurfaceKHR)
+#define VK_RT_FNS(X) \
+    X(vkCreateAccelerationStructureKHR) X(vkDestroyAccelerationStructureKHR) X(vkGetAccelerationStructureBuildSizesKHR) \
+    X(vkCmdBuildAccelerationStructuresKHR) X(vkGetAccelerationStructureDeviceAddressKHR)
 #define VK_SWAPCHAIN_FNS(X) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) \
     X(vkQueuePresentKHR)
@@ -56,7 +60,7 @@
 typedef struct {
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 #define X(f) PFN_##f f;
-    VK_GLOBAL_FNS(X) VK_INSTANCE_FNS(X) VK_DEVICE_FNS(X) VK_SURFACE_FNS(X) VK_SWAPCHAIN_FNS(X)
+    VK_GLOBAL_FNS(X) VK_INSTANCE_FNS(X) VK_DEVICE_FNS(X) VK_SURFACE_FNS(X) VK_SWAPCHAIN_FNS(X) VK_RT_FNS(X)
 #undef X
 } VkFns;
 extern VkFns vk;
@@ -105,6 +109,8 @@ struct WGPUAdapterImpl {
     VkPhysicalDeviceMemoryProperties mem;
     uint32_t family;                 // a queue family with graphics and compute
     uint32_t ts_bits;                // its timestamp bits (0: none)
+    int rt;                          // acceleration structures and ray queries (webgpu_rt.h)
+    uint32_t as_scratch_align;
 };
 
 struct WGPUQueueImpl { Obj o; WGPUDevice dev; };
@@ -128,6 +134,7 @@ struct WGPUDeviceImpl {
     Staging *stage_cur, *stage_free;
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
+    int rt;                          // ray queries asked for (WGPUNativeFeature_RayQuery) and on
     int lost;
 };
 
@@ -251,6 +258,28 @@ struct WGPUComputePassEncoderImpl {
     WGPUQuerySet ts; uint32_t ts_end;
 };
 
+// acceleration structures (vk_rt.c, webgpu_rt.h): the structure, its memory, its scratch
+typedef struct {
+    VkAccelerationStructureKHR as;
+    VkBuffer buf; VkDeviceMemory mem;
+    VkBuffer scratch; VkDeviceMemory smem; VkDeviceAddress scratch_at;
+    VkDeviceAddress addr;
+} VkAs;
+struct LRBlasImpl {
+    Obj o;
+    WGPUDevice dev;
+    VkAs a;
+    VkFlags flags;
+    uint32_t ngeo;
+    LRGeometry *geo;                 // (holding a reference to each buffer)
+};
+struct LRTlasImpl {
+    Obj o;
+    WGPUDevice dev;
+    VkAs a;
+    uint32_t max;
+};
+
 #define VK_SURFACE_IMAGES 8
 struct WGPUSurfaceImpl {
     Obj o;
@@ -286,6 +315,7 @@ int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off,
 void vk_before(WGPUCommandEncoder e);                        // a command into e: a barrier first if needed
 // a submission of cb (ended; given back when done) after the uploads, signalling `signal` too
 uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal);
+VkDeviceAddress vk_buffer_address(WGPUBuffer b);
 // WGSL -> SPIR-V (engine/gpu/wgsl): 0 and the words (free them) or 1 and a message
 int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
 
