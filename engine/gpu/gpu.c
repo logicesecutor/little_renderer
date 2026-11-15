@@ -290,6 +290,26 @@ void gpu_wait(Gpu *g){
 #endif
 }
 
+uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb){
+#ifdef LR_WGPU_NATIVE
+    return (uint64_t)wgpuQueueSubmitForIndex(g->queue, 1, &cb);
+#else
+    wgpuQueueSubmit(g->queue, 1, &cb);
+    return 0;
+#endif
+}
+
+void gpu_wait_for(Gpu *g, uint64_t submission){
+    if (!g || g->state != GPU_READY) return;
+#ifdef LR_WGPU_NATIVE
+    WGPUSubmissionIndex i = (WGPUSubmissionIndex)submission;
+    wgpuDevicePoll(g->device, 1, &i);         // sleeps until that submission is done
+#else
+    (void)submission;
+#endif
+    gpu_poll(g);
+}
+
 GpuState gpu_state(const Gpu *g){
     if (!g) return GPU_FAILED;
     gpu_poll((Gpu *)g);                       // natively: deliver what is ready

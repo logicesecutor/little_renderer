@@ -1489,20 +1489,27 @@ static const char *K_SOLVE = WGSL(
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let c = tid(gid, nw);
     if (c >= min(atomicLoad(&cnt[0]), P.n.y)) { return; }
-    var k = C[c];
-    let ia = bitcast<u32>(k.n.w);
-    let ib = bitcast<u32>(k.ra.w);
+    /* field by field: the 7 of the contact's 10 vec4s it uses read, the 2 it changes written
+       (a whole Contact loaded and stored is 160 + 160 bytes per contact and iteration) */
+    let kn = C[c].n;
+    let kra = C[c].ra;
+    let krb = C[c].rb;
+    let kt1 = C[c].t1;
+    let kt2 = C[c].t2;
+    let kj = C[c].j;
+    let mu = C[c].imp.w;
+    let ia = bitcast<u32>(kn.w);
+    let ib = bitcast<u32>(kra.w);
     let a = B[ia];
-    var dv = a.vel.xyz + cross(a.ang.xyz, k.ra.xyz);
-    if (ib != NONE) { let b = B[ib]; dv = dv - (b.vel.xyz + cross(b.ang.xyz, k.rb.xyz)); }
-    let n = k.n.xyz;
-    let jn = max(k.j.x + k.t1.w * (k.rb.w - dot(dv, n)), 0.0);
-    let lim = k.imp.w * jn;
-    let jt1 = clamp(k.j.y - k.t2.w * dot(dv, k.t1.xyz), -lim, lim);
-    let jt2 = clamp(k.j.z - k.j.w * dot(dv, k.t2.xyz), -lim, lim);
-    k.imp = vec4f(n * (jn - k.j.x) + k.t1.xyz * (jt1 - k.j.y) + k.t2.xyz * (jt2 - k.j.z), k.imp.w);
-    k.j = vec4f(jn, jt1, jt2, k.j.w);
-    C[c] = k;
+    var dv = a.vel.xyz + cross(a.ang.xyz, kra.xyz);
+    if (ib != NONE) { let b = B[ib]; dv = dv - (b.vel.xyz + cross(b.ang.xyz, krb.xyz)); }
+    let n = kn.xyz;
+    let jn = max(kj.x + kt1.w * (krb.w - dot(dv, n)), 0.0);
+    let lim = mu * jn;
+    let jt1 = clamp(kj.y - kt2.w * dot(dv, kt1.xyz), -lim, lim);
+    let jt2 = clamp(kj.z - kj.w * dot(dv, kt2.xyz), -lim, lim);
+    C[c].imp = vec4f(n * (jn - kj.x) + kt1.xyz * (jt1 - kj.y) + kt2.xyz * (jt2 - kj.z), mu);
+    C[c].j = vec4f(jn, jt1, jt2, kj.w);
 }
 );
 
@@ -1523,11 +1530,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     var dv = vec3f(0.0);
     var dw = vec3f(0.0);
     for (var q = off[i]; q < off[i + 1u]; q++) {
+        /* only the impulse and this body's lever arm read (not the whole 160-byte contact) */
         let e = L[q];
-        let k = C[e >> 1u];
-        var j = k.imp.xyz;
-        var r = k.ra.xyz;
-        if ((e & 1u) != 0u) { j = -j; r = k.rb.xyz; }
+        let ci = e >> 1u;
+        var j = C[ci].imp.xyz;
+        var r: vec3f;
+        if ((e & 1u) != 0u) { j = -j; r = C[ci].rb.xyz; } else { r = C[ci].ra.xyz; }
         dv += j;
         dw += cross(r, j);
     }
@@ -1617,6 +1625,10 @@ struct GpuRigid {
     size_t rb_cap;
     int rb_pending, rb_n;
     int inflight, wait;
+    uint64_t subs[MAX_INFLIGHT];                 // the last steps' submissions (gpu_wait_for)
+    unsigned nsub;                               // steps submitted
+    WGPUBuffer par_all;                          // every substep's parameters, 256 bytes apart:
+    size_t par_all_cap;                          // copied into par before its substep's passes
     GpuTimer *timer;                             // LR_GPU_TIMING=1: GPU time per kernel
 };
 
@@ -1624,10 +1636,19 @@ static const char *const RK_NAMES[NR] = {"forces", "pairs (bounding spheres)", "
     "contacts: hulls", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
     "contact lists 1", "contact lists 2", "prepare (warm start)", "solve", "apply", "move", "wake", "sleep"};
 
-static GpuRigid *live[4];
+// the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
+// out of the list would have its callbacks ignored (its bodies never back): creation is
+// refused when it is full
+#define MAX_LIVE_RIGID 64
+static GpuRigid *live[MAX_LIVE_RIGID];
 static int is_live(const GpuRigid *gr){
-    for (int i = 0; i < 4; i++) if (gr && live[i] == gr) return 1;
+    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (gr && live[i] == gr) return 1;
     return 0;
+}
+static int live_slot(void){
+    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (!live[i]) return i;
+    fprintf(stderr, "GPU: %d rigid-body worlds already: no more\n", MAX_LIVE_RIGID);
+    return -1;
 }
 
 static WGPUBuffer storage(Gpu *g, const char *label, size_t bytes){
@@ -1889,18 +1910,31 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     Gpu *g = gr->g;
     RigidWorld *w = &pw->rigid;
     if (dt <= 0 || gpu_state(g) != GPU_READY) return 0;
-    if (gr->inflight >= MAX_INFLIGHT || gr->wait) gpu_wait(g);
+    if (gr->wait) gpu_wait(g);
+    // MAX_INFLIGHT steps on their way: wait for the oldest one alone (not for the frame being
+    // drawn after it, as waiting for the whole queue did: the CPU prepares the next frame
+    // meanwhile)
+    for (int tries = 0; gr->inflight >= MAX_INFLIGHT && tries < 4 && gpu_state(g) == GPU_READY; tries++){
+        unsigned oldest = gr->nsub - (unsigned)gr->inflight;
+        if (tries < 3) gpu_wait_for(g, gr->subs[oldest % MAX_INFLIGHT]);
+        else gpu_wait(g);
+    }
     const int nb = w->nbodies;
-    // the bodies the CPU changed (or all of them, into new buffers), and the forces
+    // the bodies the CPU changed (or all of them, into new buffers), in runs of neighbours:
+    // one write per run, not per body; and the forces
     int fresh = reserve(gr, nb);
     upload_shapes(gr, w);
-    for (int i = 0; i < nb; i++){
+    for (int i = 0; i < nb;){
         Body *b = &w->bodies[i];
-        if (!fresh && !b->dirty && i < gr->nb) continue;
-        pack_body(w, b, gr->staging);
-        wgpuQueueWriteBuffer(g->queue, gr->bodies, (uint64_t)i * BODY_BYTES, gr->staging, BODY_BYTES);
-        b->dirty = 0;
-        b->force = b->torque = vec3(0, 0, 0);
+        if (!fresh && !b->dirty && i < gr->nb){ i++; continue; }
+        int first = i;
+        for (; i < nb && (fresh || w->bodies[i].dirty || i >= gr->nb); i++){
+            Body *bi = &w->bodies[i];
+            pack_body(w, bi, gr->staging + (size_t)(i - first) * (BODY_BYTES / 4));
+            bi->dirty = 0;
+            bi->force = bi->torque = vec3(0, 0, 0);
+        }
+        wgpuQueueWriteBuffer(g->queue, gr->bodies, (uint64_t)first * BODY_BYTES, gr->staging, (size_t)(i - first) * BODY_BYTES);
     }
     gr->nb = nb;
     if (nb == 0) return 1;
@@ -1913,6 +1947,13 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
 
     int steps = substeps > 0 ? substeps : 1;
     real h = dt / steps;
+    // the substeps' parameters, all written at once: the whole step is one command buffer,
+    // each substep copying its own into par first (they used to be a submit each, for the
+    // write in between)
+    gpu_buffer_reserve(g, &gr->par_all, &gr->par_all_cap, (size_t)steps * 256,
+                       WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst, "bodies: parameters per substep");
+    unsigned char *par_cpu = calloc((size_t)steps, 256);
+    if (!par_cpu) return 0;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     {   // the memo's table written this step starts empty (its keys)
         uint64_t cap = 2 * (uint64_t)gr->cap_pairs, wr = (uint64_t)(gr->memo_rd ^ 1);
@@ -1940,10 +1981,12 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         P.m[1] = (uint32_t)w->ngeoms;
         P.m[2] = (uint32_t)gr->cap_pairs;
         P.m[3] = (uint32_t)s;
-        // the parameters change between substeps only in the substep: written now, read in
-        // order (a buffer per substep would do too; one write per pass keeps it simple)
-        WGPUBuffer par = gr->par;
-        wgpuQueueWriteBuffer(g->queue, par, 0, &P, sizeof(P));
+        memcpy(par_cpu + (size_t)s * 256, &P, sizeof(P));
+    }
+    wgpuQueueWriteBuffer(g->queue, gr->par_all, 0, par_cpu, (size_t)steps * 256);
+    free(par_cpu);
+    for (int s = 0; s < steps; s++){
+        wgpuCommandEncoderCopyBufferToBuffer(enc, gr->par_all, (uint64_t)s * 256, gr->par, 0, sizeof(GRP));
         WGPUComputePassEncoder pass = NULL;
         if (s == 0 && w->sleep) dispatch(enc, &pass, gr, R_WAKE, (size_t)nb * nb + nb);
         dispatch(enc, &pass, gr, R_VEL, (size_t)nb);
@@ -1972,12 +2015,6 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
         }
         if (pass){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); }
-        // queue writes happen before the command buffer runs: the substeps must go one by one
-        WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
-        wgpuQueueSubmit(g->queue, 1, &cb);
-        wgpuCommandBufferRelease(cb);
-        wgpuCommandEncoderRelease(enc);
-        enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     }
     gr->prev_nb = nb;          // (the next step's contacts start from this one's)
     gr->parity ^= 1;
@@ -1992,7 +2029,8 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     }
     gpu_timer_finish(gr->timer, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
-    wgpuQueueSubmit(g->queue, 1, &cb);
+    gr->subs[gr->nsub % MAX_INFLIGHT] = gpu_submit(g, cb);
+    gr->nsub++;
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     gpu_timer_submitted(gr->timer);
@@ -2018,7 +2056,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
 }
 
 GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
-    if (!g || gpu_state(g) != GPU_READY || !pw) return NULL;
+    if (!g || gpu_state(g) != GPU_READY || !pw || live_slot() < 0) return NULL;
     GpuRigid *gr = calloc(1, sizeof(*gr));
     if (!gr) return NULL;
     gr->g = g;
@@ -2037,7 +2075,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     upload_shapes(gr, &pw->rigid);
     reserve(gr, pw->rigid.nbodies);
     for (int i = 0; i < pw->rigid.nbodies; i++) pw->rigid.bodies[i].dirty = 1;
-    for (int i = 0; i < 4; i++) if (!live[i]){ live[i] = gr; break; }
+    live[live_slot()] = gr;
     pw->rigid_step = rigid_step_gpu;
     pw->rigid_user = gr;
     gr->timer = gpu_timer_create(g, 512, NR);
@@ -2060,11 +2098,11 @@ void gpu_rigid_destroy(GpuRigid *gr){
         gpu_timer_print(gr->timer, title, RK_NAMES);
         gpu_timer_destroy(gr->timer);
     }
-    for (int i = 0; i < 4; i++) if (live[i] == gr) live[i] = NULL;
+    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (live[i] == gr) live[i] = NULL;
     if (gr->pw && gr->pw->rigid_user == gr){ gr->pw->rigid_step = NULL; gr->pw->rigid_user = NULL; }
     release_groups(gr);
     release_sized(gr);
-    WGPUBuffer *own[] = {&gr->par, &gr->shapes, &gr->rb};
+    WGPUBuffer *own[] = {&gr->par, &gr->par_all, &gr->shapes, &gr->rb};
     for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); i++) release(own[i]);
     for (int k = 0; k < NR; k++){
         if (gr->pipe[k]) wgpuComputePipelineRelease(gr->pipe[k]);

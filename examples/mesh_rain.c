@@ -192,7 +192,9 @@ int main(int argc, char **argv){
         }
         double t = now_s(), dt = t - t_last;
         t_last = t;
-        if (dt > 1.0 / 20) dt = 1.0 / 20;              // a slow frame shows slow motion, no jump
+        // a slow frame shows slow motion, no jump: at most 2 steps per frame (3 made a slow
+        // frame slower still, and 1500 cubes settled at 15 frames/s)
+        if (dt > 2 * STEP) dt = 2 * STEP;
 
         // ---- the rain: new bodies until -max, then the oldest one taken back up (-endless off:
         // the rain stops there, and the pile settles)

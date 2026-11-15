@@ -117,6 +117,11 @@ void gpu_oct_encode(Vec3 d, float *out);
 // a material's textures as GPU_WGSL_TEX reads them (indices past ntex: none)
 void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
+// Submits one command buffer and returns a number for it (natively; 0 in a browser).
+// gpu_wait_for blocks until that submission is done (not the work submitted after it, as
+// gpu_wait would: the frame being drawn), then polls. In a browser it only polls.
+uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb);
+void gpu_wait_for(Gpu *g, uint64_t submission);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
