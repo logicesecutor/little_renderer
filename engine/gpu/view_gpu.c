@@ -1172,7 +1172,10 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     // camera moves every band begins one, and a lucky low value would stay, piling up passes
     // (the helmet orbiting: 4 passes per frame, 19 ms frames, against the 10 ms meant)
     double per_pass = v->t_sub_rows > 0 && v->t_sub_reps > 0 ? ms * v->h / ((double)v->t_sub_rows * v->t_sub_reps) : 0;
-    if (per_pass > 0 && (!v->t_sub_prep || v->t_gpu_pass_ms <= 0 || per_pass < v->t_gpu_pass_ms)) v->t_gpu_pass_ms = per_pass;
+    if (per_pass > 0){
+        if (!v->t_sub_prep || v->t_gpu_pass_ms <= 0 || per_pass < v->t_gpu_pass_ms) v->t_gpu_pass_ms = per_pass;
+        else v->t_gpu_pass_ms += 0.1 * (per_pass - v->t_gpu_pass_ms);
+    }
     if (ms < 12){
         if (v->t_rows < v->h) v->t_rows = v->t_rows * 2 < v->h ? v->t_rows * 2 : v->h;
         else if (v->t_reps < 16) v->t_reps *= 2;
