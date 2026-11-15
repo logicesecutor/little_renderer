@@ -1092,6 +1092,12 @@ and the many samples of a pixel average the texels it covers anyway. The GPU ker
 single kernel, the wavefront's shading, light tracing) do the same in WGSL from one RGBA8
 atlas (`gpu/tex_gpu.c`); their images agree with the CPU's within 0.3% (PBR.md, PBR5).
 
+A **glowing** surface (glTF's emission, its factor times its texture, PBR6) is not a lamp:
+next event estimation does not sample it; a path that hits it adds its emission, at any
+depth (the light reaching other surfaces from it is found by their bounces alone, so a small
+bright glow is noisy, as it is in any path tracer without many-light sampling). The models
+come from glTF files (`core/gltf.c`): each node with a mesh is an instance (section 6).
+
 ---
 
 ## 6. The scene

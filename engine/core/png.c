@@ -10,7 +10,12 @@
 static uint32_t crc_table[256];
 static int crc_ready;
 
+// The tables made on first use are made by one thread at a time (glTF models decode their
+// images in parallel): a critical section around the making
 static uint32_t crc32_update(uint32_t c, const unsigned char *p, size_t n){
+#ifdef _OPENMP
+#pragma omp critical(png_tables)
+#endif
     if (!crc_ready){
         for (uint32_t i = 0; i < 256; i++){
             uint32_t k = i;
@@ -432,6 +437,9 @@ static int huff_decode(BitR *r, const Huff *h){
 static int inflate_into(BitR *r, Buf *out){
     static Huff fixed_lit, fixed_dist;
     static int fixed_ready;
+#ifdef _OPENMP
+#pragma omp critical(png_tables)
+#endif
     if (!fixed_ready){
         uint8_t l[288];
         for (int i = 0; i < 288; i++) l[i] = i < 144 ? 8 : (i < 256 ? 9 : (i < 280 ? 7 : 8));

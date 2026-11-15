@@ -75,7 +75,7 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_gpu_brdf $(BIN)/hello_physics \
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/hello_physics \
                               $(BIN)/mesh_rain)
 
 all: lib apps examples
@@ -143,6 +143,17 @@ dragon-download:
 	tar xzf models/dragon_recon.tar.gz -C models
 	rm models/dragon_recon.tar.gz
 
+# Khronos glTF sample models (docs/PBR.md, PBR6), once, into models/gltf/ (CC BY 4.0; the
+# helmet's earlier version CC BY-NC 4.0): what the showcase and the glTF checks use.
+# Credit: The Khronos Group, glTF-Sample-Assets (each model's README names its authors).
+GLTF_URL = https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models
+gltf-download:
+	mkdir -p models/gltf/BoxTextured
+	for m in DamagedHelmet MetalRoughSpheres NormalTangentMirrorTest OrientationTest BoxTextured; do \
+	  curl -fL -o models/gltf/$$m.glb $(GLTF_URL)/$$m/glTF-Binary/$$m.glb; done
+	for f in BoxTextured.gltf BoxTextured0.bin CesiumLogoFlat.png; do \
+	  curl -fL -o models/gltf/BoxTextured/$$f $(GLTF_URL)/BoxTextured/glTF/$$f; done
+
 # ---- running ----------------------------------------------------------------------------
 
 # rasterizer step by step: one image per milestone into out/
@@ -170,13 +181,16 @@ view-dragon: $(BIN)/view$(EXE)
 	mkdir -p out
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
-# the unit tests: the medium sampling, PNG files, the BSDF (and its WGSL), the environment, the textures, the physics (CPU and GPU)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
+# the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the physics (CPU and GPU)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
+	mkdir -p out
 	$(BIN)/test_medium
 	$(BIN)/test_png
+	$(BIN)/test_jpeg
 	$(BIN)/test_brdf
 	$(BIN)/test_env
 	$(BIN)/test_tex
+	$(BIN)/test_gltf
 	$(BIN)/test_gpu_brdf
 	$(BIN)/test_physics
 	$(BIN)/test_gpu_rigid
@@ -292,4 +306,4 @@ deps-clean:
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples check-layers models dragon-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples check-layers models dragon-download gltf-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean

@@ -43,6 +43,10 @@ bin/view -sim on                 # the same, live in the window
 
 make dragon-download             # Stanford dragon, 11 MB (once; already in the repo)
 bin/view -scene mesh -obj models/dragon_recon/dragon_vrip.ply -rot -35
+
+make gltf-download               # Khronos glTF sample models, 17 MB (once)
+bin/view -gltf models/gltf/DamagedHelmet.glb
+bin/view -scene sky -sky models/skies/kloofendal_48d_partly_cloudy_2k.hdr -gltf models/gltf/DamagedHelmet.glb
 ```
 
 Every program prints its options with `-h`. The images are PNG files: any image viewer
@@ -63,6 +67,7 @@ The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.
 | `make check-layers` | checks that `core` includes nothing else and `raster`, `rt`, `phys`, `platform` only `core` |
 | `make models` | runs `tools/gen_models.py` |
 | `make dragon-download` | downloads the Stanford dragon into `models/dragon_recon/` |
+| `make gltf-download` | downloads Khronos's glTF sample models (DamagedHelmet, MetalRoughSpheres, NormalTangentMirrorTest, OrientationTest, BoxTextured; CC BY 4.0) into `models/gltf/` |
 | `make clean` | deletes `build/` and `bin/` |
 
 Shortcuts that build and run:
@@ -207,7 +212,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | option | meaning | default |
 |---|---|---|
 | `-scene boxes` | the classic Cornell box: a tall box and a short box | ✓ |
-| `-scene showcase` | one model of each material: a mirror Stanford dragon (the full 871k triangles), a diffuse blue cube and a glass torus, under a cloud (the cloud options shape it, `-wind` blows it); needs `models/` | |
+| `-scene showcase` | one model of each material: a mirror Stanford dragon (the full 871k triangles), a diffuse blue cube (Khronos's damaged helmet instead, textured and glowing, after `make gltf-download`) and a glass torus, under a cloud (the cloud options shape it, `-wind` blows it); needs `models/` | |
 | `-scene spheres` | a mirror sphere and a glass sphere | |
 | `-scene mesh` | a model from a file, standing in the middle of the box | |
 | `-scene cloud` | the empty box with a volumetric cloud floating in it (path tracer, see VOLUMES.md) | |
@@ -218,6 +223,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-probe on\|off` | the rasterizers light with a light probe (the path tracer's light at the room's centre, made at start; `view`: again with `L`) and, for the diffuse light, an irradiance grid (5 × 5 × 5 points over the room, 5 × 3 × 5 under a sky) | on |
 | `-proberes n` / `-probespp n` | the probe's width in texels / paths per texel | 256 in a room, 512 under a sky / 32 |
 | `-obj file` | the model for `-scene mesh`: `.obj`, or ASCII `.ply` (binary PLY is not supported) | `models/torus.obj` |
+| `-gltf file` | a glTF 2.0 model (`.gltf` or `.glb`) with its own materials and textures (PNG, JPEG), in the room (`-scene mesh`, the default when `-gltf` is given) or under the sky in place of the spheres (`-scene sky`); turned to face the camera (`-rot` turns it further), its largest side 330 units. What is read: docs/PBR.md, PBR6 | none |
 | `-mat diffuse\|mirror\|glass` | material of the model: a preset of the PBR model (PBR.md) | diffuse (warm orange) |
 | `-base r,g,b` | the model's base colour: diffuse colour, metal's colour, glass's tint | the preset's |
 | `-metal m` | metallic, 0 (dielectric: plastic, stone, glass) .. 1 (metal) | the preset's: 0, mirror 1 |

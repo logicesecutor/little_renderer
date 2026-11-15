@@ -35,6 +35,7 @@ library behind one header (`lr.h`), with no third-party code in the engine.
 | **Rasterizer** | Edge functions, perspective-correct shading (flat, Gouraud, Phong, wireframe) with the path tracer's BSDF and glTF's textures (base colour, metallic-roughness, normal maps; trilinear mip-mapping) lit by the area lamp and a light probe or an HDR sky (split-sum, parallax-corrected) with an irradiance grid, multithreaded; clouds and fog raymarched over the frame |
 | **GPU (WebGPU)** | Every backend again in WGSL compute and render shaders: the rasterizer, the path tracer with an SVGF-style denoiser and temporal reprojection for real-time path tracing, light-traced caustics with a photon cache, a GPU BVH builder, the air and the cloud, the rigid bodies |
 | **Physics** | Spheres, boxes, convex hulls and triangle meshes (separating axes, contacts found once per step with speculative margins, sequential impulses with warm starting, sleeping bodies, mass splitting on the GPU), the air as Stable Fluids on a MAC grid with a multigrid pressure solve, a MacCormack-advected cloud, explosions; bodies push the air and the air drags them |
+| **Files** | Our own readers and writers: glTF 2.0 models (`.gltf`, `.glb`: meshes, the node tree, materials and textures), PNG (read and write), JPEG (baseline and progressive, the same pixels as libjpeg), Radiance `.hdr`, `.obj` and ASCII `.ply`, JSON |
 | **Platforms** | Linux (X11), Windows (Win32, MSYS2), web browsers (Emscripten + WebGPU); `float` or `double` precision |
 
 ## Gallery
@@ -118,5 +119,8 @@ keeps every measurement, and the ideas still to try):
 The Stanford dragon (`models/dragon_recon/`, `make dragon-download`) is from the
 [Stanford 3D Scanning Repository](https://graphics.stanford.edu/data/3Dscanrep/),
 © Stanford University Computer Graphics Laboratory, used for non-commercial purposes
-with credit. The techniques come from the papers and books cited in each document under
-`docs/`.
+with credit. The glTF sample models (`models/gltf/`, `make gltf-download`) are from
+[Khronos's glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), under
+CC BY 4.0 (the damaged helmet: theblueturtle_ and ctxwing; the test models: Ed Mackey,
+Analytical Graphics; the textured box: Cesium). The techniques come from the papers and
+books cited in each document under `docs/`.

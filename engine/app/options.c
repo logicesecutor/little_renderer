@@ -98,6 +98,9 @@ void options_usage(Program prog, FILE *f){
         "  -probe on|off              rasterizer: light with a probe of the room (path traced) (on)\n"
         "  -proberes n / -probespp n  the probe's width in texels / paths per texel (256, 512 under a sky / 32)\n"
         "  -obj file.obj|file.ply     model for -scene mesh (ASCII .ply)       (models/torus.obj)\n"
+        "  -gltf file.gltf|file.glb   a glTF 2.0 model instead (its own materials and textures), in\n"
+        "                             the room (-scene mesh, the default with it) or under the sky\n"
+        "                             (-scene sky, in place of the spheres)    (none)\n"
         "  -mat diffuse|mirror|glass  material of the model                    (diffuse)\n"
         "  -base r,g,b                its base colour; and the glTF parameters (docs/PBR.md):\n"
         "  -metal m, -rough r         metallic 0..1, roughness 0 (smooth) ..1\n"
@@ -222,7 +225,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->sim.vorticity = 0.25;
     o->sim.seed = 1;
     o->sim.gif = 1;
-    int backend_set = 0, march_scale_set = 0, fluidres_set = 0, cloudres_set = 0;
+    int backend_set = 0, march_scale_set = 0, fluidres_set = 0, cloudres_set = 0, scene_set = 0;
 
     for (int i = 1; i < argc; i++){
         const char *a = argv[i];
@@ -240,6 +243,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-threads")) o->threads = atoi(v);
         else if (!strcmp(a, "-o"))       o->out = v;
         else if (!strcmp(a, "-obj"))     o->scene.obj_path = v;
+        else if (!strcmp(a, "-gltf"))    o->scene.gltf_path = v;
         else if (!strcmp(a, "-rot"))     o->scene.rot_deg = atof(v);
         else if (!strcmp(a, "-base"))    { o->scene.mesh_base = parse_color(prog, v); o->scene.mesh_set |= MESH_SET_BASE; }
         else if (!strcmp(a, "-metal"))   { o->scene.mesh_metal = atof(v); o->scene.mesh_set |= MESH_SET_METAL; }
@@ -391,6 +395,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             if (m < 0 || m == MODE_TEXTURED) fail(prog, "unknown shading", v);
             o->shading = (RenderMode)m;
         } else if (!strcmp(a, "-scene")){
+            scene_set = 1;
             if (!strcmp(v, "boxes")) o->scene.kind = SCENE_BOXES;
             else if (!strcmp(v, "spheres")) o->scene.kind = SCENE_SPHERES;
             else if (!strcmp(v, "mesh")) o->scene.kind = SCENE_MESH;
@@ -444,12 +449,15 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         if (prog == PROG_VIEW && !fluidres_set) o->sim.fluid_res = 32;
         if (prog == PROG_VIEW && !cloudres_set) o->cloud.resolution = 96;
     }
+    // a glTF model and no scene: the room with the model (SCENE_MESH)
+    if (o->scene.gltf_path && !scene_set) o->scene.kind = SCENE_MESH;
     if (!o->out){
         static const char *rt[] = {"out/cornell_boxes.png", "out/cornell_spheres.png", "out/cornell_mesh.png",
-                                   "out/cornell_cloud.png", "out/cornell_empty.png", "out/cornell_showcase.png"};
+                                   "out/cornell_cloud.png", "out/cornell_empty.png", "out/cornell_showcase.png",
+                                   "out/sky.png"};
         static const char *ra[] = {"out/cornell_boxes_raster.png", "out/cornell_spheres_raster.png",
                                    "out/cornell_mesh_raster.png", "out/cornell_cloud_raster.png", "out/cornell_empty_raster.png",
-                                   "out/cornell_showcase_raster.png"};
+                                   "out/cornell_showcase_raster.png", "out/sky_raster.png"};
         o->out = o->backend == BACKEND_RASTER ? ra[o->scene.kind] : rt[o->scene.kind];
     }
 }
@@ -471,6 +479,11 @@ int options_setup_scene(const Options *o, Scene *s){
     so.cloud = (o->use_cloud || so.kind == SCENE_CLOUD || so.kind == SCENE_SHOWCASE) ? &cp : NULL;
     if (scene_cornell_box(s, &so) != 0) return 1;
     if (o->scene.kind == SCENE_SHOWCASE) ;   // (it says what it loaded)
+    else if (o->scene.gltf_path && (o->scene.kind == SCENE_MESH || o->scene.kind == SCENE_SKY)){
+        int nt = 0;
+        for (int i = 0; i < s->nmeshes; i++) nt += s->meshes[i].ntris;
+        printf("loaded %s: %d meshes, %d triangles, %d instances, %d textures\n", o->scene.gltf_path, s->nmeshes, nt, s->ninsts, s->ntexmaps);
+    }
     else if (s->ninsts > 0 && s->nmeshes > 0) printf("loaded %s: %d triangles, %d instances of it\n", o->scene.obj_path, s->meshes[0].ntris, s->ninsts);
     else if (o->scene.kind == SCENE_MESH) printf("loaded %s: %d triangles\n", o->scene.obj_path, s->ntris);
     for (int i = 0; i < s->nvolumes; i++){
@@ -520,7 +533,8 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
     fprintf(f, "bin/render -scene %s", scenes[o->scene.kind]);
     if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
-    if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
+    if (o->scene.gltf_path && (o->scene.kind == SCENE_MESH || o->scene.kind == SCENE_SKY)) fprintf(f, " -gltf %s", o->scene.gltf_path);
+    else if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
         fprintf(f, " -obj %s", o->scene.obj_path);
         if (o->scene.mesh_mat != MAT_DIFFUSE) fprintf(f, " -mat %s", mats[o->scene.mesh_mat]);
         const SceneOptions *so = &o->scene;

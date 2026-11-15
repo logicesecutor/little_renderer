@@ -469,7 +469,7 @@ void irr_grid_free(IrrGrid *g){
     free(g);
 }
 
-Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok){
+int irr_grid_blend(const IrrGrid *g, Vec3 p, float out[27]){
     // p in cell-centre units: probe i at (i + 0.5) / n of the box. Its 8 probes (where a
     // side has one probe, the same one twice with weight 0) blended first, valid ones only
     // (the 28th float: 1 or 0), then evaluated once for n. No branches: the points of a
@@ -517,13 +517,23 @@ Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok){
     }
 #endif
     real wsum = acc[27];
-    *ok = wsum > 1e-4f;
-    if (!*ok) return vec3(0, 0, 0);
+    if (!(wsum > 1e-4f)) return 0;
+    float iw = (float)(1 / wsum);
+    for (int i = 0; i < 27; i++) out[i] = acc[i] * iw;
+    return 1;
+}
+
+Vec3 irr_sh_eval(const float c[27], Vec3 n){
     real y[9];
     env_sh_basis(n, y);
-    real c[3] = {0, 0, 0};
+    real r[3] = {0, 0, 0};
     for (int i = 0; i < 9; i++)
-        for (int k = 0; k < 3; k++) c[k] += acc[3 * i + k] * y[i];
-    real iw = 1 / wsum;
-    return vec3(r_fmax(c[0] * iw, 0), r_fmax(c[1] * iw, 0), r_fmax(c[2] * iw, 0));
+        for (int k = 0; k < 3; k++) r[k] += c[3 * i + k] * y[i];
+    return vec3(r_fmax(r[0], 0), r_fmax(r[1], 0), r_fmax(r[2], 0));
+}
+
+Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok){
+    float c[27];
+    *ok = irr_grid_blend(g, p, c);
+    return *ok ? irr_sh_eval(c, n) : vec3(0, 0, 0);
 }

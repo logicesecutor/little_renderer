@@ -556,11 +556,12 @@ fn shade_tex(m0: TMat, r: Ray, f: Found, h: ptr<function, Hit>) -> TMat {
     if (all(m0.tex.xyz == vec3u(0u)) || u32(m0.albedo.w) == 3u) { return m0; }
     let tc = hit_texco(r, f, *h);
     var m = m0;
-    let tm = tex_material(m0.tex, m0.albedo.rgb, m0.pbr.x, m0.pbr.y, tc.uv, -1000.0);
+    let tm = tex_material(m0.tex, m0.albedo.rgb, m0.pbr.x, m0.pbr.y, m0.emission.rgb, tc.uv, -1000.0);
     m.albedo = vec4f(tm.base, m0.albedo.w);
     m.pbr.x = tm.metallic;
     m.pbr.y = tm.rough;
-    if (m0.tex.z != 0u) {
+    m.emission = vec4f(tm.emission, m0.emission.w);
+    if ((m0.tex.z & 255u) != 0u) {
         var n = tex_normal(m0.tex, tc.uv, -1000.0, (*h).n, tc.t);
         let v = -r.d;
         let c = dot(n, v);
@@ -1043,6 +1044,8 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
+        /* a glowing surface (glTF's emissive): found by the paths that hit it, not sampled */
+        if (kind != 3u) { radiance += thr * m.emission.rgb; }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -1557,6 +1560,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
+        if (kind != 3u) { s.rad += thr * m.emission.rgb; }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -3206,7 +3210,9 @@ static int upload_world(GpuTrace *t, const Scene *s){
     t->cell = (float)(e / 256.0);
     if (!(t->cell > 0) || t->cell > 1e20f) t->cell = 1.0f;
     t->specular = 0;
-    for (int m = 0; m < s->nmats; m++) if (material_has_delta(&s->mats[m])) t->specular = 1;
+    // (a roughness texture may make any texel smooth: such a material counts, as rt/tracer.c)
+    for (int m = 0; m < s->nmats; m++)
+        if (material_has_delta(&s->mats[m]) || (s->mats[m].tex_mr && s->mats[m].type != MAT_LIGHT)) t->specular = 1;
     if (s->light < 0) t->specular = 0;      // no lamp: no light tracing (the sky's caustics are path traced)
     t->valid = 1;
     return 1;
@@ -3390,11 +3396,8 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
         // its textures the GPU has (as 1 + index), the scale's bits (none without the layout's coordinates)
         const Material *mm = &s->mats[m];
         int ok = t->textured && mm->type != MAT_LIGHT;
-        uint32_t tx[4] = {ok && mm->tex_base > 0 && mm->tex_base <= t->gt.ntex ? (uint32_t)mm->tex_base : 0u,
-                          ok && mm->tex_mr > 0 && mm->tex_mr <= t->gt.ntex ? (uint32_t)mm->tex_mr : 0u,
-                          ok && mm->tex_normal > 0 && mm->tex_normal <= t->gt.ntex ? (uint32_t)mm->tex_normal : 0u, 0};
-        float sc = (float)mm->uv_scale;
-        memcpy(&tx[3], &sc, 4);
+        uint32_t tx[4];
+        gpu_tex_pack(mm, ok ? t->gt.ntex : 0, tx);
         memcpy(&P.mats[m][12], tx, 16);
     }
     P.txl[0] = t->uvtri_at; P.txl[1] = t->uv_at; P.txl[2] = t->textured ? 1u : 0u;

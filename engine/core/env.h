@@ -105,6 +105,10 @@ typedef struct IrrGrid {
 // the blended irradiance (E / pi) at p for normal n, times scale; 0 if no valid probe is near
 // (then *ok = 0: use another source)
 Vec3 irr_grid_irradiance(const IrrGrid *g, Vec3 p, Vec3 n, int *ok);
+// the same in two steps: the probes around p blended (27 numbers: 9 harmonics, rgb; returns 0
+// if no valid probe is near), then evaluated for a normal (as often as wanted)
+int irr_grid_blend(const IrrGrid *g, Vec3 p, float c[27]);
+Vec3 irr_sh_eval(const float c[27], Vec3 n);
 void irr_grid_free(IrrGrid *g);
 
 #endif

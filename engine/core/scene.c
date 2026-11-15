@@ -1,4 +1,5 @@
 #include "core/scene.h"
+#include "core/gltf.h"
 
 #include "core/env.h"
 
@@ -189,11 +190,18 @@ int scene_texture(Scene *s, const char *name, int srgb){
         if (!strcmp(s->texmaps[i].name, name) && s->texmaps[i].srgb == srgb) return i + 1;
     TexMap t;
     size_t len = strlen(name);
-    int err = len > 4 && !strcmp(name + len - 4, ".png") ? texmap_load_png(&t, name, srgb) : texmap_procedural(&t, name);
+    int file = (len > 4 && (!strcmp(name + len - 4, ".png") || !strcmp(name + len - 4, ".jpg"))) || (len > 5 && !strcmp(name + len - 5, ".jpeg"));
+    int err = file ? texmap_load(&t, name, srgb) : texmap_procedural(&t, name);
     if (err) return 0;
     if (strlen(name) < sizeof(t.name)) snprintf(t.name, sizeof(t.name), "%s", name);
     s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
     s->texmaps[s->ntexmaps] = t;
+    return ++s->ntexmaps;
+}
+
+int scene_add_texmap(Scene *s, const TexMap *t){
+    s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
+    s->texmaps[s->ntexmaps] = *t;
     return ++s->ntexmaps;
 }
 
@@ -225,9 +233,20 @@ Material material_at(const Scene *s, const Material *m, Vec2 uv, real uv_lod){
         r.roughness *= c.y;
         r.metallic *= c.z;
     }
+    if (m->tex_emissive > 0 && m->tex_emissive <= s->ntexmaps){
+        Vec4 c = tex_at(&s->texmaps[m->tex_emissive - 1], m, uv, uv_lod);
+        r.emission = vec3(r.emission.x * c.x, r.emission.y * c.y, r.emission.z * c.z);
+    }
     r.type = MAT_PBR;
-    r.tex_base = r.tex_mr = r.tex_normal = 0;
+    r.tex_base = r.tex_mr = r.tex_normal = r.tex_emissive = r.tex_occlusion = 0;
     return r;
+}
+
+real material_occlusion(const Scene *s, const Material *m, Vec2 uv, real uv_lod){
+    if (!(m->tex_occlusion > 0 && m->tex_occlusion <= s->ntexmaps)) return 1;
+    real k = m->occlusion > 0 ? m->occlusion : 1;
+    Vec4 c = tex_at(&s->texmaps[m->tex_occlusion - 1], m, uv_scaled(m, uv), uv_lod);
+    return 1 + k * (c.x - 1);
 }
 
 Vec3 material_normal(const Scene *s, const Material *m, Vec2 uv, real uv_lod, Vec3 n, Vec4 t){
@@ -239,7 +258,8 @@ Vec3 material_normal(const Scene *s, const Material *m, Vec2 uv, real uv_lod, Ve
     if (!(l > 1e-6f)) return n;
     tt = v_scale(tt, 1 / l);
     Vec3 b = v_scale(v_cross(n, tt), t.w);
-    Vec3 out = v_add(v_add(v_scale(tt, 2 * c.x - 1), v_scale(b, 2 * c.y - 1)), v_scale(n, 2 * c.z - 1));
+    real k = m->normal_scale > 0 ? m->normal_scale : 1;
+    Vec3 out = v_add(v_add(v_scale(tt, k * (2 * c.x - 1)), v_scale(b, k * (2 * c.y - 1))), v_scale(n, 2 * c.z - 1));
     real lo = v_len(out);
     return lo > 1e-6f ? v_scale(out, 1 / lo) : n;
 }
@@ -317,7 +337,7 @@ static void add_box(Scene *s, Vec3 size, real deg, Vec3 offset, int mat){
 // Peter Shirley's "Ray Tracing: The Next Week" (based on the Cornell measurements).
 // The camera looks down +z, so x = 555 shows up on the LEFT of the image.
 // SCENE_SKY: a floor under the sky, five spheres of five materials on it
-static int open_scene(Scene *s){
+static int open_scene(Scene *s, int spheres){
     // the floor: brick paving (PBR5's textures: colour, normal map, roughness), a repeat
     // every 450 units
     Material floor = material_pbr(vec3(0.85, 0.85, 0.85), 1, 1, 1.5, 0);
@@ -335,7 +355,7 @@ static int open_scene(Scene *s){
         material_pbr(vec3(0.1, 0.25, 0.7), 0, 0.4, 1.5, 0),        // blue plastic
         diffuse(0.8, 0.8, 0.8),
     };
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 5 && spheres; i++)
         scene_add_prim(s, make_sphere(vec3(278 + (i - 2) * 165.0f, 70, 300), 70, scene_add_material(s, m[i])));
     s->probe_set = 1;
     s->probe_at = vec3(278, 230, 300);
@@ -361,7 +381,11 @@ static int scene_sky(Scene *s, const SceneOptions *opt){
 }
 
 int scene_cornell_box(Scene *s, const SceneOptions *opt){
-    if (opt->kind == SCENE_SKY) return open_scene(s) || scene_sky(s, opt);
+    if (opt->kind == SCENE_SKY){
+        if (open_scene(s, !opt->gltf_path) || scene_sky(s, opt)) return 1;
+        if (opt->gltf_path && scene_load_gltf(s, opt->gltf_path, 330, vec3(278, 0, 300), 180 + opt->rot_deg) < 0) return 1;
+        return 0;
+    }
     int red   = scene_add_material(s, diffuse(0.65, 0.05, 0.05));
     int white = scene_add_material(s, diffuse(0.73, 0.73, 0.73));
     int green = scene_add_material(s, diffuse(0.12, 0.45, 0.15));
@@ -388,6 +412,9 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
         Material glass  = material_glass(vec3(1, 1, 1), 1.5);
         scene_add_prim(s, make_sphere(vec3(370, 100, 370), 100, scene_add_material(s, mirror)));
         scene_add_prim(s, make_sphere(vec3(185, 100, 170), 100, scene_add_material(s, glass)));
+    } else if (opt->kind == SCENE_MESH && opt->gltf_path){
+        // the glTF model, as the .obj one would be (its front, +z, to the camera)
+        if (scene_load_gltf(s, opt->gltf_path, 330.0, vec3(278, 0, 278), 180 + opt->rot_deg) < 0) return 1;
     } else if (opt->kind == SCENE_MESH && opt->instances <= 0){
         // largest side 330 units, standing on the floor in the middle of the box
         int n = scene_load_mesh(s, opt->obj_path, scene_add_material(s, scene_mesh_material_tex(s, opt)), 330.0,
@@ -407,7 +434,18 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
             {"models/torus.obj", 160, 405, 81, 190, 25, 90},
         };
         Material mats[3] = {mesh_material(MAT_MIRROR), diffuse(0.25, 0.45, 0.75), mesh_material(MAT_GLASS)};
+        // the cube's place takes a glTF model when it is there (PBR6: make gltf-download):
+        // Khronos's damaged helmet, textured and glowing, turned to the camera
+        static const char *helmet = "models/gltf/DamagedHelmet.glb";
+        FILE *hf = fopen(helmet, "rb");
+        int gltf = hf != NULL;
+        if (hf) fclose(hf);
         for (int i = 0; i < 3; i++){
+            if (i == 1 && gltf){
+                int ok = scene_load_gltf(s, helmet, 130, vec3(140, 0, 165), 180 + 25) >= 0;
+                if (ok) continue;
+                gltf = 0;
+            }
             int mesh = scene_load_mesh_object(s, m[i].path, scene_add_material(s, mats[i]), m[i].size);
             if (mesh < 0){
                 fprintf(stderr, "could not load %s (run from the repository's folder; make models)\n", m[i].path);
@@ -417,7 +455,8 @@ int scene_cornell_box(Scene *s, const SceneOptions *opt){
                               quat_axis_angle(vec3(1, 0, 0), m[i].up * (real)PI / 180));
             scene_add_instance(s, mesh, xform_make(vec3(m[i].x, m[i].y, m[i].z), quat_to_mat3(q).m, 1), -1);
         }
-        printf("showcase: a mirror dragon (%d triangles), a diffuse cube, a glass torus\n", s->meshes[0].ntris);
+        printf("showcase: a mirror dragon (%d triangles), %s, a glass torus\n", s->meshes[0].ntris,
+               gltf ? "a glTF model (models/gltf/DamagedHelmet.glb)" : "a diffuse cube");
     }
     if (opt->instances > 0){
         // one mesh, opt->instances instances of it in a row on the floor, each turned a little
@@ -579,6 +618,28 @@ int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
         m->nuvs = src->nvt;
         scene_compute_tangents(m->tris, m->ntris, m->uvs, m->tangents, 0, m->nuvs);
     }
+    m->version = 1;
+    mesh_bounds(m);
+    return s->nmeshes++;
+}
+
+int scene_add_mesh_arrays(Scene *s, Triangle *tris, int ntris, Vec3 *normals, int nnormals,
+                          Vec2 *uvs, Vec4 *tangents, int nuvs){
+    s->meshes = grow(s->meshes, &s->cap_meshes, s->nmeshes + 1, sizeof(SceneMesh));
+    SceneMesh *m = &s->meshes[s->nmeshes];
+    memset(m, 0, sizeof(*m));
+    m->tris = tris; m->ntris = ntris;
+    m->normals = normals; m->nnormals = nnormals;
+    if (uvs && nuvs > 0){
+        m->uvs = uvs;
+        m->nuvs = nuvs;
+        m->tangents = tangents;
+        if (!m->tangents){
+            m->tangents = malloc((size_t)nuvs * sizeof(Vec4));
+            if (!m->tangents){ perror("malloc"); exit(1); }
+            scene_compute_tangents(tris, ntris, uvs, m->tangents, 0, nuvs);
+        }
+    } else { free(uvs); free(tangents); }
     m->version = 1;
     mesh_bounds(m);
     return s->nmeshes++;

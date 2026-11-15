@@ -30,7 +30,8 @@ typedef enum {
 typedef struct {
     MatType type;
     Vec3 albedo;        // base colour: the diffuse colour, a metal's reflectance, glass's tint
-    Vec3 emission;      // radiance emitted (lights only)
+    Vec3 emission;      // radiance emitted: a MAT_LIGHT's; a MAT_PBR's glow (glTF's emissive:
+                        // seen, and lighting by the paths that find it, not sampled as a lamp)
     real ior;           // index of refraction (dielectrics: glass, and the specular of the
                         // others; MAT_DIFFUSE uses 1.5)
     real metallic;      // MAT_PBR: 0 dielectric .. 1 metal
@@ -39,9 +40,13 @@ typedef struct {
                         // does not reflect goes through (refracted) instead of diffusing
     // textures (PBR5), each 1 + an index into Scene.texmaps (0 = none), as glTF's: the base
     // colour (times albedo), metallic in blue and roughness in green (times metallic and
-    // roughness: they make a preset MAT_PBR), the normal map (tangent space, green up)
-    int tex_base, tex_mr, tex_normal;
+    // roughness: they make a preset MAT_PBR), the normal map (tangent space, green up), the
+    // emission (times `emission`; PBR6) and the occlusion (red: how much of the light from
+    // around reaches the point; only the rasterizers use it, the path tracers find it)
+    int tex_base, tex_mr, tex_normal, tex_emissive, tex_occlusion;
     real uv_scale;      // texture coordinates times this (0 = 1)
+    real normal_scale;  // the normal map's x and y times this (0 = 1)
+    real occlusion;     // the occlusion's strength (0 = 1)
 } Material;
 
 // the presets, and a MAT_PBR material
@@ -67,7 +72,13 @@ static inline Material material_pbr(Vec3 base, real metallic, real roughness, re
     return m;
 }
 // the material has textures
-static inline int material_textured(const Material *m){ return m->tex_base || m->tex_mr || m->tex_normal; }
+static inline int material_textured(const Material *m){
+    return m->tex_base || m->tex_mr || m->tex_normal || m->tex_emissive || m->tex_occlusion;
+}
+// it glows: a MAT_PBR (or preset) with an emission (not a lamp)
+static inline int material_glows(const Material *m){
+    return m->type != MAT_LIGHT && (m->emission.x > 0 || m->emission.y > 0 || m->emission.z > 0);
+}
 // the material with all its parameters: a preset's filled in (type stays)
 static inline Material material_resolved(const Material *m){
     Material r = *m;
@@ -206,6 +217,9 @@ struct Env;           // core/env.h
 typedef struct {
     SceneKind kind;
     const char *obj_path;   // SCENE_MESH: the .obj or .ply file to put in the box
+    // a glTF model (core/gltf.h) instead: SCENE_MESH's model, or in SCENE_SKY in place of
+    // the spheres; turned to face the camera (glTF's front is +z), then by rot_deg
+    const char *gltf_path;
     MatType mesh_mat;       // SCENE_MESH: MAT_DIFFUSE, MAT_MIRROR or MAT_GLASS
     // ... and what changes it (-base, -metal, -rough, -ior, -transmission): the MESH_SET_*
     // bits say which of these are set; any makes it a MAT_PBR material (scene_mesh_material)
@@ -300,6 +314,11 @@ int scene_add_mesh(Scene *s, const Mesh *m, int material);
 int scene_load_mesh(Scene *s, const char *path, int material, real size, Vec3 base, real rot_y_deg);
 // A new SceneMesh from a loaded mesh (copied; its triangles get `material`). Returns its index.
 int scene_add_mesh_object(Scene *s, const Mesh *m, int material);
+// A new SceneMesh from arrays the scene takes over (malloc'ed; Triangle.n and .t index
+// normals and uvs; uvs, tangents may be NULL). With uvs but no tangents, the tangents are
+// computed. Returns its index.
+int scene_add_mesh_arrays(Scene *s, Triangle *tris, int ntris, Vec3 *normals, int nnormals,
+                          Vec2 *uvs, Vec4 *tangents, int nuvs);
 // mesh_load, scaled so its largest side is `size`, its bottom centre at the origin. -1 on failure.
 int scene_load_mesh_object(Scene *s, const char *path, int material, real size);
 // An instance of mesh `mesh` (material -1: the triangles' own), or of a shape (mesh =
@@ -333,6 +352,8 @@ Aabb scene_shape_bounds(const Scene *s, int id);
 // (texmap_procedural); srgb for colour. Returns 1 + its index (for Material.tex_*), 0 if it
 // cannot be had.
 int scene_texture(Scene *s, const char *name, int srgb);
+// a texture made elsewhere (a glTF model's), taken over by the scene: 1 + its index
+int scene_add_texmap(Scene *s, const TexMap *t);
 // The material at texture coordinates uv (Material.uv_scale applied here): its textures
 // applied, as a MAT_PBR (or MAT_LIGHT) material without textures. uv_lod: log2 of the
 // footprint in texture coordinates (material_uv_lod; MATERIAL_LOD0: no filtering, level 0)
@@ -340,6 +361,8 @@ int scene_texture(Scene *s, const char *name, int srgb);
 Material material_at(const Scene *s, const Material *m, Vec2 uv, real uv_lod);
 // the normal n bent by the material's normal map at uv (tangent t: xyz, w its handedness)
 Vec3 material_normal(const Scene *s, const Material *m, Vec2 uv, real uv_lod, Vec3 n, Vec4 t);
+// the occlusion at uv: 1 (none) .. 0 (no light from around), its strength applied
+real material_occlusion(const Scene *s, const Material *m, Vec2 uv, real uv_lod);
 #define MATERIAL_LOD0 (-1000.0f)
 // the footprint's log2 for a pixel whose texture coordinates change by (dudx, dvdx) and
 // (dudy, dvdy) to the next ones (the longer side)

@@ -52,10 +52,12 @@ Env *probe_bake(const Scene *s, Vec3 center, const Aabb *box, int w, int spp){
 }
 
 // How open the space around c is: the harmonic mean of how far 64 rays in all directions
-// go before they hit something (a ray that hits a closed shape from its back: c is inside
-// something, 0); rays that hit nothing count as `far`
+// go before they hit something (most of them hitting a shape from its back: c is inside
+// something, 0; a few: c is behind an open surface, as a glTF model's thin panels); rays
+// that hit nothing count as `far`
 static real openness_ex(const Scene *s, Vec3 c, real far, int *escaped){
     real inv = 0;
+    int backs = 0;
     *escaped = 0;
     for (int i = 0; i < 64; i++){
         real z = 1 - 2 * (i + 0.5f) / 64, r = r_sqrt(r_fmax(0, 1 - z * z)), ph = 2.399963f * i;   // a Fibonacci sphere
@@ -65,11 +67,11 @@ static real openness_ex(const Scene *s, Vec3 c, real far, int *escaped){
             // the back of a closed shape (a mesh, a sphere, an instance; not a quad: walls
             // are seen from either side)
             int closed = h.inst >= 0 || h.prim >= s->nprims || s->prims[h.prim].type == PRIM_SPHERE;
-            if (!h.front_face && closed && s->mats[hit_material(s, &h)].type != MAT_LIGHT) return 0;
+            if (!h.front_face && closed && s->mats[hit_material(s, &h)].type != MAT_LIGHT) backs++;
             inv += 1 / r_fmax(h.t, 1e-3f);
         } else { inv += 1 / far; (*escaped)++; }
     }
-    return 64 / inv;
+    return backs > 32 ? 0 : 64 / inv;
 }
 static real openness(const Scene *s, Vec3 c, real far){
     int e;

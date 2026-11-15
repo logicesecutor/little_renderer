@@ -94,6 +94,10 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
     something left out), else the probe's or the sky's own 9 harmonics;
   - the transmitted part along the ray **through** the object (refracted in, and out
     where it would leave a sphere: exact for spheres, close for convex shapes);
+  - the probe's view is scaled down where less light arrives around the reflected direction
+    at the point (the irradiance grid) than at the probe (its harmonics; the luminance from
+    the first 4): "probe normalization" (PBR6), so a face turned to a dark corner does not
+    reflect the room the probe saw from its middle;
   - a probe of a room knows the room's box: a lookup from a point follows its direction
     to the wall and looks at that wall point from the probe's centre (**parallax
     correction**), so the mirror sphere in the corner reflects the walls where they are.
@@ -116,7 +120,9 @@ Those are exactly what the path tracer computes. `render_scene` uses *local* lig
   pixel's view direction;
 - **two-sided** surfaces: the normal is turned towards the camera first, because the
   scene's quads have no "outside" (the walls are seen from inside the box);
-- **lights** are drawn as their colour at full brightness;
+- **lights** are drawn as their colour at full brightness; a glowing material (glTF's
+  emission, PBR6) adds its emission as it is; glTF's **occlusion** texture scales the light
+  from around (the environment's), not the lamp's;
 - what depends on one cosine alone (the environment's three albedo parts, the diffuse
   lobes' Fresnel factors) is tabulated per material once per frame (33 cosines), the rest
   computed per pixel: ~110 ns per pixel on one core for the lamp, ~110 more for the

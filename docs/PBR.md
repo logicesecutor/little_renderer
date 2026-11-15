@@ -1,7 +1,7 @@
-# PBR: one physically based material model for every pipeline (plan)
+# PBR: one physically based material model for every pipeline
 
-The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)). Status: PBR1
-and PBR2 done (2026-11-14, below); each phase is marked here as it lands.
+The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)), and what was
+done. Status: all six phases done (PBR1-PBR4 2026-11-14, PBR5 and PBR6 2026-11-15, below).
 
 ## Goals (decided 2026-11-14)
 
@@ -95,7 +95,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | PBR3 | Both rasterizers with the same BRDF, lit by the lamp | raster vs path traced direct light on a metal and a plastic sphere: same highlights. **Done** (below) |
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized. **Done** (below) |
 | PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four. **Done** (below) |
-| PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers |
+| PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers. **Done** (below) |
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
 `make test`; the measurements in [PERFORMANCE.md](PERFORMANCE.md); one commit per phase.
@@ -292,6 +292,77 @@ Decided on the way:
   fast to make, and the GPU blends it the same way.
 - **Filtering only where it pays**: trilinear in the rasterizers, level 0 in the path
   tracers (many samples per pixel average it anyway).
+
+### PBR6, done (2026-11-15)
+
+- `core/jpeg.{c,h}`: JPEG read by our own code: baseline, extended (SOF1, 16-bit tables) and
+  progressive (spectral selection, successive approximation), Huffman, restart markers, grey
+  and 3 components (YCbCr, or RGB by Adobe's marker), any sampling factors. The IDCT is
+  libjpeg's accurate integer one, the chroma upsampling its "fancy" triangle filter, the
+  colour conversion its fixed point: the pixels are **exactly libjpeg's** on all 14 test
+  files. A 2048 x 2048 progressive JPEG decodes in 120 ms (the Linux VM; libjpeg-turbo with
+  SIMD: 73).
+- `core/json.{c,h}`: a small JSON reader into a tree (UTF-8, \uXXXX escapes and surrogate
+  pairs; errors with their line).
+- `core/gltf.{c,h}`: `.gltf` (buffers and images in files beside it or in data: URIs) and
+  `.glb`; accessors of every component type (normalized or not, strided), triangles, strips
+  and fans, indexed or not; the default scene's node tree (matrix or translation / rotation /
+  scale): each node with a mesh becomes an instance of a scene mesh (one per glTF mesh, all
+  its primitives, each triangle with its primitive's material); the model placed as an .obj
+  is (`scene_load_gltf(scene, path, size, base, rot)`). Its tangents are used (computed as
+  ours when missing: the same convention, bitangent up the image).
+- Materials gain glTF's last pieces: **emission** (factor x texture x
+  KHR_materials_emissive_strength) in all four pipelines, the paths that hit a glowing surface
+  count it (it is not sampled as a lamp); the **occlusion** texture, used by the rasterizers on
+  the light from around (the path tracers find occlusion themselves); the normal map's
+  **scale**; the textures' **wrap modes** (repeat, clamp, mirror; CPU and GPU).
+- `-gltf file` (USAGE.md): the model in the room (the default with it), or under the sky in
+  place of the spheres (`-scene sky`); turned to face the camera. The showcase puts the
+  damaged helmet in the cube's place when `make gltf-download` has fetched the samples.
+- Test models (CC BY 4.0, Khronos glTF-Sample-Assets): DamagedHelmet, MetalRoughSpheres,
+  NormalTangentMirrorTest, OrientationTest, BoxTextured (.glb, and as .gltf with its .bin and
+  .png), in `models/gltf/` (not in git).
+- `bin/test_jpeg` and `bin/test_gltf` (in `make test`): JPEG files written by libjpeg
+  (`tools/gen_jpeg_tests.py`) decoded to its exact pixels, broken files refused; glTF models
+  made by the test as .gltf with data: URIs, with files, and as .glb: instances, placement,
+  the nodes' transforms, normals, texture coordinates, tangents, every material field, the
+  texture's pixels and sampler; JSON values and errors; broken files refused. Both run clean
+  under AddressSanitizer and UBSan.
+- Checked on the samples (in the room, and the helmet under a sky): GPU, wavefront and CPU
+  path tracing agree within 0.04%; the GPU and CPU rasterizers within 0.07-0.13 of 255; the
+  rooms' rasterized light against the path tracer's as in PBR5 (boxes +7.8%, spheres -2.6%,
+  the open scene +4.2%). They
+  look as in other viewers: the helmet's visor, glow and worn metal, the spheres' metallic /
+  roughness sweep, the orientation test's arrows, the mirrored normal maps (rasterizer and
+  path tracer alike).
+- Cost: PERFORMANCE.md.
+
+Decided and found on the way:
+
+- **Atlas packing**: the GPU atlas is now as narrow as fits under 8192 rows (1024 to 8192
+  wide; the helmet's five 2048 x 2048 maps did not fit in one 2048-wide column); if nothing
+  fits, the largest texture's top level is left out on the GPU (a message says so).
+- **Probe normalization** (the rasterizers): a single reflection probe made somewhere else
+  showed the room's light in corners that see none of it (the orientation test's cube front,
+  facing the room's open side, shone blue). The specular from the probe is now scaled by how
+  much light arrives around the reflected direction at the point (the irradiance grid)
+  against at the probe (its own harmonics), never brightened; the luminances from the first
+  4 harmonics (the full 9 cost 12 ms more per frame on the boxes).
+- **Inside or behind**: a grid probe counted as inside something when any of its rays hit a
+  back face; thin open panels (glTF's double-sided surfaces) then left whole layers of probes
+  unused (a lighter rectangle on the wall behind the normal-map test). Now it takes most rays.
+- **Light tracing with roughness textures**: the CPU and GPU decided whether a scene can have
+  caustics from the untextured materials, so a roughness map with smooth texels lost those
+  caustics in both (the path tracer leaves them to light tracing): textured materials count
+  now. One difference remains, the same on CPU and GPU: on the normal-map mirror test, light
+  tracing gives 0.4% less than path tracing alone (normal maps are not reciprocal: the bent
+  normal is tilted towards the light in one and towards the camera in the other).
+- **At most 16 materials** (`MAX_MATS`): the GPU packs a triangle's material in 4 bits. Every
+  sample model fits; a model with more shares the last one (with a message). More materials
+  need a wider packing: later, with the Vulkan backend's scene layout.
+- Not read (gltf.h): animations and skins, cameras, lights, morph targets, sparse accessors,
+  alpha masking and blending (drawn opaque), texture coordinates 1, KHR_texture_transform;
+  Draco and meshopt compression are refused, KTX2 and WebP images skipped.
 
 ## Open questions (decided during the phases)
 

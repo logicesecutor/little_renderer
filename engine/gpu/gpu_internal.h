@@ -114,6 +114,8 @@ int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s);
 void gpu_textures_free(GpuTextures *gt);
 // a unit direction as 2 floats (octahedral; WGSL oct_decode)
 void gpu_oct_encode(Vec3 d, float *out);
+// a material's textures as GPU_WGSL_TEX reads them (indices past ntex: none)
+void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);

@@ -27,7 +27,8 @@ static const char *SHADER = WGSL(
 struct RMat {
     base: vec4f,     /* base colour (a lamp's: its colour at full brightness); w = 1: drawn as it is */
     pbr: vec4f,      /* metallic, roughness, index of refraction, transmission (material_resolved) */
-    tex: vec4u,      /* its textures, 1 + index (0 none): base, metal-roughness, normal; w: the scale's bits */
+    tex: vec4u,      /* its textures (tex_gpu.c gpu_tex_pack) */
+    emis: vec4f,     /* its glow (a MAT_PBR's emission) */
 };
 /* the lamp (RenderLamp): the quad q + a u + b v, the side it shines to, w = (u x v) / |u x v|^2 */
 struct RLamp {
@@ -135,20 +136,23 @@ fn env_irradiance(n0: vec3f) -> vec3f {
     for (var i = 0; i < 9; i++) { c += U.sh[i].rgb * y[i]; }
     return max(c, vec3f(0.0)) * U.envp.x;
 }
-/* core/env.c irr_grid_irradiance: blended from the 8 probes around p (the unused ones left
-   out); w = 0 when none is near */
-fn irr_grid(p: vec3f, n: vec3f) -> vec4f {
+/* render.c sh_lum4: the luminance of the environment's harmonics towards n, the first 4 */
+fn env_lum4(n0: vec3f) -> f32 {
+    let n = vec3f(n0.x * U.envp.y - n0.z * U.envp.z, n0.y, n0.x * U.envp.z + n0.z * U.envp.y);
+    let c = U.sh[0].rgb * 0.282095 + (U.sh[1].rgb * n.y + U.sh[2].rgb * n.z + U.sh[3].rgb * n.x) * 0.488603;
+    return dot(c, vec3f(0.2126, 0.7152, 0.0722)) * U.envp.x;
+}
+/* env.c irr_grid_blend: the valid probes around p blended (ok = 0: none near) */
+struct IrrSH { c: array<vec3f, 9>, ok: f32 };
+fn irr_blend(p: vec3f) -> IrrSH {
+    var r: IrrSH;
+    r.ok = 0.0;
+    if (U.irrn.w == 0u) { return r; }
     let nn = vec3i(U.irrn.xyz);
     var x = (p - U.irrlo.xyz) / (U.irrhi.xyz - U.irrlo.xyz) * vec3f(nn) - vec3f(0.5);
     x = clamp(x, vec3f(0.0), vec3f(nn - vec3i(1)));
     let i0 = min(vec3i(x), max(nn - vec3i(2), vec3i(0)));
     let f = x - vec3f(i0);
-    var y: array<f32, 9>;
-    y[0] = 0.282095;
-    y[1] = 0.488603 * n.y; y[2] = 0.488603 * n.z; y[3] = 0.488603 * n.x;
-    y[4] = 1.092548 * n.x * n.y; y[5] = 1.092548 * n.y * n.z; y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
-    y[7] = 1.092548 * n.x * n.z; y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
-    var c = vec3f(0.0);
     var ws = 0.0;
     for (var corner = 0u; corner < 8u; corner++) {
         let o = vec3i(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
@@ -159,20 +163,24 @@ fn irr_grid(p: vec3f, n: vec3f) -> vec4f {
         if (!(IG[base + 6u].w > 0.0) || w <= 0.0) { continue; }
         for (var i = 0u; i < 9u; i++) {
             let k = 3u * i;
-            let q = vec3f(IG[base + k / 4u][k % 4u], IG[base + (k + 1u) / 4u][(k + 1u) % 4u], IG[base + (k + 2u) / 4u][(k + 2u) % 4u]);
-            c += w * q * y[i];
+            r.c[i] += w * vec3f(IG[base + k / 4u][k % 4u], IG[base + (k + 1u) / 4u][(k + 1u) % 4u], IG[base + (k + 2u) / 4u][(k + 2u) % 4u]);
         }
         ws += w;
     }
-    if (ws <= 1e-4) { return vec4f(0.0); }
-    return vec4f(max(c / ws, vec3f(0.0)), 1.0);
+    if (ws <= 1e-4) { return r; }
+    for (var i = 0u; i < 9u; i++) { r.c[i] /= ws; }
+    r.ok = 1.0;
+    return r;
 }
-fn diffuse_light(p: vec3f, n: vec3f) -> vec3f {
-    if (U.irrn.w != 0u) {
-        let g = irr_grid(p, n);
-        if (g.w > 0.0) { return g.rgb; }
-    }
-    return env_irradiance(n);
+fn irr_eval(b: IrrSH, n: vec3f) -> vec3f {
+    var y: array<f32, 9>;
+    y[0] = 0.282095;
+    y[1] = 0.488603 * n.y; y[2] = 0.488603 * n.z; y[3] = 0.488603 * n.x;
+    y[4] = 1.092548 * n.x * n.y; y[5] = 1.092548 * n.y * n.z; y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    y[7] = 1.092548 * n.x * n.z; y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+    var c = vec3f(0.0);
+    for (var i = 0u; i < 9u; i++) { c += b.c[i] * y[i]; }
+    return max(c, vec3f(0.0));
 }
 fn env_box_dir(p: vec3f, d: vec3f) -> vec3f {
     if (U.envc.w < 0.5) { return d; }
@@ -285,10 +293,13 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f, uv: vec2f, tg: vec4f, uv_lod: f32) 
     var base = m.base.rgb;
     var metallic = m.pbr.x;
     var rough = m.pbr.y;
+    var emis = m.emis.rgb;
+    var ao = 1.0;
     if (any(m.tex.xyz != vec3u(0u))) {
-        let tm = tex_material(m.tex, base, metallic, rough, uv, uv_lod);
-        base = tm.base; metallic = tm.metallic; rough = tm.rough;
-        if (m.tex.z != 0u) {
+        let tm = tex_material(m.tex, base, metallic, rough, emis, uv, uv_lod);
+        base = tm.base; metallic = tm.metallic; rough = tm.rough; emis = tm.emission;
+        ao = tex_occlusion(m.tex, uv, uv_lod);
+        if ((m.tex.z & 255u) != 0u) {
             n = tex_normal(m.tex, uv, uv_lod, n, tg);
             let c = dot(n, v);
             if (c < 1e-3) { n = normalize(n + v * (1e-3 - c)); }
@@ -304,7 +315,18 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f, uv: vec2f, tg: vec4f, uv_lod: f32) 
         let rr = reflect(-v, n);
         let sm = 1.0 - r;
         let rd = normalize(mix(n, rr, sm * (sqrt(sm) + r)));
-        c = ap.spec * env_level(env_box_dir(p, rd), r) + ap.diff * diffuse_light(p, n);
+        var spec = ap.spec * env_level(env_box_dir(p, rd), r);
+        let ib = irr_blend(p);
+        var diff = env_irradiance(n);
+        if (ib.ok > 0.0) {
+            /* render.c shade_env: the probe's view scaled by the light around rd here against there */
+            let lw = vec3f(0.2126, 0.7152, 0.0722);
+            let here = dot(ib.c[0] * 0.282095 + (ib.c[1] * rd.y + ib.c[2] * rd.z + ib.c[3] * rd.x) * 0.488603, lw);
+            let there = env_lum4(rd);
+            if (there > 1e-6 && here < there) { spec *= max(here, 0.0) / there; }
+            diff = irr_eval(ib, n);
+        }
+        c = spec + ap.diff * diff;
         if ((1.0 - b.metallic) * b.transmission > 0.0) {
             c += ap.trans * env_level(env_box_dir(p, through_dir(v, n, b.eta)), r);
         }
@@ -313,10 +335,11 @@ fn scene_shade(mi: u32, p: vec3f, n0: vec3f, uv: vec2f, tg: vec4f, uv_lod: f32) 
     }
     let center = U.lamp.center.xyz;
     let ln = U.lamp.n.xyz;
+    c = c * ao + emis;
     if (U.lamp.q.w < 0.5 || dot(p - center, ln) <= 0.0) { return c; }
     /* a bent normal: only the share of the lamp above the surface's own plane (render.c lamp_hz) */
     var hz = 1.0;
-    if (m.tex.z != 0u) {
+    if ((m.tex.z & 255u) != 0u) {
         let tc0 = center - p;
         let d = length(tc0);
         let s = max(sqrt(U.lamp.u.w / BSDF_PI) / d, 1e-3);
@@ -468,7 +491,7 @@ typedef struct {
     float cam_r[4], cam_u[4], cam_b[4], vps[4];
     uint32_t irrn[4];
     float irrlo[4], irrhi[4];
-    float mats[MAX_MATS][12];          // base, pbr, tex (uint32 bits)
+    float mats[MAX_MATS][16];          // base, pbr, tex (uint32 bits), emission
 } GRU;
 
 // one set of triangles on the GPU
@@ -957,13 +980,11 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         U.mats[m][7] = (float)res.transmission;
         // the textures the GPU has (the first GPU_TEX_MAX), as 1 + index; the scale's bits
         const Material *mm = &s->mats[m];
-        uint32_t tx[4] = {mm->tex_base > 0 && mm->tex_base <= r->gt.ntex ? (uint32_t)mm->tex_base : 0u,
-                          mm->tex_mr > 0 && mm->tex_mr <= r->gt.ntex ? (uint32_t)mm->tex_mr : 0u,
-                          mm->tex_normal > 0 && mm->tex_normal <= r->gt.ntex ? (uint32_t)mm->tex_normal : 0u, 0};
-        float sc = (float)mm->uv_scale;
-        memcpy(&tx[3], &sc, 4);
+        uint32_t tx[4];
+        gpu_tex_pack(mm, r->gt.ntex, tx);
         if (rm.constant) tx[0] = tx[1] = tx[2] = 0;
         memcpy(&U.mats[m][8], tx, 16);
+        put(U.mats[m] + 12, material_glows(mm) && !rm.constant ? mm->emission : vec3(0, 0, 0), 0);
     }
     wgpuQueueWriteBuffer(g->queue, r->uni, 0, &U, sizeof(U));
 

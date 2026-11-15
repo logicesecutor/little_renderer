@@ -297,6 +297,8 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             }
             break;
         }
+        // a glowing surface (glTF's emissive): found by the paths that hit it, not sampled
+        if (material_glows(m)) radiance = v_add(radiance, v_mul(throughput, m->emission));
         if (depth >= max_depth) break;
 
         // the surface's BSDF (core/brdf.h), seen from v (back along the ray)
@@ -379,9 +381,10 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
 #define LT_FIXED 4294967296.0     // 2^32
 #define LT_BATCH 4096             // light paths per random-number stream
 
+// (a roughness texture may make any texel of a material smooth: such a material counts)
 static int scene_has_specular(const Scene *s){
     for (int i = 0; i < s->nmats; i++)
-        if (material_has_delta(&s->mats[i])) return 1;
+        if (material_has_delta(&s->mats[i]) || (s->mats[i].tex_mr && s->mats[i].type != MAT_LIGHT)) return 1;
     return 0;
 }
 

@@ -23,7 +23,8 @@ Vec3 texture_sample(const Texture *t, real u, real v);
 // A TexMap is an RGBA8 image with its mip levels (each half the previous one, down to
 // 1 x 1, made when it is created: 2 x 2 averages, in linear light for colour). Texture
 // coordinates: u across, v DOWN (v = 0 the image's top row, glTF's convention; OBJ's
-// v = 0 is the bottom: its loader turns them over), repeating outside [0, 1].
+// v = 0 is the bottom: its loader turns them over), repeating outside [0, 1] (or clamped,
+// or mirrored: wrap_u, wrap_v).
 #define TEXMAP_LEVELS 16
 typedef struct {
     int w, h, levels;                  // level 0's size, how many levels
@@ -31,13 +32,19 @@ typedef struct {
     size_t at[TEXMAP_LEVELS];          // each level's first texel in px
     uint32_t *px;                      // r | g << 8 | b << 16 | a << 24, rows top to bottom
     int srgb;                          // colour: the texels are sRGB, decoded when read
+    int wrap_u, wrap_v;                // outside 0..1 (glTF's samplers): TEXMAP_REPEAT, _CLAMP, _MIRROR
     char name[64];                     // where it came from (a file, or a procedural one)
 } TexMap;
+enum { TEXMAP_REPEAT, TEXMAP_CLAMP, TEXMAP_MIRROR };
 
 // from w x h RGBA8 pixels (copied); 0 on success
 int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb);
 // a PNG file (any kind: grey, alpha, palette...), as RGBA; 0 on success
 int texmap_load_png(TexMap *t, const char *path, int srgb);
+// a PNG or JPEG file (told apart by their first bytes), or the same in memory (a glTF
+// model's images); 0 on success
+int texmap_load(TexMap *t, const char *path, int srgb);
+int texmap_decode(TexMap *t, const unsigned char *data, size_t size, int srgb);
 // Made here, 512 x 512: "checker" (colour), "bricks" (colour), "bricks_normal" (normal
 // map), "bricks_mr" (roughness in green, metallic in blue, as glTF), "plate_mr" (a
 // worn metal: metallic and roughness both vary). 0 on success, 1 for an unknown name.

@@ -2,6 +2,7 @@
 
 #include "core/image.h"   // rgb8
 #include "core/png.h"
+#include "core/jpeg.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,9 @@ static float SRGB[256];
 static int srgb_ready;
 
 const float *texmap_srgb_table(void){
+#ifdef _OPENMP
+#pragma omp critical(texmap_srgb)
+#endif
     if (!srgb_ready){
         for (int i = 0; i < 256; i++){
             double c = i / 255.0;
@@ -131,6 +135,40 @@ int texmap_load_png(TexMap *t, const char *path, int srgb){
     return r;
 }
 
+int texmap_decode(TexMap *t, const unsigned char *data, size_t size, int srgb){
+    int w, h, ch;
+    unsigned char *px = NULL;
+    if (size >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G') px = png_decode(data, size, &w, &h, &ch, 4);
+    else if (size >= 3 && data[0] == 0xFF && data[1] == 0xD8) px = jpeg_decode(data, size, &w, &h, &ch, 4);
+    else fprintf(stderr, "texture: neither a PNG nor a JPEG image\n");
+    if (!px) return 1;
+    int r = texmap_make(t, px, w, h, srgb);
+    free(px);
+    return r;
+}
+
+int texmap_load(TexMap *t, const char *path, int srgb){
+    FILE *f = fopen(path, "rb");
+    if (!f){ fprintf(stderr, "texture: cannot open %s\n", path); return 1; }
+    size_t cap = 1 << 16, n = 0, k;
+    unsigned char *buf = malloc(cap);
+    while (buf && (k = fread(buf + n, 1, cap - n, f)) > 0){
+        n += k;
+        if (n == cap){
+            unsigned char *q = realloc(buf, cap * 2);
+            if (!q){ free(buf); buf = NULL; break; }
+            buf = q; cap *= 2;
+        }
+    }
+    fclose(f);
+    if (!buf) return 1;
+    int r = texmap_decode(t, buf, n, srgb);
+    free(buf);
+    if (r) fprintf(stderr, "texture: cannot read %s\n", path);
+    else snprintf(t->name, sizeof(t->name), "%s", path);
+    return r;
+}
+
 void texmap_free(TexMap *t){
     free(t->px);
     t->px = NULL;
@@ -167,33 +205,46 @@ static inline Vec4 decode(uint32_t c, const float *lut){
     return r;
 }
 
-// (u, v wrapped into 0..1 first: the 4 texels' rows and columns found without a division)
+// a coordinate into 0..1 by the wrap mode (repeat: the fraction; clamp; mirror: every other
+// period turned over)
+static inline real fold(real u, int mode){
+    if (mode == TEXMAP_CLAMP) return u < 0 ? 0 : u > 1 ? 1 : u;
+    if (mode == TEXMAP_MIRROR){
+        real m = u - 2 * r_floor(u * 0.5f);
+        return m > 1 ? 2 - m : m;
+    }
+    return u >= 0 && u < 1 ? u : u - r_floor(u);
+}
+// texel x (-1 .. n) of a row of n: around for repeat, else held at the edge
+static inline int edge(int x, int n, int mode){
+    if (mode == TEXMAP_REPEAT) return x < 0 ? x + n : x >= n ? x - n : x;
+    return x < 0 ? 0 : x >= n ? n - 1 : x;
+}
+
+// (u, v folded into 0..1 first: the 4 texels' rows and columns found without a division)
 Vec4 texmap_bilinear(const TexMap *t, int level, real u, real v){
-    if (!(u >= 0 && u < 1)) u -= r_floor(u);
-    if (!(v >= 0 && v < 1)) v -= r_floor(v);
+    u = fold(u, t->wrap_u);
+    v = fold(v, t->wrap_v);
     int w = t->lw[level], h = t->lh[level];
     real x = u * w - 0.5f, y = v * h - 0.5f;
     real fx0 = r_floor(x), fy0 = r_floor(y);
-    int x0 = (int)fx0, y0 = (int)fy0;                  // -1 .. w - 1 (u = 1 - ulp: w - 1)
+    int x0 = (int)fx0, y0 = (int)fy0;                  // -1 .. w (u = 1 when clamped)
     real fx = x - fx0, fy = y - fy0;
-    int x1 = x0 + 1 >= w ? x0 + 1 - w : x0 + 1, y1 = y0 + 1 >= h ? y0 + 1 - h : y0 + 1;
-    if (x0 < 0) x0 += w;
-    if (y0 < 0) y0 += h;
-    if (x0 >= w) x0 = w - 1;                           // (rounding)
-    if (y0 >= h) y0 = h - 1;
-    if (x1 < 0 || x1 >= w) x1 = 0;
-    if (y1 < 0 || y1 >= h) y1 = 0;
+    if (x0 < -1) x0 = -1;                              // (rounding, NaN)
+    if (x0 > w - 1) x0 = w - 1;
+    if (y0 < -1) y0 = -1;
+    if (y0 > h - 1) y0 = h - 1;
+    int xa = edge(x0, w, t->wrap_u), xb = edge(x0 + 1, w, t->wrap_u);
+    int ya = edge(y0, h, t->wrap_v), yb = edge(y0 + 1, h, t->wrap_v);
     const uint32_t *px = t->px + t->at[level];
     const float *lut = t->srgb ? (srgb_ready ? SRGB : texmap_srgb_table()) : NULL;
-    Vec4 a = decode(px[(size_t)y0 * w + x0], lut), b = decode(px[(size_t)y0 * w + x1], lut);
-    Vec4 c = decode(px[(size_t)y1 * w + x0], lut), d = decode(px[(size_t)y1 * w + x1], lut);
+    Vec4 a = decode(px[(size_t)ya * w + xa], lut), b = decode(px[(size_t)ya * w + xb], lut);
+    Vec4 c = decode(px[(size_t)yb * w + xa], lut), d = decode(px[(size_t)yb * w + xb], lut);
     return v4_lerp(v4_lerp(a, b, fx), v4_lerp(c, d, fx), fy);
 }
 
 Vec4 texmap_sample(const TexMap *t, real u, real v, real lod){
     if (!(u > -1e6f && u < 1e6f && v > -1e6f && v < 1e6f)) u = v = 0;    // (NaN, inf: far too big)
-    u -= r_floor(u);
-    v -= r_floor(v);
     if (!(lod > 0)) return texmap_bilinear(t, 0, u, v);
     if (lod >= t->levels - 1) return texmap_bilinear(t, t->levels - 1, u, v);
     int k = (int)lod;

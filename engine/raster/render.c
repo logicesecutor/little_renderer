@@ -492,6 +492,8 @@ typedef struct {
     real gd[SHADE_TAB + 1], gm[SHADE_TAB + 1];
     int through;          // it transmits: the environment through it is looked up too
     int direct;           // no tables: the BSDF evaluated as it is (a textured material, per pixel)
+    Vec3 emit;            // its glow (Material.emission of a MAT_PBR: added as it is)
+    real ao;              // its occlusion (1 = none): scales the light from around, not the lamp's
 } ShadeMat;
 
 // the BSDF and its constants, without the tables (sm->direct)
@@ -503,6 +505,8 @@ static void shade_mat_direct(ShadeMat *sm, const Material *m){
     sm->kms = !b->smooth && mt > 0 ? mt * b->kms_norm : 0;
     sm->through = (1 - mt) * t > 0;
     sm->direct = 1;
+    sm->emit = material_glows(m) ? m->emission : vec3(0, 0, 0);
+    sm->ao = 1;
 }
 
 static void shade_mat_init(ShadeMat *sm, const Material *m){
@@ -610,6 +614,19 @@ static Vec3 through_dir(Vec3 v, Vec3 n, real eta){
 // lobe's direction (between n and the reflected ray, nearer n the rougher: Lagarde &
 // de Rousiers 2014), the diffuse from the irradiance, the transmitted around the ray
 // through; a probe's lookups corrected by its box (env_box_dir)
+// the luminance of 9 harmonics (rgb, 27 numbers) in direction d, by the first 4 alone
+static inline real sh_lum4(const float *c, Vec3 d){
+    real y1 = 0.488603f * d.y, y2 = 0.488603f * d.z, y3 = 0.488603f * d.x;
+    real r = 0.282095f * c[0] + y1 * c[3] + y2 * c[6] + y3 * c[9];
+    real g = 0.282095f * c[1] + y1 * c[4] + y2 * c[7] + y3 * c[10];
+    real b = 0.282095f * c[2] + y1 * c[5] + y2 * c[8] + y3 * c[11];
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+// a direction in an environment's own frame (its turn: env_irradiance's)
+static inline Vec3 env_dir_rot(const Env *e, Vec3 n){
+    return e->rot != 0 ? vec3(n.x * e->rot_c - n.z * e->rot_s, n.y, n.x * e->rot_s + n.z * e->rot_c) : n;
+}
+
 static Vec3 shade_env(const Env *E, const IrrGrid *irr, const ShadeMat *sm, Vec3 sp, Vec3 df, Vec3 tr, Vec3 p, Vec3 n, Vec3 v){
     const Bsdf *b = &sm->b;
     real r = b->smooth ? 0 : b->rough;
@@ -617,9 +634,18 @@ static Vec3 shade_env(const Env *E, const IrrGrid *irr, const ShadeMat *sm, Vec3
     real s = 1 - r, k = s * (r_sqrt(s) + r);
     Vec3 rd = v_norm(v_add(n, v_scale(v_sub(rr, n), k)));
     Vec3 c = v_mul(sp, env_level(E, env_box_dir(E, p, rd), r));
-    int ok = 0;
-    Vec3 e = irr ? irr_grid_irradiance(irr, p, n, &ok) : vec3(0, 0, 0);
-    c = v_add(c, v_mul(df, ok ? e : env_irradiance(E, n)));
+    float sh[27];
+    int ok = irr ? irr_grid_blend(irr, p, sh) : 0;
+    if (ok){
+        // the probe was made somewhere else: what it shows along rd is scaled by how much
+        // light arrives around rd here (the grid) against there (the probe's own harmonics),
+        // never brightened. (A surface deep in a corner the probe sees into from the room
+        // reflects that corner's darkness, not the room: "probe normalization".) Their
+        // luminances by the first 4 harmonics: enough for a ratio, and cheap
+        real here = sh_lum4(sh, rd), there = sh_lum4(E->sh[0], env_dir_rot(E, rd)) * E->scale;
+        if (there > 1e-6f && here < there) c = v_scale(c, r_fmax(here, 0) / there);
+    }
+    c = v_add(c, v_mul(df, ok ? irr_sh_eval(sh, n) : env_irradiance(E, n)));
     if (sm->through) c = v_add(c, v_mul(tr, env_level(E, env_box_dir(E, p, through_dir(v, n, b->eta)), r)));
     return c;
 }
@@ -658,6 +684,7 @@ static Vec3 shade_point_g(const RenderLamp *L, const ShadeMat *sm, Vec3 p, Vec3 
     }
     Vec3 c = L->env ? shade_env(L->env, L->irr, sm, sp, df, tr, p, n, v)
                     : v_scale(v_add(v_add(sp, df), tr), L->ambient + L->fill * cv);
+    c = v_add(v_scale(c, sm->ao), sm->emit);
     if (!L->on || v_dot(v_sub(p, L->center), L->n) <= 0) return c;   // behind the lamp
     real hz = ng ? lamp_hz(L, p, *ng) : 1;
     if (hz <= 0) return c;
@@ -740,6 +767,7 @@ static Vec3 shade_textured(const SceneShading *s, Vec3 p, Vec3 n, Vec2 uv, Vec4 
     }
     ShadeMat sm;
     shade_mat_direct(&sm, &mt);
+    sm.ao = material_occlusion(s->scene, s->mat, uv, uv_lod);
     return shade_point_g(s->lamp, &sm, p, n, s->mat->tex_normal ? &ng : NULL, s->eye);
 }
 
