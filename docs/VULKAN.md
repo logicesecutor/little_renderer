@@ -17,7 +17,7 @@ kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
 | render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
 | the window's surface (Win32 swapchain; X11 later): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC | done |
-| acceleration structures, ray queries (R6) | after |
+| acceleration structures and ray queries (R6): our extension of webgpu.h (`gpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/vk/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
 
 Checked so far, with the validation layer on and nothing reported: `make VK=1 test` passes;
 `render` (rasterizer: every shading mode, the helmet's textures, the sky; path tracer: the
@@ -29,7 +29,27 @@ the physics' CPU time per frame 0.39 ms on ours, 0.80 ms on wgpu (GPU bodies 0.1
 0.3 ms, the air 0.3 against 0.5 ms); the path tracer's pass in `view` 2.1-2.3 ms against
 4.2 ms.
 
-Next: the native extensions (below), then ray tracing (R6).
+### Hardware ray tracing (R6)
+
+wgpu-native's C API has no acceleration structures, so ours is an extension of webgpu.h of
+our own (`engine/gpu/vk/webgpu_rt.h`), shaped after the WebGPU proposal: bottom levels of
+triangles or boxes (`lrDeviceCreateBlas`, `lrCommandEncoderBuildBlas`), a top level of
+64-byte instance records (`lrDeviceCreateTlas`, `lrCommandEncoderBuildTlas`), bound through
+chained bind group entries. The WGSL is wgpu's and the proposal's: `acceleration_structure`,
+`ray_query`, `rayQueryInitialize` / `Proceed` / `GenerateIntersection` /
+`GetCommittedIntersection`, `RayDesc`, `RayIntersection`, the `RAY_*` constants.
+
+The device asks for ray queries when the GPU has them (`LR_GPU_HWRT=0`: not). The path
+tracer then compiles a `traverse()` on ray queries in place of the BVH walk (the same
+result, so every kernel uses it unchanged) and keeps, besides its buffers, bottom levels of
+the world's triangles, its spheres and quads (boxes the kernel hits with the CPU's tests),
+each mesh, and the unit box (balls and boxes); the top level is built every frame from
+records written by the CPU with the instances. Kernel ms per pass, 640×640, RTX 3070 (the
+BVH on our layer → ray queries): boxes 2.08 → 1.35, a sphere mesh 3.36 → 1.25, the helmet
+4.82 → 1.80, the showcase 12.17 → 7.40 (PERFORMANCE.md).
+
+Next: the WGSL out of the C files into files of their own (asked for 2026-11-15); then the
+native extensions (below) where measurements show a gain.
 
 Building: `make VK=1` (binaries in `bin/vk`; the webgpu.h header still comes from `make
 deps`). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed
