@@ -9,13 +9,20 @@ kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web
 
 | part | state |
 |---|---|
-| `engine/gpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | started; `tools/vk_check.py` checks every size, offset and constant against the official headers (636 checks, 0 differ) |
+| `engine/gpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | `tools/vk_check.py` checks every size, offset and constant against the official headers (838 checks, 0 differ) |
 | loader, instance, adapter, device, queue (timeline semaphore), submissions, polling, callbacks | done |
-| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/vk/test_gpu_basic` passes, with the validation layer |
-| bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | written, waiting for shaders |
-| WGSL → SPIR-V (`engine/gpu/wgsl`) | next |
-| textures, render pipelines and passes, the window's surface | to do (`vk_todo.c` says so at run time) |
+| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/vk/test_gpu_basic` passes |
+| bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | done |
+| WGSL → SPIR-V (`engine/gpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
+| textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
+| render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
+| the window's surface (Win32 swapchain) | to do (`vk_todo.c` says so at run time; `view` draws offscreen meanwhile) |
 | acceleration structures, ray queries (R6) | after |
+
+Checked so far, with the validation layer on and nothing reported: `make VK=1 test` passes;
+`render` (rasterizer: every shading mode, the helmet's textures, the sky; path tracer: the
+box, the sky, the helmet) writes the same pixels as on wgpu, bit for bit; `sim` (drop,
+blast: GPU bodies, air and cloud) differs by at most 2 levels of 255 after 12 frames.
 
 Building: `make VK=1` (binaries in `bin/vk`; the webgpu.h header still comes from `make
 deps`). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed

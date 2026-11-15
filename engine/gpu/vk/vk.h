@@ -537,6 +537,134 @@ typedef struct VkQueryPoolCreateInfo {
 #define VK_PIPELINE_BIND_POINT_GRAPHICS 0u
 #define VK_PIPELINE_BIND_POINT_COMPUTE 1u
 
+// ---- images ----
+typedef enum {
+    VK_FORMAT_UNDEFINED = 0, VK_FORMAT_R8G8B8A8_UNORM = 37, VK_FORMAT_R8G8B8A8_SRGB = 43,
+    VK_FORMAT_B8G8R8A8_UNORM = 44, VK_FORMAT_B8G8R8A8_SRGB = 50, VK_FORMAT_R16G16B16A16_SFLOAT = 97,
+    VK_FORMAT_R32_UINT = 98, VK_FORMAT_R32_SFLOAT = 100, VK_FORMAT_R32G32_SFLOAT = 103,
+    VK_FORMAT_R32G32B32A32_SFLOAT = 109, VK_FORMAT_D32_SFLOAT = 126, VK_FORMAT_MAX_ENUM = 0x7fffffff
+} VkFormat;
+
+typedef enum {
+    VK_IMAGE_USAGE_TRANSFER_SRC_BIT = 0x1, VK_IMAGE_USAGE_TRANSFER_DST_BIT = 0x2, VK_IMAGE_USAGE_SAMPLED_BIT = 0x4,
+    VK_IMAGE_USAGE_STORAGE_BIT = 0x8, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT = 0x10,
+    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT = 0x20
+} VkImageUsageFlagBits;
+
+#define VK_IMAGE_ASPECT_COLOR_BIT 1u
+#define VK_IMAGE_ASPECT_DEPTH_BIT 2u
+#define VK_IMAGE_LAYOUT_UNDEFINED 0u
+#define VK_IMAGE_LAYOUT_GENERAL 1u
+#define VK_IMAGE_LAYOUT_PRESENT_SRC_KHR 1000001002u
+
+typedef struct VkImageCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t imageType; VkFormat format; VkExtent3D extent;
+    uint32_t mipLevels, arrayLayers, samples, tiling;
+    VkFlags usage; uint32_t sharingMode;
+    uint32_t queueFamilyIndexCount; const uint32_t *pQueueFamilyIndices;
+    uint32_t initialLayout;
+} VkImageCreateInfo;
+
+typedef struct VkComponentMapping { uint32_t r, g, b, a; } VkComponentMapping;
+typedef struct VkImageViewCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkImage image; uint32_t viewType; VkFormat format;
+    VkComponentMapping components; VkImageSubresourceRange subresourceRange;
+} VkImageViewCreateInfo;
+
+typedef struct VkImageSubresourceLayers { VkFlags aspectMask; uint32_t mipLevel, baseArrayLayer, layerCount; } VkImageSubresourceLayers;
+typedef struct VkBufferImageCopy {
+    VkDeviceSize bufferOffset; uint32_t bufferRowLength, bufferImageHeight;
+    VkImageSubresourceLayers imageSubresource; VkOffset3D imageOffset; VkExtent3D imageExtent;
+} VkBufferImageCopy;
+
+// ---- graphics pipelines and dynamic rendering ----
+typedef struct VkPipelineVertexInputStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t vertexBindingDescriptionCount; const void *pVertexBindingDescriptions;
+    uint32_t vertexAttributeDescriptionCount; const void *pVertexAttributeDescriptions;
+} VkPipelineVertexInputStateCreateInfo;
+typedef struct VkPipelineInputAssemblyStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t topology; VkBool32 primitiveRestartEnable;
+} VkPipelineInputAssemblyStateCreateInfo;
+typedef struct VkViewport { float x, y, width, height, minDepth, maxDepth; } VkViewport;
+typedef struct VkPipelineViewportStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t viewportCount; const VkViewport *pViewports;
+    uint32_t scissorCount; const VkRect2D *pScissors;
+} VkPipelineViewportStateCreateInfo;
+typedef struct VkPipelineRasterizationStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkBool32 depthClampEnable, rasterizerDiscardEnable;
+    uint32_t polygonMode; VkFlags cullMode; uint32_t frontFace;
+    VkBool32 depthBiasEnable; float depthBiasConstantFactor, depthBiasClamp, depthBiasSlopeFactor, lineWidth;
+} VkPipelineRasterizationStateCreateInfo;
+typedef struct VkPipelineMultisampleStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t rasterizationSamples; VkBool32 sampleShadingEnable; float minSampleShading;
+    const uint32_t *pSampleMask; VkBool32 alphaToCoverageEnable, alphaToOneEnable;
+} VkPipelineMultisampleStateCreateInfo;
+typedef struct VkStencilOpState { uint32_t failOp, passOp, depthFailOp, compareOp, compareMask, writeMask, reference; } VkStencilOpState;
+typedef struct VkPipelineDepthStencilStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkBool32 depthTestEnable, depthWriteEnable; uint32_t depthCompareOp;
+    VkBool32 depthBoundsTestEnable, stencilTestEnable;
+    VkStencilOpState front, back; float minDepthBounds, maxDepthBounds;
+} VkPipelineDepthStencilStateCreateInfo;
+typedef struct VkPipelineColorBlendAttachmentState {
+    VkBool32 blendEnable;
+    uint32_t srcColorBlendFactor, dstColorBlendFactor, colorBlendOp;
+    uint32_t srcAlphaBlendFactor, dstAlphaBlendFactor, alphaBlendOp;
+    VkFlags colorWriteMask;
+} VkPipelineColorBlendAttachmentState;
+typedef struct VkPipelineColorBlendStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkBool32 logicOpEnable; uint32_t logicOp;
+    uint32_t attachmentCount; const VkPipelineColorBlendAttachmentState *pAttachments;
+    float blendConstants[4];
+} VkPipelineColorBlendStateCreateInfo;
+typedef struct VkPipelineDynamicStateCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t dynamicStateCount; const uint32_t *pDynamicStates;
+} VkPipelineDynamicStateCreateInfo;
+typedef struct VkGraphicsPipelineCreateInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    uint32_t stageCount; const VkPipelineShaderStageCreateInfo *pStages;
+    const VkPipelineVertexInputStateCreateInfo *pVertexInputState;
+    const VkPipelineInputAssemblyStateCreateInfo *pInputAssemblyState;
+    const void *pTessellationState;
+    const VkPipelineViewportStateCreateInfo *pViewportState;
+    const VkPipelineRasterizationStateCreateInfo *pRasterizationState;
+    const VkPipelineMultisampleStateCreateInfo *pMultisampleState;
+    const VkPipelineDepthStencilStateCreateInfo *pDepthStencilState;
+    const VkPipelineColorBlendStateCreateInfo *pColorBlendState;
+    const VkPipelineDynamicStateCreateInfo *pDynamicState;
+    VkPipelineLayout layout; VkRenderPass renderPass; uint32_t subpass;
+    VkPipeline basePipelineHandle; int32_t basePipelineIndex;
+} VkGraphicsPipelineCreateInfo;
+typedef struct VkPipelineRenderingCreateInfo {
+    VkStructureType sType; const void *pNext;
+    uint32_t viewMask, colorAttachmentCount; const VkFormat *pColorAttachmentFormats;
+    VkFormat depthAttachmentFormat, stencilAttachmentFormat;
+} VkPipelineRenderingCreateInfo;
+
+typedef union VkClearValue { float color[4]; struct { float depth; uint32_t stencil; } depthStencil; } VkClearValue;
+typedef struct VkRenderingAttachmentInfo {
+    VkStructureType sType; const void *pNext;
+    VkImageView imageView; uint32_t imageLayout;
+    uint32_t resolveMode; VkImageView resolveImageView; uint32_t resolveImageLayout;
+    uint32_t loadOp, storeOp; VkClearValue clearValue;
+} VkRenderingAttachmentInfo;
+typedef struct VkRenderingInfo {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    VkRect2D renderArea; uint32_t layerCount, viewMask, colorAttachmentCount;
+    const VkRenderingAttachmentInfo *pColorAttachments;
+    const VkRenderingAttachmentInfo *pDepthAttachment;
+    const VkRenderingAttachmentInfo *pStencilAttachment;
+} VkRenderingInfo;
+
 // ---- the functions (pointer types; vk_load.c fills a table of them) ----
 typedef void (VKAPI_PTR *PFN_vkVoidFunction)(void);
 typedef PFN_vkVoidFunction (VKAPI_PTR *PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
@@ -604,5 +732,20 @@ typedef void (VKAPI_PTR *PFN_vkDestroyQueryPool)(VkDevice, VkQueryPool, const vo
 typedef void (VKAPI_PTR *PFN_vkCmdResetQueryPool)(VkCommandBuffer, VkQueryPool, uint32_t, uint32_t);
 typedef void (VKAPI_PTR *PFN_vkCmdWriteTimestamp)(VkCommandBuffer, VkFlags, VkQueryPool, uint32_t);
 typedef void (VKAPI_PTR *PFN_vkCmdCopyQueryPoolResults)(VkCommandBuffer, VkQueryPool, uint32_t, uint32_t, VkBuffer, VkDeviceSize, VkDeviceSize, VkFlags);
+
+typedef VkResult (VKAPI_PTR *PFN_vkCreateImage)(VkDevice, const VkImageCreateInfo *, const void *, VkImage *);
+typedef void (VKAPI_PTR *PFN_vkDestroyImage)(VkDevice, VkImage, const void *);
+typedef void (VKAPI_PTR *PFN_vkGetImageMemoryRequirements)(VkDevice, VkImage, VkMemoryRequirements *);
+typedef VkResult (VKAPI_PTR *PFN_vkBindImageMemory)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateImageView)(VkDevice, const VkImageViewCreateInfo *, const void *, VkImageView *);
+typedef void (VKAPI_PTR *PFN_vkDestroyImageView)(VkDevice, VkImageView, const void *);
+typedef void (VKAPI_PTR *PFN_vkCmdCopyBufferToImage)(VkCommandBuffer, VkBuffer, VkImage, uint32_t, uint32_t, const VkBufferImageCopy *);
+typedef void (VKAPI_PTR *PFN_vkCmdCopyImageToBuffer)(VkCommandBuffer, VkImage, uint32_t, VkBuffer, uint32_t, const VkBufferImageCopy *);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateGraphicsPipelines)(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo *, const void *, VkPipeline *);
+typedef void (VKAPI_PTR *PFN_vkCmdBeginRendering)(VkCommandBuffer, const VkRenderingInfo *);
+typedef void (VKAPI_PTR *PFN_vkCmdEndRendering)(VkCommandBuffer);
+typedef void (VKAPI_PTR *PFN_vkCmdSetViewport)(VkCommandBuffer, uint32_t, uint32_t, const VkViewport *);
+typedef void (VKAPI_PTR *PFN_vkCmdSetScissor)(VkCommandBuffer, uint32_t, uint32_t, const VkRect2D *);
+typedef void (VKAPI_PTR *PFN_vkCmdDraw)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
 
 #endif

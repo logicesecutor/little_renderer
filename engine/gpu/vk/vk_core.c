@@ -604,7 +604,7 @@ static Staging *staging_get(WGPUDevice dev, VkDeviceSize need){
 }
 
 // room for n bytes in this submission's staging memory: its buffer and offset
-static int staging_alloc(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr){
+int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr){
     Staging *s = dev->stage_cur;
     VkDeviceSize at = s ? (s->used + 15) & ~15ull : 0;
     if (!s || at + n > s->size){
@@ -618,7 +618,7 @@ static int staging_alloc(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDevice
     return 1;
 }
 
-static VkCommandBuffer upload_cb(WGPUDevice dev){
+VkCommandBuffer vk_upload_cb(WGPUDevice dev){
     if (!dev->up_open){
         dev->up = vk_cb_get(dev);
         dev->up_open = dev->up != NULL;
@@ -632,7 +632,7 @@ static VkCommandBuffer upload_cb(WGPUDevice dev){
 void wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t off, void const *data, size_t size){
     WGPUDevice dev = queue->dev;
     if (!buffer || !size) return;
-    VkCommandBuffer cb = upload_cb(dev);
+    VkCommandBuffer cb = vk_upload_cb(dev);
     if (!cb) return;
     refs_add(&dev->up_refs, &buffer->o);
     if (size <= 65536 && !(size & 3) && !(off & 3)){
@@ -640,7 +640,7 @@ void wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t off, void
         return;
     }
     VkBuffer sb; VkDeviceSize so; unsigned char *p;
-    if (!staging_alloc(dev, size, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
+    if (!vk_staging(dev, size, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
     memcpy(p, data, size);
     VkBufferCopy c = {so, off, size};
     vk.vkCmdCopyBuffer(cb, sb, buffer->vk, 1, &c);

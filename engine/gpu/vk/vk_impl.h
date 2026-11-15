@@ -39,7 +39,11 @@
     X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdCopyBuffer) X(vkCmdFillBuffer) X(vkCmdUpdateBuffer) \
     X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCreateSemaphore) X(vkDestroySemaphore) \
     X(vkGetSemaphoreCounterValue) X(vkWaitSemaphores) X(vkCreateQueryPool) X(vkDestroyQueryPool) \
-    X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkCmdCopyQueryPoolResults)
+    X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkCmdCopyQueryPoolResults) \
+    X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
+    X(vkCreateImageView) X(vkDestroyImageView) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
+    X(vkCreateGraphicsPipelines) X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdSetViewport) \
+    X(vkCmdSetScissor) X(vkCmdDraw)
 
 typedef struct {
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
@@ -136,8 +140,11 @@ struct WGPUTextureImpl {
     VkImage img;
     VkDeviceMemory mem;              // 0: not ours (a swapchain image)
     WGPUTextureFormat format;
+    VkFormat vkformat;
+    uint32_t texel;                  // bytes per texel
+    int swapchain;                   // a window's image: PRESENT layout between frames
     WGPUTextureUsage usage;
-    uint32_t w, h;
+    uint32_t w, h, layers, mips;
     VkFlags aspect;
     int ready;                       // in its layout (GENERAL) already
 };
@@ -210,6 +217,22 @@ struct WGPUCommandBufferImpl {
     int submitted;
 };
 
+struct WGPURenderPipelineImpl {
+    Obj o;
+    WGPUDevice dev;
+    VkPipeline vk;
+    WGPUPipelineLayout layout;
+};
+
+struct WGPURenderPassEncoderImpl {
+    Obj o;
+    WGPUCommandEncoder enc;
+    WGPURenderPipeline pipe; int pipe_bound;
+    WGPUBindGroup bg[4];
+    uint32_t dyn[4][8]; uint32_t ndyn[4];
+    int bg_dirty;
+};
+
 struct WGPUComputePassEncoderImpl {
     Obj o;
     WGPUCommandEncoder enc;
@@ -229,6 +252,13 @@ void vk_barrier_to_host(VkCommandBuffer cb);
 int vk_memory_type(WGPUAdapter ad, uint32_t bits, VkFlags want, VkFlags avoid);
 int vk_alloc_buffer(WGPUDevice dev, VkDeviceSize size, VkFlags usage, VkFlags mem_want, VkBuffer *buf,
                     VkDeviceMemory *mem, void **mapped);
+VkFormat vk_format(WGPUTextureFormat f, uint32_t *texel, VkFlags *aspect);
+WGPUTextureFormat vk_wgpu_format(VkFormat f);
+void vk_image_layout(VkCommandBuffer cb, VkImage img, VkFlags aspect, uint32_t from, uint32_t to);
+void vk_texture_ready(WGPUDevice dev, VkCommandBuffer cb, WGPUTexture t);   // into GENERAL, once
+VkCommandBuffer vk_upload_cb(WGPUDevice dev);                 // the upload command buffer (a barrier first)
+int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr);
+void vk_before(WGPUCommandEncoder e);                        // a command into e: a barrier first if needed
 // WGSL -> SPIR-V (engine/gpu/wgsl): 0 and the words (free them) or 1 and a message
 int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
 

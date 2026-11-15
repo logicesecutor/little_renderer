@@ -26,10 +26,11 @@ WGPUCommandEncoder wgpuDeviceCreateCommandEncoder(WGPUDevice device, WGPUCommand
 void wgpuCommandEncoderRelease(WGPUCommandEncoder e){ if (e) obj_unref(&e->o); }
 
 // before a command: the ones before it done (vk_impl.h: a full barrier)
-static void before(WGPUCommandEncoder e){
+void vk_before(WGPUCommandEncoder e){
     if (e->dirty) vk_barrier(e->cb);
     e->dirty = 1;
 }
+#define before vk_before
 
 static void cmdbuf_free(Obj *o){
     WGPUCommandBuffer c = (WGPUCommandBuffer)o;
