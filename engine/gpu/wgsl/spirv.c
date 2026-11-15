@@ -35,7 +35,17 @@ enum {
     OpAtomicCompareExchange = 230, OpAtomicIAdd = 234, OpAtomicISub = 235, OpAtomicSMin = 236,
     OpAtomicUMin = 237, OpAtomicSMax = 238, OpAtomicUMax = 239, OpAtomicAnd = 240, OpAtomicOr = 241,
     OpAtomicXor = 242, OpCopyLogical = 400, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249,
-    OpBranchConditional = 250, OpKill = 252, OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255
+    OpBranchConditional = 250, OpKill = 252, OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255,
+    OpExtension = 10,
+    // ray queries (SPV_KHR_ray_query)
+    OpTypeRayQueryKHR = 4472, OpRayQueryInitializeKHR = 4473, OpRayQueryTerminateKHR = 4474,
+    OpRayQueryGenerateIntersectionKHR = 4475, OpRayQueryConfirmIntersectionKHR = 4476, OpRayQueryProceedKHR = 4477,
+    OpRayQueryGetIntersectionTypeKHR = 4479, OpTypeAccelerationStructureKHR = 5341,
+    OpRayQueryGetIntersectionTKHR = 6018, OpRayQueryGetIntersectionInstanceCustomIndexKHR = 6019,
+    OpRayQueryGetIntersectionInstanceIdKHR = 6020, OpRayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR = 6021,
+    OpRayQueryGetIntersectionGeometryIndexKHR = 6022, OpRayQueryGetIntersectionPrimitiveIndexKHR = 6023,
+    OpRayQueryGetIntersectionBarycentricsKHR = 6024, OpRayQueryGetIntersectionFrontFaceKHR = 6025,
+    OpRayQueryGetIntersectionObjectToWorldKHR = 6031, OpRayQueryGetIntersectionWorldToObjectKHR = 6032
 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Workgroup = 4, SC_Private = 6,
        SC_Function = 7, SC_StorageBuffer = 12 };
@@ -69,7 +79,7 @@ static void put(Wgsl *W, Words *b, uint32_t x){
 
 // ---- types ----
 typedef enum { T_VOID, T_BOOL, T_I32, T_U32, T_F32, T_AINT, T_AFLOAT, T_VEC, T_MAT, T_ARRAY, T_RTARRAY,
-               T_STRUCT, T_ATOMIC, T_PTR, T_TEX, T_TEXDEPTH } Kind;
+               T_STRUCT, T_ATOMIC, T_PTR, T_TEX, T_TEXDEPTH, T_ACCEL, T_RAYQUERY } Kind;
 
 typedef struct Type Type;
 typedef struct StructInfo StructInfo;
@@ -104,7 +114,7 @@ typedef struct {
     uint32_t bound;
     uint32_t glsl;                   // the GLSL.std.450 import
     Type *types;
-    int cap_image_query, cap_derivative;
+    int cap_image_query, cap_derivative, cap_ray_query;
     // constants already made: (type, bits) -> id; vectors: (type, components) -> id
     struct { Type *t; uint64_t bits; uint32_t id; } *consts; int nconsts, cap_consts;
     struct { Type *t; double v[16]; uint32_t id; } *cc; int ncc, cap_cc;
@@ -183,6 +193,8 @@ static void type_name(Type *t, char *out, size_t n){
     case T_PTR: { char e[48]; type_name(t->e, e, sizeof(e)); snprintf(out, n, "ptr<%.40s>", e); break; }
     case T_TEX: snprintf(out, n, "texture_2d<f32>"); break;
     case T_TEXDEPTH: snprintf(out, n, "texture_depth_2d"); break;
+    case T_ACCEL: snprintf(out, n, "acceleration_structure"); break;
+    case T_RAYQUERY: snprintf(out, n, "ray_query"); break;
     }
 }
 
@@ -303,6 +315,8 @@ static uint32_t tid(Sp *S, Type *t){
         OP(S, &S->globals, OpTypeImage, t->id, f, 1, t->k == T_TEXDEPTH ? 1u : 0u, 0, 0, 1, 0);
         break;
     }
+    case T_ACCEL: t->id = new_id(S); OP(S, &S->globals, OpTypeAccelerationStructureKHR, t->id); S->cap_ray_query = 1; break;
+    case T_RAYQUERY: t->id = new_id(S); OP(S, &S->globals, OpTypeRayQueryKHR, t->id); S->cap_ray_query = 1; break;
     }
     return t->id;
 }
@@ -490,6 +504,8 @@ static Type *resolve_type(Cx *c, Node *n){
         if (l == 7 && s[0] == 'm' && s[1] == 'a' && s[2] == 't' && s[4] == 'x' && s[6] == 'f' &&
             s[3] >= '2' && s[3] <= '4' && s[5] >= '2' && s[5] <= '4') return t_mat(S, s[3] - '0', s[5] - '0');
         if (IS("texture_depth_2d")) return mk(S, T_TEXDEPTH, NULL, 0, 0, NULL);
+        if (IS("acceleration_structure")) return mk(S, T_ACCEL, NULL, 0, 0, NULL);
+        if (IS("ray_query")) return mk(S, T_RAYQUERY, NULL, 0, 0, NULL);
         Sym *sym = lookup(c, s, l);
         if (sym && sym->kind == SYM_STRUCT) return resolve_struct(c, sym->index);
         wgsl_fail(c->W, n->line, "unknown type '%.*s'", l, s);
@@ -1092,6 +1108,97 @@ static Val ptr_arg(Cx *c, Node *e, int line){
 
 static uint32_t barrier_scope_sem(Cx *c, uint32_t scope, uint32_t sem){ (void)c; return (scope << 16) | sem; }
 
+// ---- ray queries (SPV_KHR_ray_query; the WGSL of wgpu and of the WebGPU proposal, with
+// RayDesc, RayIntersection and the RAY_* constants predeclared by wgsl.c) ----
+static Type *predeclared(Cx *c, const char *name, int line){
+    Sym *sym = lookup(c, name, (int)strlen(name));
+    if (!sym || sym->kind != SYM_STRUCT) wgsl_fail(c->W, line, "internal: %s is not declared", name);
+    return resolve_struct(c, sym->index);
+}
+
+static Val rq_arg(Cx *c, Node *e, int line){
+    Val p = ptr_arg(c, e, line);
+    if (p.t->e->k != T_RAYQUERY) wgsl_fail(c->W, line, "expected a pointer to a ray_query (&rq)");
+    return p;
+}
+
+// committed (1) or candidate (0): a RayIntersection with every member
+static Val ray_intersection(Cx *c, uint32_t rq, int committed, int line){
+    Sp *S = SP(c);
+    Type *rt = predeclared(c, "RayIntersection", line);
+    Type *u = t_u32(S), *f = t_f32(S);
+    uint32_t which = c_u32(S, (uint32_t)committed), m[11];
+    uint32_t ty = nid(c);
+    E(c, OpRayQueryGetIntersectionTypeKHR, tid(S, u), ty, rq, which);
+    if (committed) m[0] = ty;
+    else {   // a candidate: 0 a triangle, 1 a box -> RAY_QUERY_INTERSECTION_TRIANGLE (1), _AABB (3)
+        uint32_t is_tri = nid(c), k = nid(c);
+        E(c, OpIEqual, tid(S, t_bool(S)), is_tri, ty, c_u32(S, 0));
+        E(c, OpSelect, tid(S, u), k, is_tri, c_u32(S, 1), c_u32(S, 3));
+        m[0] = k;
+    }
+    static const uint32_t ops[] = {OpRayQueryGetIntersectionTKHR, OpRayQueryGetIntersectionInstanceCustomIndexKHR,
+        OpRayQueryGetIntersectionInstanceIdKHR, OpRayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR,
+        OpRayQueryGetIntersectionGeometryIndexKHR, OpRayQueryGetIntersectionPrimitiveIndexKHR,
+        OpRayQueryGetIntersectionBarycentricsKHR, OpRayQueryGetIntersectionFrontFaceKHR,
+        OpRayQueryGetIntersectionObjectToWorldKHR, OpRayQueryGetIntersectionWorldToObjectKHR};
+    Type *mts[] = {f, u, u, u, u, u, t_vec(S, f, 2), t_bool(S), t_mat(S, 4, 3), t_mat(S, 4, 3)};
+    for (int i = 0; i < 10; i++){
+        m[1 + i] = nid(c);
+        E(c, ops[i], tid(S, mts[i]), m[1 + i], rq, which);
+    }
+    uint32_t a[13];
+    a[0] = tid(S, rt); a[1] = nid(c);
+    for (int i = 0; i < 11; i++) a[2 + i] = m[i];
+    op(S, FB(c), OpCompositeConstruct, 13, a);
+    return mkval(rt, a[1]);
+}
+
+static int ray_query_builtin(Cx *c, Node *call, Val *out){
+    Sp *S = SP(c);
+    const char *s = call->name; int l = call->nlen, n = call->n, line = call->line;
+#define IS(x) wgsl_name_is(s, l, x)
+    if (n < 1) wgsl_fail(c->W, line, "%.*s needs a ray_query", l, s);
+    Val p = rq_arg(c, call->list[0], line);
+    if (IS("rayQueryInitialize")){
+        if (n != 3) wgsl_fail(c->W, line, "rayQueryInitialize(&rq, acceleration_structure, RayDesc)");
+        Val acc = eval(c, call->list[1]);
+        if (acc.t->k != T_ACCEL || !acc.ref) wgsl_fail(c->W, line, "rayQueryInitialize: expected an acceleration_structure");
+        uint32_t as = load(c, &acc);
+        Val d = loaded(c, call->list[2]);
+        Type *dt = predeclared(c, "RayDesc", line);
+        if (d.t != dt) wgsl_fail(c->W, line, "rayQueryInitialize: expected a RayDesc");
+        uint32_t dv = value(c, &d), f[6];
+        for (int i = 0; i < 6; i++){ f[i] = nid(c); E(c, OpCompositeExtract, tid(S, dt->s->mt[i]), f[i], dv, (uint32_t)i); }
+        // flags, cull mask, origin, t min, direction, t max
+        E(c, OpRayQueryInitializeKHR, p.id, as, f[0], f[1], f[4], f[2], f[5], f[3]);
+        *out = mkval(t_void(S), 0);
+        return 1;
+    }
+    if (IS("rayQueryProceed")){
+        uint32_t r = nid(c);
+        E(c, OpRayQueryProceedKHR, tid(S, t_bool(S)), r, p.id);
+        *out = mkval(t_bool(S), r);
+        return 1;
+    }
+    if (IS("rayQueryGetCandidateIntersection") || IS("rayQueryGetCommittedIntersection")){
+        *out = ray_intersection(c, p.id, IS("rayQueryGetCommittedIntersection"), line);
+        return 1;
+    }
+    if (IS("rayQueryGenerateIntersection")){
+        if (n != 2) wgsl_fail(c->W, line, "rayQueryGenerateIntersection(&rq, t)");
+        Val t = convert(c, loaded(c, call->list[1]), t_f32(S), line);
+        E(c, OpRayQueryGenerateIntersectionKHR, p.id, value(c, &t));
+        *out = mkval(t_void(S), 0);
+        return 1;
+    }
+    if (IS("rayQueryConfirmIntersection")){ E(c, OpRayQueryConfirmIntersectionKHR, p.id); *out = mkval(t_void(S), 0); return 1; }
+    if (IS("rayQueryTerminate")){ E(c, OpRayQueryTerminateKHR, p.id); *out = mkval(t_void(S), 0); return 1; }
+#undef IS
+    wgsl_fail(c->W, line, "'%.*s' is not supported", l, s);
+    return 0;
+}
+
 static int builtin(Cx *c, Node *call, Val *out){
     Sp *S = SP(c);
     const char *s = call->name; int l = call->nlen, n = call->n, line = call->line;
@@ -1343,6 +1450,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         *out = mkval(t_u32(S), r);
         return 1;
     }
+    if (l > 8 && !memcmp(s, "rayQuery", 8)) return ray_query_builtin(c, call, out);
     if (IS("textureLoad") || IS("textureDimensions")){
         Val tex = eval(c, call->list[0]);
         if (!tex.ref || (tex.t->k != T_TEX && tex.t->k != T_TEXDEPTH)) wgsl_fail(c->W, line, "%.*s on a texture", l, s);
@@ -1597,6 +1705,7 @@ static void stmt(Cx *c, Node *s){
         Val ref; memset(&ref, 0, sizeof(ref)); ref.t = t; ref.id = var; ref.ref = 1; ref.sc = SC_Function;
         // (stored here, not as the variable's initializer: a declaration in a loop starts again each time)
         if (s->a) store(c, ref, v, s->line);
+        else if (t->k == T_RAYQUERY){}                 // (opaque: nothing to start it at)
         else E(c, OpStore, var, (is_scalar(t) || t->k == T_VEC) ? const_id(c, t, mkconst(t, 0).cv) : c_null(S, t));
         declare(c, s->name, s->nlen, SYM_VAR, ref);
         return;
@@ -2044,6 +2153,10 @@ void wgsl_emit(Wgsl *W, uint32_t **words, size_t *nwords){
     OP(S, &out, OpCapability, 1);                                      // Shader
     if (S->cap_image_query) OP(S, &out, OpCapability, 50);
     if (S->cap_derivative) OP(S, &out, OpCapability, 51);
+    if (S->cap_ray_query){
+        OP(S, &out, OpCapability, 4472);                               // RayQueryKHR
+        op_str(S, &out, OpExtension, 0, NULL, "SPV_KHR_ray_query", 17, 0, NULL);
+    }
     { uint32_t id = S->glsl; op_str(S, &out, OpExtInstImport, 1, &id, "GLSL.std.450", 12, 0, NULL); }
     OP(S, &out, OpMemoryModel, 0, 1);                                  // Logical, GLSL450
     Words *parts[] = {&S->entries, &S->modes, &S->names, &S->decos, &S->globals, &S->fns};

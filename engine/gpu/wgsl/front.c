@@ -569,7 +569,8 @@ void wgsl_parse(Wgsl *w){
             if (accept(w, TK_EQ)) g.init = expr(w);
             expect(w, TK_SEMI, "';'");
             if (g.type && g.type->k == N_TYPE && !g.is_const && (wgsl_name_is(g.type->name, g.type->nlen, "texture_2d") ||
-                wgsl_name_is(g.type->name, g.type->nlen, "texture_depth_2d"))) g.space = SP_HANDLE;
+                wgsl_name_is(g.type->name, g.type->nlen, "texture_depth_2d") ||
+                wgsl_name_is(g.type->name, g.type->nlen, "acceleration_structure"))) g.space = SP_HANDLE;
             if (g.is_const && !g.init) wgsl_fail(w, name->line, "a const needs a value");
             add_global(w, g);
         } else if (wgsl_name_is(t->s, t->len, "fn")){
