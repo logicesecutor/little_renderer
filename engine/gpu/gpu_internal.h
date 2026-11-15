@@ -7,6 +7,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <webgpu/webgpu.h>
+#ifdef LR_VK
+#include "gpu/vk/webgpu_rt.h"     // hardware ray tracing: our Vulkan layer's extension
+#endif
 #include "core/scene.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
@@ -28,6 +31,7 @@ struct Gpu {
     uint64_t native_window; // the X Window or HWND, 0 = none
     int software;        // the adapter is a CPU emulating a GPU
     int timestamps;      // passes can be timed (LR_GPU_TIMING=1 natively, and the adapter can)
+    int rt;              // hardware ray queries (make VK=1 on a GPU that has them; LR_GPU_HWRT=0: off)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
 };
@@ -45,7 +49,7 @@ int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBu
 
 // compute kernels: a layout of n buffers (binding i of types[i], 'U' uniform, 'D' uniform at
 // a dynamic offset, 'R' read-only storage, 'W' read-write storage, 'T' a float texture read
-// with textureLoad, '-' no binding i; up to 24), a pipeline on it, bind groups (of buffers), and 1-D
+// with textureLoad, 'A' an acceleration structure (g->rt only), '-' no binding i; up to 24), a pipeline on it, bind groups (of buffers), and 1-D
 // dispatches
 WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types);
 // a w x h float texture (channels 1: R32Float, 4: RGBA32Float) for 'T' bindings, filled with

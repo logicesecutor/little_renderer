@@ -167,12 +167,23 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     dd.requiredLimits = &want;
 #ifndef __EMSCRIPTEN__
     // timed passes (gpu_timer): only when asked, natively
-    static const WGPUFeatureName ts = WGPUFeatureName_TimestampQuery;
-    if (getenv("LR_GPU_TIMING") && wgpuAdapterHasFeature(adapter, ts)){
-        dd.requiredFeatureCount = 1;
-        dd.requiredFeatures = &ts;
+    static WGPUFeatureName feats[2];
+    size_t nfeats = 0;
+    if (getenv("LR_GPU_TIMING") && wgpuAdapterHasFeature(adapter, WGPUFeatureName_TimestampQuery)){
+        feats[nfeats++] = WGPUFeatureName_TimestampQuery;
         g->timestamps = 1;
     }
+#ifdef LR_VK
+    // hardware ray queries: our Vulkan layer's (gpu/vk/webgpu_rt.h), when the GPU has them;
+    // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
+    const char *hw = getenv("LR_GPU_HWRT");
+    if (!(hw && *hw == '0') && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)WGPUNativeFeature_RayQuery)){
+        feats[nfeats++] = (WGPUFeatureName)WGPUNativeFeature_RayQuery;
+        g->rt = 1;
+    }
+#endif
+    dd.requiredFeatureCount = nfeats;
+    dd.requiredFeatures = feats;
 #endif
     g->max_storage = lim.maxStorageBufferBindingSize < lim.maxBufferSize ? lim.maxStorageBufferBindingSize : lim.maxBufferSize;
     dd.uncapturedErrorCallbackInfo.callback = on_error;
@@ -376,6 +387,10 @@ int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBu
     return 1;
 }
 
+#ifdef LR_VK
+static LRBindGroupLayoutEntryTlas tlas_entry = {{NULL, LRSType_BindGroupLayoutEntryTlas}};
+#endif
+
 WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types){
     WGPUBindGroupLayoutEntry e[24];
     memset(e, 0, sizeof(e));
@@ -387,6 +402,10 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
         if (types[i] == 'T'){                    // a float texture read with textureLoad
             e[n].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
             e[n].texture.viewDimension = WGPUTextureViewDimension_2D;
+#ifdef LR_VK
+        } else if (types[i] == 'A'){             // an acceleration structure (webgpu_rt.h)
+            e[n].nextInChain = &tlas_entry.chain;
+#endif
         } else {
             e[n].buffer.type = types[i] == 'U' || types[i] == 'D' ? WGPUBufferBindingType_Uniform
                              : types[i] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
