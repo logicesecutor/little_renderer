@@ -125,9 +125,12 @@ UV_WIN = $(shell cygpath -u "$$USERPROFILE" 2>/dev/null)/.local/bin/uv.exe
 endif
 PYTHON = $(if $(shell command -v uv 2>/dev/null),uv run,$(if $(wildcard $(UV_WIN)),$(UV_WIN) run,python3))
 
-# cube, sphere, torus, dense torus into models/
+# cube, sphere, torus, dense torus into models/ (made here), then the HDR skies and the glTF
+# sample models (downloaded, about 30 MB, only those not there yet; without a network they
+# are skipped with a message and the rest still works)
 models:
 	$(PYTHON) tools/gen_models.py
+	$(MAKE) --no-print-directory skies-download gltf-download
 
 # (re)make a GIF from frames: make gif FRAMES_DIR=out/sim FPS=30
 FRAMES_DIR = out/sim
@@ -143,16 +146,25 @@ dragon-download:
 	tar xzf models/dragon_recon.tar.gz -C models
 	rm models/dragon_recon.tar.gz
 
-# Khronos glTF sample models (docs/PBR.md, PBR6), once, into models/gltf/ (CC BY 4.0; the
-# helmet's earlier version CC BY-NC 4.0): what the showcase and the glTF checks use.
-# Credit: The Khronos Group, glTF-Sample-Assets (each model's README names its authors).
+# a file downloaded unless it is already there: $(call fetch,file,url)
+fetch = if [ -s $(1) ]; then echo "have $(1)"; else echo "downloading $(1)"; \
+	curl -fsSL --create-dirs -o $(1) $(2) || { rm -f $(1); echo "could not download $(2) (no network?)"; }; fi
+
+# Khronos glTF sample models (docs/PBR.md, PBR6), once, into models/gltf/ (17 MB): what the
+# showcase (the damaged helmet) and the glTF checks use. Credit: The Khronos Group,
+# glTF-Sample-Assets (each model's README names its authors); CC BY 4.0, the helmet's earlier
+# version CC BY-NC 4.0.
 GLTF_URL = https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models
+GLTF_MODELS = DamagedHelmet MetalRoughSpheres NormalTangentMirrorTest OrientationTest BoxTextured
 gltf-download:
-	mkdir -p models/gltf/BoxTextured
-	for m in DamagedHelmet MetalRoughSpheres NormalTangentMirrorTest OrientationTest BoxTextured; do \
-	  curl -fL -o models/gltf/$$m.glb $(GLTF_URL)/$$m/glTF-Binary/$$m.glb; done
-	for f in BoxTextured.gltf BoxTextured0.bin CesiumLogoFlat.png; do \
-	  curl -fL -o models/gltf/BoxTextured/$$f $(GLTF_URL)/BoxTextured/glTF/$$f; done
+	@$(foreach m,$(GLTF_MODELS),$(call fetch,models/gltf/$(m).glb,$(GLTF_URL)/$(m)/glTF-Binary/$(m).glb);)
+	@$(foreach f,BoxTextured.gltf BoxTextured0.bin CesiumLogoFlat.png,$(call fetch,models/gltf/BoxTextured/$(f),$(GLTF_URL)/BoxTextured/glTF/$(f));)
+
+# HDR skies (docs/PBR.md, PBR4), once, into models/skies/ (13 MB): Poly Haven's, CC0
+SKY_URL = https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k
+SKIES = kloofendal_48d_partly_cloudy studio_small_09
+skies-download:
+	@$(foreach k,$(SKIES),$(call fetch,models/skies/$(k)_2k.hdr,$(SKY_URL)/$(k)_2k.hdr);)
 
 # ---- running ----------------------------------------------------------------------------
 
@@ -306,4 +318,4 @@ deps-clean:
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples check-layers models dragon-download gltf-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean

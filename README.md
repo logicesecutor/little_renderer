@@ -63,7 +63,7 @@ library behind one header (`lr.h`), with no third-party code in the engine.
 ## Quick start
 
 ```sh
-make models          # the test models (needs uv or python3, once)
+make models          # the test models, HDR skies and glTF samples (uv or python3; ~30 MB, once)
 make                 # the library, the programs, the examples
 bin/view             # fly through the Cornell box: WASD + mouse, M changes mode
 bin/render           # a path traced image -> out/cornell_boxes.png
@@ -137,7 +137,7 @@ test models by Ed Mackey, Analytical Graphics (CC BY 4.0), the textured box by C
 [Kloofendal 48d Partly Cloudy](https://polyhaven.com/a/kloofendal_48d_partly_cloudy) (CC0).
 The techniques come from the papers and books cited in each document under `docs/`.
 
-The new pictures were made with (after `make gltf-download`, the sky in `models/skies/`):
+The new pictures were made with (after `make models`, which downloads the sky and the models):
 
 ```sh
 K=models/skies/kloofendal_48d_partly_cloudy_2k.hdr
