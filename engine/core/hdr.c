@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // one RGBE pixel -> 3 floats: the mantissas times 2^(e - 128 - 8)
 static void rgbe_to_float(const unsigned char *p, float *o){
@@ -58,10 +59,12 @@ static long read_scanline(const unsigned char *d, long n, int w, unsigned char *
         const unsigned char *p = d + at;
         at += 4;
         if (p[0] == 1 && p[1] == 1 && p[2] == 1){
-            if (x == 0) return 0;
-            long rep = (long)p[3] << shift;
+            // (a row is at most 32767 pixels: three repeats in a row, a shift of 16, already
+            // cover it; a fourth, 24, is the last Radiance's own reader takes)
+            if (x == 0 || shift > 24) return 0;
+            int64_t rep = (int64_t)p[3] << shift;
             if (rep > w - x) return 0;
-            for (long i = 0; i < rep; i++, x++) memcpy(line + 4 * x, line + 4 * (x - 1), 4);
+            for (int64_t i = 0; i < rep; i++, x++) memcpy(line + 4 * x, line + 4 * (x - 1), 4);
             shift += 8;
         } else {
             memcpy(line + 4 * (x++), p, 4);

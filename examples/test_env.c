@@ -79,6 +79,12 @@ static void test_hdr(void){
     check("worst error / the pixel's largest channel", worst, 0, 1.0 / 128);
     free(img);
     free(back);
+    // the old run-length form, repeat pixels one after another: each shifts the count 8 bits
+    // more; past the row's length it is refused (it was undefined shifts)
+    static const unsigned char rle[] = {35,63,82,65,68,73,65,78,67,69,10,70,79,82,77,65,84,61,51,50,45,98,105,116,95,114,108,101,95,114,103,98,101,10,10,45,89,32,49,32,43,88,32,52,10,128,128,128,129,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,128,128,128,129,128,128,128,129,128,128,128,129};
+    float *bad = hdr_decode(rle, (long)sizeof(rle), &w2, &h2);
+    check("old run-length form, 20 repeats in a row: refused (stderr)", bad == NULL, 1, 0);
+    free(bad);
 }
 
 static void test_sampling(const char *name, Env *e){

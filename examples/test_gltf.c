@@ -235,8 +235,18 @@ int main(void){
         " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 12}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA\", \"byteLength\": 12}]}",
         "{\"asset\": {\"version\": \"2.0\"}, \"extensionsRequired\": [\"KHR_draco_mesh_compression\"]}",
         "{\"asset\": {\"version\": \"2.0\"}, \"nodes\": [{\"children\": [0]}]}",
+        // offsets that once wrapped the bounds check: negative, fractional, a huge stride
+        "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}], \"nodes\": [{\"mesh\": 0}],"
+        " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 1, \"type\": \"VEC3\"}],"
+        " \"bufferViews\": [{\"buffer\": 0, \"byteOffset\": -4096, \"byteLength\": 4108}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA\", \"byteLength\": 12}]}",
+        "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}], \"nodes\": [{\"mesh\": 0}],"
+        " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 1, \"type\": \"VEC3\", \"byteOffset\": 0.5}],"
+        " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 12}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA\", \"byteLength\": 12}]}",
+        "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}], \"nodes\": [{\"mesh\": 0}],"
+        " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}],"
+        " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 12, \"byteStride\": 1e19}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA\", \"byteLength\": 12}]}",
     };
-    for (int i = 0; i < 4; i++){
+    for (int i = 0; i < 7; i++){
         write_file("out/test_gltf_bad.gltf", bad_json[i], strlen(bad_json[i]));
         int n = load(&s, "out/test_gltf_bad.gltf");
         refused += n < 0;
@@ -244,7 +254,7 @@ int main(void){
         scene_free(&s);
     }
     char d[96];
-    snprintf(d, sizeof(d), "truncated, wrong version, past the buffer, Draco, a loop: %d of %d refused", refused, tries);
+    snprintf(d, sizeof(d), "truncated, version, past the buffer, Draco, loop, bad offsets: %d of %d refused", refused, tries);
     check(d, refused == tries);
     free(g); free(j); free(bu); free(iu); free(duri); free(iuri); free(png);
     if (failures){ printf("test_gltf: %d FAILED\n", failures); return 1; }

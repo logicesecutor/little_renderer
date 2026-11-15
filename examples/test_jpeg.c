@@ -10,6 +10,8 @@
 //    conversion).
 // 2. What a caller asks for: grey, grey + alpha, RGBA from the same file.
 // 3. Broken files are refused, not crashed on: truncated anywhere, bytes changed.
+// 4. Two crafted files that once read past a buffer or shifted out of range (make SAN=1 test
+//    checks them with the address and undefined-behaviour sanitizers).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,10 +100,39 @@ static void broken(void){
     check("truncated and changed files: no crash", crashed_not, d);
 }
 
+// two crafted files that once read out of bounds or shifted by more than an int has
+static void crafted(void){
+    printf("4. crafted files (messages on stderr expected)\n");
+    // ends inside its scan header: Ss, Se, Ah/Al are missing
+    static const unsigned char sos[] = {
+        0xFF,0xD8, 0xFF,0xC0, 0,11, 8, 0,8, 0,8, 1, 1,0x11,0,
+        0xFF,0xC4, 0,20, 0x00, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,
+        0xFF,0xDA, 0,6, 1, 1,0x00,0};
+    // a DC table whose only code means 200 extra bits (8-bit JPEG has at most 11)
+    static const unsigned char dc[] = {
+        0xFF,0xD8, 0xFF,0xDB, 0,67, 0, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+        1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+        0xFF,0xC0, 0,11, 8, 0,8, 0,8, 1, 1,0x11,0,
+        0xFF,0xC4, 0,20, 0x00, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 200,
+        0xFF,0xC4, 0,20, 0x10, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,
+        0xFF,0xDA, 0,8, 1, 1,0x00, 0,63,0, 0x00,0x00,0x00,0x00, 0xFF,0xD9};
+    int w, h, c;
+    for (int k = 0; k < 2; k++){
+        size_t n = k ? sizeof dc : sizeof sos;
+        unsigned char *d = malloc(n);              // (exactly as long: reading past it shows)
+        memcpy(d, k ? dc : sos, n);
+        unsigned char *px = jpeg_decode(d, n, &w, &h, &c, 0);
+        check(k ? "a DC category above 11: refused" : "a scan header cut short: refused", px == NULL, "");
+        free(px);
+        free(d);
+    }
+}
+
 int main(void){
     against_libjpeg();
     channels();
     broken();
+    crafted();
     if (failures){ printf("test_jpeg: %d FAILED\n", failures); return 1; }
     printf("all JPEG tests passed\n");
     return 0;

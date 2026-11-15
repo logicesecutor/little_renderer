@@ -140,10 +140,21 @@ static int be16(const uint8_t *p){ return p[0] << 8 | p[1]; }
 
 // ---- decoding one block ----------------------------------------------------------------------
 
-static void block_baseline(Jpeg *j, Bits *b, Comp *c, int16_t *blk){
+// the next DC difference, added to the prediction. An 8-bit JPEG's DC categories are 0..11
+// (the bit reader takes up to 16): a larger symbol is corrupt data, and the prediction is
+// held to a range no valid file leaves, so that nothing overflows on a crafted one
+static int dc_diff(Jpeg *j, Bits *b, Comp *c){
     int t = huff_decode(b, &j->dc[c->td], &j->bad);
+    if (t > 11){ j->bad = 1; t = 0; }
     int diff = t ? extend(bits_get(b, t), t) : 0;
     c->dc += diff;
+    if (c->dc > 65535) c->dc = 65535;
+    if (c->dc < -65536) c->dc = -65536;
+    return diff;
+}
+
+static void block_baseline(Jpeg *j, Bits *b, Comp *c, int16_t *blk){
+    dc_diff(j, b, c);
     blk[0] = (int16_t)c->dc;
     const Huff *ac = &j->ac[c->ta];
     for (int k = 1; k < 64;){
@@ -161,9 +172,7 @@ static void block_baseline(Jpeg *j, Bits *b, Comp *c, int16_t *blk){
 }
 
 static void block_dc_first(Jpeg *j, Bits *b, Comp *c, int16_t *blk, int al){
-    int t = huff_decode(b, &j->dc[c->td], &j->bad);
-    int diff = t ? extend(bits_get(b, t), t) : 0;
-    c->dc += diff;
+    dc_diff(j, b, c);
     blk[0] = (int16_t)(c->dc * (1 << al));
 }
 
@@ -247,9 +256,12 @@ static const uint8_t *next_marker(const uint8_t *p, const uint8_t *end){
 }
 
 static const uint8_t *scan(Jpeg *j, const uint8_t *p, int len){
+    // the header: Ns, then 2 bytes per component, then Ss, Se, Ah/Al (len counts the
+    // length's own 2 bytes too)
     const uint8_t *seg = p;
+    if (len < 3){ j->err = "bad scan header"; return NULL; }
     int ns = seg[0];
-    if (ns < 1 || ns > 4 || len < 4 + 2 * ns){ j->err = "bad scan header"; return NULL; }
+    if (ns < 1 || ns > 4 || len < 2 + 1 + 2 * ns + 3){ j->err = "bad scan header"; return NULL; }
     Comp *sc[4];
     for (int i = 0; i < ns; i++){
         int id = seg[1 + 2 * i], t = seg[2 + 2 * i];
@@ -261,7 +273,7 @@ static const uint8_t *scan(Jpeg *j, const uint8_t *p, int len){
     }
     int ss = seg[1 + 2 * ns], se = seg[2 + 2 * ns], ah = seg[3 + 2 * ns] >> 4, al = seg[3 + 2 * ns] & 15;
     if (!j->progressive){ ss = 0; se = 63; ah = al = 0; }
-    if (ss > se || se > 63 || (ss == 0 && se != 0 && j->progressive) || (ss > 0 && ns != 1)){
+    if (ss > se || se > 63 || (ss == 0 && se != 0 && j->progressive) || (ss > 0 && ns != 1) || ah > 13 || al > 13){
         j->err = "bad progressive scan";
         return NULL;
     }

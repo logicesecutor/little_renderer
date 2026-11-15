@@ -52,6 +52,15 @@ static uint8_t *read_file(const char *path, size_t *n){
     return b;
 }
 
+// a size or an offset from the JSON (absent: def): a whole number from 0 up; anything else
+// (negative, fractional, huge, not a number) is refused, 1, so that it never wraps a check
+static int json_size(const Json *v, size_t def, size_t *out){
+    if (!v){ *out = def; return 0; }
+    if (v->type != JSON_NUMBER || !(v->num >= 0) || v->num > (double)(SIZE_MAX / 4) || v->num != floor(v->num)) return 1;
+    *out = (size_t)v->num;
+    return 0;
+}
+
 static uint32_t le32(const uint8_t *p){ return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 
 // ---- URIs ------------------------------------------------------------------------------------
@@ -112,7 +121,8 @@ static int load_buffers(G *g){
     for (int i = 0; i < g->nbufs; i++){
         const Json *b = json_at(bl, i);
         const char *uri = json_str(json_get(b, "uri"), NULL);
-        size_t want = (size_t)json_num(json_get(b, "byteLength"), 0);
+        size_t want;
+        if (json_size(json_get(b, "byteLength"), 0, &want)){ fprintf(stderr, "gltf: buffer %d: bad byteLength\n", i); return 1; }
         Buf *d = &g->bufs[i];
         if (uri){
             d->own = uri_bytes(g, uri, &d->n);
@@ -169,12 +179,19 @@ static int acc_get(G *g, int index, Acc *a){
     const Json *v = json_at(json_get(g->j, "bufferViews"), bv);
     int bi = json_int(json_get(v, "buffer"), -1);
     if (!v || bi < 0 || bi >= g->nbufs){ fprintf(stderr, "gltf: accessor %d: bad buffer view\n", index); return 1; }
-    size_t voff = (size_t)json_num(json_get(v, "byteOffset"), 0), vlen = (size_t)json_num(json_get(v, "byteLength"), 0);
-    size_t aoff = (size_t)json_num(json_get(ac, "byteOffset"), 0);
-    a->stride = (size_t)json_num(json_get(v, "byteStride"), 0);
+    size_t voff, vlen, aoff;
+    if (json_size(json_get(v, "byteOffset"), 0, &voff) || json_size(json_get(v, "byteLength"), 0, &vlen) ||
+        json_size(json_get(ac, "byteOffset"), 0, &aoff) || json_size(json_get(v, "byteStride"), 0, &a->stride)){
+        fprintf(stderr, "gltf: accessor %d: a bad offset, length or stride\n", index);
+        return 1;
+    }
     if (!a->stride) a->stride = a->esize;
+    // inside the view, the view inside its buffer: by subtraction, so that nothing wraps
     const Buf *b = &g->bufs[bi];
-    if (voff + vlen > b->n || (a->count > 0 && aoff + a->stride * (size_t)(a->count - 1) + a->esize > vlen)){
+    int past = voff > b->n || vlen > b->n - voff;
+    if (!past && a->count > 0)
+        past = aoff > vlen || a->esize > vlen - aoff || (size_t)(a->count - 1) > (vlen - aoff - a->esize) / a->stride;
+    if (past){
         fprintf(stderr, "gltf: accessor %d runs past its buffer\n", index);
         return 1;
     }
@@ -229,9 +246,9 @@ static int decode_texture(G *g, int ti, int srgb, TexMap *tm){
     } else {
         const Json *v = json_at(json_get(g->j, "bufferViews"), json_int(json_get(im, "bufferView"), -1));
         int bi = json_int(json_get(v, "buffer"), -1);
-        size_t off = (size_t)json_num(json_get(v, "byteOffset"), 0);
-        n = (size_t)json_num(json_get(v, "byteLength"), 0);
-        if (v && bi >= 0 && bi < g->nbufs && off + n <= g->bufs[bi].n) data = g->bufs[bi].p + off;
+        size_t off;
+        if (v && bi >= 0 && bi < g->nbufs && !json_size(json_get(v, "byteOffset"), 0, &off) && !json_size(json_get(v, "byteLength"), 0, &n)
+            && off <= g->bufs[bi].n && n <= g->bufs[bi].n - off) data = g->bufs[bi].p + off;
     }
     if (!data){ fprintf(stderr, "gltf: image %d: no data\n", src); free(own); return 1; }
     int err = texmap_decode(tm, data, n, srgb);
@@ -529,7 +546,7 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
         while (at + 8 <= g->file_n){
             size_t n = le32(g->file + at);
             uint32_t type = le32(g->file + at + 4);
-            if (at + 8 + n > g->file_n) break;
+            if (n > g->file_n - at - 8) break;              // (by subtraction: no wrap)
             if (type == 0x4E4F534Au && !js){ js = g->file + at + 8; js_n = n; }
             else if (type == 0x004E4942u && !g->bin){ g->bin = g->file + at + 8; g->bin_n = n; }
             at += 8 + ((n + 3) & ~(size_t)3);

@@ -29,7 +29,7 @@ const Json *json_get(const Json *obj, const char *key);    // an object's item, 
 const Json *json_at(const Json *arr, int i);               // an array's item, or NULL
 int json_len(const Json *arr);                             // items of an array (0 if not one)
 double json_num(const Json *v, double def);                // a number, else def
-int json_int(const Json *v, int def);
+int json_int(const Json *v, int def);                       // (def also outside int's range)
 const char *json_str(const Json *v, const char *def);      // a string, else def
 
 #endif

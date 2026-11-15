@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 typedef struct {
     const char *p, *end, *start;
@@ -210,5 +211,8 @@ const Json *json_at(const Json *arr, int i){
 }
 int json_len(const Json *arr){ return arr && arr->type == JSON_ARRAY ? arr->n : 0; }
 double json_num(const Json *v, double def){ return v && v->type == JSON_NUMBER ? v->num : def; }
-int json_int(const Json *v, int def){ return v && v->type == JSON_NUMBER ? (int)v->num : def; }
+int json_int(const Json *v, int def){
+    // (outside int's range, or NaN: the default; converting it would be undefined)
+    return v && v->type == JSON_NUMBER && v->num >= (double)INT_MIN && v->num <= (double)INT_MAX ? (int)v->num : def;
+}
 const char *json_str(const Json *v, const char *def){ return v && v->type == JSON_STRING ? v->str : def; }
