@@ -260,6 +260,7 @@ typedef struct Scene {
     // coordinates (Triangle.t), each with a tangent: xyz along +u, w = +-1 the side of the
     // bitangent w (n x t), which points up the image (towards -v)
     TexMap *texmaps; int ntexmaps, cap_texmaps;
+    unsigned tex_version;   // a new number whenever a texture is added (the GPU's atlas follows it)
     Vec2 *uvs; Vec4 *tangents; int nuvs, cap_uvs;
     // The environment (core/env.h), owned by the scene (scene_free frees them):
     struct Env *env;        // the sky, at infinity: what a ray leaving the scene sees (NULL: black)

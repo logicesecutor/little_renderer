@@ -167,14 +167,17 @@ static int by_height(const void *a, const void *b){
     return q->h != p->h ? q->h - p->h : q->w - p->w;
 }
 
+// a reference let go (the texture goes when its last user lets it go: no wgpuTextureDestroy,
+// another user's bind groups may still hold it until their next sync)
 static void textures_release(GpuTextures *gt){
     if (gt->view) wgpuTextureViewRelease(gt->view);
-    if (gt->tex){ wgpuTextureDestroy(gt->tex); wgpuTextureRelease(gt->tex); }
+    if (gt->tex) wgpuTextureRelease(gt->tex);
     gt->view = NULL;
     gt->tex = NULL;
 }
 
-static void make_atlas(Gpu *g, GpuTextures *gt, int w, int h, const unsigned char *px){
+// an empty atlas of w x h (WebGPU starts textures at zero)
+static void new_atlas(Gpu *g, GpuTextures *gt, int w, int h){
     WGPUTextureDescriptor td;
     memset(&td, 0, sizeof(td));
     td.label = gpu_str("material textures");
@@ -185,17 +188,29 @@ static void make_atlas(Gpu *g, GpuTextures *gt, int w, int h, const unsigned cha
     td.mipLevelCount = 1;
     td.sampleCount = 1;
     gt->tex = wgpuDeviceCreateTexture(g->device, &td);
+    gt->view = wgpuTextureCreateView(gt->tex, NULL);
+}
+
+// w x h RGBA8 texels written at (x, y) of the atlas, straight from where they are (a texture
+// write needs no row alignment, unlike a buffer copy: no copy of the whole atlas on the CPU)
+static void put_rect(Gpu *g, GpuTextures *gt, int x, int y, int w, int h, const void *px){
     WGPUTexelCopyTextureInfo dst;
     memset(&dst, 0, sizeof(dst));
     dst.texture = gt->tex;
     dst.aspect = WGPUTextureAspect_All;
+    dst.origin = (WGPUOrigin3D){(uint32_t)x, (uint32_t)y, 0};
     WGPUTexelCopyBufferLayout lay;
     memset(&lay, 0, sizeof(lay));
     lay.bytesPerRow = (uint32_t)w * 4;
     lay.rowsPerImage = (uint32_t)h;
     WGPUExtent3D size = {(uint32_t)w, (uint32_t)h, 1};
     wgpuQueueWriteTexture(g->queue, &dst, px, (size_t)w * h * 4, &lay, &size);
-    gt->view = wgpuTextureCreateView(gt->tex, NULL);
+}
+
+static void white_atlas(Gpu *g, GpuTextures *gt){
+    static const unsigned char none[4] = {255, 255, 255, 255};
+    new_atlas(g, gt, 1, 1);
+    put_rect(g, gt, 0, 0, 1, 1, none);
 }
 
 // rows, left to right, a new row when one does not fit: the height they take in width aw
@@ -210,12 +225,11 @@ static int pack_rows(Rect *r, int nr, int aw){
     return y + row_h;
 }
 
-int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s){
-    const void *key = s->ntexmaps ? (const void *)s->texmaps[0].px : NULL;
-    if (gt->tex && gt->nsrc == s->ntexmaps && gt->src == (const void *)s->texmaps && gt->key == key) return 0;
+// the scene's atlas, built into gt (the Gpu's shared one)
+static void build_atlas(Gpu *g, GpuTextures *gt, const Scene *s){
     textures_release(gt);
     memset(gt->table, 0, sizeof(gt->table));
-    gt->src = s->texmaps; gt->nsrc = s->ntexmaps; gt->key = key;
+    gt->src = s->texmaps; gt->nsrc = s->ntexmaps; gt->version = s->tex_version;
     gt->ntex = 0;
     int n = s->ntexmaps < GPU_TEX_MAX ? s->ntexmaps : GPU_TEX_MAX;
     if (s->ntexmaps > GPU_TEX_MAX) fprintf(stderr, "GPU: %d textures, the GPU takes the first %d\n", s->ntexmaps, GPU_TEX_MAX);
@@ -261,13 +275,11 @@ int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s){
         if (skip[t]) fprintf(stderr, "GPU: texture %s from %d x %d (its first %d level(s) left out: the atlas is full)\n",
                              s->texmaps[t].name, s->texmaps[t].lw[skip[t]], s->texmaps[t].lh[skip[t]], skip[t]);
     if (!nr){
-        unsigned char none[4] = {255, 255, 255, 255};
-        make_atlas(g, gt, 1, 1, none);
+        white_atlas(g, gt);
         free(r);
-        return 1;
+        return;
     }
-    unsigned char *px = calloc((size_t)aw * ah, 4);
-    if (!px){ free(r); unsigned char none[4] = {255, 255, 255, 255}; make_atlas(g, gt, 1, 1, none); return 1; }
+    new_atlas(g, gt, aw, ah);
     // the table: per texture its first rectangle (in level order), then the rectangles
     int next = GPU_TEX_MAX;
     for (int t = 0; t < n; t++){
@@ -282,19 +294,41 @@ int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s){
         const TexMap *tm = &s->texmaps[r[i].tex];
         uint32_t *e = gt->table[gt->table[r[i].tex][0] + (uint32_t)(r[i].level - skip[r[i].tex])];
         e[0] = (uint32_t)r[i].x; e[1] = (uint32_t)r[i].y; e[2] = (uint32_t)r[i].w; e[3] = (uint32_t)r[i].h;
-        const uint32_t *src = tm->px + tm->at[r[i].level];
-        for (int yy = 0; yy < r[i].h; yy++)
-            memcpy(px + 4 * ((size_t)(r[i].y + yy) * aw + r[i].x), src + (size_t)yy * r[i].w, (size_t)r[i].w * 4);
+        put_rect(g, gt, r[i].x, r[i].y, r[i].w, r[i].h, tm->px + tm->at[r[i].level]);
     }
-    make_atlas(g, gt, aw, ah, px);
     gt->ntex = n;
-    free(px);
     free(r);
+}
+
+// The atlas is the Gpu's, one for every user (the rasterizer and the path tracer each built
+// their own, through a full-size copy on the CPU: the helmet's 120 MB twice). Each user keeps
+// a reference to its texture and view and a copy of the table: changed (1) when the scene's
+// textures did.
+int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s){
+    if (!g->atlas){
+        g->atlas = calloc(1, sizeof(GpuTextures));
+        if (!g->atlas) return 0;
+    }
+    GpuTextures *a = g->atlas;
+    if (!a->tex || a->nsrc != s->ntexmaps || a->src != (const void *)s->texmaps || a->version != s->tex_version)
+        build_atlas(g, a, s);
+    if (gt->tex == a->tex && gt->view == a->view) return 0;
+    textures_release(gt);
+    memcpy(gt, a, sizeof(*gt));
+    wgpuTextureAddRef(gt->tex);
+    wgpuTextureViewAddRef(gt->view);
     return 1;
 }
 
 void gpu_textures_free(GpuTextures *gt){
     textures_release(gt);
+}
+
+void gpu_atlas_free(Gpu *g){
+    if (!g || !g->atlas) return;
+    textures_release(g->atlas);
+    free(g->atlas);
+    g->atlas = NULL;
 }
 
 #else

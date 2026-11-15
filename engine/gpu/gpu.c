@@ -322,6 +322,7 @@ int gpu_software(const Gpu *g){ return g && g->software; }
 void gpu_destroy(Gpu *g){
     if (!g) return;
     for (int i = 0; i < MAX_LIVE; i++) if (live[i] == g) live[i] = NULL;
+    gpu_atlas_free(g);
     if (g->surface) wgpuSurfaceRelease(g->surface);
     if (g->queue) wgpuQueueRelease(g->queue);
     if (g->device) wgpuDeviceRelease(g->device);

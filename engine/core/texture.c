@@ -82,10 +82,43 @@ static unsigned char to_srgb8(double c){
     return (unsigned char)(c * 255 + 0.5);
 }
 
+// the linear values where the sRGB byte steps up: byte(c) = how many of them c reaches (the
+// same bytes as to_srgb8 without a pow per texel: making the helmet's mips spent most of its
+// time there)
+static double SRGB_UP[255];
+static int srgb_up_ready;
+
+static void srgb_up_init(void){
+    if (srgb_up_ready) return;
+#ifdef _OPENMP
+#pragma omp critical(texmap_srgb_up)
+#endif
+    if (!srgb_up_ready){
+        for (int i = 0; i < 255; i++){
+            double e = (i + 0.5) / 255;
+            SRGB_UP[i] = e <= 0.0031308 * 12.92 ? e / 12.92 : pow((e + 0.055) / 1.055, 2.4);
+        }
+#ifdef _OPENMP
+#pragma omp flush
+#endif
+        srgb_up_ready = 1;
+    }
+}
+
+static unsigned srgb8_fast(double c){
+    unsigned lo = 0, hi = 255;          // the answer is in [lo, hi]
+    while (lo < hi){
+        unsigned mid = (lo + hi) / 2;   // byte > mid when c reaches SRGB_UP[mid]
+        if (c >= SRGB_UP[mid]) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
 int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb){
     memset(t, 0, sizeof(*t));
     if (w <= 0 || h <= 0) return 1;
     const float *lut = texmap_srgb_table();
+    srgb_up_init();
     t->w = w; t->h = h; t->srgb = srgb;
     size_t total = 0;
     int lw = w, lh = h, n = 0;
@@ -114,14 +147,17 @@ int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb){
                 uint32_t c[4] = {src[y0 * sw + x0], src[y0 * sw + x1], src[y1 * sw + x0], src[y1 * sw + x1]};
                 uint32_t out = 0;
                 for (int ch = 0; ch < 4; ch++){
-                    double s = 0;
-                    for (int i = 0; i < 4; i++){
-                        unsigned b = (c[i] >> (8 * ch)) & 255;
-                        s += srgb && ch < 3 ? lut[b] : b;
+                    unsigned v;
+                    if (srgb && ch < 3){
+                        double s = 0;
+                        for (int i = 0; i < 4; i++) s += lut[(c[i] >> (8 * ch)) & 255];
+                        v = srgb8_fast(s * 0.25);
+                    } else {                    // linear: the integer average, rounded
+                        unsigned s = 0;
+                        for (int i = 0; i < 4; i++) s += (c[i] >> (8 * ch)) & 255;
+                        v = (s + 2) >> 2;
                     }
-                    s *= 0.25;
-                    unsigned v = srgb && ch < 3 ? to_srgb8(s) : (unsigned)(s + 0.5);
-                    out |= (uint32_t)(v > 255 ? 255 : v) << (8 * ch);
+                    out |= (uint32_t)v << (8 * ch);
                 }
                 dst[y * t->lw[k] + x] = out;
             }

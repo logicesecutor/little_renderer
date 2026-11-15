@@ -184,6 +184,13 @@ void scene_compute_tangents(const Triangle *tris, int ntris, const Vec2 *uvs, Ve
     free(tu); free(up); free(nn);
 }
 
+// numbers no two texture sets share, across scenes (a scene made again at the same address
+// with as many textures must not look unchanged to the GPU)
+static unsigned next_tex_version(void){
+    static unsigned v;
+    return ++v;
+}
+
 int scene_texture(Scene *s, const char *name, int srgb){
     if (!name || !*name) return 0;
     for (int i = 0; i < s->ntexmaps; i++)
@@ -196,12 +203,14 @@ int scene_texture(Scene *s, const char *name, int srgb){
     if (strlen(name) < sizeof(t.name)) snprintf(t.name, sizeof(t.name), "%s", name);
     s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
     s->texmaps[s->ntexmaps] = t;
+    s->tex_version = next_tex_version();
     return ++s->ntexmaps;
 }
 
 int scene_add_texmap(Scene *s, const TexMap *t){
     s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
     s->texmaps[s->ntexmaps] = *t;
+    s->tex_version = next_tex_version();
     return ++s->ntexmaps;
 }
 

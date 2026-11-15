@@ -29,6 +29,7 @@ struct Gpu {
     int software;        // the adapter is a CPU emulating a GPU
     int timestamps;      // passes can be timed (LR_GPU_TIMING=1 natively, and the adapter can)
     char canvas[64];
+    struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
 };
 
 // WGSL source kept in C: WGSL( ...code... ) turns the code into a string. The preprocessor
@@ -100,28 +101,30 @@ void gpu_bsdf_tables(float *out);
 // samples them (the includer declares var TEXA: texture_2d<f32> and fn tex_entry(k: u32) -> vec4u)
 #define GPU_TEX_MAX 32
 #define GPU_TEX_TABLE 512
-typedef struct {
+typedef struct GpuTextures {
     WGPUTexture tex;
     WGPUTextureView view;
     uint32_t table[GPU_TEX_TABLE][4];
     int ntex;
-    const void *src, *key;   // the scene's textures it was made from
+    const void *src;         // the scene's textures it was made from, and their version
+    unsigned version;
     int nsrc;
 } GpuTextures;
 extern const char *const GPU_WGSL_TEX;
 // (re)makes the atlas when the scene's textures changed (or the first time); returns 1 if it did
 int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s);
 void gpu_textures_free(GpuTextures *gt);
+void gpu_atlas_free(Gpu *g);                 // the shared atlas (gpu_destroy)
 // a unit direction as 2 floats (octahedral; WGSL oct_decode)
 void gpu_oct_encode(Vec3 d, float *out);
-// a material's textures as GPU_WGSL_TEX reads them (indices past ntex: none)
-void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
-GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // Submits one command buffer and returns a number for it (natively; 0 in a browser).
 // gpu_wait_for blocks until that submission is done (not the work submitted after it, as
 // gpu_wait would: the frame being drawn), then polls. In a browser it only polls.
 uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb);
 void gpu_wait_for(Gpu *g, uint64_t submission);
+// a material's textures as GPU_WGSL_TEX reads them (indices past ntex: none)
+void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
+GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
