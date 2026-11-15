@@ -23,7 +23,7 @@ Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost pe
 both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; R7
 (anti-aliasing for the rasterizers and the viewer: MSAA, FXAA/SMAA, TAA, the path tracer's
 pixel filter and denoiser guide); mixed materials for the falling meshes
-(`-meshmat mirror,diffuse`).
+(`-meshmat mirror,diffuse`); M1 (surface depth from textures, below).
 
 **Stopped: the web.** No browser checks and no web work until the user resumes it
 (PERFORMANCE.md W1). Meanwhile `make web` is not run; when the web resumes, the web build is
@@ -100,3 +100,28 @@ with transmission, one shading code for the CPU and GPU rasterizers and path tra
 environment for the rasterizer (light probes from the scene and HDR skies), textures, and
 glTF files with PNG and JPEG textures. All six phases are done (`-gltf`, `make
 gltf-download` for Khronos's sample models).
+
+## Later: M1, surface depth from textures (an idea, agreed 2026-11-15)
+
+Make surfaces look deep and detailed without more triangles: the model stays simple and
+textures carry the relief. Normal maps (PBR5) already bend the light; what they cannot do is
+move what is seen (a brick's edge does not hide the mortar behind it), cast the relief's own
+shadows or change the silhouette. The textures to add, each with a fallback when a model
+lacks it:
+
+- **height maps and parallax**: a height (depth) texture; the rasterizers march the view ray
+  through it (parallax occlusion mapping, Tatarchuk 2006; relief mapping) so the texture
+  coordinates shift where the surface would really be, with the relief's self-shadowing
+  towards the lamp from the same march. The path tracers the same at each hit (the ray
+  marched in the height field, then the shading point and normal there), so all four
+  pipelines still agree. The procedural bricks get their height map (it is already their
+  normal map's source);
+- **detail maps**: a second, finer normal and colour texture repeated many times over the
+  first, so close-ups stay sharp without huge textures;
+- the textures glTF already brings in, used further: the occlusion texture also on the
+  lamp's light where the relief hides it (only the light from around today); and a
+  displacement map as the step after, where the triangles are subdivided only near the camera
+  (tessellation) for real silhouettes, if parallax is not enough.
+
+glTF has no height map in its core material: an option to give one (`-heightmap`, as
+`-normalmap`), and the extensions that carry one read when models use them.
