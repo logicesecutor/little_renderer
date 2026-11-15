@@ -756,7 +756,7 @@ static Val binop(Cx *c, int opk, Val a, Val b, int line){
         E(c, OpVectorTimesScalar, tid(S, vt), r, vec, sc);
         return mkval(vt, r);
     }
-    if (scalar_of(a.t) != scalar_of(b.t)){
+    if (scalar_of(a.t) != scalar_of(b.t) && !((opk == TK_SHL || opk == TK_SHR) && is_uint(b.t) && !is_float(a.t))){
         char p[64], q[64];
         type_name(a.t, p, sizeof(p)); type_name(b.t, q, sizeof(q));
         wgsl_fail(c->W, line, "mixed types: %s and %s", p, q);

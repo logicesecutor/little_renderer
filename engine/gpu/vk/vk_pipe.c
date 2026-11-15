@@ -27,23 +27,26 @@ WGPUShaderModule wgpuDeviceCreateShaderModule(WGPUDevice device, WGPUShaderModul
         } else if (c->sType == WGPUSType_ShaderSourceWGSL){
             const WGPUShaderSourceWGSL *s = (const WGPUShaderSourceWGSL *)c;
             char err[1024];
-            if (wgsl_to_spirv(s->code.data, sv_len(s->code), &words, &nwords, err, sizeof(err))){
-                vk_error(device, WGPUErrorType_Validation, "shader %.*s: %s", (int)sv_len(d->label), d->label.data ? d->label.data : "", err);
-                return NULL;
-            }
-            code = words;
             // LR_VK_DUMP=dir: each WGSL module and its SPIR-V saved there (to check with spirv-val)
             const char *dump = getenv("LR_VK_DUMP");
+            static int k;
+            char path[512];
             if (dump && *dump){
-                static int k;
-                char path[512];
                 snprintf(path, sizeof(path), "%s/%03d.wgsl", dump, k);
                 FILE *f = fopen(path, "wb");
                 if (f){ fwrite(s->code.data, 1, sv_len(s->code), f); fclose(f); }
-                snprintf(path, sizeof(path), "%s/%03d.spv", dump, k++);
-                f = fopen(path, "wb");
+            }
+            if (wgsl_to_spirv(s->code.data, sv_len(s->code), &words, &nwords, err, sizeof(err))){
+                vk_error(device, WGPUErrorType_Validation, "shader %.*s (%03d): %s", (int)sv_len(d->label), d->label.data ? d->label.data : "", k++, err);
+                return NULL;
+            }
+            code = words;
+            if (dump && *dump){
+                snprintf(path, sizeof(path), "%s/%03d.spv", dump, k);
+                FILE *f = fopen(path, "wb");
                 if (f){ fwrite(words, 4, nwords, f); fclose(f); }
             }
+            k++;
         }
     }
     if (!code){ vk_error(device, WGPUErrorType_Validation, "shader module without WGSL or SPIR-V"); return NULL; }
