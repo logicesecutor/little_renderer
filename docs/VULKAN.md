@@ -1,7 +1,28 @@
 # Our own Vulkan backend: the plan (after PBR)
 
 The plan agreed on 2026-11-14 for the engine's GPU layer natively, step 6 of
-[ROADMAP.md](ROADMAP.md). Status: a plan; nothing implemented yet.
+[ROADMAP.md](ROADMAP.md). Work happens on the `vulkan` branch (merged only when agreed).
+Decided on 2026-11-15: `webgpu.h` on Vulkan first, natively only (the browser build is not
+kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web comes after.
+
+## Status
+
+| part | state |
+|---|---|
+| `engine/gpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | started; `tools/vk_check.py` checks every size, offset and constant against the official headers (636 checks, 0 differ) |
+| loader, instance, adapter, device, queue (timeline semaphore), submissions, polling, callbacks | done |
+| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/vk/test_gpu_basic` passes, with the validation layer |
+| bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | written, waiting for shaders |
+| WGSL → SPIR-V (`engine/gpu/wgsl`) | next |
+| textures, render pipelines and passes, the window's surface | to do (`vk_todo.c` says so at run time) |
+| acceleration structures, ray queries (R6) | after |
+
+Building: `make VK=1` (binaries in `bin/vk`; the webgpu.h header still comes from `make
+deps`). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed
+(MSYS2: `mingw-w64-ucrt-x86_64-vulkan-validation-layers`; then `VK_ADD_LAYER_PATH` to its
+`bin`). Development tools only, nothing linked: SPIRV-Tools (`spirv-val`, `spirv-dis`) and
+the validation layers, through MSYS2 (updated on 2026-11-15 for them: gcc 12.1 → 16.2, the
+builds and `make test` unchanged).
 
 ## The goal
 

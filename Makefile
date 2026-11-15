@@ -57,10 +57,20 @@ GPULIBS = $(WGPU_DIR)/lib/libwgpu_native.a $(WGPU_SYSLIBS)
 GPUDIR = -gpu
 endif
 
+# VK=1: our own Vulkan layer (engine/gpu/vk, docs/VULKAN.md) in place of wgpu-native: the
+# same webgpu.h (its header still from make deps), the WGSL compiled by engine/gpu/wgsl; the
+# Vulkan loader is opened at run time (no SDK needed to build). Binaries in bin/vk.
+ifeq ($(VK),1)
+GPUFLAGS = -DLR_GPU -DLR_WGPU_NATIVE -DLR_VK -I$(WGPU_DIR)/include
+GPULIBS = $(if $(filter Windows_NT,$(OS)),,-ldl)
+GPUDIR = -vk
+BIN := $(BIN)/vk
+endif
+
 BUILD = build/$(PREC)$(GPUDIR)
 INC = -Iengine
-HDR = $(wildcard engine/*.h engine/*/*.h)
-SRC = $(wildcard engine/*/*.c)
+HDR = $(wildcard engine/*.h engine/*/*.h engine/gpu/*/*.h)
+SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard engine/gpu/vk/*.c engine/gpu/wgsl/*.c))
 OBJ = $(patsubst engine/%.c,$(BUILD)/%.o,$(SRC))
 LIB = $(BUILD)/liblr.a
 
@@ -75,7 +85,7 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/hello_physics \
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/test_gpu_basic $(BIN)/hello_physics \
                               $(BIN)/mesh_rain)
 
 all: lib apps examples
@@ -194,7 +204,7 @@ view-dragon: $(BIN)/view$(EXE)
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
 # the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the physics (CPU and GPU)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE) $(BIN)/test_gpu_basic$(EXE)
 	mkdir -p out
 	$(BIN)/test_medium
 	$(BIN)/test_png
@@ -203,6 +213,7 @@ test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BI
 	$(BIN)/test_env
 	$(BIN)/test_tex
 	$(BIN)/test_gltf
+	$(BIN)/test_gpu_basic
 	$(BIN)/test_gpu_brdf
 	$(BIN)/test_physics
 	$(BIN)/test_gpu_rigid
