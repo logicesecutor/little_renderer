@@ -1167,7 +1167,10 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     v->t_bands++;
     double ms = gpu_now_ms() - v->t_submit_ms;
     // the time of a pass: from bands that did not begin an image (their time includes the guide
-    // of the whole image), or a smaller one than known (the first includes making the pipelines)
+    // of the whole image), or a smaller one than known (the first includes making the pipelines).
+    // A larger one from a band that began an image moves it a tenth of the way: while the
+    // camera moves every band begins one, and a lucky low value would stay, piling up passes
+    // (the helmet orbiting: 4 passes per frame, 19 ms frames, against the 10 ms meant)
     double per_pass = v->t_sub_rows > 0 && v->t_sub_reps > 0 ? ms * v->h / ((double)v->t_sub_rows * v->t_sub_reps) : 0;
     if (per_pass > 0 && (!v->t_sub_prep || v->t_gpu_pass_ms <= 0 || per_pass < v->t_gpu_pass_ms)) v->t_gpu_pass_ms = per_pass;
     if (ms < 12){
@@ -1212,12 +1215,16 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     // the caustics: while things move, one pass of light paths into the photon cache, which
     // fades a little each time (what moved fades out); still, a pass ending with this band
     // brings as many passes of the (exact) light tracer, and while that has few the cache
-    // goes on filling
-    if (gpu_trace_caustics_on(v->trace, &v->tparams)){
-        if (v->t_live && v->tparams.photon_cache){
-            gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 0.9, v->frame_u, v->dens, v->bricks, v->vstat);
+    // goes on filling. While things move, a quarter of the light paths: those caustics last a
+    // frame (or fade out of the cache), and all of them cost as much as the path tracer's pass
+    // in a room of moving bodies; all of them again once the view is still.
+    GpuTraceParams ltp = v->tparams;
+    if (v->t_live) ltp.photons *= 0.25;
+    if (gpu_trace_caustics_on(v->trace, &ltp)){
+        if (v->t_live && ltp.photon_cache){
+            gpu_trace_photons(v->trace, enc, s, &ltp, nvol, v->t_index, 0.9, v->frame_u, v->dens, v->bricks, v->vstat);
         } else if (v->t_y + rows >= v->h){
-            gpu_trace_light(v->trace, enc, s, &v->tparams, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+            gpu_trace_light(v->trace, enc, s, &ltp, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
             if (v->tparams.photon_cache && gpu_trace_caustic_passes(v->trace) < 32)
                 gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 1.0, v->frame_u, v->dens, v->bricks, v->vstat);
         }

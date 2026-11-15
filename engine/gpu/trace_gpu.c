@@ -2411,7 +2411,6 @@ struct GpuTrace {
     WGPUComputePipeline dc_pipe;
     WGPUBuffer grid, dc_params, pc_params;
     double pc_paths;         // light paths in the grid, faded as the grid is
-    double lt_frac;          // of the light paths per pass, this share (0: all; the cache in motion)
     float cell;              // its cells' size
     WGPUBuffer nodes, aux, prims, tris;
     // the sky (bindings 16, 17): its radiance and probabilities, its distributions; a 1 x 1
@@ -3345,7 +3344,7 @@ int gpu_trace_caustics_on(const GpuTrace *t, const GpuTraceParams *tp){ return t
 // light paths per pass: photons per pixel
 static uint32_t light_paths(const GpuTrace *t, const GpuTraceParams *tp){
     if (!gpu_trace_caustics_on(t, tp)) return 0;
-    double n = tp->photons * t->w * t->h * (t->lt_frac > 0 ? t->lt_frac : 1);
+    double n = tp->photons * t->w * t->h;
     return n < 1 ? 1u : (n > 1.6e7 ? 16000000u : (uint32_t)n);
 }
 
@@ -3709,13 +3708,9 @@ void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, cons
         wgpuBindGroupRelease(bg);
         t->pc_paths *= fade;
     }
-    // while things move (the cache fading), a quarter of the light paths: the cache averages
-    // over the last frames anyway, and this pass cost as much as the path tracer's
-    t->lt_frac = fade < 1 ? 0.25 : 1;
     write_params(t, t->pc_params, s, tp, 0, t->h, nvolumes, index ^ 0x5bd1e995u, 1, 1.0f);
     dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), 1, frame_u, dens, bricks, vstat, 2);
     t->pc_paths += light_paths(t, tp);
-    t->lt_frac = 1;
 }
 
 void gpu_trace_photons_clear(GpuTrace *t, WGPUCommandEncoder enc){
