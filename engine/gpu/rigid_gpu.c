@@ -8,6 +8,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){ (void)g; (void)pw; return NUL
 void gpu_rigid_set_wait(GpuRigid *gr, int wait){ (void)gr; (void)wait; }
 void gpu_rigid_sync(GpuRigid *gr){ (void)gr; }
 void gpu_rigid_destroy(GpuRigid *gr){ (void)gr; }
+int gpu_rigid_skipped(const GpuRigid *gr){ (void)gr; return 0; }
 #else
 
 #include <stdio.h>
@@ -1481,7 +1482,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 }
 );
 
-/* the warm start: each body's velocities with its contacts' starting impulses (each with the
 /* Each body's contact list, read 8 entries at a time by its 8 threads (a thread per body
    waited on one contact after the other); the 8 results added up by the first thread in the
    list's order (summed in another order, piles came to rest less often: 600 hulls asleep in
@@ -1504,6 +1504,7 @@ fn chunks(lv: u32, n: u32) -> u32 {
 }
 );
 
+/* the warm start: each body's velocities with its contacts' starting impulses (each with the
    whole mass: the shares average back to it), into V (the iterations' velocities) */
 static const char *K_APPLY = WGSL(
 @group(0) @binding(1) var<storage, read> B: array<Body>;
@@ -1516,11 +1517,11 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let lane = lv.x & 7u;
     let i = (wid.x + wid.y * nw.x) * 8u + (lv.x >> 3u);
     let live = i < P.n.x;
-    var dv = vec3f(0.0);
     var lo = 0u;
     var hi = 0u;
     if (live && B[i].vel.w != 0.0) { lo = off[i]; hi = off[i + 1u]; }
     let nch = chunks(lv.x, hi - lo);
+    var dv = vec3f(0.0);
     var dw = vec3f(0.0);
     for (var k = 0u; k < nch; k++) {
         var cv = vec3f(0.0);
@@ -1535,12 +1536,12 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             cv = j;
             cw = cross(r, j);
         }
-    }
         sdv[lv.x] = cv;
         sdw[lv.x] = cw;
         workgroupBarrier();
         if (lane == 0u) { for (var l = 0u; l < 8u; l++) { dv += sdv[lv.x + l]; dw += sdw[lv.x + l]; } }
         workgroupBarrier();
+    }
     if (!live || lane != 0u) { return; }
     let b = B[i];
     V[2u * i] = vec4f(b.vel.xyz + dv * b.vel.w, b.vel.w);
@@ -1570,11 +1571,11 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let i = (wid.x + wid.y * nw.x) * 8u + (lv.x >> 3u);
     let live = i < P.n.x;
     var w = 0.0;
-    var dv = vec3f(0.0);
     var lo = 0u;
     var hi = 0u;
     if (live) { w = B[i].vel.w; lo = off[i]; hi = off[i + 1u]; }
     let nch = chunks(lv.x, hi - lo);
+    var dv = vec3f(0.0);
     var dw = vec3f(0.0);
     for (var k = 0u; k < nch; k++) {
         var cv = vec3f(0.0);
@@ -1613,12 +1614,12 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
                 C[c].j = vec4f(jn, jt1, jt2, kj.w);
             }
         }
-    }
         sdv[lv.x] = cv;
         sdw[lv.x] = cw;
         workgroupBarrier();
         if (lane == 0u) { for (var l = 0u; l < 8u; l++) { dv += sdv[lv.x + l]; dw += sdw[lv.x + l]; } }
         workgroupBarrier();
+    }
     if (!live || lane != 0u) { return; }
     let v = Vi[2u * i];
     let a = Vi[2u * i + 1u];
@@ -1723,6 +1724,14 @@ struct GpuRigid {
     WGPUBuffer par_all;                          // every substep's parameters, 256 bytes apart:
     size_t par_all_cap;                          // copied into par before its substep's passes
     GpuTimer *timer;                             // LR_GPU_TIMING=1: GPU time per kernel
+    // a world all asleep, which nothing has changed since, is not stepped (P10): it would
+    // stay as it is. Steps are numbered; the bodies read back say whether all slept after
+    // theirs, and the last change (bodies, forces) the step it went in with
+    unsigned step_no, changed_at, rb_req_step, rb_step;
+    int rb_valid, rb_all_asleep;
+    Vec3 *last_f;                                // the forces of the last step
+    int last_n, last_null;
+    int skipped;                                 // steps not stepped
 };
 
 static const char *const RK_NAMES[NR] = {"forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
@@ -1964,6 +1973,14 @@ static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
             b->sleep_time = o[24];
             b->sleeping = o[25] > 0.5f;
         }
+        // all asleep after that step: no body moves (vel.w is its inverse mass while it is
+        // awake, 0 asleep or fixed); a body changed on the CPU since counts as awake
+        int awake = 0;
+        for (int i = 0; i < gr->rb_n && !awake; i++)
+            awake = d[32 * (size_t)i + 11] != 0 || (i < w->nbodies && w->bodies[i].dirty);
+        gr->rb_all_asleep = !awake;
+        gr->rb_step = gr->rb_req_step;
+        gr->rb_valid = 1;
         uint32_t nc;
         memcpy(&nc, d + 32 * (size_t)gr->rb_n, 4);
         w->ncontacts = (int)(nc < gr->cap_contacts ? nc : gr->cap_contacts);
@@ -2008,6 +2025,20 @@ static void dispatch(WGPUCommandEncoder enc, WGPUComputePassEncoder *pass, GpuRi
     dispatch1(*pass, gr, k, threads);
 }
 
+// the forces the same as the last step's (and remembered for the next)
+static int forces_same(GpuRigid *gr, const Vec3 *forces, int nb){
+    int same = gr->last_n == nb && gr->last_null == (forces == NULL) &&
+               (!forces || !nb || !memcmp(gr->last_f, forces, (size_t)nb * sizeof(Vec3)));
+    if (same) return 1;
+    Vec3 *f = forces && nb ? realloc(gr->last_f, (size_t)nb * sizeof(Vec3)) : gr->last_f;
+    if (forces && nb && !f){ gr->last_n = -1; return 0; }
+    gr->last_f = f;
+    if (forces && nb) memcpy(f, forces, (size_t)nb * sizeof(Vec3));
+    gr->last_n = nb;
+    gr->last_null = forces == NULL;
+    return 0;
+}
+
 static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, const Vec3 *forces){
     GpuRigid *gr = user;
     Gpu *g = gr->g;
@@ -2023,6 +2054,18 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         else gpu_wait(g);
     }
     const int nb = w->nbodies;
+    // Everything asleep after a step the bodies came back from, and nothing changed since
+    // (no body new or changed on the CPU, the same forces): the step would change nothing,
+    // so it is not made. (Sleeping bodies wake on the GPU only near a moving body, or when
+    // the force on them changes.)
+    int changed = nb != gr->nb || (size_t)nb > gr->cap_bodies || !gr->bodies;
+    for (int i = 0; i < nb && !changed; i++) changed = w->bodies[i].dirty;
+    if (!forces_same(gr, forces, nb)) changed = 1;
+    if (changed) gr->changed_at = gr->step_no;
+    else if (w->sleep && gr->rb_valid && gr->rb_all_asleep && gr->rb_step >= gr->changed_at){
+        gr->skipped++;
+        return 1;
+    }
     // the bodies the CPU changed (or all of them, into new buffers), in runs of neighbours:
     // one write per run, not per body; and the forces
     int fresh = reserve(gr, nb);
@@ -2141,6 +2184,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     if (!gr->rb_pending){
         gr->rb_pending = 1;
         gr->rb_n = nb;
+        gr->rb_req_step = gr->step_no;
         WGPUBufferMapCallbackInfo mi;
         memset(&mi, 0, sizeof(mi));
         mi.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -2154,6 +2198,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     wi.callback = on_done;
     wi.userdata1 = gr;
     gr->inflight++;
+    gr->step_no++;
     wgpuQueueOnSubmittedWorkDone(g->queue, wi);
     if (gr->wait) gpu_rigid_sync(gr);
     return 1;
@@ -2188,6 +2233,8 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
 
 void gpu_rigid_set_wait(GpuRigid *gr, int wait){ if (gr) gr->wait = wait; }
 
+int gpu_rigid_skipped(const GpuRigid *gr){ return gr ? gr->skipped : 0; }
+
 void gpu_rigid_sync(GpuRigid *gr){
     if (!gr) return;
     for (int k = 0; k < 2000 && gr->rb_pending; k++) gpu_wait(gr->g);
@@ -2213,6 +2260,7 @@ void gpu_rigid_destroy(GpuRigid *gr){
         if (gr->bgl[k]) wgpuBindGroupLayoutRelease(gr->bgl[k]);
     }
     free(gr->staging);
+    free(gr->last_f);
     free(gr);
 }
 

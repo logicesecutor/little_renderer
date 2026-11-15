@@ -30,6 +30,8 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw);
 void gpu_rigid_set_wait(GpuRigid *gr, int wait);
 // the bodies back to the CPU now (waits for the GPU)
 void gpu_rigid_sync(GpuRigid *gr);
+// steps not made because every body slept and nothing had changed (they would change nothing)
+int gpu_rigid_skipped(const GpuRigid *gr);
 // gives the bodies back to the CPU and frees the GPU's copy
 void gpu_rigid_destroy(GpuRigid *gr);
 

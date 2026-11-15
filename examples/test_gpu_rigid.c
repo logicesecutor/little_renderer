@@ -300,6 +300,12 @@ static void test_sleep(void){
     world_start(&w, 1);
     world_run(&w, 2.0);
     check("asleep after 2 s (of 3)", rigid_sleeping(&w.pw.rigid), 3, 0);
+    // all asleep, nothing changes: the steps are not made (P10), and nothing moves
+    int skipped0 = gpu_rigid_skipped(w.gr);
+    Vec3 top0 = w.pw.rigid.bodies[2].pos;
+    world_run(&w, 0.5);
+    check("all asleep: steps not made (of 120)", gpu_rigid_skipped(w.gr) - skipped0, 120, 2);
+    check("all asleep: the top box moved", v_len(v_sub(w.pw.rigid.bodies[2].pos, top0)), 0, 0);
     int d = rigid_add_box(&w.pw.rigid, vec3(278, 400, 278), vec3(40, 30, 40), quat_identity(), 1);
     int fewest = 3;
     for (int k = 0; k < 240; k++){

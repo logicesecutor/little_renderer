@@ -306,6 +306,11 @@ in a pile of hulls some body always jitters a little, and that kept whole island
 asleep after 40 s). Alone, the still ones fall asleep, hold the others still as fixed
 bodies, and the pile falls asleep from the bottom up (all 250 after 35 s).
 
+On the GPU a world whose bodies all sleep is not stepped at all while nothing changes (no
+body new or changed by the program, the same forces): a step would change nothing, since a
+sleeping body wakes only near a moving one or when the force on it changes. The CPU learns
+that all sleep from the bodies read back (a step late); a change steps the world again.
+
 A sleeping body **wakes** when:
 
 - a body faster than 20 cm/s (four times the "still" speed, so that a jittering neighbour
