@@ -387,9 +387,11 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
         if (types[i] == 'T'){                    // a float texture read with textureLoad
             e[n].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
             e[n].texture.viewDimension = WGPUTextureViewDimension_2D;
-        } else
-            e[n].buffer.type = types[i] == 'U' ? WGPUBufferBindingType_Uniform
+        } else {
+            e[n].buffer.type = types[i] == 'U' || types[i] == 'D' ? WGPUBufferBindingType_Uniform
                              : types[i] == 'R' ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
+            e[n].buffer.hasDynamicOffset = types[i] == 'D';   // where in the buffer: given at SetBindGroup
+        }
         n++;
     }
     WGPUBindGroupLayoutDescriptor d;

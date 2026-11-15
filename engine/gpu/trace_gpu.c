@@ -2411,6 +2411,7 @@ struct GpuTrace {
     WGPUComputePipeline dc_pipe;
     WGPUBuffer grid, dc_params, pc_params;
     double pc_paths;         // light paths in the grid, faded as the grid is
+    double lt_frac;          // of the light paths per pass, this share (0: all; the cache in motion)
     float cell;              // its cells' size
     WGPUBuffer nodes, aux, prims, tris;
     // the sky (bindings 16, 17): its radiance and probabilities, its distributions; a 1 x 1
@@ -2537,7 +2538,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     if (!src){ free(t); return NULL; }
     // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
     // blue noise
-    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRRWU-----TTTU");
+    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRDRRRRWU-----TTTU");
     t->timer = gpu_timer_create(g, 1024, NTS);
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
@@ -2576,7 +2577,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->ploc_small = small_env && atoi(small_env) > 0 ? atoi(small_env) : 1024;
     t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
-    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRURRRR-UW------TU");
+    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRDRRRR-UW------TU");
     t->lt_pipe = gpu_compute(g, "light tracer", src, "ltrace", t->lt_bgl);
     t->rs_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWRR");
     t->dc_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UW");
@@ -3344,7 +3345,7 @@ int gpu_trace_caustics_on(const GpuTrace *t, const GpuTraceParams *tp){ return t
 // light paths per pass: photons per pixel
 static uint32_t light_paths(const GpuTrace *t, const GpuTraceParams *tp){
     if (!gpu_trace_caustics_on(t, tp)) return 0;
-    double n = tp->photons * t->w * t->h;
+    double n = tp->photons * t->w * t->h * (t->lt_frac > 0 ? t->lt_frac : 1);
     return n < 1 ? 1u : (n > 1.6e7 ? 16000000u : (uint32_t)n);
 }
 
@@ -3420,7 +3421,8 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 }
 
 // `repeats` dispatches, the r-th with the r-th copy of the parameters (light = 1: the light
-// tracer, whose binding 11 takes the place of 9)
+// tracer, whose binding 11 takes the place of 9): one bind group, the copy chosen by its
+// dynamic offset (it was a bind group per dispatch, each several us of the CPU's time)
 static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
                         WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
@@ -3431,7 +3433,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     for (int i = 0; i < 11; i++){
         e[i].binding = (uint32_t)(light && i == 9 ? 11 : i);
         e[i].buffer = b[i];
-        e[i].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;
+        e[i].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;   // (4: at the dynamic offset)
     }
     int nent = 11;
     if (!light){                    // the path tracer: the sky too (the light tracer has none)
@@ -3449,18 +3451,18 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
                                 : timed_pass(t, enc, light ? TS_LIGHT : TS_TRACE,
                                              light ? repeats : (double)threads * repeats / ((double)t->w * t->h));
     wgpuComputePassEncoderSetPipeline(pass, pipe);
+    WGPUBindGroupDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.layout = light ? t->lt_bgl : t->bgl;
+    d.entryCount = (size_t)nent;
+    d.entries = e;
+    WGPUBindGroup bg = wgpuDeviceCreateBindGroup(t->g->device, &d);
     for (int r = 0; r < repeats; r++){
-        e[4].offset = (uint64_t)r * GTP_STRIDE;
-        WGPUBindGroupDescriptor d;
-        memset(&d, 0, sizeof(d));
-        d.layout = light ? t->lt_bgl : t->bgl;
-        d.entryCount = (size_t)nent;
-        d.entries = e;
-        WGPUBindGroup bg = wgpuDeviceCreateBindGroup(t->g->device, &d);
-        wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+        uint32_t off = (uint32_t)(r * GTP_STRIDE);
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
         gpu_dispatch(pass, threads);
-        wgpuBindGroupRelease(bg);
     }
+    wgpuBindGroupRelease(bg);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
 }
@@ -3707,9 +3709,13 @@ void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, cons
         wgpuBindGroupRelease(bg);
         t->pc_paths *= fade;
     }
+    // while things move (the cache fading), a quarter of the light paths: the cache averages
+    // over the last frames anyway, and this pass cost as much as the path tracer's
+    t->lt_frac = fade < 1 ? 0.25 : 1;
     write_params(t, t->pc_params, s, tp, 0, t->h, nvolumes, index ^ 0x5bd1e995u, 1, 1.0f);
     dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), 1, frame_u, dens, bricks, vstat, 2);
     t->pc_paths += light_paths(t, tp);
+    t->lt_frac = 1;
 }
 
 void gpu_trace_photons_clear(GpuTrace *t, WGPUCommandEncoder enc){
