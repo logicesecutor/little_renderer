@@ -283,7 +283,11 @@ every contact pushes its own copy, then the body takes the average of its copies
 velocities. That is a sequential-impulse solve of a different but equivalent system, it
 converges like 1.3 and does not depend on the order. An iteration is a single pass (P10):
 before, a pass worked out every contact's impulse and a second added them to the bodies,
-twice the passes, and each body's thread then waited on one contact after the other. Warm starting is the same as on the
+twice the passes, and each body's thread then waited on one contact after the other. Two
+details matter there: both bodies of a contact must get exactly the same impulse (the same
+instructions, the side applied after by an exact sign; computed in two branches it could
+round differently, momentum was not kept and piles rested less often), and a body adds its
+contacts in its list's order (in another order, the same). Warm starting is the same as on the
 CPU: each new contact looks for the old one of the same pair, within 1 cm, and starts from
 its impulses.
 

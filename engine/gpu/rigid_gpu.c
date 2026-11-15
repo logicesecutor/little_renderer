@@ -1482,39 +1482,66 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 );
 
 /* the warm start: each body's velocities with its contacts' starting impulses (each with the
-   whole mass: the shares average back to it), into V (the iterations' velocities); 8 threads
-   per body, as K_SOLVE */
+/* Each body's contact list, read 8 entries at a time by its 8 threads (a thread per body
+   waited on one contact after the other); the 8 results added up by the first thread in the
+   list's order (summed in another order, piles came to rest less often: 600 hulls asleep in
+   40 s 3 times out of 6, against 6 of 6). LANES(...) declares the workgroup's memory;
+   chunks() is how many rounds of 8 the longest list in the workgroup needs. */
+static const char *K_LANES = WGSL(
+var<workgroup> sdv: array<vec3f, 64>;
+var<workgroup> sdw: array<vec3f, 64>;
+var<workgroup> nlist: array<u32, 8>;
+var<workgroup> nmax: u32;
+fn chunks(lv: u32, n: u32) -> u32 {
+    if ((lv & 7u) == 0u) { nlist[lv >> 3u] = (n + 7u) / 8u; }
+    workgroupBarrier();
+    if (lv == 0u) {
+        var m = 0u;
+        for (var k = 0u; k < 8u; k++) { m = max(m, nlist[k]); }
+        nmax = m;
+    }
+    return workgroupUniformLoad(&nmax);
+}
+);
+
+   whole mass: the shares average back to it), into V (the iterations' velocities) */
 static const char *K_APPLY = WGSL(
 @group(0) @binding(1) var<storage, read> B: array<Body>;
 @group(0) @binding(2) var<storage, read> C: array<Contact>;
 @group(0) @binding(3) var<storage, read> off: array<u32>;
 @group(0) @binding(4) var<storage, read> L: array<u32>;
 @group(0) @binding(5) var<storage, read_write> V: array<vec4f>;
-var<workgroup> sdv: array<vec3f, 64>;
-var<workgroup> sdw: array<vec3f, 64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let lane = lv.x & 7u;
     let i = (wid.x + wid.y * nw.x) * 8u + (lv.x >> 3u);
     let live = i < P.n.x;
     var dv = vec3f(0.0);
+    var lo = 0u;
+    var hi = 0u;
+    if (live && B[i].vel.w != 0.0) { lo = off[i]; hi = off[i + 1u]; }
+    let nch = chunks(lv.x, hi - lo);
     var dw = vec3f(0.0);
-    if (live && B[i].vel.w != 0.0) {
-        for (var q = off[i] + lane; q < off[i + 1u]; q += 8u) {
+    for (var k = 0u; k < nch; k++) {
+        var cv = vec3f(0.0);
+        var cw = vec3f(0.0);
+        let q = lo + 8u * k + lane;
+        if (q < hi) {
             let e = L[q];
             let ci = e >> 1u;
             var j = C[ci].imp.xyz;
             var r: vec3f;
             if ((e & 1u) != 0u) { j = -j; r = C[ci].rb.xyz; } else { r = C[ci].ra.xyz; }
-            dv += j;
-            dw += cross(r, j);
+            cv = j;
+            cw = cross(r, j);
         }
     }
-    sdv[lv.x] = dv;
-    sdw[lv.x] = dw;
-    workgroupBarrier();
+        sdv[lv.x] = cv;
+        sdw[lv.x] = cw;
+        workgroupBarrier();
+        if (lane == 0u) { for (var l = 0u; l < 8u; l++) { dv += sdv[lv.x + l]; dw += sdw[lv.x + l]; } }
+        workgroupBarrier();
     if (!live || lane != 0u) { return; }
-    for (var k = 1u; k < 8u; k++) { dv += sdv[lv.x + k]; dw += sdw[lv.x + k]; }
     let b = B[i];
     V[2u * i] = vec4f(b.vel.xyz + dv * b.vel.w, b.vel.w);
     V[2u * i + 1u] = vec4f(b.ang.xyz + inv_inertia(b) * dw, b.ang.w);
@@ -1527,9 +1554,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
    velocities (Vo). A contact is worked out by both of its bodies, the same way, from the
    same numbers; its first body keeps the result (Jo, and C.j for the next substep). A
    fixed or sleeping body does only its first-body contacts (their impulses) and keeps its
-   velocities; the fixed mesh, never a first body, nothing. 8 threads per body share its
-   list (a thread per body waited on one contact after the other), their sums added up in
-   the workgroup's memory. */
+   velocities; the fixed mesh, never a first body, nothing. 8 threads per body (K_LANES). */
 static const char *K_SOLVE = WGSL(
 @group(0) @binding(1) var<storage, read> B: array<Body>;
 @group(0) @binding(2) var<storage, read_write> C: array<Contact>;
@@ -1539,8 +1564,6 @@ static const char *K_SOLVE = WGSL(
 @group(0) @binding(6) var<storage, read_write> Vo: array<vec4f>;
 @group(0) @binding(7) var<storage, read> Ji: array<vec4f>;
 @group(0) @binding(8) var<storage, read_write> Jo: array<vec4f>;
-var<workgroup> sdv: array<vec3f, 64>;
-var<workgroup> sdw: array<vec3f, 64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let lane = lv.x & 7u;
@@ -1548,13 +1571,19 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let live = i < P.n.x;
     var w = 0.0;
     var dv = vec3f(0.0);
+    var lo = 0u;
+    var hi = 0u;
+    if (live) { w = B[i].vel.w; lo = off[i]; hi = off[i + 1u]; }
+    let nch = chunks(lv.x, hi - lo);
     var dw = vec3f(0.0);
-    if (live) {
-        w = B[i].vel.w;
-        for (var q = off[i] + lane; q < off[i + 1u]; q += 8u) {
-            let e = L[q];
-            let second = (e & 1u) != 0u;
-            if (w == 0.0 && second) { continue; }
+    for (var k = 0u; k < nch; k++) {
+        var cv = vec3f(0.0);
+        var cw = vec3f(0.0);
+        let q = lo + 8u * k + lane;
+        var e = 0u;
+        if (q < hi) { e = L[q]; }
+        let second = (e & 1u) != 0u;
+        if (q < hi && !(w == 0.0 && second)) {
             let c = e >> 1u;
             /* the 6 of the contact's 10 vec4s it uses (and its impulses so far, Ji) */
             let kn = C[c].n;
@@ -1574,22 +1603,23 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             let jt1 = clamp(kj.y - kt2.w * dot(d, kt1.xyz), -lim, lim);
             let jt2 = clamp(kj.z - kj.w * dot(d, kt2.xyz), -lim, lim);
             let imp = n * (jn - kj.x) + kt1.xyz * (jt1 - kj.y) + kt2.xyz * (jt2 - kj.z);
-            if (second) {
-                dv -= imp;
-                dw += cross(krb.xyz, -imp);
-            } else {
+            /* both bodies' threads must get the very same impulse (or momentum is not kept,
+               and piles never rest): the same instructions for both, the side applied after
+               (by an exact sign), not in two branches the compiler may round differently */
+            cv = imp * select(1.0, -1.0, second);
+            cw = cross(select(kra.xyz, krb.xyz, second), cv);
+            if (!second) {
                 Jo[c] = vec4f(jn, jt1, jt2, kj.w);
                 C[c].j = vec4f(jn, jt1, jt2, kj.w);
-                dv += imp;
-                dw += cross(kra.xyz, imp);
             }
         }
     }
-    sdv[lv.x] = dv;
-    sdw[lv.x] = dw;
-    workgroupBarrier();
+        sdv[lv.x] = cv;
+        sdw[lv.x] = cw;
+        workgroupBarrier();
+        if (lane == 0u) { for (var l = 0u; l < 8u; l++) { dv += sdv[lv.x + l]; dw += sdw[lv.x + l]; } }
+        workgroupBarrier();
     if (!live || lane != 0u) { return; }
-    for (var k = 1u; k < 8u; k++) { dv += sdv[lv.x + k]; dw += sdw[lv.x + k]; }
     let v = Vi[2u * i];
     let a = Vi[2u * i + 1u];
     if (w == 0.0) { Vo[2u * i] = v; Vo[2u * i + 1u] = a; return; }
@@ -1647,8 +1677,8 @@ static const struct { const char *name, *types; const char **body, **more, **mor
     {"bodies: lists 1",  "UWWW",     &K_SCAN, NULL, NULL},
     {"bodies: lists 2",  "URWRWW",   &K_FILL, NULL, NULL},
     {"bodies: prepare",  "URWWRRRRW", &K_PREP, NULL, NULL},
-    {"bodies: solve",    "URWRRRWRW", &K_SOLVE, NULL, NULL},
-    {"bodies: warm start", "URRRRW", &K_APPLY, NULL, NULL},
+    {"bodies: solve",    "URWRRRWRW", &K_LANES, &K_SOLVE, NULL},
+    {"bodies: warm start", "URRRRW", &K_LANES, &K_APPLY, NULL},
     {"bodies: move",     "UWR",      &K_POS, NULL, NULL},
     {"bodies: wake",     "URWR",     &K_WAKE, NULL, NULL},
     {"bodies: sleep",    "UWR",      &K_SLEEP, NULL, NULL},
