@@ -10,18 +10,23 @@ uint32_t sampler_hash(uint32_t x){
     return x;
 }
 
-static uint32_t reverse_bits(uint32_t x){
+static inline uint32_t reverse_bits(uint32_t x){
     x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
     x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
     x = ((x >> 4) & 0x0f0f0f0fu) | ((x & 0x0f0f0f0fu) << 4);
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_bswap32(x);             // the bytes' order: one instruction
+#else
     x = ((x >> 8) & 0x00ff00ffu) | ((x & 0x00ff00ffu) << 8);
     return (x >> 16) | (x << 16);
+#endif
 }
 
 // Owen scrambling: each bit is flipped depending on (a hash of) all the bits above it, which
 // keeps the points stratified. Burley's hash runs on the reversed bits (it mixes upward).
-uint32_t sampler_owen(uint32_t x, uint32_t seed){
-    x = reverse_bits(x);
+// owen_reversed takes x's bits already reversed (the van der Corput dimension is i reversed:
+// scrambling it is the hash of i itself, two reversals fewer)
+static inline uint32_t owen_reversed(uint32_t x, uint32_t seed){
     x ^= x * 0x3d20adeau;
     x += seed;
     x *= (seed >> 16) | 1u;
@@ -29,6 +34,8 @@ uint32_t sampler_owen(uint32_t x, uint32_t seed){
     x ^= x * 0x53a22864u;
     return reverse_bits(x);
 }
+
+uint32_t sampler_owen(uint32_t x, uint32_t seed){ return owen_reversed(reverse_bits(x), seed); }
 
 // the second Sobol dimension (the first is reverse_bits(i), van der Corput)
 uint32_t sampler_sobol1(uint32_t i){
@@ -149,7 +156,7 @@ void sampler_2d(Sampler *s, int dim, real *a, real *b){
     uint32_t tile = sampler_hash(((uint32_t)(s->x >> 6) * 73856093u) ^ ((uint32_t)(s->y >> 6) * 19349663u));
     uint32_t seed = sampler_hash(s->seed ^ sampler_hash(((uint32_t)dim * 0x9e3779b9u) ^ tile));
     uint32_t i = sampler_owen(s->index, seed);           // the order, shuffled (stratified prefixes)
-    uint32_t xa = sampler_owen(reverse_bits(i), sampler_hash(seed ^ 0xa511e9b3u));
+    uint32_t xa = owen_reversed(i, sampler_hash(seed ^ 0xa511e9b3u));       // = sampler_owen(reverse_bits(i), ...)
     uint32_t xb = sampler_owen(sampler_sobol1(i), sampler_hash(seed ^ 0x63d83595u));
     int ox = s->x + 23 * dim, oy = s->y + 41 * dim;
     *a = wrap01(unit(xa) + bn_value(m, ox, oy));
