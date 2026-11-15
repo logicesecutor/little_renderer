@@ -2349,6 +2349,60 @@ fn small(@builtin(local_invocation_index) lid: u32) {
 }
 );
 
+#ifdef LR_VK
+// ---- hardware ray tracing (our Vulkan layer, gpu/vk/webgpu_rt.h) ----
+// traverse() with ray queries, in place of the BVH's (renamed traverse_bvh, unused): the
+// same Found. The top level's instances: the world's triangles (custom data HW_WTRI), its
+// spheres and quads as boxes (HW_WPRIM: primitive i is prims[i], hit here by the CPU's
+// tests), and the scene's instances (custom data: the instance; a mesh's triangles, its
+// first triangle in the SBT offset, which ray queries leave unused; a ball or a box: the
+// unit box, hit here in its own space). Triangles are opaque: the hardware keeps the
+// nearest; a box is a candidate the loop below tests against the nearest so far.
+static const char *HW_TRAVERSE = WGSL(
+@group(0) @binding(20) var ACC: acceleration_structure;
+const HW_WTRI: u32 = 0xffffffu;
+const HW_WPRIM: u32 = 0xfffffeu;
+fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, ACC, RayDesc(select(RAY_FLAG_NONE, RAY_FLAG_TERMINATE_ON_FIRST_HIT, stop_at_first), 0xffu,
+                                         tmin, tmax, r.o, r.d));
+    while (rayQueryProceed(&rq)) {
+        let c = rayQueryGetCandidateIntersection(&rq);
+        let cm = rayQueryGetCommittedIntersection(&rq);
+        let tm = select(tmax, cm.t, cm.kind != RAY_QUERY_INTERSECTION_NONE);
+        var t = -1.0;
+        if (c.instance_custom_data == HW_WPRIM) {
+            let pr = prims[c.primitive_index];
+            if (pr.q.w < 0.5) { t = hit_sphere(pr, r, tmin, tm); } else { t = hit_quad(pr, r, tmin, tm); }
+        } else {
+            let i = c.instance_custom_data;
+            let o = to_object(i, r);
+            if (bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z) == UNIT_SPHERE) { t = hit_unit_sphere(o, tmin, tm); }
+            else { t = hit_unit_box(o, tmin, tm); }
+        }
+        if (t > 0.0) {
+            rayQueryGenerateIntersection(&rq, t);
+            if (stop_at_first) { rayQueryTerminate(&rq); }
+        }
+    }
+    let h = rayQueryGetCommittedIntersection(&rq);
+    if (h.kind == RAY_QUERY_INTERSECTION_TRIANGLE) {
+        let inst = select(h.instance_custom_data, NONE, h.instance_custom_data == HW_WTRI);
+        return Found(h.t, T.opt.z + h.sbt_record_offset + h.primitive_index, h.barycentrics, inst);
+    }
+    if (h.kind == RAY_QUERY_INTERSECTION_GENERATED) {
+        if (h.instance_custom_data == HW_WPRIM) { return Found(h.t, h.primitive_index, vec2f(0.0), NONE); }
+        let i = h.instance_custom_data;
+        return Found(h.t, bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z), vec2f(0.0), i);
+    }
+    return Found(tmax, NONE, vec2f(0.0), NONE);
+}
+);
+#define HW_WTRI 0xffffffu
+#define HW_WPRIM 0xfffffeu
+#define HW_BINDING 20
+#endif
+
 #define RT_EPS_F 2e-3f           // rt/tracer.c, float build: minimum ray distance
 #define RT_SHADOW_MARGIN_F 2e-2f // shadow rays stop this far before the lamp
 #define CHUNK_TRIS 32768
@@ -2484,6 +2538,20 @@ struct GpuTrace {
     WGPUBuffer wf, wfc, wfa, wf_params;
     int wf_rows;             // rows per wave
     const char *types_wgsl, *media_wgsl;
+#ifdef LR_VK
+    // hardware ray tracing (g->rt; LR_GPU_HWRT=0 natively: the BVH, as everywhere else): the
+    // bottom levels of the world's triangles, its spheres and quads (boxes), each mesh, the
+    // unit box (balls and boxes); the top level over them and the instances, built every
+    // frame from records written by upload_instances (HW_TRAVERSE)
+    int hw;
+    WGPUBuffer hw_vtx, hw_boxes, hw_rec, hw_unit_buf;   // vertices (3 per triangle, as `tris`), boxes, records
+    size_t hw_vtx_cap, hw_boxes_cap, hw_rec_cap;
+    LRBlas hw_tri, hw_prim, hw_unit, *hw_mesh;
+    unsigned char *hw_mesh_dirty;
+    int hw_nmesh, hw_tri_dirty, hw_prim_dirty, hw_unit_dirty;
+    LRTlas hw_tlas;
+    uint32_t hw_tlas_cap, hw_ninst;
+#endif
 };
 enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_WF0, NTS = TS_WF0 + 6 };
 static const char *const TS_NAMES[NTS] = {"path tracer", "light tracer (caustics)", "BVH builds",
@@ -2517,12 +2585,56 @@ static char *trace_source(GpuTrace *t, int sky, int wave){
     const int n = (int)(sizeof(parts) / sizeof(parts[0]));
     size_t len = 1;
     for (int i = 0; i < n; i++) len += strlen(parts[i]);
+#ifdef LR_VK
+    if (t->hw) len += strlen(HW_TRAVERSE) + 8;
+#endif
     char *src = malloc(len);
     if (!src) return NULL;
     src[0] = 0;
     for (int i = 0; i < n; i++) strcat(src, parts[i]);
+#ifdef LR_VK
+    if (t->hw){
+        char *f = strstr(src, "fn traverse(");
+        if (f){
+            memmove(f + 15, f + 11, strlen(f + 11) + 1);   // (room made by the 4 bytes of len above)
+            memcpy(f + 11, "_bvh", 4);
+        }
+        strcat(src, "\n");
+        strcat(src, HW_TRAVERSE);
+    }
+#endif
     return src;
 }
+
+// a layout's types (gpu_layout) with the acceleration structure at HW_BINDING when the
+// kernels trace with ray queries and use the scene (binding 5, the BVH, is there)
+static const char *layout_types(const GpuTrace *t, const char *types, char *buf, size_t n){
+#ifdef LR_VK
+    size_t k = strlen(types);
+    if (t->hw && k > 5 && types[5] == 'R' && n > HW_BINDING + 1){
+        memset(buf, '-', HW_BINDING);
+        memcpy(buf, types, k < HW_BINDING ? k : HW_BINDING);
+        buf[HW_BINDING] = 'A';
+        buf[HW_BINDING + 1] = 0;
+        return buf;
+    }
+#else
+    (void)t; (void)buf; (void)n;
+#endif
+    return types;
+}
+
+#ifdef LR_VK
+// the bind group entry of the top level (HW_BINDING), chained to `te`
+static void hw_entry(GpuTrace *t, WGPUBindGroupEntry *e, LRBindGroupEntryTlas *te){
+    memset(te, 0, sizeof(*te));
+    te->chain.sType = LRSType_BindGroupEntryTlas;
+    te->tlas = t->hw_tlas;
+    memset(e, 0, sizeof(*e));
+    e->binding = HW_BINDING;
+    e->nextInChain = &te->chain;
+}
+#endif
 
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl){
     if (!g || g->state != GPU_READY) return NULL;
@@ -2533,11 +2645,15 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->h = height;
     t->types_wgsl = types_wgsl;
     t->media_wgsl = media_wgsl;
+#ifdef LR_VK
+    t->hw = g->rt;
+#endif
     char *src = trace_source(t, 0, 0);
+    char lt[32];
     if (!src){ free(t); return NULL; }
     // frame, densities, bricks, media boxes, parameters, nodes, aux, prims, tris, accumulation,
     // blue noise
-    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRDRRRRWU-----TTTU");
+    t->bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRRWU-----TTTU", lt, sizeof(lt)));
     t->timer = gpu_timer_create(g, 1024, NTS);
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
@@ -2576,7 +2692,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->ploc_small = small_env && atoi(small_env) > 0 ? atoi(small_env) : 1024;
     t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
-    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRRDRRRR-UW------TU");
+    t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRR-UW------TU", lt, sizeof(lt)));
     t->lt_pipe = gpu_compute(g, "light tracer", src, "ltrace", t->lt_bgl);
     t->rs_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWRR");
     t->dc_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UW");
@@ -2768,7 +2884,13 @@ static void ploc_build(GpuTrace *t, WGPUComputePassEncoder pass, const GpuBuild 
 }
 
 // the BVHs queued since the last call (the top level over the instances, dynamic meshes')
+#ifdef LR_VK
+static void hw_build(GpuTrace *t, WGPUCommandEncoder enc);
+#endif
 static void gpu_trace_build(GpuTrace *t, WGPUCommandEncoder enc){
+#ifdef LR_VK
+    hw_build(t, enc);
+#endif
     if (t->nbuild == 0) return;
     Gpu *g = t->g;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
@@ -2992,6 +3114,19 @@ static int upload_tris(GpuTrace *t, const Triangle *src, int n, uint32_t first, 
         int k = n - f < CHUNK_TRIS ? n - f : CHUNK_TRIS;
         put_tris(tr, src + f, k, nrm0);
         wgpuQueueWriteBuffer(t->g->queue, t->tris, (uint64_t)(first + (uint32_t)f) * 48, tr, (size_t)k * 48);
+#ifdef LR_VK
+        if (t->hw && t->hw_vtx){            // its corners, for the bottom levels (36 bytes: q, q + u, q + v)
+            float *v = (float *)tr;
+            for (int i = 0; i < k; i++){
+                const Triangle *q = &src[f + i];
+                Vec3 c[3] = {q->q, v_add(q->q, q->u), v_add(q->q, q->v)};
+                for (int j = 0; j < 3; j++){
+                    v[9 * i + 3 * j] = (float)c[j].x; v[9 * i + 3 * j + 1] = (float)c[j].y; v[9 * i + 3 * j + 2] = (float)c[j].z;
+                }
+            }
+            wgpuQueueWriteBuffer(t->g->queue, t->hw_vtx, (uint64_t)(first + (uint32_t)f) * 36, v, (size_t)k * 36);
+        }
+#endif
     }
     free(tr);
     return 1;
@@ -3054,6 +3189,23 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     size_t bytes_tris = (size_t)(tris ? tris : 1) * 48;
     if (too_big(g, bytes_tris)) return 0;
     gpu_buffer_reserve(g, &t->tris, &t->tris_cap, bytes_tris, st, "triangles");
+#ifdef LR_VK
+    if (t->hw){
+        // the corners (made again: the bottom levels read them where they are), every
+        // bottom level of triangles to be made again
+        gpu_buffer_reserve(g, &t->hw_vtx, &t->hw_vtx_cap, (size_t)(tris ? tris : 1) * 36, st, "triangles' corners");
+        for (int m = 0; m < t->hw_nmesh; m++) lrBlasRelease(t->hw_mesh[m]);
+        free(t->hw_mesh); free(t->hw_mesh_dirty);
+        t->hw_nmesh = s->nmeshes;
+        t->hw_mesh = calloc((size_t)(s->nmeshes ? s->nmeshes : 1), sizeof(LRBlas));
+        t->hw_mesh_dirty = calloc((size_t)(s->nmeshes ? s->nmeshes : 1), 1);
+        if (!t->hw_mesh || !t->hw_mesh_dirty){ t->hw_nmesh = 0; return 0; }
+        lrBlasRelease(t->hw_tri);
+        t->hw_tri = NULL;
+        if (tris > 0xffffffu)                // (a mesh's first triangle goes in 24 bits)
+            fprintf(stderr, "GPU path tracer: more than 16M triangles: some meshes will be hit wrongly\n");
+    }
+#endif
     // (the node and shape buffers: sized with the world's part, by upload_world)
     t->layout_nodes = nodes;
     t->layout_aux = t->world_ref0;
@@ -3192,6 +3344,38 @@ static int upload_world(GpuTrace *t, const Scene *s){
         put(o + 20, p->w, 0);
     }
     if (s->nprims) wgpuQueueWriteBuffer(g->queue, t->prims, 0, pr, (size_t)s->nprims * 96);
+#ifdef LR_VK
+    if (t->hw){
+        // their boxes (a little larger: a flat quad's box is not flat), a bottom level of them
+        float *bx = pr;
+        for (int i = 0; i < s->nprims; i++){
+            const Primitive *p = &s->prims[i];
+            Aabb b;
+            if (p->type == PRIM_QUAD){
+                b.lo = b.hi = p->q;
+                Vec3 c[3] = {v_add(p->q, p->u), v_add(p->q, p->v), v_add(v_add(p->q, p->u), p->v)};
+                for (int k = 0; k < 3; k++){
+                    b.lo = vec3(r_fmin(b.lo.x, c[k].x), r_fmin(b.lo.y, c[k].y), r_fmin(b.lo.z, c[k].z));
+                    b.hi = vec3(r_fmax(b.hi.x, c[k].x), r_fmax(b.hi.y, c[k].y), r_fmax(b.hi.z, c[k].z));
+                }
+            } else {
+                Vec3 r = vec3(p->radius, p->radius, p->radius);
+                b.lo = v_sub(p->center, r); b.hi = v_add(p->center, r);
+            }
+            Vec3 d = v_sub(b.hi, b.lo);
+            real pad = 1e-4 * (d.x + d.y + d.z) + 1e-4;
+            Vec3 pv = vec3(pad, pad, pad);
+            b.lo = v_sub(b.lo, pv); b.hi = v_add(b.hi, pv);
+            float *o = bx + 6 * (size_t)i;
+            o[0] = (float)b.lo.x; o[1] = (float)b.lo.y; o[2] = (float)b.lo.z;
+            o[3] = (float)b.hi.x; o[4] = (float)b.hi.y; o[5] = (float)b.hi.z;
+        }
+        gpu_buffer_reserve(g, &t->hw_boxes, &t->hw_boxes_cap, (size_t)(s->nprims + 1) * 24, st, "spheres' and quads' boxes");
+        if (s->nprims) wgpuQueueWriteBuffer(g->queue, t->hw_boxes, 0, bx, (size_t)s->nprims * 24);
+        lrBlasRelease(t->hw_prim);
+        t->hw_prim = NULL;
+    }
+#endif
     free(pr);
     Primitive *c = realloc(t->prim_copy, (size_t)(s->nprims ? s->nprims : 1) * sizeof(Primitive));
     if (!c) return 0;
@@ -3217,6 +3401,107 @@ static int upload_world(GpuTrace *t, const Scene *s){
     t->valid = 1;
     return 1;
 }
+
+static int hw_on(const GpuTrace *t){
+#ifdef LR_VK
+    return t->hw;
+#else
+    (void)t;
+    return 0;
+#endif
+}
+
+#ifdef LR_VK
+static LRBlas hw_blas(GpuTrace *t, const char *label, LRGeometryType type, WGPUBuffer buf, uint64_t offset, uint32_t count){
+    LRGeometry g;
+    memset(&g, 0, sizeof(g));
+    g.type = type;
+    g.buffer = buf;
+    g.offset = offset;
+    g.stride = type == LRGeometry_Triangles ? 12 : 24;
+    g.count = count;
+    g.opaque = type == LRGeometry_Triangles;
+    LRBlasDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.label = gpu_str(label);
+    d.geometryCount = 1;
+    d.geometries = &g;
+    return lrDeviceCreateBlas(t->g->device, &d);
+}
+
+static void hw_record(LRTlasInstance *r, const Xform *xf, uint32_t custom, uint32_t sbt, LRBlas b){
+    memset(r, 0, sizeof(*r));
+    for (int i = 0; i < 3; i++)
+        for (int k = 0; k < 4; k++) r->transform[i][k] = xf ? (float)xf->m[i][k] : (i == k ? 1.0f : 0.0f);
+    r->custom_mask = custom | 0xffu << 24;
+    r->sbt_flags = sbt;
+    r->blas = lrBlasGetAddress(b);
+}
+
+// the bottom levels missing made (built at the next gpu_trace_build), the top level's records
+static int hw_records(GpuTrace *t, const Scene *s){
+    Gpu *g = t->g;
+    if (!t->hw_tri && s->ntris > 0){
+        t->hw_tri = hw_blas(t, "the world's triangles", LRGeometry_Triangles, t->hw_vtx, 0, (uint32_t)s->ntris);
+        t->hw_tri_dirty = 1;
+    }
+    if (!t->hw_prim && s->nprims > 0){
+        t->hw_prim = hw_blas(t, "spheres and quads", LRGeometry_Boxes, t->hw_boxes, 0, (uint32_t)s->nprims);
+        t->hw_prim_dirty = 1;
+    }
+    if (!t->hw_unit){
+        static const float unit[6] = {-1, -1, -1, 1, 1, 1};
+        if (!t->hw_unit_buf) t->hw_unit_buf = gpu_buffer(g, "the unit box", 24, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
+        wgpuQueueWriteBuffer(g->queue, t->hw_unit_buf, 0, unit, 24);
+        t->hw_unit = hw_blas(t, "the unit box", LRGeometry_Boxes, t->hw_unit_buf, 0, 1);
+        t->hw_unit_dirty = 1;
+    }
+    for (int m = 0; m < t->hw_nmesh && m < s->nmeshes; m++)
+        if (!t->hw_mesh[m] && s->meshes[m].ntris > 0){
+            t->hw_mesh[m] = hw_blas(t, "a mesh", LRGeometry_Triangles, t->hw_vtx, (uint64_t)t->mc[m].tri0 * 36, (uint32_t)s->meshes[m].ntris);
+            t->hw_mesh_dirty[m] = 1;
+        }
+    // the records: the world's triangles, its spheres and quads, the instances
+    size_t most = (size_t)s->ninsts + 2;
+    LRTlasInstance *r = malloc(most * sizeof(*r));
+    if (!r) return 0;
+    uint32_t n = 0;
+    if (t->hw_tri) hw_record(&r[n++], NULL, HW_WTRI, 0, t->hw_tri);
+    if (t->hw_prim) hw_record(&r[n++], NULL, HW_WPRIM, 0, t->hw_prim);
+    for (int i = 0; i < s->ninsts; i++){
+        const Instance *in = &s->insts[i];
+        LRBlas b = in->mesh >= 0 ? (in->mesh < t->hw_nmesh ? t->hw_mesh[in->mesh] : NULL) : t->hw_unit;
+        if (!b) continue;
+        hw_record(&r[n++], &in->xf, (uint32_t)i, in->mesh >= 0 ? t->mc[in->mesh].tri0 : 0, b);
+    }
+    gpu_buffer_reserve(g, &t->hw_rec, &t->hw_rec_cap, most * sizeof(*r), WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
+                       "top level: instances");
+    if (n) wgpuQueueWriteBuffer(g->queue, t->hw_rec, 0, r, (size_t)n * sizeof(*r));
+    free(r);
+    if (!t->hw_tlas || n > t->hw_tlas_cap){
+        uint32_t cap = 64;
+        while (cap < n) cap *= 2;
+        lrTlasRelease(t->hw_tlas);
+        t->hw_tlas = lrDeviceCreateTlas(g->device, cap, gpu_str("the scene's top level"));
+        t->hw_tlas_cap = t->hw_tlas ? cap : 0;
+        if (!t->hw_tlas) return 0;
+    }
+    t->hw_ninst = n;
+    return 1;
+}
+
+// the bottom levels that changed, then the top level (every frame: instances move)
+static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
+    if (!t->hw || !t->hw_tlas) return;
+    if (t->hw_tri_dirty && t->hw_tri) lrCommandEncoderBuildBlas(enc, t->hw_tri);
+    if (t->hw_prim_dirty && t->hw_prim) lrCommandEncoderBuildBlas(enc, t->hw_prim);
+    if (t->hw_unit_dirty && t->hw_unit) lrCommandEncoderBuildBlas(enc, t->hw_unit);
+    t->hw_tri_dirty = t->hw_prim_dirty = t->hw_unit_dirty = 0;
+    for (int m = 0; m < t->hw_nmesh; m++)
+        if (t->hw_mesh_dirty[m] && t->hw_mesh[m]){ lrCommandEncoderBuildBlas(enc, t->hw_mesh[m]); t->hw_mesh_dirty[m] = 0; }
+    lrCommandEncoderBuildTlas(enc, t->hw_tlas, t->hw_rec, 0, t->hw_ninst);
+}
+#endif
 
 // the instances' records, the dynamic meshes' triangles; their BVHs to build (gpu_trace_build)
 static int upload_instances(GpuTrace *t, const Scene *s){
@@ -3260,7 +3545,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             free(nd);
             free(ax);
         } else tl = NULL;
-        if (!tl) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
+        if (!tl && !hw_on(t)) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
         free(box);
     }
     // dynamic meshes: their new triangles, and a BVH of them built on the GPU in their place
@@ -3269,6 +3554,14 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         GpuMeshCopy *c = &t->mc[m];
         if (sm->dynamic ? c->version == sm->version : !t->blas_gpu || c->built) continue;
         if (sm->dynamic && !upload_tris(t, sm->tris, sm->ntris, c->tri0, c->nrm0)) return 0;
+#ifdef LR_VK
+        if (hw_on(t)){                       // its bottom level built again instead
+            if (m < t->hw_nmesh) t->hw_mesh_dirty[m] = 1;
+            c->version = sm->version;
+            c->built = 1;
+            continue;
+        }
+#endif
         float *box = malloc((size_t)(sm->ntris ? sm->ntris : 1) * 32);
         if (!box) return 0;
         for (int i = 0; i < sm->ntris; i++){
@@ -3281,6 +3574,9 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         c->version = sm->version;
         c->built = 1;
     }
+#ifdef LR_VK
+    if (hw_on(t) && !hw_records(t, s)) return 0;
+#endif
     return 1;
 }
 
@@ -3427,7 +3723,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
-    WGPUBindGroupEntry e[15];
+    WGPUBindGroupEntry e[16];
     memset(e, 0, sizeof(e));
     for (int i = 0; i < 11; i++){
         e[i].binding = (uint32_t)(light && i == 9 ? 11 : i);
@@ -3443,6 +3739,10 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     e[nent].binding = 18; e[nent].textureView = t->gt.view;           // the textures
     e[nent + 1].binding = 19; e[nent + 1].buffer = t->txt; e[nent + 1].size = WGPU_WHOLE_SIZE;
     nent += 2;
+#ifdef LR_VK
+    LRBindGroupEntryTlas te;
+    if (t->hw) hw_entry(t, &e[nent++], &te);
+#endif
     if (repeats < 1) repeats = 1;
     if (repeats > MAX_REPS) repeats = MAX_REPS;
     // timed: the tracer per full-image pass (1 sample per pixel), the light tracer per pass
@@ -3526,7 +3826,8 @@ static int wf_ready(GpuTrace *t){
     for (int k = 0; k < NWF; k++){
         char label[64];
         snprintf(label, sizeof(label), "path tracer: %s", WF_ENTRY[k]);
-        t->wf_bgl[k] = gpu_layout(g, WGPUShaderStage_Compute, WF_LAYOUT[k]);
+        char lt[32];
+        t->wf_bgl[k] = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, WF_LAYOUT[k], lt, sizeof(lt)));
         t->wf_pipe[k] = pipeline_of(g, label, m, WF_ENTRY[k], t->wf_bgl[k]);
     }
     wgpuShaderModuleRelease(m);
@@ -3544,9 +3845,13 @@ static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame
                              WGPUBuffer vstat){
     WGPUBuffer b[20] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
                         t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa, NULL, NULL, NULL, NULL, t->txt};
-    WGPUBindGroupEntry e[20];
+    WGPUBindGroupEntry e[21];
     memset(e, 0, sizeof(e));
     int n = 0;
+#ifdef LR_VK
+    LRBindGroupEntryTlas te;
+    if (t->hw && WF_LAYOUT[k][5] == 'R') hw_entry(t, &e[n++], &te);
+#endif
     for (int i = 0; WF_LAYOUT[k][i]; i++){
         if (WF_LAYOUT[k][i] == '-') continue;
         e[n].binding = (uint32_t)i;
@@ -3820,6 +4125,13 @@ void gpu_trace_destroy(GpuTrace *t){
     if (t->skyc_tex){ wgpuTextureDestroy(t->skyc_tex); wgpuTextureRelease(t->skyc_tex); }
     gpu_textures_free(&t->gt);
     if (t->txt){ wgpuBufferDestroy(t->txt); wgpuBufferRelease(t->txt); }
+#ifdef LR_VK
+    for (int m = 0; m < t->hw_nmesh; m++) lrBlasRelease(t->hw_mesh[m]);
+    free(t->hw_mesh); free(t->hw_mesh_dirty);
+    lrBlasRelease(t->hw_tri); lrBlasRelease(t->hw_prim); lrBlasRelease(t->hw_unit); lrTlasRelease(t->hw_tlas);
+    WGPUBuffer hb[] = {t->hw_vtx, t->hw_boxes, t->hw_rec, t->hw_unit_buf};
+    for (int i = 0; i < 4; i++) if (hb[i]){ wgpuBufferDestroy(hb[i]); wgpuBufferRelease(hb[i]); }
+#endif
     free(t->mc);
     free(t->arena_boxes);
     free(t->arena_par);
