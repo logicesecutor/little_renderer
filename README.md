@@ -12,6 +12,9 @@ on the CPU or on the GPU through WebGPU, natively and in the browser.
 ![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%7C%20Windows%20%7C%20Browser-2E7D32)
 ![Dependencies](https://img.shields.io/badge/dependencies-libm%20%2B%20a%20window-555555)
 
+<img src="docs/images/helmet.jpg" width="97%" alt="A glTF model, the damaged helmet, path traced under an HDR sky on brick paving">
+<br><sub>A glTF model with its JPEG textures, normal map and glowing visor, path traced under an HDR sky on the GPU (4096 samples per pixel, 31 s at 1600×700)</sub>
+
 <img src="docs/images/spheres.jpg" width="32%" alt="Mirror and glass spheres with caustics"> <img src="docs/images/fog.jpg" width="32%" alt="Glass spheres in a volumetric cloud and fog"> <img src="docs/images/dragon.jpg" width="32%" alt="The Stanford dragon, path traced">
 
 </div>
@@ -44,6 +47,13 @@ library behind one header (`lr.h`), with no third-party code in the engine.
 |:---:|:---:|:---:|
 | <img src="docs/images/boxes.jpg" alt="Cornell box"> | <img src="docs/images/cloud.jpg" alt="A volumetric cloud"> | <img src="docs/images/glass_dragon.jpg" alt="A glass dragon"> |
 | The Cornell box | A procedural cloud | A glass dragon (871k triangles) |
+| <img src="docs/images/sky_spheres.jpg" alt="Five spheres of five materials under an HDR sky"> | <img src="docs/images/metal_rough.jpg" alt="Khronos's metal-roughness test spheres"> | <img src="docs/images/showcase.jpg" alt="Mirror dragon, glTF helmet and glass torus under a cloud"> |
+| Physically based materials under an HDR sky | glTF's metallic × roughness sweep | Mirror dragon, glTF helmet, glass torus, cloud |
+
+<div align="center">
+<img src="docs/images/helmet_split.jpg" width="80%" alt="The same frame path traced on the left and rasterized on the right">
+<br><sub>One scene, two renderers: path traced (left) and rasterized in real time with light probes, an irradiance grid and the same BSDF (right)</sub>
+</div>
 
 <div align="center">
 <img src="docs/images/physics.gif" width="45%" alt="Dragons falling through a cloud onto a big dragon">
@@ -120,7 +130,21 @@ The Stanford dragon (`models/dragon_recon/`, `make dragon-download`) is from the
 [Stanford 3D Scanning Repository](https://graphics.stanford.edu/data/3Dscanrep/),
 © Stanford University Computer Graphics Laboratory, used for non-commercial purposes
 with credit. The glTF sample models (`models/gltf/`, `make gltf-download`) are from
-[Khronos's glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), under
-CC BY 4.0 (the damaged helmet: theblueturtle_ and ctxwing; the test models: Ed Mackey,
-Analytical Graphics; the textured box: Cesium). The techniques come from the papers and
-books cited in each document under `docs/`.
+[Khronos's glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets): the
+test models by Ed Mackey, Analytical Graphics (CC BY 4.0), the textured box by Cesium (CC BY
+4.0); the damaged helmet is ctxwing's rebuild (CC BY 4.0) of theblueturtle_'s model (CC BY-NC
+4.0), so its pictures here are for non-commercial use. The HDR sky in the pictures is Poly Haven's
+[Kloofendal 48d Partly Cloudy](https://polyhaven.com/a/kloofendal_48d_partly_cloudy) (CC0).
+The techniques come from the papers and books cited in each document under `docs/`.
+
+The new pictures were made with (after `make gltf-download`, the sky in `models/skies/`):
+
+```sh
+K=models/skies/kloofendal_48d_partly_cloudy_2k.hdr
+bin/render -scene sky -sky $K -skyrot 120 -gltf models/gltf/DamagedHelmet.glb -rot 35 \
+    -cam 60,190,-360 -look 278,140,300 -fov 32 -width 1600 -height 700 -s 4096
+bin/render -scene sky -sky $K -cam 278,210,-470 -look 278,60,300 -fov 52 -n 512 -s 4096
+bin/render -scene sky -sky $K -skyrot 200 -gltf models/gltf/MetalRoughSpheres.glb \
+    -cam 278,200,-300 -look 278,170,300 -fov 40 -n 512 -s 4096
+bin/render -scene showcase -n 512 -s 4096
+```
