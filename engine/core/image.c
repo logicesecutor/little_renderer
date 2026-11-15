@@ -121,8 +121,16 @@ static int srgb_lut_ready;
 
 void srgb_lut_init(void){
     if (srgb_lut_ready) return;
-    for (int i = 0; i < 4096; i++) srgb_lut[i] = to_srgb8(i / 4095.0);
-    srgb_lut_ready = 1;
+#ifdef _OPENMP
+#pragma omp critical(srgb_lut)
+#endif
+    if (!srgb_lut_ready){
+        for (int i = 0; i < 4096; i++) srgb_lut[i] = to_srgb8(i / 4095.0);
+#ifdef _OPENMP
+#pragma omp flush
+#endif
+        srgb_lut_ready = 1;
+    }
 }
 
 static inline int lut_index(real c){
@@ -132,6 +140,7 @@ static inline int lut_index(real c){
 }
 
 uint32_t image_pack_srgb(Vec3 c){
+    if (!srgb_lut_ready) srgb_lut_init();     // (it was black before someone called it)
     return ((uint32_t)srgb_lut[lut_index(c.x)] << 16) |
            ((uint32_t)srgb_lut[lut_index(c.y)] << 8) |
             (uint32_t)srgb_lut[lut_index(c.z)];

@@ -59,6 +59,7 @@ static float SRGB[256];
 static int srgb_ready;
 
 const float *texmap_srgb_table(void){
+    if (!srgb_ready)
 #ifdef _OPENMP
 #pragma omp critical(texmap_srgb)
 #endif
@@ -67,6 +68,9 @@ const float *texmap_srgb_table(void){
             double c = i / 255.0;
             SRGB[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
         }
+#ifdef _OPENMP
+#pragma omp flush
+#endif
         srgb_ready = 1;
     }
     return SRGB;

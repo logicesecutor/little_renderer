@@ -54,8 +54,8 @@ int image_write_png(const Image *img, const char *path);
 // one linear channel value -> 0..255 sRGB byte (clamped, NaN -> 0). Exact, uses pow().
 unsigned char image_srgb8(double linear);
 
-// Fast version for whole frames: a 4096-entry lookup table. Call srgb_lut_init() once
-// before using image_pack_srgb (and before starting threads that use it).
+// Fast version for whole frames: a 4096-entry lookup table, made on first use (or by
+// srgb_lut_init, best before threads start using it).
 void srgb_lut_init(void);
 uint32_t image_pack_srgb(Vec3 linear);   // -> 0x00RRGGBB, sRGB-encoded
 

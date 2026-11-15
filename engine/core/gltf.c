@@ -27,6 +27,7 @@ typedef struct {
     int def_mat;                // ... for primitives without one (glTF's default material)
     int *meshes; int nmeshes;   // the scene's mesh for each glTF mesh (-2 not yet, -1 none)
     int warned_alpha, warned_tc, warned_sparse, warned_mats, warned_mode, warned_mirror;
+    long visits;                // nodes visited (a graph that shares children grows fast)
 } G;
 
 static int fail(const char *path, const char *why){
@@ -500,7 +501,13 @@ typedef struct { int mesh; double m[16]; } Placed;
 
 static void visit(G *g, int ni, const double *parent, int depth, Vec *out){
     const Json *nd = json_at(json_get(g->j, "nodes"), ni);
+    // (a cycle stops at depth 64; a node listing the next one twice, and so on, would be
+    // visited 2^64 times: at most a million visits)
     if (!nd || depth > 64) return;
+    if (++g->visits > 1000000){
+        if (g->visits == 1000001) fprintf(stderr, "gltf: %s: more than a million nodes placed: the rest left out\n", g->path);
+        return;
+    }
     double local[16], world[16];
     node_local(nd, local);
     mat_mul(parent, local, world);

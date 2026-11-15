@@ -728,10 +728,17 @@ struct GpuFluid {
 #define MAX_OWED 0.1f
 
 // the GPU fluids alive: a "work done" callback can arrive after gpu_fluid_destroy
-static GpuFluid *live[4];
+// (creation is refused when the list is full: one left out would have its callbacks ignored)
+#define MAX_LIVE_FLUID 64
+static GpuFluid *live[MAX_LIVE_FLUID];
 static int is_live(const GpuFluid *gf){
-    for (int i = 0; i < 4; i++) if (gf && live[i] == gf) return 1;
+    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (gf && live[i] == gf) return 1;
     return 0;
+}
+static int live_slot(void){
+    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (!live[i]) return i;
+    fprintf(stderr, "GPU: %d fluids already: no more\n", MAX_LIVE_FLUID);
+    return -1;
 }
 
 static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
@@ -887,7 +894,7 @@ static void free_all(GpuFluid *gf){
 static void air_step(void *user, PhysWorld *pw, real dt);
 
 GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
-    if (!g || gpu_state(g) != GPU_READY || !pw || !pw->fluid) return NULL;
+    if (!g || gpu_state(g) != GPU_READY || !pw || !pw->fluid || live_slot() < 0) return NULL;
     Fluid *f = pw->fluid;
     GpuFluid *gf = calloc(1, sizeof(*gf));
     if (!gf) return NULL;
@@ -938,7 +945,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     }
     make_bind_groups(gf);
     reserve_bodies(gf, &pw->rigid);
-    for (int i = 0; i < 4; i++) if (!live[i]){ live[i] = gf; break; }
+    live[live_slot()] = gf;
     pw->air_step = air_step;
     pw->air_user = gf;
     pw->air_around = NULL;
@@ -1210,7 +1217,7 @@ void gpu_fluid_destroy(GpuFluid *gf){
         pw->air_around = NULL;
         pw->nair_around = 0;
     }
-    for (int i = 0; i < 4; i++) if (live[i] == gf) live[i] = NULL;
+    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (live[i] == gf) live[i] = NULL;
     free_all(gf);
 }
 

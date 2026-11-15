@@ -526,9 +526,11 @@ struct GpuView {
 };
 
 // the views alive: a "work done" callback can arrive after gpu_view_destroy
-static GpuView *live_views[4];
+// (creation is refused when the list is full: one left out would have its callbacks ignored)
+#define MAX_LIVE_VIEWS 64
+static GpuView *live_views[MAX_LIVE_VIEWS];
 static int view_is_live(const GpuView *v){
-    for (int i = 0; i < 4; i++) if (v && live_views[i] == v) return 1;
+    for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (v && live_views[i] == v) return 1;
     return 0;
 }
 
@@ -560,12 +562,15 @@ static WGPUPipelineLayout make_pipeline_layout(Gpu *g, WGPUBindGroupLayout bgl){
 
 GpuView *gpu_view_create(Gpu *g, int width, int height){
     if (!g || g->state != GPU_READY || (!g->surface && !g->offscreen)) return NULL;
+    int slot = -1;
+    for (int i = 0; i < MAX_LIVE_VIEWS && slot < 0; i++) if (!live_views[i]) slot = i;
+    if (slot < 0){ fprintf(stderr, "GPU: %d views already: no more\n", MAX_LIVE_VIEWS); return NULL; }
     GpuView *v = calloc(1, sizeof(*v));
     if (!v) return NULL;
     v->g = g;
     v->w = width;
     v->h = height;
-    for (int i = 0; i < 4; i++) if (!live_views[i]){ live_views[i] = v; break; }
+    live_views[slot] = v;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     v->frame_u = gpu_buffer(g, "frame", sizeof(GFrame), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     for (int k = 0; k < GPU_MAX_VOLUMES; k++){
@@ -1318,9 +1323,10 @@ void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
 
 void gpu_view_destroy(GpuView *v){
     if (!v) return;
-    WGPUBuffer bufs[] = {v->frame_u, v->sel_u[0], v->sel_u[1], v->dens, v->bricks, v->light, v->color, v->depth,
+    WGPUBuffer bufs[] = {v->frame_u, v->dens, v->bricks, v->light, v->color, v->depth,
                          v->vstat, v->acc, v->hud_u, v->hud_px};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
+    for (int k = 0; k < GPU_MAX_VOLUMES; k++) if (v->sel_u[k]){ wgpuBufferDestroy(v->sel_u[k]); wgpuBufferRelease(v->sel_u[k]); }
     if (v->light_pipe) wgpuComputePipelineRelease(v->light_pipe);
     if (v->comp_pipe) wgpuRenderPipelineRelease(v->comp_pipe);
     if (v->comp_gpu_pipe) wgpuRenderPipelineRelease(v->comp_gpu_pipe);
@@ -1329,7 +1335,7 @@ void gpu_view_destroy(GpuView *v){
     gpu_raster_destroy(v->raster);
     gpu_trace_destroy(v->trace);
     gpu_denoise_destroy(v->den);
-    for (int i = 0; i < 4; i++) if (live_views[i] == v) live_views[i] = NULL;
+    for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (live_views[i] == v) live_views[i] = NULL;
     if (v->stats_pipe) wgpuComputePipelineRelease(v->stats_pipe);
     if (v->finish_pipe) wgpuComputePipelineRelease(v->finish_pipe);
     WGPUBindGroupLayout bgls[] = {v->light_bgl, v->comp_bgl, v->comp_gpu_bgl, v->stats_bgl, v->finish_bgl};
