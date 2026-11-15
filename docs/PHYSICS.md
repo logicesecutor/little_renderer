@@ -265,7 +265,8 @@ in each substep:
 | meshes | once per step | for each body near a fixed mesh one workgroup walks the mesh's tree breadth first and lists the triangles near the body; then one thread per triangle runs the test, and the best 4 contacts of each pair are kept |
 | contact lists | once per step | each body's contacts: count, prefix sum, fill |
 | prepare | every substep | each contact's points where its bodies are now, its depth, masses and target (as the CPU's) |
-| solve | every substep | the contacts' impulses, 16 iterations, warm started |
+| warm start | every substep | each body's velocities with its contacts' starting impulses (from the last substep or step) |
+| solve | every substep | 16 iterations of one pass each: every body (8 threads, sharing its contact list) works out its contacts' impulses from the velocities before the iteration and adds them to its own; each contact is worked out by both its bodies, the same way, and its first body keeps the result |
 | move | every substep | integrate |
 | wake, sleep | once per step | sleeping (1.5): which sleeping bodies wake (one thread per pair), and, at the end, how long each has been still and who falls asleep |
 
@@ -280,7 +281,9 @@ Voroshilov (2012, "Mass splitting for jitter-free parallel rigid body simulation
 each body into as many copies as it has contacts, each with mass `m / k` (inertia `I / k`):
 every contact pushes its own copy, then the body takes the average of its copies'
 velocities. That is a sequential-impulse solve of a different but equivalent system, it
-converges like 1.3 and does not depend on the order. Warm starting is the same as on the
+converges like 1.3 and does not depend on the order. An iteration is a single pass (P10):
+before, a pass worked out every contact's impulse and a second added them to the bodies,
+twice the passes, and each body's thread then waited on one contact after the other. Warm starting is the same as on the
 CPU: each new contact looks for the old one of the same pair, within 1 cm, and starts from
 its impulses.
 

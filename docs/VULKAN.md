@@ -82,8 +82,8 @@ What has to be written:
 ## What it gains, and what not
 
 - Faster natively: no per-call validation and conservative barrier tracking (wgpu: about
-  1.6 us more per indirect dispatch, 3-7 us per dispatch; the physics' ~140 dispatches per
-  step, P10, cost 1 ms even when the bodies sleep), the hardware's features above, ray
+  1.6 us more per indirect dispatch, 3-7 us per dispatch; the physics' 92 dispatches per
+  step, P10, still cost 0.8 ms when the bodies sleep), the hardware's features above, ray
   tracing (an estimated 2-5x on scenes whose time goes to finding hits).
 - Not faster by itself: a kernel's arithmetic compiles to about the same machine code as
   through wgpu.

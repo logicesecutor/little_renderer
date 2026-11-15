@@ -1400,6 +1400,7 @@ static const char *K_PREP = WGSL(
 @group(0) @binding(5) var<storage, read> Cp: array<Contact>;
 @group(0) @binding(6) var<storage, read> Lp: array<u32>;
 @group(0) @binding(7) var<storage, read> offp: array<u32>;
+@group(0) @binding(8) var<storage, read_write> J0: array<vec4f>;
 
 fn eff(ma: f32, mb: f32, ia: mat3x3f, ib: mat3x3f, ra: vec3f, rb: vec3f, d: vec3f) -> f32 {
     let k = ma + mb + dot(d, cross(ia * cross(ra, d), ra)) + dot(d, cross(ib * cross(rb, d), rb));
@@ -1476,90 +1477,149 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     k.j = vec4f(j, eff(ma, mb, Ia, Ib, ra, rb, t[1]));
     k.imp = vec4f(n * j.x + t[0] * j.y + t[1] * j.z, mu);
     C[c] = k;
+    J0[c] = k.j;                /* the impulses the iterations start from (K_SOLVE) */
 }
 );
 
-/* one iteration for every contact at once: the impulse that stops it approaching (and the
-   friction, at most mu times the normal one), from the bodies' velocities as they are */
-static const char *K_SOLVE = WGSL(
-@group(0) @binding(1) var<storage, read> B: array<Body>;
-@group(0) @binding(2) var<storage, read_write> C: array<Contact>;
-@group(0) @binding(3) var<storage, read_write> cnt: array<atomic<u32>>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let c = tid(gid, nw);
-    if (c >= min(atomicLoad(&cnt[0]), P.n.y)) { return; }
-    /* field by field: the 7 of the contact's 10 vec4s it uses read, the 2 it changes written
-       (a whole Contact loaded and stored is 160 + 160 bytes per contact and iteration) */
-    let kn = C[c].n;
-    let kra = C[c].ra;
-    let krb = C[c].rb;
-    let kt1 = C[c].t1;
-    let kt2 = C[c].t2;
-    let kj = C[c].j;
-    let mu = C[c].imp.w;
-    let ia = bitcast<u32>(kn.w);
-    let ib = bitcast<u32>(kra.w);
-    let a = B[ia];
-    var dv = a.vel.xyz + cross(a.ang.xyz, kra.xyz);
-    if (ib != NONE) { let b = B[ib]; dv = dv - (b.vel.xyz + cross(b.ang.xyz, krb.xyz)); }
-    let n = kn.xyz;
-    let jn = max(kj.x + kt1.w * (krb.w - dot(dv, n)), 0.0);
-    let lim = mu * jn;
-    let jt1 = clamp(kj.y - kt2.w * dot(dv, kt1.xyz), -lim, lim);
-    let jt2 = clamp(kj.z - kj.w * dot(dv, kt2.xyz), -lim, lim);
-    C[c].imp = vec4f(n * (jn - kj.x) + kt1.xyz * (jt1 - kj.y) + kt2.xyz * (jt2 - kj.z), mu);
-    C[c].j = vec4f(jn, jt1, jt2, kj.w);
-}
-);
-
-
-/* each body takes the sum of its contacts' impulses (each with the whole mass: the shares
-   average back to it) */
+/* the warm start: each body's velocities with its contacts' starting impulses (each with the
+   whole mass: the shares average back to it), into V (the iterations' velocities); 8 threads
+   per body, as K_SOLVE */
 static const char *K_APPLY = WGSL(
-@group(0) @binding(1) var<storage, read_write> B: array<Body>;
+@group(0) @binding(1) var<storage, read> B: array<Body>;
 @group(0) @binding(2) var<storage, read> C: array<Contact>;
 @group(0) @binding(3) var<storage, read> off: array<u32>;
 @group(0) @binding(4) var<storage, read> L: array<u32>;
+@group(0) @binding(5) var<storage, read_write> V: array<vec4f>;
+var<workgroup> sdv: array<vec3f, 64>;
+var<workgroup> sdw: array<vec3f, 64>;
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let i = tid(gid, nw);
-    if (i >= P.n.x) { return; }
-    let b = B[i];
-    if (b.vel.w == 0.0 || off[i] == off[i + 1u]) { return; }
+fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let lane = lv.x & 7u;
+    let i = (wid.x + wid.y * nw.x) * 8u + (lv.x >> 3u);
+    let live = i < P.n.x;
     var dv = vec3f(0.0);
     var dw = vec3f(0.0);
-    for (var q = off[i]; q < off[i + 1u]; q++) {
-        /* only the impulse and this body's lever arm read (not the whole 160-byte contact) */
-        let e = L[q];
-        let ci = e >> 1u;
-        var j = C[ci].imp.xyz;
-        var r: vec3f;
-        if ((e & 1u) != 0u) { j = -j; r = C[ci].rb.xyz; } else { r = C[ci].ra.xyz; }
-        dv += j;
-        dw += cross(r, j);
+    if (live && B[i].vel.w != 0.0) {
+        for (var q = off[i] + lane; q < off[i + 1u]; q += 8u) {
+            let e = L[q];
+            let ci = e >> 1u;
+            var j = C[ci].imp.xyz;
+            var r: vec3f;
+            if ((e & 1u) != 0u) { j = -j; r = C[ci].rb.xyz; } else { r = C[ci].ra.xyz; }
+            dv += j;
+            dw += cross(r, j);
+        }
     }
-    B[i].vel = vec4f(b.vel.xyz + dv * b.vel.w, b.vel.w);
-    B[i].ang = vec4f(b.ang.xyz + inv_inertia(b) * dw, b.ang.w);
+    sdv[lv.x] = dv;
+    sdw[lv.x] = dw;
+    workgroupBarrier();
+    if (!live || lane != 0u) { return; }
+    for (var k = 1u; k < 8u; k++) { dv += sdv[lv.x + k]; dw += sdw[lv.x + k]; }
+    let b = B[i];
+    V[2u * i] = vec4f(b.vel.xyz + dv * b.vel.w, b.vel.w);
+    V[2u * i + 1u] = vec4f(b.ang.xyz + inv_inertia(b) * dw, b.ang.w);
+}
+);
+
+/* One iteration, one pass (P10; it was two: every contact's impulse, then every body's
+   sum): each body goes through its contacts, works out each one's impulse from the
+   velocities before the iteration (Vi, and the impulses so far Ji) and adds it to its own
+   velocities (Vo). A contact is worked out by both of its bodies, the same way, from the
+   same numbers; its first body keeps the result (Jo, and C.j for the next substep). A
+   fixed or sleeping body does only its first-body contacts (their impulses) and keeps its
+   velocities; the fixed mesh, never a first body, nothing. 8 threads per body share its
+   list (a thread per body waited on one contact after the other), their sums added up in
+   the workgroup's memory. */
+static const char *K_SOLVE = WGSL(
+@group(0) @binding(1) var<storage, read> B: array<Body>;
+@group(0) @binding(2) var<storage, read_write> C: array<Contact>;
+@group(0) @binding(3) var<storage, read> off: array<u32>;
+@group(0) @binding(4) var<storage, read> L: array<u32>;
+@group(0) @binding(5) var<storage, read> Vi: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> Vo: array<vec4f>;
+@group(0) @binding(7) var<storage, read> Ji: array<vec4f>;
+@group(0) @binding(8) var<storage, read_write> Jo: array<vec4f>;
+var<workgroup> sdv: array<vec3f, 64>;
+var<workgroup> sdw: array<vec3f, 64>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let lane = lv.x & 7u;
+    let i = (wid.x + wid.y * nw.x) * 8u + (lv.x >> 3u);
+    let live = i < P.n.x;
+    var w = 0.0;
+    var dv = vec3f(0.0);
+    var dw = vec3f(0.0);
+    if (live) {
+        w = B[i].vel.w;
+        for (var q = off[i] + lane; q < off[i + 1u]; q += 8u) {
+            let e = L[q];
+            let second = (e & 1u) != 0u;
+            if (w == 0.0 && second) { continue; }
+            let c = e >> 1u;
+            /* the 6 of the contact's 10 vec4s it uses (and its impulses so far, Ji) */
+            let kn = C[c].n;
+            let kra = C[c].ra;
+            let krb = C[c].rb;
+            let kt1 = C[c].t1;
+            let kt2 = C[c].t2;
+            let mu = C[c].imp.w;
+            let kj = Ji[c];
+            let ia = bitcast<u32>(kn.w);
+            let ib = bitcast<u32>(kra.w);
+            var d = Vi[2u * ia].xyz + cross(Vi[2u * ia + 1u].xyz, kra.xyz);
+            if (ib != NONE) { d = d - (Vi[2u * ib].xyz + cross(Vi[2u * ib + 1u].xyz, krb.xyz)); }
+            let n = kn.xyz;
+            let jn = max(kj.x + kt1.w * (krb.w - dot(d, n)), 0.0);
+            let lim = mu * jn;
+            let jt1 = clamp(kj.y - kt2.w * dot(d, kt1.xyz), -lim, lim);
+            let jt2 = clamp(kj.z - kj.w * dot(d, kt2.xyz), -lim, lim);
+            let imp = n * (jn - kj.x) + kt1.xyz * (jt1 - kj.y) + kt2.xyz * (jt2 - kj.z);
+            if (second) {
+                dv -= imp;
+                dw += cross(krb.xyz, -imp);
+            } else {
+                Jo[c] = vec4f(jn, jt1, jt2, kj.w);
+                C[c].j = vec4f(jn, jt1, jt2, kj.w);
+                dv += imp;
+                dw += cross(kra.xyz, imp);
+            }
+        }
+    }
+    sdv[lv.x] = dv;
+    sdw[lv.x] = dw;
+    workgroupBarrier();
+    if (!live || lane != 0u) { return; }
+    for (var k = 1u; k < 8u; k++) { dv += sdv[lv.x + k]; dw += sdw[lv.x + k]; }
+    let v = Vi[2u * i];
+    let a = Vi[2u * i + 1u];
+    if (w == 0.0) { Vo[2u * i] = v; Vo[2u * i + 1u] = a; return; }
+    Vo[2u * i] = vec4f(v.xyz + dv * w, w);
+    Vo[2u * i + 1u] = vec4f(a.xyz + inv_inertia(B[i]) * dw, a.w);
 }
 );
 
 /* velocities -> positions, orientations */
 static const char *K_POS = WGSL(
 @group(0) @binding(1) var<storage, read_write> B: array<Body>;
+@group(0) @binding(2) var<storage, read> V: array<vec4f>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
     if (i >= P.n.x) { return; }
     let b = B[i];
     if (b.vel.w == 0.0) { return; }
+    /* the iterations' velocities, the body's again */
+    let vel = V[2u * i];
+    let ang = V[2u * i + 1u];
+    B[i].vel = vel;
+    B[i].ang = ang;
     let h = P.h.x;
     let q = b.rot;
-    let w = b.ang.xyz;
+    let w = ang.xyz;
     /* dq/dt = 0.5 (0, w) q */
     let d = vec4f(w.x * q.w + w.y * q.z - w.z * q.y, -w.x * q.z + w.y * q.w + w.z * q.x,
                   w.x * q.y - w.y * q.x + w.z * q.w, -w.x * q.x - w.y * q.y - w.z * q.z);
-    B[i].pos = vec4f(b.pos.xyz + b.vel.xyz * h, b.pos.w);
+    B[i].pos = vec4f(b.pos.xyz + vel.xyz * h, b.pos.w);
     B[i].rot = normalize(q + d * (0.5 * h));
 }
 );
@@ -1586,10 +1646,10 @@ static const struct { const char *name, *types; const char **body, **more, **mor
     {"bodies: contacts (meshes)", "URWWRW--RW", &K_NARROW, &K_CONVEX, &K_MESHFLUSH},
     {"bodies: lists 1",  "UWWW",     &K_SCAN, NULL, NULL},
     {"bodies: lists 2",  "URWRWW",   &K_FILL, NULL, NULL},
-    {"bodies: prepare",  "URWWRRRR", &K_PREP, NULL, NULL},
-    {"bodies: solve",    "URWW",     &K_SOLVE, NULL, NULL},
-    {"bodies: apply",    "UWRRR",    &K_APPLY, NULL, NULL},
-    {"bodies: move",     "UW",       &K_POS, NULL, NULL},
+    {"bodies: prepare",  "URWWRRRRW", &K_PREP, NULL, NULL},
+    {"bodies: solve",    "URWRRRWRW", &K_SOLVE, NULL, NULL},
+    {"bodies: warm start", "URRRRW", &K_APPLY, NULL, NULL},
+    {"bodies: move",     "UWR",      &K_POS, NULL, NULL},
     {"bodies: wake",     "URWR",     &K_WAKE, NULL, NULL},
     {"bodies: sleep",    "UWR",      &K_SLEEP, NULL, NULL},
 };
@@ -1614,11 +1674,14 @@ struct GpuRigid {
     int nshapes;                                 // RigidWorld.geoms in it
     uint32_t unit_box;                           // its shape index in G
     WGPUBuffer contacts[2], lists[2], offs[2];   // this step's and the one before's
+    WGPUBuffer vel[2], imps[2];                  // the iterations' velocities and impulses, in turns (K_SOLVE)
     size_t cap_bodies, cap_contacts;             // what the buffers hold
     int nb;                                      // bodies on the GPU
     int prev_nb;                                 // bodies in the last substep (its lists)
     int parity;
     WGPUBindGroup bg[NR][2];
+    WGPUBindGroup bg_solve[2][2], bg_pos[2];     // by the contacts' parity, and the iteration's turn
+    int turn;                                    // the iterations' buffers read next (vel[turn], imps[turn])
     float *staging;
     // the bodies back: one readback at a time
     WGPUBuffer rb;
@@ -1634,7 +1697,7 @@ struct GpuRigid {
 
 static const char *const RK_NAMES[NR] = {"forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
     "contacts: hulls", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
-    "contact lists 1", "contact lists 2", "prepare (warm start)", "solve", "apply", "move", "wake", "sleep"};
+    "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep"};
 
 // the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
 // out of the list would have its callbacks ignored (its bodies never back): creation is
@@ -1660,6 +1723,10 @@ static void release(WGPUBuffer *b){ if (*b){ wgpuBufferDestroy(*b); wgpuBufferRe
 static void release_groups(GpuRigid *gr){
     for (int k = 0; k < NR; k++)
         for (int p = 0; p < 2; p++) if (gr->bg[k][p]){ wgpuBindGroupRelease(gr->bg[k][p]); gr->bg[k][p] = NULL; }
+    for (int p = 0; p < 2; p++){
+        for (int t = 0; t < 2; t++) if (gr->bg_solve[p][t]){ wgpuBindGroupRelease(gr->bg_solve[p][t]); gr->bg_solve[p][t] = NULL; }
+        if (gr->bg_pos[p]){ wgpuBindGroupRelease(gr->bg_pos[p]); gr->bg_pos[p] = NULL; }
+    }
 }
 
 static void make_groups(GpuRigid *gr){
@@ -1683,10 +1750,13 @@ static void make_groups(GpuRigid *gr){
           gr->bg[R_MESHFLUSH][p] = gpu_bind(g, gr->bgl[R_MESHFLUSH], b_, 10); }
         BG(R_SCAN, gr->par, gr->cnt, O, gr->cursor);
         BG(R_FILL, gr->par, C, gr->cnt, O, gr->cursor, L);
-        BG(R_PREP, gr->par, gr->bodies, C, gr->cnt, O, Cp, Lp, Op);
-        BG(R_SOLVE, gr->par, gr->bodies, C, gr->cnt);
-        BG(R_APPLY, gr->par, gr->bodies, C, O, L);
-        BG(R_POS, gr->par, gr->bodies);
+        BG(R_PREP, gr->par, gr->bodies, C, gr->cnt, O, Cp, Lp, Op, gr->imps[0]);
+        BG(R_APPLY, gr->par, gr->bodies, C, O, L, gr->vel[0]);
+        for (int t = 0; t < 2; t++){
+            WGPUBuffer b_[] = {gr->par, gr->bodies, C, O, L, gr->vel[t], gr->vel[!t], gr->imps[t], gr->imps[!t]};
+            gr->bg_solve[p][t] = gpu_bind(g, gr->bgl[R_SOLVE], b_, 9);
+        }
+        { WGPUBuffer b_[] = {gr->par, gr->bodies, gr->vel[p]}; gr->bg_pos[p] = gpu_bind(g, gr->bgl[R_POS], b_, 3); }
         BG(R_WAKE, gr->par, gr->bodies, gr->wake, gr->forces);
         BG(R_SLEEP, gr->par, gr->bodies, gr->forces);
 #undef BG
@@ -1698,7 +1768,7 @@ static void make_groups(GpuRigid *gr){
 static void release_sized(GpuRigid *gr){
     WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
-                         &gr->tris, &gr->store, &gr->scount, &gr->memo};
+                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1]};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
 }
 
@@ -1731,6 +1801,8 @@ static int reserve(GpuRigid *gr, int nb){
         gr->contacts[p] = storage(g, "contacts", gr->cap_contacts * CONTACT_BYTES);
         gr->lists[p] = storage(g, "contact lists", gr->cap_contacts * 2 * 4);
         gr->offs[p] = storage(g, "contact list starts", (cap + 1) * 4);
+        gr->vel[p] = storage(g, "bodies: velocities while solving", cap * 32);
+        gr->imps[p] = storage(g, "contacts: impulses while solving", gr->cap_contacts * 16);
     }
     free(gr->staging);
     gr->staging = malloc(cap * BODY_BYTES);
@@ -1877,7 +1949,8 @@ static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1
 
 static void dispatch1(WGPUComputePassEncoder pass, GpuRigid *gr, int k, size_t threads){
     wgpuComputePassEncoderSetPipeline(pass, gr->pipe[k]);
-    wgpuComputePassEncoderSetBindGroup(pass, 0, gr->bg[k][gr->parity], 0, NULL);
+    WGPUBindGroup bg = k == R_SOLVE ? gr->bg_solve[gr->parity][gr->turn] : k == R_POS ? gr->bg_pos[gr->turn] : gr->bg[k][gr->parity];
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
     if (k == R_SCAN || k == R_ARGS || k == R_ARGS2) wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
     else if (k == R_SIMPLE) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 0);
     else if (k == R_HEAVY) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 16);
@@ -2004,12 +2077,13 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_FILL, gr->cap_contacts);
         }
         dispatch(enc, &pass, gr, R_PREP, gr->cap_contacts);
-        dispatch(enc, &pass, gr, R_APPLY, (size_t)nb);                  // the warm start
+        dispatch(enc, &pass, gr, R_APPLY, 8 * (size_t)nb);              // the warm start, into vel[0]; 8 threads a body
+        gr->turn = 0;
         for (int it = 0; it < w->iterations; it++){
-            dispatch(enc, &pass, gr, R_SOLVE, gr->cap_contacts);
-            dispatch(enc, &pass, gr, R_APPLY, (size_t)nb);
+            dispatch(enc, &pass, gr, R_SOLVE, 8 * (size_t)nb);          // vel, imps [turn] -> [!turn]; 8 threads a body
+            gr->turn ^= 1;
         }
-        dispatch(enc, &pass, gr, R_POS, (size_t)nb);
+        dispatch(enc, &pass, gr, R_POS, (size_t)nb);                    // vel[turn] back into the bodies
         if (s == steps - 1 && w->sleep){
             // the end of the step: who falls asleep
             dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
