@@ -71,8 +71,16 @@ BUILD = build/$(PREC)$(GPUDIR)
 INC = -Iengine
 HDR = $(wildcard engine/*.h engine/*/*.h engine/gpu/*/*.h)
 SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard engine/gpu/vk/*.c engine/gpu/wgsl/*.c))
-OBJ = $(patsubst engine/%.c,$(BUILD)/%.o,$(SRC))
+OBJ = $(patsubst engine/%.c,$(BUILD)/%.o,$(SRC)) $(BUILD)/wgsl_shaders.o
 LIB = $(BUILD)/liblr.a
+
+# the shaders: engine/gpu/shaders/*.wgsl, carried inside the library as C strings
+# (lr_wgsl_<name>), made by tools/wgsl_embed.c (built with the same compiler: HOSTCC for
+# another one)
+HOSTCC ?= $(CC)
+WGSL_FILES = $(sort $(wildcard engine/gpu/shaders/*.wgsl))
+WGSL_EMBED = build/tools/wgsl_embed$(EXE)
+WGSL_C = build/gen/wgsl_shaders.c
 
 # the window: X11 on Linux, Win32 (gdi32) on Windows
 ifeq ($(OS),Windows_NT)
@@ -98,6 +106,18 @@ examples: $(EXAMPLES)
 $(BUILD)/%.o: engine/%.c $(HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
+
+$(WGSL_EMBED): tools/wgsl_embed.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra $< -o $@
+
+$(WGSL_C): $(WGSL_EMBED) $(WGSL_FILES)
+	@mkdir -p $(dir $@)
+	$(WGSL_EMBED) $@ $(WGSL_FILES)
+
+$(BUILD)/wgsl_shaders.o: $(WGSL_C)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(GPUFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
 	rm -f $@
@@ -287,7 +307,7 @@ WEB = web/build
 WEB_MODELS = models/cube.obj models/sphere.obj models/torus.obj models/torus_dense.obj \
              models/dragon_recon/dragon_vrip_res2.ply models/dragon_recon/dragon_vrip_res3.ply \
              models/dragon_recon/dragon_vrip_res4.ply $(if $(WEB_DRAGON),$(DRAGON))
-WEB_SRC = $(SRC) apps/view.c
+WEB_SRC = $(SRC) $(WGSL_C) apps/view.c
 # the GPU backend: WebGPU through Dawn's bindings for Emscripten (fetched by emcc once)
 WEBGPU = -DLR_GPU --use-port=emdawnwebgpu
 WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pragmas $(WEBGPU) -sDEFAULT_TO_CXX \
@@ -303,9 +323,9 @@ $(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
 # a local web server for the page (the browser will not run WebAssembly from file://)
 # the GPU air against the CPU air (open web/build/test_gpu_fluid.html, or see docs/WEB.md)
 webtest: $(WEB)/test_gpu_fluid.html
-$(WEB)/test_gpu_fluid.html: $(SRC) $(HDR) examples/test_gpu_fluid.c
+$(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) examples/test_gpu_fluid.c
 	@mkdir -p $(WEB)
-	$(EMCC) $(WEBBASE) $(SRC) examples/test_gpu_fluid.c -o $@
+	$(EMCC) $(WEBBASE) $(SRC) $(WGSL_C) examples/test_gpu_fluid.c -o $@
 
 serve:
 	cd $(WEB) && (python3 -m http.server 8000 || uv run python -m http.server 8000)

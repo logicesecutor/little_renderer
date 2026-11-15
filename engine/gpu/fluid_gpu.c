@@ -26,618 +26,102 @@ void gpu_fluid_destroy(GpuFluid *gf){ (void)gf; }
 // voxels of the cloud, or over bodies. The comments of phys/fluid.c explain the method.
 
 // the step's parameters (struct GFP on the C side)
-static const char *FHEAD = WGSL(
-struct FP {
-    n: vec4u,      /* nx, ny, nz, open faces (FLUID_OPEN_* bits) */
-    lo: vec4f,     /* the grid's corner, w = h */
-    a: vec4f,      /* 1 / h, dt, the wind's rate * dt (<= 1), buoyancy * dt */
-    wind: vec4f,   /* the wind, w = vorticity * h */
-    dn: vec4u,     /* the cloud's voxels per axis, w = 1 if there is a cloud */
-    dlo: vec4f,    /* the cloud's box, w = what the dissipation keeps */
-    dhi: vec4f,    /* w = number of expansion sources */
-    m: vec4u,      /* bodies */
-    src: array<vec4f, 8>,   /* sources: center, radius */
-    rate: array<vec4f, 2>,  /* and their rates */
-};
-@group(0) @binding(0) var<uniform> P: FP;
-
-fn NX() -> i32 { return i32(P.n.x); }
-fn NY() -> i32 { return i32(P.n.y); }
-fn NZ() -> i32 { return i32(P.n.z); }
-fn H() -> f32 { return P.lo.w; }
-fn tid(g: vec3u, nw: vec3u) -> u32 { return g.x + g.y * nw.x * 64u; }
-fn ncells() -> u32 { return P.n.x * P.n.y * P.n.z; }
-fn npoints() -> u32 { return (P.n.x + 1u) * (P.n.y + 1u) * (P.n.z + 1u); }
-fn nvoxels() -> u32 { return P.dn.x * P.dn.y * P.dn.z; }
-fn cell_of(id: u32) -> vec3i { let i = i32(id); return vec3i(i % NX(), (i / NX()) % NY(), i / (NX() * NY())); }
-fn point_of(id: u32) -> vec3i { let i = i32(id); let a = NX() + 1; let b = NY() + 1; return vec3i(i % a, (i / a) % b, i / (a * b)); }
-fn cidx(x: i32, y: i32, z: i32) -> u32 { return u32((z * NY() + y) * NX() + x); }
-fn iu(x: i32, y: i32, z: i32) -> u32 { return u32((z * NY() + y) * (NX() + 1) + x); }
-fn iv(x: i32, y: i32, z: i32) -> u32 { return u32((z * (NY() + 1) + y) * NX() + x); }
-fn iw(x: i32, y: i32, z: i32) -> u32 { return u32((z * NY() + y) * NX() + x); }
-fn center(c: vec3i) -> vec3f { return P.lo.xyz + (vec3f(c) + 0.5) * H(); }
-fn pos_u(c: vec3i) -> vec3f { return P.lo.xyz + (vec3f(c) + vec3f(0.0, 0.5, 0.5)) * H(); }
-fn pos_v(c: vec3i) -> vec3f { return P.lo.xyz + (vec3f(c) + vec3f(0.5, 0.0, 0.5)) * H(); }
-fn pos_w(c: vec3i) -> vec3f { return P.lo.xyz + (vec3f(c) + vec3f(0.5, 0.5, 0.0)) * H(); }
-fn SU() -> vec3i { return vec3i(NX() + 1, NY(), NZ()); }
-fn SV() -> vec3i { return vec3i(NX(), NY() + 1, NZ()); }
-fn SW() -> vec3i { return vec3i(NX(), NY(), NZ() + 1); }
-fn DN() -> vec3i { return vec3i(P.dn.xyz); }
-fn voxel_of(id: u32) -> vec3i { let i = i32(id); let n = DN(); return vec3i(i % n.x, (i / n.x) % n.y, i / (n.x * n.y)); }
-fn dcenter(c: vec3i) -> vec3f { return P.dlo.xyz + (vec3f(c) + 0.5) * (P.dhi.xyz - P.dlo.xyz) / vec3f(P.dn.xyz); }
-fn dgrid(p: vec3f) -> vec3f { return (p - P.dlo.xyz) * (vec3f(P.dn.xyz) / (P.dhi.xyz - P.dlo.xyz)) - 0.5; }
-
-/* the divergence the expansion sources impose at a point */
-fn src_div(p: vec3f) -> f32 {
-    var d = 0.0;
-    for (var s = 0u; s < u32(P.dhi.w); s++) {
-        let c = P.src[s];
-        let l = length(p - c.xyz) / c.w;
-        if (l < 1.0) { d += P.rate[s / 4u][s % 4u] * (1.0 - l * l); }
-    }
-    return d;
-}
-);
+extern const char lr_wgsl_fluid_head[];   // engine/gpu/shaders/fluid_head.wgsl
+static const char *FHEAD = lr_wgsl_fluid_head;
 
 // trilinear sample of array QA (dims S, x fastest), clamped to the grid (sample3 in fluid.c);
 // QN names the function. QM: the same, also returning the min and max of the 8 values.
-static const char *SAMPLE = WGSL(
-fn s_QN(g0: vec3f, S: vec3i) -> f32 {
-    let g = clamp(g0, vec3f(0.0), vec3f(S - 1));
-    let i0 = min(vec3i(g), max(S - 2, vec3i(0)));
-    let i1 = min(i0 + 1, S - 1);
-    let f = g - vec3f(i0);
-    let a = i0.z * S.x * S.y; let b = i1.z * S.x * S.y; let c = i0.y * S.x; let d = i1.y * S.x;
-    let c00 = mix(QA[u32(a + c + i0.x)], QA[u32(a + c + i1.x)], f.x);
-    let c10 = mix(QA[u32(a + d + i0.x)], QA[u32(a + d + i1.x)], f.x);
-    let c01 = mix(QA[u32(b + c + i0.x)], QA[u32(b + c + i1.x)], f.x);
-    let c11 = mix(QA[u32(b + d + i0.x)], QA[u32(b + d + i1.x)], f.x);
-    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
-}
-);
-static const char *SAMPLE_MM = WGSL(
-fn sm_QN(g0: vec3f, S: vec3i) -> vec3f {
-    let g = clamp(g0, vec3f(0.0), vec3f(S - 1));
-    let i0 = min(vec3i(g), max(S - 2, vec3i(0)));
-    let i1 = min(i0 + 1, S - 1);
-    let f = g - vec3f(i0);
-    let a = i0.z * S.x * S.y; let b = i1.z * S.x * S.y; let c = i0.y * S.x; let d = i1.y * S.x;
-    let c000 = QA[u32(a + c + i0.x)]; let c100 = QA[u32(a + c + i1.x)];
-    let c010 = QA[u32(a + d + i0.x)]; let c110 = QA[u32(a + d + i1.x)];
-    let c001 = QA[u32(b + c + i0.x)]; let c101 = QA[u32(b + c + i1.x)];
-    let c011 = QA[u32(b + d + i0.x)]; let c111 = QA[u32(b + d + i1.x)];
-    let lo = min(min(min(c000, c100), min(c010, c110)), min(min(c001, c101), min(c011, c111)));
-    let hi = max(max(max(c000, c100), max(c010, c110)), max(max(c001, c101), max(c011, c111)));
-    let c00 = mix(c000, c100, f.x); let c10 = mix(c010, c110, f.x);
-    let c01 = mix(c001, c101, f.x); let c11 = mix(c011, c111, f.x);
-    return vec3f(mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z), lo, hi);
-}
-);
+extern const char lr_wgsl_fluid_sample[];   // engine/gpu/shaders/fluid_sample.wgsl
+static const char *SAMPLE = lr_wgsl_fluid_sample;
+extern const char lr_wgsl_fluid_sample_mm[];   // engine/gpu/shaders/fluid_sample_mm.wgsl
+static const char *SAMPLE_MM = lr_wgsl_fluid_sample_mm;
 
 // the air velocity at a world point (needs u, v, w and their samplers)
-static const char *VEL = WGSL(
-fn vel_at(p: vec3f) -> vec3f {
-    let g = (p - P.lo.xyz) * P.a.x;
-    return vec3f(s_u(g - vec3f(0.0, 0.5, 0.5), SU()), s_v(g - vec3f(0.5, 0.0, 0.5), SV()), s_w(g - vec3f(0.5, 0.5, 0.0), SW()));
-}
-);
+extern const char lr_wgsl_fluid_vel[];   // engine/gpu/shaders/fluid_vel.wgsl
+static const char *VEL = lr_wgsl_fluid_vel;
 
 // obstacles (needs solid)
-static const char *SOLID = WGSL(
-fn solid_at(x: i32, y: i32, z: i32) -> bool {
-    return x >= 0 && y >= 0 && z >= 0 && x < NX() && y < NY() && z < NZ() && solid[cidx(x, y, z)] != 0u;
-}
-);
+extern const char lr_wgsl_fluid_solid[];   // engine/gpu/shaders/fluid_solid.wgsl
+static const char *SOLID = lr_wgsl_fluid_solid;
 
 // 1 if the face's value is fixed by a wall or a body, and the value (needs solid, svel)
-static const char *FIXED = WGSL(
-fn fixed_face(ax: i32, q: vec3i) -> vec2f {
-    var qq = q;
-    var nn = vec3i(NX(), NY(), NZ());
-    let c = qq[ax];
-    let bit = 1u << u32(2 * ax);
-    if (c == 0 && (P.n.w & bit) == 0u) { return vec2f(1.0, 0.0); }
-    if (c == nn[ax] && (P.n.w & (bit << 1u)) == 0u) { return vec2f(1.0, 0.0); }
-    var o = vec3i(0);
-    o[ax] = 1;
-    let pa = q - o;
-    let a = solid_at(pa.x, pa.y, pa.z);
-    let b = solid_at(q.x, q.y, q.z);
-    if (!a && !b) { return vec2f(0.0, 0.0); }
-    var s = 0.0;
-    var k = 0.0;
-    if (a) { s += svel[cidx(pa.x, pa.y, pa.z)][ax]; k += 1.0; }
-    if (b) { s += svel[cidx(q.x, q.y, q.z)][ax]; k += 1.0; }
-    return vec2f(1.0, s / k);
-}
-);
+extern const char lr_wgsl_fluid_fixed[];   // engine/gpu/shaders/fluid_fixed.wgsl
+static const char *FIXED = lr_wgsl_fluid_fixed;
 
 /* the cells inside each body become obstacles moving with it (mark_solids in world.c);
    a body is 6 vec4: position (w: 0 sphere, 1 box, 2 + k a mesh body whose cells are bits
    k.. of occ: 48^3 over [-half, half] of its own frame, phys/convex.h), its 3 axes (w: half
    sizes), velocity (w: bounding radius), angular velocity (w: radius of the drag samples) */
-static const char *K_MARK = WGSL(
-@group(0) @binding(1) var<storage, read> bodies: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> solid: array<u32>;
-@group(0) @binding(3) var<storage, read_write> svel: array<vec4f>;
-@group(0) @binding(4) var<storage, read> occ: array<u32>;
-const OCC = 48;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    let c = center(cell_of(id));
-    var s = 0u;
-    var vel = vec3f(0.0);
-    for (var b = 0u; b < P.m.x; b++) {
-        let o = 6u * b;
-        let pos = bodies[o];
-        let d = c - pos.xyz;
-        let r = bodies[o + 4u].w;
-        if (dot(d, d) > r * r) { continue; }
-        var inside = false;
-        if (pos.w < 0.5) {
-            inside = dot(d, d) <= bodies[o + 1u].w * bodies[o + 1u].w;
-        } else if (pos.w > 1.5) {
-            let half = vec3f(bodies[o + 1u].w, bodies[o + 2u].w, bodies[o + 3u].w);
-            let l = vec3f(dot(bodies[o + 1u].xyz, d), dot(bodies[o + 2u].xyz, d), dot(bodies[o + 3u].xyz, d));
-            let q = vec3i(floor((l + half) / (2.0 * half) * f32(OCC)));
-            if (all(q >= vec3i(0)) && all(q < vec3i(OCC))) {
-                let i = u32((q.z * OCC + q.y) * OCC + q.x) + u32(pos.w - 2.0 + 0.5) * 1024u;   /* in units of 32 words */
-                inside = ((occ[i >> 5u] >> (i & 31u)) & 1u) != 0u;
-            }
-        } else {
-            inside = abs(dot(bodies[o + 1u].xyz, d)) <= bodies[o + 1u].w && abs(dot(bodies[o + 2u].xyz, d)) <= bodies[o + 2u].w &&
-                     abs(dot(bodies[o + 3u].xyz, d)) <= bodies[o + 3u].w;
-        }
-        if (inside) { s = 1u; vel = bodies[o + 4u].xyz + cross(bodies[o + 5u].xyz, d); }
-    }
-    solid[id] = s;
-    svel[id] = vec4f(vel, 0.0);
-}
-);
+extern const char lr_wgsl_fluid_mark[];   // engine/gpu/shaders/fluid_mark.wgsl
+static const char *K_MARK = lr_wgsl_fluid_mark;
 
 /* walls and bodies fix the faces they touch (enforce_boundaries) */
-static const char *K_BOUND = WGSL(
-@group(0) @binding(1) var<storage, read_write> u: array<f32>;
-@group(0) @binding(2) var<storage, read_write> v: array<f32>;
-@group(0) @binding(3) var<storage, read_write> w: array<f32>;
-@group(0) @binding(4) var<storage, read> solid: array<u32>;
-@group(0) @binding(5) var<storage, read> svel: array<vec4f>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= npoints()) { return; }
-    let q = point_of(id);
-    if (q.y < NY() && q.z < NZ()) { let r = fixed_face(0, q); if (r.x > 0.5) { u[iu(q.x, q.y, q.z)] = r.y; } }
-    if (q.x < NX() && q.z < NZ()) { let r = fixed_face(1, q); if (r.x > 0.5) { v[iv(q.x, q.y, q.z)] = r.y; } }
-    if (q.x < NX() && q.y < NY()) { let r = fixed_face(2, q); if (r.x > 0.5) { w[iw(q.x, q.y, q.z)] = r.y; } }
-}
-);
+extern const char lr_wgsl_fluid_bound[];   // engine/gpu/shaders/fluid_bound.wgsl
+static const char *K_BOUND = lr_wgsl_fluid_bound;
 
 /* wind and buoyancy (add_forces) */
-static const char *K_FORCES = WGSL(
-@group(0) @binding(1) var<storage, read_write> u: array<f32>;
-@group(0) @binding(2) var<storage, read_write> v: array<f32>;
-@group(0) @binding(3) var<storage, read_write> w: array<f32>;
-@group(0) @binding(4) var<storage, read> dens: array<f32>;
-/* volume_density: trilinear, 0 outside the grid */
-fn vol_density(p: vec3f) -> f32 {
-    let n = vec3f(P.dn.xyz);
-    let g = (p - P.dlo.xyz) / (P.dhi.xyz - P.dlo.xyz) * n - 0.5;
-    if (!(all(g > vec3f(-1.0)) && all(g < n))) { return 0.0; }
-    let i0 = vec3i(floor(g));
-    let f = g - vec3f(i0);
-    let ni = DN();
-    var c: array<f32, 8>;
-    for (var k = 0; k < 8; k++) {
-        let i = i0 + vec3i(k & 1, (k >> 1) & 1, k >> 2);
-        var val = 0.0;
-        if (all(i >= vec3i(0)) && all(i < ni)) { val = dens[u32((i.z * ni.y + i.y) * ni.x + i.x)]; }
-        c[k] = val;
-    }
-    let c00 = mix(c[0], c[1], f.x); let c10 = mix(c[2], c[3], f.x);
-    let c01 = mix(c[4], c[5], f.x); let c11 = mix(c[6], c[7], f.x);
-    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
-}
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= npoints()) { return; }
-    let q = point_of(id);
-    let a = P.a.z;
-    if (q.y < NY() && q.z < NZ()) { let i = iu(q.x, q.y, q.z); u[i] += (P.wind.x - u[i]) * a; }
-    if (q.x < NX() && q.z < NZ()) {
-        let i = iv(q.x, q.y, q.z);
-        var val = v[i];
-        val += (P.wind.y - val) * a;
-        if (P.dn.w != 0u && P.a.w != 0.0) { val += P.a.w * vol_density(pos_v(q)); }
-        v[i] = val;
-    }
-    if (q.x < NX() && q.y < NY()) { let i = iw(q.x, q.y, q.z); w[i] += (P.wind.z - w[i]) * a; }
-}
-);
+extern const char lr_wgsl_fluid_forces[];   // engine/gpu/shaders/fluid_forces.wgsl
+static const char *K_FORCES = lr_wgsl_fluid_forces;
 
 /* vorticity confinement in 4 passes: velocity at the cell centers; vorticity and its length;
    the force N x omega; spread to the faces */
-static const char *K_VA = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read_write> cvel: array<vec4f>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    let c = cell_of(id);
-    cvel[id] = vec4f(0.5 * (u[iu(c.x, c.y, c.z)] + u[iu(c.x + 1, c.y, c.z)]),
-                     0.5 * (v[iv(c.x, c.y, c.z)] + v[iv(c.x, c.y + 1, c.z)]),
-                     0.5 * (w[iw(c.x, c.y, c.z)] + w[iw(c.x, c.y, c.z + 1)]), 0.0);
-}
-);
-static const char *K_VB = WGSL(
-@group(0) @binding(1) var<storage, read> cvel: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> omg: array<vec4f>;
-fn at(x: i32, y: i32, z: i32) -> vec4f { return cvel[cidx(clamp(x, 0, NX() - 1), clamp(y, 0, NY() - 1), clamp(z, 0, NZ() - 1))]; }
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    let c = cell_of(id);
-    let k = 0.5 / H();
-    let dwdy = (at(c.x, c.y + 1, c.z).z - at(c.x, c.y - 1, c.z).z) * k;
-    let dvdz = (at(c.x, c.y, c.z + 1).y - at(c.x, c.y, c.z - 1).y) * k;
-    let dudz = (at(c.x, c.y, c.z + 1).x - at(c.x, c.y, c.z - 1).x) * k;
-    let dwdx = (at(c.x + 1, c.y, c.z).z - at(c.x - 1, c.y, c.z).z) * k;
-    let dvdx = (at(c.x + 1, c.y, c.z).y - at(c.x - 1, c.y, c.z).y) * k;
-    let dudy = (at(c.x, c.y + 1, c.z).x - at(c.x, c.y - 1, c.z).x) * k;
-    let o = vec3f(dwdy - dvdz, dudz - dwdx, dvdx - dudy);
-    omg[id] = vec4f(o, length(o));
-}
-);
-static const char *K_VC = WGSL(
-@group(0) @binding(1) var<storage, read> omg: array<vec4f>;
-@group(0) @binding(2) var<storage, read> solid: array<u32>;
-@group(0) @binding(3) var<storage, read_write> frc: array<vec4f>;
-fn mag(x: i32, y: i32, z: i32) -> f32 { return omg[cidx(clamp(x, 0, NX() - 1), clamp(y, 0, NY() - 1), clamp(z, 0, NZ() - 1))].w; }
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    let c = cell_of(id);
-    let k = 0.5 / H();
-    let g = vec3f(mag(c.x + 1, c.y, c.z) - mag(c.x - 1, c.y, c.z), mag(c.x, c.y + 1, c.z) - mag(c.x, c.y - 1, c.z),
-                  mag(c.x, c.y, c.z + 1) - mag(c.x, c.y, c.z - 1)) * k;
-    let gl = length(g);
-    var force = vec3f(0.0);
-    if (gl > 1e-6 && solid[id] == 0u) { force = cross(g / gl, omg[id].xyz) * P.wind.w; }
-    frc[id] = vec4f(force, 0.0);
-}
-);
-static const char *K_VD = WGSL(
-@group(0) @binding(1) var<storage, read> frc: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> u: array<f32>;
-@group(0) @binding(3) var<storage, read_write> v: array<f32>;
-@group(0) @binding(4) var<storage, read_write> w: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    let c = cell_of(id);
-    let dt = P.a.y;
-    let f = frc[id];
-    if (c.x > 0) { u[iu(c.x, c.y, c.z)] += 0.5 * (f.x + frc[cidx(c.x - 1, c.y, c.z)].x) * dt; }
-    if (c.y > 0) { v[iv(c.x, c.y, c.z)] += 0.5 * (f.y + frc[cidx(c.x, c.y - 1, c.z)].y) * dt; }
-    if (c.z > 0) { w[iw(c.x, c.y, c.z)] += 0.5 * (f.z + frc[cidx(c.x, c.y, c.z - 1)].z) * dt; }
-}
-);
+extern const char lr_wgsl_fluid_va[];   // engine/gpu/shaders/fluid_va.wgsl
+static const char *K_VA = lr_wgsl_fluid_va;
+extern const char lr_wgsl_fluid_vb[];   // engine/gpu/shaders/fluid_vb.wgsl
+static const char *K_VB = lr_wgsl_fluid_vb;
+extern const char lr_wgsl_fluid_vc[];   // engine/gpu/shaders/fluid_vc.wgsl
+static const char *K_VC = lr_wgsl_fluid_vc;
+extern const char lr_wgsl_fluid_vd[];   // engine/gpu/shaders/fluid_vd.wgsl
+static const char *K_VD = lr_wgsl_fluid_vd;
 
 /* semi-Lagrangian advection of the velocity into tu, tv, tw */
-static const char *K_ADV = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read_write> tu: array<f32>;
-@group(0) @binding(5) var<storage, read_write> tv: array<f32>;
-@group(0) @binding(6) var<storage, read_write> tw: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= npoints()) { return; }
-    let q = point_of(id);
-    let dt = P.a.y;
-    let s = P.a.x;
-    if (q.y < NY() && q.z < NZ()) {
-        let c = pos_u(q);
-        tu[iu(q.x, q.y, q.z)] = s_u((c - vel_at(c) * dt - P.lo.xyz) * s - vec3f(0.0, 0.5, 0.5), SU());
-    }
-    if (q.x < NX() && q.z < NZ()) {
-        let c = pos_v(q);
-        tv[iv(q.x, q.y, q.z)] = s_v((c - vel_at(c) * dt - P.lo.xyz) * s - vec3f(0.5, 0.0, 0.5), SV());
-    }
-    if (q.x < NX() && q.y < NY()) {
-        let c = pos_w(q);
-        tw[iw(q.x, q.y, q.z)] = s_w((c - vel_at(c) * dt - P.lo.xyz) * s - vec3f(0.5, 0.5, 0.0), SW());
-    }
-}
-);
+extern const char lr_wgsl_fluid_adv[];   // engine/gpu/shaders/fluid_adv.wgsl
+static const char *K_ADV = lr_wgsl_fluid_adv;
 
 /* the divergence, minus what the expansion sources ask for */
-static const char *K_DIV = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read> solid: array<u32>;
-@group(0) @binding(5) var<storage, read_write> div: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ncells()) { return; }
-    if (solid[id] != 0u) { div[id] = 0.0; return; }
-    let c = cell_of(id);
-    let d = (u[iu(c.x + 1, c.y, c.z)] - u[iu(c.x, c.y, c.z)]) + (v[iv(c.x, c.y + 1, c.z)] - v[iv(c.x, c.y, c.z)]) +
-            (w[iw(c.x, c.y, c.z + 1)] - w[iw(c.x, c.y, c.z)]);
-    div[id] = d * P.a.x - src_div(center(c));
-}
-);
+extern const char lr_wgsl_fluid_div[];   // engine/gpu/shaders/fluid_div.wgsl
+static const char *K_DIV = lr_wgsl_fluid_div;
 
 /* u -= grad p across the faces the pressure acts on */
-static const char *K_GRAD = WGSL(
-@group(0) @binding(1) var<storage, read_write> u: array<f32>;
-@group(0) @binding(2) var<storage, read_write> v: array<f32>;
-@group(0) @binding(3) var<storage, read_write> w: array<f32>;
-@group(0) @binding(4) var<storage, read> p: array<f32>;
-@group(0) @binding(5) var<storage, read> solid: array<u32>;
-@group(0) @binding(6) var<storage, read> svel: array<vec4f>;
-fn pc(x: i32, y: i32, z: i32) -> f32 {
-    if (x < 0 || y < 0 || z < 0 || x >= NX() || y >= NY() || z >= NZ()) { return 0.0; }
-    return p[cidx(x, y, z)];
-}
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= npoints()) { return; }
-    let q = point_of(id);
-    let s = P.a.x;
-    let here = pc(q.x, q.y, q.z);
-    if (q.y < NY() && q.z < NZ() && fixed_face(0, q).x < 0.5) { u[iu(q.x, q.y, q.z)] -= (here - pc(q.x - 1, q.y, q.z)) * s; }
-    if (q.x < NX() && q.z < NZ() && fixed_face(1, q).x < 0.5) { v[iv(q.x, q.y, q.z)] -= (here - pc(q.x, q.y - 1, q.z)) * s; }
-    if (q.x < NX() && q.y < NY() && fixed_face(2, q).x < 0.5) { w[iw(q.x, q.y, q.z)] -= (here - pc(q.x, q.y, q.z - 1)) * s; }
-}
-);
+extern const char lr_wgsl_fluid_grad[];   // engine/gpu/shaders/fluid_grad.wgsl
+static const char *K_GRAD = lr_wgsl_fluid_grad;
 
 /* the cloud, MacCormack: one step backwards into d1, then the correction */
-static const char *K_D1 = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read> d0: array<f32>;
-@group(0) @binding(5) var<storage, read_write> d1: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= nvoxels()) { return; }
-    let c = dcenter(voxel_of(id));
-    d1[id] = s_d0(dgrid(c - vel_at(c) * P.a.y), DN());
-}
-);
-static const char *K_D2 = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read> d0: array<f32>;
-@group(0) @binding(5) var<storage, read> d1: array<f32>;
-@group(0) @binding(6) var<storage, read_write> dens: array<f32>;
-@group(0) @binding(7) var<storage, read> solid: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= nvoxels()) { return; }
-    let c = dcenter(voxel_of(id));
-    let fc = vec3i(floor((c - P.lo.xyz) * P.a.x));
-    if (solid_at(fc.x, fc.y, fc.z)) { dens[id] = 0.0; return; }
-    let dt = P.a.y;
-    let vel = vel_at(c);
-    let mm = sm_d0(dgrid(c - vel * dt), DN());
-    let back = s_d1(dgrid(c + vel * dt), DN());
-    var r = d1[id] + 0.5 * (d0[id] - back);
-    r = clamp(r, mm.y, mm.z);
-    r *= P.dlo.w;
-    if (P.dhi.w > 0.5) { r *= exp(-src_div(c) * dt); }
-    dens[id] = select(r, 0.0, r < 1e-4);
-}
-);
+extern const char lr_wgsl_fluid_d1[];   // engine/gpu/shaders/fluid_d1.wgsl
+static const char *K_D1 = lr_wgsl_fluid_d1;
+extern const char lr_wgsl_fluid_d2[];   // engine/gpu/shaders/fluid_d2.wgsl
+static const char *K_D2 = lr_wgsl_fluid_d2;
 
 /* the air around each body: the mean over 14 points on a shell just outside it */
-static const char *K_SAMP = WGSL(
-@group(0) @binding(1) var<storage, read> u: array<f32>;
-@group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read> w: array<f32>;
-@group(0) @binding(4) var<storage, read> bodies: array<vec4f>;
-@group(0) @binding(5) var<storage, read_write> around: array<vec4f>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= P.m.x) { return; }
-    let pos = bodies[6u * id].xyz;
-    let r = bodies[6u * id + 5u].w;
-    let k = 0.57735027;
-    var dirs = array<vec3f, 14>(vec3f(1.0, 0.0, 0.0), vec3f(-1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, -1.0, 0.0),
-        vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, -1.0), vec3f(k, k, k), vec3f(k, k, -k), vec3f(k, -k, k), vec3f(k, -k, -k),
-        vec3f(-k, k, k), vec3f(-k, k, -k), vec3f(-k, -k, k), vec3f(-k, -k, -k));
-    var sum = vec3f(0.0);
-    for (var d = 0; d < 14; d++) { sum += vel_at(pos + dirs[d] * r); }
-    around[id] = vec4f(sum / 14.0, 0.0);
-}
-);
+extern const char lr_wgsl_fluid_samp[];   // engine/gpu/shaders/fluid_samp.wgsl
+static const char *K_SAMP = lr_wgsl_fluid_samp;
 
 // ---- the multigrid kernels (phys/poisson.c), on the levels' own parameters ----------------------
 
-static const char *LHEAD = WGSL(
-struct LU {
-    d: vec4u,    /* this level: nx, ny, nz, open faces */
-    c: vec4u,    /* the next coarser level: nx, ny, nz; w = the color of a red-black sweep */
-    h: vec4f,    /* h^2 */
-};
-@group(0) @binding(0) var<uniform> L: LU;
-fn tid(g: vec3u, nw: vec3u) -> u32 { return g.x + g.y * nw.x * 64u; }
-fn lcount() -> u32 { return L.d.x * L.d.y * L.d.z; }
-fn ccount() -> u32 { return L.c.x * L.c.y * L.c.z; }
-fn lcell(id: u32) -> vec3i { let i = i32(id); let n = vec3i(L.d.xyz); return vec3i(i % n.x, (i / n.x) % n.y, i / (n.x * n.y)); }
-fn ccell(id: u32) -> vec3i { let i = i32(id); let n = vec3i(L.c.xyz); return vec3i(i % n.x, (i / n.x) % n.y, i / (n.x * n.y)); }
-fn lidx(q: vec3i) -> u32 { return u32((q.z * i32(L.d.y) + q.y) * i32(L.d.x) + q.x); }
-fn cidx(q: vec3i) -> u32 { return u32((q.z * i32(L.c.y) + q.y) * i32(L.c.x) + q.x); }
-);
+extern const char lr_wgsl_fluid_level_head[];   // engine/gpu/shaders/fluid_level_head.wgsl
+static const char *LHEAD = lr_wgsl_fluid_level_head;
 
 // neighbors of a cell through its links (needs p, links)
-static const char *NSUM = WGSL(
-fn nsum(i: u32, m: u32) -> f32 {
-    let sy = L.d.x;
-    let sz = L.d.x * L.d.y;
-    var s = 0.0;
-    if ((m & 1u) != 0u) { s += p[i - 1u]; }
-    if ((m & 2u) != 0u) { s += p[i + 1u]; }
-    if ((m & 4u) != 0u) { s += p[i - sy]; }
-    if ((m & 8u) != 0u) { s += p[i + sy]; }
-    if ((m & 16u) != 0u) { s += p[i - sz]; }
-    if ((m & 32u) != 0u) { s += p[i + sz]; }
-    return s;
-}
-fn ncount(m: u32) -> f32 { return f32(countOneBits(m & 63u) + (m >> 6u)); }
-);
+extern const char lr_wgsl_fluid_nsum[];   // engine/gpu/shaders/fluid_nsum.wgsl
+static const char *NSUM = lr_wgsl_fluid_nsum;
 
-static const char *K_LINKS = WGSL(
-@group(0) @binding(1) var<storage, read> solid: array<u32>;
-@group(0) @binding(2) var<storage, read_write> links: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= lcount()) { return; }
-    var m = 0u;
-    var o = 0u;
-    if (solid[id] == 0u) {
-        let q = lcell(id);
-        let n = vec3i(L.d.xyz);
-        var nb = array<vec3i, 6>(vec3i(-1, 0, 0), vec3i(1, 0, 0), vec3i(0, -1, 0), vec3i(0, 1, 0), vec3i(0, 0, -1), vec3i(0, 0, 1));
-        for (var k = 0u; k < 6u; k++) {
-            let a = q + nb[k];
-            if (any(a < vec3i(0)) || any(a >= n)) {
-                if (((L.d.w >> k) & 1u) != 0u) { o++; }
-                continue;
-            }
-            if (solid[lidx(a)] == 0u) { m |= 1u << k; }
-        }
-    }
-    links[id] = m | (o << 6u);
-}
-);
+extern const char lr_wgsl_fluid_links[];   // engine/gpu/shaders/fluid_links.wgsl
+static const char *K_LINKS = lr_wgsl_fluid_links;
 /* a coarse cell is solid only if all its fine cells are (L: the fine level) */
-static const char *K_CSOLID = WGSL(
-@group(0) @binding(1) var<storage, read> fine: array<u32>;
-@group(0) @binding(2) var<storage, read_write> coarse: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ccount()) { return; }
-    let q = ccell(id);
-    var all_solid = 1u;
-    for (var k = 0; k < 8; k++) {
-        let a = 2 * q + vec3i(k & 1, (k >> 1) & 1, k >> 2);
-        if (any(a >= vec3i(L.d.xyz))) { continue; }
-        if (fine[lidx(a)] == 0u) { all_solid = 0u; }
-    }
-    coarse[id] = all_solid;
-}
-);
-static const char *K_SMOOTH = WGSL(
-@group(0) @binding(1) var<storage, read> links: array<u32>;
-@group(0) @binding(2) var<storage, read_write> p: array<f32>;
-@group(0) @binding(3) var<storage, read> rhs: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= lcount()) { return; }
-    let q = lcell(id);
-    if (((u32(q.x + q.y + q.z) + L.c.w) & 1u) != 0u) { return; }
-    let m = links[id];
-    if (m == 0u) { return; }
-    p[id] = (nsum(id, m) - L.h.x * rhs[id]) / ncount(m);
-}
-);
-static const char *K_RESID = WGSL(
-@group(0) @binding(1) var<storage, read> links: array<u32>;
-@group(0) @binding(2) var<storage, read> p: array<f32>;
-@group(0) @binding(3) var<storage, read> rhs: array<f32>;
-@group(0) @binding(4) var<storage, read_write> res: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= lcount()) { return; }
-    let m = links[id];
-    if (m == 0u) { res[id] = 0.0; return; }
-    res[id] = rhs[id] - (nsum(id, m) - ncount(m) * p[id]) / L.h.x;
-}
-);
+extern const char lr_wgsl_fluid_csolid[];   // engine/gpu/shaders/fluid_csolid.wgsl
+static const char *K_CSOLID = lr_wgsl_fluid_csolid;
+extern const char lr_wgsl_fluid_smooth[];   // engine/gpu/shaders/fluid_smooth.wgsl
+static const char *K_SMOOTH = lr_wgsl_fluid_smooth;
+extern const char lr_wgsl_fluid_resid[];   // engine/gpu/shaders/fluid_resid.wgsl
+static const char *K_RESID = lr_wgsl_fluid_resid;
 /* the coarse right-hand side: the mean residual of the fine fluid cells (L: the fine level) */
-static const char *K_RESTRICT = WGSL(
-@group(0) @binding(1) var<storage, read> links: array<u32>;
-@group(0) @binding(2) var<storage, read> res: array<f32>;
-@group(0) @binding(3) var<storage, read_write> crhs: array<f32>;
-@group(0) @binding(4) var<storage, read_write> cp: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= ccount()) { return; }
-    let q = ccell(id);
-    var s = 0.0;
-    var n = 0;
-    for (var k = 0; k < 8; k++) {
-        let a = 2 * q + vec3i(k & 1, (k >> 1) & 1, k >> 2);
-        if (any(a >= vec3i(L.d.xyz))) { continue; }
-        let fi = lidx(a);
-        if (links[fi] == 0u) { continue; }
-        s += res[fi];
-        n++;
-    }
-    crhs[id] = select(0.0, s / f32(n), n > 0);
-    cp[id] = 0.0;
-}
-);
-static const char *K_PROLONG = WGSL(
-@group(0) @binding(1) var<storage, read> links: array<u32>;
-@group(0) @binding(2) var<storage, read_write> p: array<f32>;
-@group(0) @binding(3) var<storage, read> cp: array<f32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
-    let id = tid(gid, nw);
-    if (id >= lcount()) { return; }
-    if (links[id] == 0u) { return; }
-    p[id] += cp[cidx(lcell(id) / 2)];
-}
-);
+extern const char lr_wgsl_fluid_restrict[];   // engine/gpu/shaders/fluid_restrict.wgsl
+static const char *K_RESTRICT = lr_wgsl_fluid_restrict;
+extern const char lr_wgsl_fluid_prolong[];   // engine/gpu/shaders/fluid_prolong.wgsl
+static const char *K_PROLONG = lr_wgsl_fluid_prolong;
 /* the coarsest grid: 40 sweeps by one workgroup, which can wait for itself */
-static const char *K_COARSEST = WGSL(
-@group(0) @binding(1) var<storage, read> links: array<u32>;
-@group(0) @binding(2) var<storage, read_write> p: array<f32>;
-@group(0) @binding(3) var<storage, read> rhs: array<f32>;
-@compute @workgroup_size(256)
-fn main(@builtin(local_invocation_index) li: u32) {
-    let n = lcount();
-    for (var it = 0; it < 40; it++) {
-        for (var color = 0u; color < 2u; color++) {
-            for (var i = li; i < n; i += 256u) {
-                let q = lcell(i);
-                if (((u32(q.x + q.y + q.z) + color) & 1u) == 0u) {
-                    let m = links[i];
-                    if (m != 0u) { p[i] = (nsum(i, m) - L.h.x * rhs[i]) / ncount(m); }
-                }
-            }
-            storageBarrier();
-            workgroupBarrier();
-        }
-    }
-}
-);
+extern const char lr_wgsl_fluid_coarsest[];   // engine/gpu/shaders/fluid_coarsest.wgsl
+static const char *K_COARSEST = lr_wgsl_fluid_coarsest;
 
 // ---- the C side ---------------------------------------------------------------------------------
 
@@ -756,7 +240,10 @@ static size_t npoints(const Fluid *f){ return (size_t)(f->nx + 1) * (f->ny + 1) 
 // the WGSL of kernel k: the header, the samplers and helpers it needs, its body
 static char *kernel_source(int k){
     const int nd = KERNELS[k].needs;
-    size_t cap = 65536;
+    // room for every part it may take (six samplers, each at most SAMPLE's length plus names)
+    size_t sl = strlen(SAMPLE) > strlen(SAMPLE_MM) ? strlen(SAMPLE) : strlen(SAMPLE_MM);
+    size_t cap = strlen(LHEAD) + strlen(FHEAD) + strlen(*KERNELS[k].body) + strlen(NSUM) + strlen(SOLID) + strlen(FIXED) +
+                 strlen(VEL) + 6 * (2 * sl + 2) + 16;
     char *s = malloc(cap);
     if (!s) return NULL;
     s[0] = 0;

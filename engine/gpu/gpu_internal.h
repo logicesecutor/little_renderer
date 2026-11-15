@@ -36,9 +36,9 @@ struct Gpu {
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
 };
 
-// WGSL source kept in C: WGSL( ...code... ) turns the code into a string. The preprocessor
-// removes the comments and joins the lines, which WGSL does not mind.
-#define WGSL(...) #__VA_ARGS__
+// The shaders are files of their own, engine/gpu/shaders/<name>.wgsl, carried inside the
+// library as strings (tools/wgsl_embed.c, by the Makefile): a file using one declares
+//     extern const char lr_wgsl_<name>[];
 
 static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU_STRLEN}; return v; }
 

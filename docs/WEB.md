@@ -102,8 +102,11 @@ used for 2D drawing any more, so reload the page with `?gpu=off` or `?gpu=offscr
 | (in `trace_gpu.c`) | real time: each image's guide pass and the reprojection of the last image's samples (2.5) |
 | `fluid_gpu.h`, `fluid_gpu.c` | `GpuFluid`: takes over a `PhysWorld`'s air (`PhysWorld.air_step`); the state stays on the GPU, the view draws the cloud straight from there; only the air around each body (the drag) comes back every step |
 
-The shaders are WGSL, written inside the C files with the `WGSL(...)` macro, so the engine
-stays a C library with nothing to load at run time. Every kernel has an explicit binding
+The shaders are WGSL, one file each in `engine/gpu/shaders/` (`trace.wgsl`, `rigid_solve.wgsl`,
+...). The build turns them into C strings inside the library (`tools/wgsl_embed.c`: a file
+`x.wgsl` becomes `lr_wgsl_x`, which the C file using it declares), so the engine stays a C
+library with nothing to load at run time, natively or in a browser. Some are pieces put
+together by their C file (the path tracer's module, the air's kernels with their samplers). Every kernel has an explicit binding
 layout. The `gpu` layer may use `core`, `raster` (the raymarching model) and `phys`
 (`make check-layers`), and nothing uses `gpu` except the apps.
 
