@@ -37,12 +37,20 @@ static inline uint32_t owen_reversed(uint32_t x, uint32_t seed){
 
 uint32_t sampler_owen(uint32_t x, uint32_t seed){ return owen_reversed(reverse_bits(x), seed); }
 
-// the second Sobol dimension (the first is reverse_bits(i), van der Corput)
-uint32_t sampler_sobol1(uint32_t i){
-    uint32_t r = 0, v = 1u << 31;
-    for (; i; i >>= 1, v ^= v >> 1) if (i & 1) r ^= v;
-    return r;
+// The second Sobol dimension (the first is reverse_bits(i), van der Corput), bits reversed.
+// Its direction numbers are v_1 = 1 << 31, v_k+1 = v_k ^ (v_k >> 1): with i's bits as a
+// polynomial f(z) over GF(2), the point is f(z + 1)'s, reversed. f(z + 1) in 5 steps, as
+// (z + 1)^s = z^s + 1 for s a power of 2: each half block of 2s bits gets its upper half
+// added. (Linear in i, and equal to the loop over i's bits on every single bit: the same.)
+static inline uint32_t sobol1_reversed(uint32_t i){
+    i ^= (i >> 1) & 0x55555555u;
+    i ^= (i >> 2) & 0x33333333u;
+    i ^= (i >> 4) & 0x0f0f0f0fu;
+    i ^= (i >> 8) & 0x00ff00ffu;
+    i ^= i >> 16;
+    return i;
 }
+uint32_t sampler_sobol1(uint32_t i){ return reverse_bits(sobol1_reversed(i)); }
 
 // ---- the blue-noise mask: void-and-cluster ---------------------------------------------
 // Points are added one at a time where the pattern has its largest gap ("void"), measured
@@ -59,7 +67,9 @@ static void bn_update(float *energy, const float *kern, int p, float sign){
     for (int y = 0; y < BN; y++){
         const float *k = kern + ((y - py) & (BN - 1)) * BN;
         float *e = energy + y * BN;
-        for (int x = 0; x < BN; x++) e[x] += sign * k[(x - px) & (BN - 1)];
+        // (the kernel's row wraps at x = px: two straight runs, which the compiler vectorizes)
+        for (int x = 0; x < px; x++) e[x] += sign * k[x - px + BN];
+        for (int x = px; x < BN; x++) e[x] += sign * k[x - px];
     }
 }
 
@@ -157,7 +167,7 @@ void sampler_2d(Sampler *s, int dim, real *a, real *b){
     uint32_t seed = sampler_hash(s->seed ^ sampler_hash(((uint32_t)dim * 0x9e3779b9u) ^ tile));
     uint32_t i = sampler_owen(s->index, seed);           // the order, shuffled (stratified prefixes)
     uint32_t xa = owen_reversed(i, sampler_hash(seed ^ 0xa511e9b3u));       // = sampler_owen(reverse_bits(i), ...)
-    uint32_t xb = sampler_owen(sampler_sobol1(i), sampler_hash(seed ^ 0x63d83595u));
+    uint32_t xb = owen_reversed(sobol1_reversed(i), sampler_hash(seed ^ 0x63d83595u));   // = sampler_owen(sampler_sobol1(i), ...)
     int ox = s->x + 23 * dim, oy = s->y + 41 * dim;
     *a = wrap01(unit(xa) + bn_value(m, ox, oy));
     *b = wrap01(unit(xb) + bn_value(m, ox + 32, oy + 17));

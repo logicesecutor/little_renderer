@@ -83,8 +83,10 @@ fn bn_value(x: u32, y: u32) -> f32 {
     let w = TB.bn[i >> 3u][(i >> 1u) & 3u];
     return (f32((w >> ((i & 1u) * 16u)) & 0xffffu) + 0.5) / 4096.0;
 }
-fn owen(x0: u32, seed: u32) -> u32 {
-    var x = reverseBits(x0);
+/* owen_r: x's bits already reversed (core/sampler.c, owen_reversed) */
+fn owen(x0: u32, seed: u32) -> u32 { return owen_r(reverseBits(x0), seed); }
+fn owen_r(x0: u32, seed: u32) -> u32 {
+    var x = x0;
     x ^= x * 0x3d20adeau;
     x += seed;
     x *= (seed >> 16u) | 1u;
@@ -92,17 +94,13 @@ fn owen(x0: u32, seed: u32) -> u32 {
     x ^= x * 0x53a22864u;
     return reverseBits(x);
 }
-fn sobol1(i0: u32) -> u32 {
+fn sobol1_r(i0: u32) -> u32 {   /* the second Sobol dimension, bits reversed (core/sampler.c) */
     var i = i0;
-    var r = 0u;
-    var v = 0x80000000u;
-    loop {
-        if (i == 0u) { break; }
-        if ((i & 1u) != 0u) { r ^= v; }
-        i >>= 1u;
-        v ^= v >> 1u;
-    }
-    return r;
+    i ^= (i >> 1u) & 0x55555555u;
+    i ^= (i >> 2u) & 0x33333333u;
+    i ^= (i >> 4u) & 0x0f0f0f0fu;
+    i ^= (i >> 8u) & 0x00ff00ffu;
+    return i ^ (i >> 16u);
 }
 struct Smp { x: u32, y: u32, idx: u32, on: u32 };
 const SMP_PAIRS = 13u;   /* SAMPLER_PAIRS of core/sampler.h */
@@ -114,8 +112,8 @@ fn s2(s: Smp, dim: u32, rng: ptr<function, u32>) -> vec2f {
     let tile = hash32(((s.x >> 6u) * 73856093u) ^ ((s.y >> 6u) * 19349663u));
     let seed = hash32(T.ext.y ^ hash32((dim * 0x9e3779b9u) ^ tile));
     let i = owen(s.idx, seed);
-    let a = owen(reverseBits(i), hash32(seed ^ 0xa511e9b3u));
-    let b = owen(sobol1(i), hash32(seed ^ 0x63d83595u));
+    let a = owen_r(i, hash32(seed ^ 0xa511e9b3u));
+    let b = owen_r(sobol1_r(i), hash32(seed ^ 0x63d83595u));
     let ox = s.x + 23u * dim;
     let oy = s.y + 41u * dim;
     let u = vec2f(f32(a >> 8u), f32(b >> 8u)) * (1.0 / 16777216.0) + vec2f(bn_value(ox, oy), bn_value(ox + 32u, oy + 17u));
