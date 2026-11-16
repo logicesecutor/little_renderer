@@ -1,4 +1,4 @@
-// test_gpu_rt.c - hardware ray tracing in our Vulkan layer (gpu/vk/webgpu_rt.h): bottom levels
+// test_gpu_rt.c - hardware ray tracing in our Vulkan layer (webgpu/vk/webgpu_rt.h): bottom levels
 // of triangles and of boxes, a top level of moved and scaled instances, rays cast from a
 // compute kernel with ray queries (our WGSL compiler), each hit checked against the answer
 // worked out here; then one instance moved, the top level built again, and checked again.

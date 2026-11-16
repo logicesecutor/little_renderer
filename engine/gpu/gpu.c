@@ -177,7 +177,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
         g->timestamps = 1;
     }
 #ifdef LR_VK
-    // hardware ray queries: our Vulkan layer's (gpu/vk/webgpu_rt.h), when the GPU has them;
+    // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
     const char *hw = getenv("LR_GPU_HWRT");
     if (!(hw && *hw == '0') && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)WGPUNativeFeature_RayQuery)){

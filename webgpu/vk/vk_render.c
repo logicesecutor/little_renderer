@@ -8,7 +8,7 @@
 //
 // No barrier can go inside a dynamic render pass, so the one before the pass (vk_before)
 // covers all of its draws, and the command after the pass waits for the whole pass.
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdio.h>
 #include <stdlib.h>

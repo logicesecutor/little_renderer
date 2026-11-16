@@ -100,7 +100,7 @@ GPU_WGSL(BUILD, trace_build);
 GPU_WGSL(PLOC, trace_ploc);
 
 #ifdef LR_VK
-// ---- hardware ray tracing (our Vulkan layer, gpu/vk/webgpu_rt.h) ----
+// ---- hardware ray tracing (our Vulkan layer, webgpu/vk/webgpu_rt.h) ----
 // traverse() with ray queries, in place of the BVH's (renamed traverse_bvh, unused): the
 // same Found. The top level's instances: the world's triangles (custom data HW_WTRI), its
 // spheres and quads as boxes (HW_WPRIM: primitive i is prims[i], hit here by the CPU's

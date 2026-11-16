@@ -1,5 +1,5 @@
 // front.c - WGSL tokens and the syntax tree (wgsl_impl.h)
-#include "gpu/wgsl/wgsl_impl.h"
+#include "wgsl/wgsl_impl.h"
 
 #include <ctype.h>
 #include <stdarg.h>

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <webgpu/webgpu.h>
 #ifdef LR_VK
-#include "gpu/vk/webgpu_rt.h"     // hardware ray tracing: our Vulkan layer's extension
+#include "vk/webgpu_rt.h"     // hardware ray tracing: our Vulkan layer's extension
 #endif
 #include "core/scene.h"
 #include "gpu/gpu.h"

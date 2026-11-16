@@ -100,7 +100,7 @@ flowchart LR
     raster --> gpu["gpu<br/>WebGPU backend"]
     rt --> gpu
     phys --> gpu
-    gpu --> vk["gpu/vk · gpu/wgsl<br/>our WebGPU on Vulkan,<br/>WGSL → SPIR-V"]
+    gpu --> vk["webgpu/vk · webgpu/wgsl<br/>our WebGPU on Vulkan,<br/>WGSL → SPIR-V"]
     gpu --> app["app<br/>options · demos"]
     platform --> app
     app --> programs["render · view · sim<br/>examples"]

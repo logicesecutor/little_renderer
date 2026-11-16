@@ -1,6 +1,6 @@
-// wgsl.c - WGSL -> SPIR-V, for the Vulkan layer (engine/gpu/vk): our own compiler of the WGSL
+// wgsl.c - WGSL -> SPIR-V, for the Vulkan layer (webgpu/vk): our own compiler of the WGSL
 // the engine writes (wgsl_impl.h: what it takes).
-#include "gpu/wgsl/wgsl_impl.h"
+#include "wgsl/wgsl_impl.h"
 
 #include <stdio.h>
 #include <stdlib.h>

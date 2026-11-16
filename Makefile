@@ -2,6 +2,7 @@
 # Every target, option and key is documented in docs/USAGE.md; the library API in docs/SDK.md.
 #
 #   engine/{core,raster,rt,phys,platform,app}/*.c  -> build/float/liblr.a   (the engine)
+#   webgpu/{vk,wgsl}/*.c                      -> into the same library with VK=1 (our WebGPU)
 #   apps/*.c                                  -> bin/render, bin/view, bin/sim
 #   examples/*.c                              -> bin/hello_raster, bin/hello_rt, ...
 #   tests/*.c                                 -> bin/test_png, bin/test_physics, ... (make test runs them)
@@ -58,8 +59,8 @@ GPULIBS = $(WGPU_DIR)/lib/libwgpu_native.a $(WGPU_SYSLIBS)
 GPUDIR = -gpu
 endif
 
-# VK=1: our own Vulkan layer (engine/gpu/vk, docs/VULKAN.md) in place of wgpu-native: the
-# same webgpu.h (its header still from make deps), the WGSL compiled by engine/gpu/wgsl; the
+# VK=1: our own Vulkan layer (webgpu/vk, docs/VULKAN.md) in place of wgpu-native: the
+# same webgpu.h (its header still from make deps), the WGSL compiled by webgpu/wgsl; the
 # Vulkan loader is opened at run time (no SDK needed to build). Binaries in bin/vk.
 ifeq ($(VK),1)
 GPUFLAGS = -DLR_GPU -DLR_WGPU_NATIVE -DLR_VK -I$(WGPU_DIR)/include
@@ -69,10 +70,10 @@ BIN := $(BIN)/vk
 endif
 
 BUILD = build/$(PREC)$(GPUDIR)
-INC = -Iengine
-HDR = $(wildcard engine/*.h engine/*/*.h engine/gpu/*/*.h)
-SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard engine/gpu/vk/*.c engine/gpu/wgsl/*.c))
-OBJ = $(patsubst engine/%.c,$(BUILD)/%.o,$(SRC)) $(BUILD)/wgsl_shaders.o
+INC = -Iengine -Iwebgpu
+HDR = $(wildcard engine/*.h engine/*/*.h webgpu/*/*.h)
+SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard webgpu/vk/*.c webgpu/wgsl/*.c))
+OBJ = $(patsubst webgpu/%.c,$(BUILD)/webgpu/%.o,$(patsubst engine/%.c,$(BUILD)/%.o,$(SRC))) $(BUILD)/wgsl_shaders.o
 LIB = $(BUILD)/liblr.a
 
 # the shaders: engine/gpu/shaders/<folder>/*.wgsl, carried inside the library as C strings
@@ -112,6 +113,10 @@ $(BUILD)/%.o: engine/%.c $(HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
 
+$(BUILD)/webgpu/%.o: webgpu/%.c $(HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
+
 $(WGSL_EMBED): tools/wgsl_embed.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -Wall -Wextra $< -o $@
@@ -143,14 +148,16 @@ $(BIN)/%$(EXE): tests/%.c $(LIB) $(HDR) tests/png_tests.h tests/jpeg_tests.h
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 
 # Layering rule: core uses nothing else; raster, rt, phys and platform use only core (and
-# themselves); gpu (the GPU backend) uses core and the data types of raster, rt and phys; app may
-# use everything. Fails if a file includes a layer it should not.
+# themselves); gpu (the GPU backend) uses core and the data types of raster, rt and phys (and our
+# Vulkan layer's ray tracing header, vk/webgpu_rt.h); app may use everything. webgpu/ (vk, wgsl)
+# includes nothing of the engine. Fails if a file includes a layer it should not.
 check-layers:
 	@ok=1; \
 	for f in engine/core/*; do grep -Hn '#include "' $$f | grep -v '"core/' && ok=0; done; \
 	for l in raster rt phys platform; do for f in engine/$$l/*; do \
 	  grep -Hn '#include "' $$f | grep -v -e '"core/' -e "\"$$l/" && ok=0; done; done; \
-	for f in engine/gpu/*.[ch]; do grep -Hn '#include "' $$f | grep -v -e '"core/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' && ok=0; done; \
+	for f in engine/gpu/*.[ch]; do grep -Hn '#include "' $$f | grep -v -e '"core/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' -e '"vk/webgpu_rt.h"' && ok=0; done; \
+	for f in webgpu/*/*; do grep -Hn '#include "' $$f | grep -v -e '"vk/' -e '"wgsl/' && ok=0; done; \
 	if [ $$ok = 1 ]; then echo "layers ok"; else echo "layer violations above"; exit 1; fi
 
 # ---- models -----------------------------------------------------------------------------

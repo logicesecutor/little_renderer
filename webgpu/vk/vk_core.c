@@ -1,5 +1,5 @@
 // vk_core.c - instance, adapter, device, queue, buffers, uploads, submissions (vk_impl.h)
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdarg.h>
 #include <stdio.h>

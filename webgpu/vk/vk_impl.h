@@ -1,5 +1,5 @@
 // vk_impl.h - the Vulkan layer's insides: the part of webgpu.h the engine uses, implemented
-// on Vulkan (engine/gpu/vk/*.c), in place of wgpu-native (`make VK=1`).
+// on Vulkan (webgpu/vk/*.c), in place of wgpu-native (`make VK=1`).
 //
 // How WebGPU's model maps here:
 // - one queue (graphics + compute), a second when asked for (LR_VK_QUEUES=2,
@@ -18,8 +18,8 @@
 
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>
-#include "gpu/vk/vk.h"
-#include "gpu/vk/webgpu_rt.h"
+#include "vk/vk.h"
+#include "vk/webgpu_rt.h"
 
 // ---- the Vulkan functions, looked up at run time (vk_core.c) ----
 #define VK_GLOBAL_FNS(X) \
@@ -346,7 +346,7 @@ void vk_before(WGPUCommandEncoder e, int kind);              // a command of thi
 // a submission of cb (ended; given back when done) after the uploads, signalling `signal` too
 uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal);
 VkDeviceAddress vk_buffer_address(WGPUBuffer b);
-// WGSL -> SPIR-V (engine/gpu/wgsl): 0 and the words (free them) or 1 and a message
+// WGSL -> SPIR-V (webgpu/wgsl): 0 and the words (free them) or 1 and a message
 int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
 
 #endif

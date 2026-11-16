@@ -3,7 +3,7 @@
 // command buffer (so before anything that uses it), and never moved again. textureLoad,
 // attachments and copies all work in GENERAL; it costs a little bandwidth on some GPUs, and
 // saves tracking layouts. A window's images are the exception (vk_surface.c).
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdlib.h>
 #include <string.h>

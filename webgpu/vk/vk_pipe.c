@@ -1,6 +1,6 @@
 // vk_pipe.c - shader modules, bind group layouts, pipeline layouts, bind groups, compute
 // pipelines (vk_impl.h)
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 
 static size_t sv_len(WGPUStringView v){ return v.data ? (v.length == WGPU_STRLEN ? strlen(v.data) : v.length) : 0; }
 
-// ---- shader modules: WGSL through our compiler (engine/gpu/wgsl), or SPIR-V as it is ----
+// ---- shader modules: WGSL through our compiler (webgpu/wgsl), or SPIR-V as it is ----
 static void module_free(Obj *o){
     WGPUShaderModule m = (WGPUShaderModule)o;
     if (m->vk) vk.vkDestroyShaderModule(m->dev->vk, m->vk, NULL);

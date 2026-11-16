@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks engine/gpu/vk/vk.h (our own declarations of the Vulkan API) against the official
+"""Checks webgpu/vk/vk.h (our own declarations of the Vulkan API) against the official
 headers: every struct's size and every field's offset, and every constant we define that the
 official headers also have. A development check, run where the Vulkan headers are installed
 (MSYS2: mingw-w64-ucrt-x86_64-vulkan-headers):
@@ -10,7 +10,7 @@ import os, re, subprocess, sys, tempfile
 
 here = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(here)
-src = open(os.path.join(root, 'engine', 'gpu', 'vk', 'vk.h')).read()
+src = open(os.path.join(root, 'webgpu', 'vk', 'vk.h')).read()
 body = re.sub(r'//[^\n]*', '', src)
 
 structs = []   # (name, [fields])
@@ -51,7 +51,7 @@ def program(header, prefix):
 cc = os.environ.get('CC', 'cc')
 outs = []
 with tempfile.TemporaryDirectory() as d:
-    for tag, header in (('ours', f'#include "{os.path.join(root, "engine", "gpu", "vk", "vk.h")}"'),
+    for tag, header in (('ours', f'#include "{os.path.join(root, "webgpu", "vk", "vk.h")}"'),
                         ('ref', '#define VK_USE_PLATFORM_WIN32_KHR\n#include <vulkan/vulkan.h>' if os.name == 'nt'
                                 else '#include <vulkan/vulkan.h>')):
         c = os.path.join(d, tag + '.c'); exe = os.path.join(d, tag + '.exe')

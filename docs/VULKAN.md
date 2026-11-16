@@ -9,15 +9,15 @@ kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web
 
 | part | state |
 |---|---|
-| `engine/gpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | `tools/vk_check.py` checks every size, offset and constant against the official headers (899 checks, 0 differ) |
+| `webgpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | `tools/vk_check.py` checks every size, offset and constant against the official headers (899 checks, 0 differ) |
 | loader, instance, adapter, device, queue (timeline semaphore), submissions, polling, callbacks | done |
 | buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/vk/test_gpu_basic` passes |
 | bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | done |
-| WGSL → SPIR-V (`engine/gpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
+| WGSL → SPIR-V (`webgpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
 | render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
 | the window's surface (Win32 swapchain; X11 later): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC | done |
-| acceleration structures and ray queries (R6): our extension of webgpu.h (`gpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/vk/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
+| acceleration structures and ray queries (R6): our extension of webgpu.h (`webgpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/vk/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
 
 Checked so far, with the validation layer on and nothing reported: `make VK=1 test` passes;
 `render` (rasterizer: every shading mode, the helmet's textures, the sky; path tracer: the
@@ -32,7 +32,7 @@ the physics' CPU time per frame 0.39 ms on ours, 0.80 ms on wgpu (GPU bodies 0.1
 ### Hardware ray tracing (R6)
 
 wgpu-native's C API has no acceleration structures, so ours is an extension of webgpu.h of
-our own (`engine/gpu/vk/webgpu_rt.h`), shaped after the WebGPU proposal: bottom levels of
+our own (`webgpu/vk/webgpu_rt.h`), shaped after the WebGPU proposal: bottom levels of
 triangles or boxes (`lrDeviceCreateBlas`, `lrCommandEncoderBuildBlas`), a top level of
 64-byte instance records (`lrDeviceCreateTlas`, `lrCommandEncoderBuildTlas`), bound through
 chained bind group entries. The WGSL is wgpu's and the proposal's: `acceleration_structure`,
@@ -133,13 +133,13 @@ for the browser, kept in step forever.
 
 What has to be written:
 
-1. **A WGSL → SPIR-V compiler** (C, `gpu/wgsl/`): Vulkan reads SPIR-V only, and WGSL stays
+1. **A WGSL → SPIR-V compiler** (C, `webgpu/wgsl/`): Vulkan reads SPIR-V only, and WGSL stays
    our one shader source because it is the only one browsers accept. Only the WGSL we
    write: structs, arrays, loops, atomics, workgroup memory, pointers to function
    variables, the built-ins; then textures and samplers (PBR5) and ray queries. Parser,
    type checker, SPIR-V emitter (structured control flow, the memory model). About 6-10k
    lines. Checked kernel by kernel: the same results as wgpu's compiler on every test.
-2. **`webgpu.h` on Vulkan** (`gpu/vk/`): the about 60 functions the engine calls. Instance,
+2. **`webgpu.h` on Vulkan** (`webgpu/vk/`): the about 60 functions the engine calls. Instance,
    adapter and device (the Vulkan loader opened at run time: no library linked, our own
    declarations of the part of the API we use), buffers (an allocator of our own, staging
    uploads, mapped readbacks), bind group layouts and groups (descriptor sets), compute and

@@ -1,5 +1,5 @@
 // webgpu_rt.h - hardware ray tracing: our own extension of webgpu.h, implemented by our Vulkan
-// layer only (`make VK=1`, engine/gpu/vk/vk_rt.c). Shaped after the WebGPU proposal and
+// layer only (`make VK=1`, webgpu/vk/vk_rt.c). Shaped after the WebGPU proposal and
 // wgpu's ray queries: bottom-level structures of triangles or boxes, a top level of
 // instances, bound like a buffer and queried in WGSL with
 //

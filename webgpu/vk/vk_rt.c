@@ -5,7 +5,7 @@
 // again (a top level every frame) allocates nothing. A build is a command like any other:
 // the barrier before it (vk_before) orders it after what wrote its inputs, and the one
 // before the next command orders the queries after it.
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdlib.h>
 #include <string.h>

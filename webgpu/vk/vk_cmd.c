@@ -1,5 +1,5 @@
 // vk_cmd.c - command encoders, compute passes, copies, timestamps (vk_impl.h)
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdlib.h>
 #include <string.h>

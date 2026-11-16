@@ -1,7 +1,7 @@
 // spirv.c - the checked WGSL module as SPIR-V 1.4 for Vulkan (wgsl_impl.h): types and their
 // layout, constants, module-scope variables, expressions, statements, entry points. One pass:
 // each expression's type is worked out as it is emitted.
-#include "gpu/wgsl/wgsl_impl.h"
+#include "wgsl/wgsl_impl.h"
 
 #include <math.h>
 #include <stdio.h>

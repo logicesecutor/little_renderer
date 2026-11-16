@@ -6,7 +6,7 @@
 // to GENERAL in the upload command buffer; wgpuSurfacePresent moves it to PRESENT_SRC in a
 // small submission of its own that also signals the image's "presentable" semaphore, which
 // the present waits for.
-#include "gpu/vk/vk_impl.h"
+#include "vk/vk_impl.h"
 
 #include <stdio.h>
 #include <stdlib.h>
