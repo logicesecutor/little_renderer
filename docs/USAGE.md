@@ -360,6 +360,7 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
 | `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary) |
 | `LR_GPU_TLAS=gpu` | the GPU builds the top level over the instances itself every frame (default: it takes the CPU's SAH tree); `lbvh`, the old name, works too |
+| `LR_VK_LOSE_AFTER=n` | our Vulkan layer (`make VK=1`): the n-th submission fails as on a lost device (to test what follows: VULKAN.md) |
 | `LR_GPU_BVH=ploc\|lbvh` | the GPU's tree builder for everything it builds (default: PLOC for meshes' trees, the LBVH for the top level) |
 | `LR_GPU_BLAS=gpu` | every mesh's tree is built once on the GPU instead of the CPU's being uploaded (to measure the GPU builders) |
 | `LR_GPU_PLOC_SMALL=n` | PLOC: from this many clusters down, one workgroup finishes the tree (default 1024) |

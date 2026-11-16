@@ -41,6 +41,7 @@ typedef int32_t VkResult;
 #define VK_SUCCESS 0
 #define VK_TIMEOUT 2
 #define VK_SUBOPTIMAL_KHR 1000001003
+#define VK_ERROR_DEVICE_LOST (-4)
 #define VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
 
 // handles: dispatchable ones are pointers, the others 64-bit values

@@ -48,6 +48,23 @@ void vk_error(WGPUDevice dev, WGPUErrorType type, const char *fmt, ...){
     } else fprintf(stderr, "Vulkan layer: %s\n", msg);
 }
 
+void vk_device_lost(WGPUDevice dev, const char *why, VkResult r){
+    if (!dev || dev->lost) return;
+    dev->lost = 1;
+    if (dev->vk) vk.vkDeviceWaitIdle(dev->vk);   // (returns at once on a lost device; LR_VK_LOSE_AFTER: what runs ends)
+    char msg[256];
+    snprintf(msg, sizeof(msg), "%s (VkResult %d)", why, (int)r);
+    if (dev->on_lost.callback){
+        WGPUDevice d = dev;
+        dev->on_lost.callback(&d, WGPUDeviceLostReason_Unknown, sv(msg), dev->on_lost.userdata1, dev->on_lost.userdata2);
+    } else fprintf(stderr, "Vulkan layer: device lost: %s\n", msg);
+}
+
+VkResult vk_check_lost(WGPUDevice dev, const char *what, VkResult r){
+    if (r == VK_ERROR_DEVICE_LOST) vk_device_lost(dev, what, r);
+    return r;
+}
+
 // ---- the loader ----
 static int load_loader(WGPUInstance in){
 #ifdef _WIN32
@@ -440,6 +457,7 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     d->ad = adapter;
     if (descriptor){
         d->on_error = descriptor->uncapturedErrorCallbackInfo;
+        d->on_lost = descriptor->deviceLostCallbackInfo;
         for (size_t i = 0; i < descriptor->requiredFeatureCount; i++){
             if (descriptor->requiredFeatures[i] == WGPUFeatureName_TimestampQuery) d->timestamps = 1;
             if ((int)descriptor->requiredFeatures[i] == (int)WGPUNativeFeature_RayQuery) d->rt = adapter->rt;
@@ -854,8 +872,16 @@ static uint64_t submit_ex(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs, V
     si.pCommandBuffers = s.cbs;
     si.signalSemaphoreCount = signal ? 2 : 1;
     si.pSignalSemaphores = sig;
-    VkResult r = vk.vkQueueSubmit(q->q, 1, &si, 0);
-    if (r != VK_SUCCESS){ vk_error(dev, WGPUErrorType_Internal, "vkQueueSubmit failed (%d)", r); dev->lost = 1; }
+    VkResult r = dev->lost ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(q->q, 1, &si, 0);
+    // LR_VK_LOSE_AFTER=n, to test what follows a lost device: the n-th submission fails like one
+    static int lose_after = -1;
+    if (lose_after < 0){ const char *e = getenv("LR_VK_LOSE_AFTER"); lose_after = e ? atoi(e) : 0; }
+    if (lose_after > 0 && ++dev->nsubmits == lose_after) r = VK_ERROR_DEVICE_LOST;
+    // a submission that failed is never signalled: nothing more can be waited for on this device
+    if (r != VK_SUCCESS && !dev->lost){
+        vk_error(dev, WGPUErrorType_Internal, "vkQueueSubmit failed (%d)", r);
+        vk_device_lost(dev, "vkQueueSubmit failed", r);
+    }
     s.value = value;
     sub_push(q, &s);
     return value;
@@ -932,16 +958,19 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
     int busy = 0;
     for (int q = 0; q < dev->nqueues; q++){
         WGPUQueue Q = &dev->queues[q];
-        if (wait && until && until[q]){
+        if (wait && until && until[q] && !dev->lost){
             VkSemaphoreWaitInfo wi;
             memset(&wi, 0, sizeof(wi));
             wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
             wi.semaphoreCount = 1;
             wi.pSemaphores = &Q->tl;
             wi.pValues = &until[q];
-            vk.vkWaitSemaphores(dev->vk, &wi, ~0ull);
+            vk_check_lost(dev, "vkWaitSemaphores", vk.vkWaitSemaphores(dev->vk, &wi, ~0ull));
         }
-        vk.vkGetSemaphoreCounterValue(dev->vk, Q->tl, &done[q]);
+        if (!dev->lost) vk_check_lost(dev, "vkGetSemaphoreCounterValue", vk.vkGetSemaphoreCounterValue(dev->vk, Q->tl, &done[q]));
+        // a lost device finishes nothing more: what was submitted is given back, and what
+        // waited for it is told so below (as wgpu does), instead of waiting for good
+        if (dev->lost) done[q] = ~0ull;
         int k = 0;
         for (; k < Q->nsubs && Q->subs[k].value <= done[q]; k++){
             Sub *s = &Q->subs[k];
@@ -958,7 +987,11 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
         memmove(dev->pend + i, dev->pend + i + 1, (size_t)(dev->npend - i - 1) * sizeof(Pending));
         dev->npend--;
         if (p.kind == 0){
-            if (p.wd.callback) p.wd.callback(WGPUQueueWorkDoneStatus_Success, sv(""), p.wd.userdata1, p.wd.userdata2);
+            if (p.wd.callback) p.wd.callback(dev->lost ? WGPUQueueWorkDoneStatus_Error : WGPUQueueWorkDoneStatus_Success,
+                                             sv(dev->lost ? "device lost" : ""), p.wd.userdata1, p.wd.userdata2);
+        } else if (dev->lost){
+            if (p.map.callback) p.map.callback(WGPUMapAsyncStatus_Aborted, sv("device lost"), p.map.userdata1, p.map.userdata2);
+            obj_unref(&p.buf->o);
         } else {
             p.buf->map_ok = p.buf->mapped != NULL;
             if (p.map.callback) p.map.callback(p.buf->map_ok ? WGPUMapAsyncStatus_Success : WGPUMapAsyncStatus_Error,

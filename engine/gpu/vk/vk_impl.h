@@ -155,7 +155,9 @@ struct WGPUDeviceImpl {
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
     int rt;                          // ray queries asked for (WGPUNativeFeature_RayQuery) and on
-    int lost;
+    WGPUDeviceLostCallbackInfo on_lost;
+    int lost;                        // vk_device_lost: the callback was called, what waited was failed
+    int nsubmits;                    // (LR_VK_LOSE_AFTER counts them)
 };
 
 struct WGPUBufferImpl {
@@ -319,6 +321,11 @@ struct WGPUSurfaceImpl {
 
 // ---- between the files ----
 void vk_error(WGPUDevice dev, WGPUErrorType type, const char *fmt, ...);
+// The device is gone (a submission failed, VK_ERROR_DEVICE_LOST): the device-lost callback is
+// called, once, as wgpu does; from then on what waits for the GPU fails instead (poll).
+void vk_device_lost(WGPUDevice dev, const char *why, VkResult r);
+// r passed on; VK_ERROR_DEVICE_LOST also reported (vk_device_lost)
+VkResult vk_check_lost(WGPUDevice dev, const char *what, VkResult r);
 VkCommandBuffer vk_cb_get(WGPUQueue q);                     // a command buffer for q, begun
 void vk_cb_put(WGPUQueue q, VkCommandBuffer cb);            // back to q's free list (not in flight)
 void vk_barrier(VkCommandBuffer cb);                        // everything before, before everything after

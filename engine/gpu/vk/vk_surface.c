@@ -277,6 +277,7 @@ void wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture *st){
     st->status = WGPUSurfaceGetCurrentTextureStatus_Error;
     if (!s->dev) return;
     WGPUDevice dev = s->dev;
+    if (dev->lost){ st->status = WGPUSurfaceGetCurrentTextureStatus_Lost; return; }
     if (s->cur >= 0){                              // not presented: the same one again
         obj_ref(&s->tex[s->cur]->o);
         st->texture = s->tex[s->cur];
@@ -289,10 +290,11 @@ void wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture *st){
         VkResult r = vk.vkAcquireNextImageKHR(dev->vk, s->sc, ~0ull, 0, s->acquired, &idx);
         if (r == VK_ERROR_OUT_OF_DATE_KHR){ s->stale = 1; continue; }
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR){
+            vk_check_lost(dev, "vkAcquireNextImageKHR", r);
             st->status = r == VK_TIMEOUT ? WGPUSurfaceGetCurrentTextureStatus_Timeout : WGPUSurfaceGetCurrentTextureStatus_Lost;
             return;
         }
-        vk.vkWaitForFences(dev->vk, 1, &s->acquired, 1, ~0ull);
+        vk_check_lost(dev, "vkWaitForFences", vk.vkWaitForFences(dev->vk, 1, &s->acquired, 1, ~0ull));
         vk.vkResetFences(dev->vk, 1, &s->acquired);
         // what it held is not kept (the engine clears it): from UNDEFINED, into GENERAL
         WGPUTexture t = s->tex[idx];
@@ -319,6 +321,7 @@ WGPUStatus wgpuSurfacePresent(WGPUSurface s){
     vk_image_layout(cb, s->tex[idx]->img, s->tex[idx]->aspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     vk.vkEndCommandBuffer(cb);
     vk_submit_cb(dev, cb, s->presentable[idx]);
+    if (dev->lost) return WGPUStatus_Error;        // (not submitted: nothing will signal the image)
     VkPresentInfoKHR pi;
     memset(&pi, 0, sizeof(pi));
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -329,6 +332,6 @@ WGPUStatus wgpuSurfacePresent(WGPUSurface s){
     pi.pImageIndices = &idx;
     VkResult r = vk.vkQueuePresentKHR(VK_MAIN(dev)->q, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) s->stale = 1;
-    else if (r != VK_SUCCESS) return WGPUStatus_Error;
+    else if (r != VK_SUCCESS){ vk_check_lost(dev, "vkQueuePresentKHR", r); return WGPUStatus_Error; }
     return WGPUStatus_Success;
 }

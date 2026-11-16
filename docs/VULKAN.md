@@ -80,6 +80,13 @@ instead of 2: the same). The two workloads fill the GPU each and slow each other
 rather than filling each other's gaps, so it is off by default; the main queue is then
 `lrDeviceGetComputeQueue`'s answer and nothing changes.
 
+A lost device: when a submission fails, or Vulkan answers `VK_ERROR_DEVICE_LOST` to a wait,
+an acquire or a present, the layer calls the device-lost callback (once), as wgpu does, and
+from then on fails what waits for the GPU instead of waiting for good: work-done callbacks
+get an error, mappings are aborted, the surface reports itself lost. The engine's
+`gpu_state` goes to `GPU_FAILED` and the programs carry on with the CPU (the viewer says
+"GPU lost"). `LR_VK_LOSE_AFTER=n` makes the n-th submission fail that way, to test it.
+
 `LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
 commands): the tests, `render`, `sim` and `view` run clean.
 
