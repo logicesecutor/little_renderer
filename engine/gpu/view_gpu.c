@@ -137,7 +137,7 @@ struct GpuView {
     WGPUBuffer src_buf[GPU_MAX_SOURCES];
     int nsrc;
     // what is on the GPU now
-    const Volume *vols[GPU_MAX_VOLUMES];
+    uint32_t vol_ids[GPU_MAX_VOLUMES];     // (Volume.id: not its address, which a later one can be given)
     uint32_t versions[GPU_MAX_VOLUMES];
     int nvols, light_res;
     float lamp[3];
@@ -369,7 +369,7 @@ static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, Mar
     int changed = n != v->nvols || mp->light_res != v->light_res ||
                   lamp->pos.x != v->lamp[0] || lamp->pos.y != v->lamp[1] || lamp->pos.z != v->lamp[2];
     for (int k = 0; k < n && !changed; k++)
-        if (v->vols[k] != s->volumes[k] || v->versions[k] != s->volumes[k]->version) changed = 1;
+        if (v->vol_ids[k] != s->volumes[k]->id || v->versions[k] != s->volumes[k]->version) changed = 1;
     if (!changed) return !v->light_valid;
     size_t nd = 0, nb = 0, nl = 0;
     for (int k = 0; k < n; k++){
@@ -406,7 +406,7 @@ static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, Mar
         gv->p[2] = empty ? 0.0f : (float)vol->max_density;
         gv->p[3] = (float)voxel;
         size_t cnt = (size_t)vol->nx * vol->ny * vol->nz;
-        if (fresh || v->vols[k] != vol || v->versions[k] != vol->version || n != v->nvols){
+        if (fresh || v->vol_ids[k] != vol->id || v->versions[k] != vol->version || n != v->nvols){
             WGPUBuffer from = gpu_source(v, vol);
             if (from) wgpuCommandEncoderCopyBufferToBuffer(enc, from, 0, v->dens, (uint64_t)od * 4, cnt * 4);
             else wgpuQueueWriteBuffer(g->queue, v->dens, (uint64_t)od * 4, vol->density, cnt * 4);
@@ -415,7 +415,7 @@ static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, Mar
         od += (uint32_t)cnt;
         ob += (uint32_t)(vol->bnx * vol->bny * vol->bnz);
         ol += (uint32_t)(ld[0] * ld[1] * ld[2]);
-        v->vols[k] = vol;
+        v->vol_ids[k] = vol->id;
         v->versions[k] = vol->version;
     }
     v->nvols = n;

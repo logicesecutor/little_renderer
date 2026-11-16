@@ -136,8 +136,8 @@ typedef struct {
 
 // where an instanced mesh is on the GPU (and what it was made from)
 typedef struct {
-    const Triangle *tris; int ntris;
-    const Vec3 *normals; int nnormals;
+    unsigned id;                        // SceneMesh.id: which mesh (not its arrays' addresses: a
+    int ntris, nnormals;                // later mesh can be given a freed one's)
     int dynamic;
     unsigned version;
     int built;                          // (LR_GPU_BLAS=gpu) its BVH was built on the GPU
@@ -241,8 +241,7 @@ struct GpuTrace {
     unsigned inst_version;
     void *sc_rec, *sc_box, *sc_nd, *sc_ax, *sc_hw;
     size_t sc_rec_cap, sc_box_cap, sc_nd_cap, sc_ax_cap, sc_hw_cap;
-    const Triangle *mesh_tris;
-    const Vec3 *mesh_normals;
+    unsigned mesh_version;   // the world's triangles and normals it holds: Scene.tris_version
     int mesh_ntris, mesh_nnormals;
     int valid;
     Bvh own;                 // built here when the scene has no BVH of its own
@@ -764,8 +763,7 @@ static int meshes_same(const GpuTrace *t, const Scene *s){
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
         const GpuMeshCopy *c = &t->mc[m];
-        if (c->tris != sm->tris || c->ntris != sm->ntris || c->normals != sm->normals ||
-            c->nnormals != sm->nnormals || c->dynamic != sm->dynamic) return 0;
+        if (c->id != sm->id || c->ntris != sm->ntris || c->nnormals != sm->nnormals || c->dynamic != sm->dynamic) return 0;
         if (!sm->dynamic && c->version != sm->version) return 0;
     }
     return 1;
@@ -773,7 +771,7 @@ static int meshes_same(const GpuTrace *t, const Scene *s){
 
 // all but the world's BVH and primitives stay where they are
 static int layout_same(const GpuTrace *t, const Scene *s){
-    return t->laid_out && t->mesh_tris == s->tris && t->mesh_ntris == s->ntris && t->mesh_normals == s->normals &&
+    return t->laid_out && t->mesh_version == s->tris_version && t->mesh_ntris == s->ntris &&
            t->mesh_nnormals == s->nnormals && meshes_same(t, s) && s->ninsts <= t->inst_cap;
 }
 
@@ -889,7 +887,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
             return 0;
         }
         GpuMeshCopy *c = &mc[m];
-        c->tris = sm->tris; c->ntris = sm->ntris; c->normals = sm->normals; c->nnormals = sm->nnormals;
+        c->id = sm->id; c->ntris = sm->ntris; c->nnormals = sm->nnormals;
         c->dynamic = sm->dynamic; c->version = sm->version; c->built = 0;
         c->node0 = nodes; c->ref0 = refs; c->tri0 = tris; c->nrm0 = nrm; c->uv0 = nuv;
         // a dynamic mesh: room for the GPU's BVH of it too (2n - 1 nodes, n leaves of one
@@ -1011,8 +1009,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     if (!upload_tris(t, s->tris, s->ntris, 0, 0)) return 0;
     for (int m = 0; m < s->nmeshes; m++)
         if (!upload_tris(t, s->meshes[m].tris, s->meshes[m].ntris, mc[m].tri0, mc[m].nrm0)) return 0;
-    t->mesh_tris = s->tris;
-    t->mesh_normals = s->normals;
+    t->mesh_version = s->tris_version;
     t->mesh_ntris = s->ntris;
     t->mesh_nnormals = s->nnormals;
     t->laid_out = 1;

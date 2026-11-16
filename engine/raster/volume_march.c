@@ -176,7 +176,7 @@ struct RasterVolumes {
     LowSample *low;
     size_t low_n;
     LightGrid grid[MAX_VOLUMES];
-    const Volume *vols[MAX_VOLUMES];   // what they were built for
+    uint32_t ids[MAX_VOLUMES];         // what they were built for (Volume.id, and its version)
     uint32_t versions[MAX_VOLUMES];
     int nvolumes, light_res;
     Vec3 lamp_pos;
@@ -203,7 +203,7 @@ static int grids_valid(const RasterVolumes *rv, const Scene *s, Vec3 lamp, int l
     if (rv->nvolumes != s->nvolumes || rv->light_res != light_res) return 0;
     if (v_len(v_sub(rv->lamp_pos, lamp)) > 1e-3f) return 0;
     for (int i = 0; i < s->nvolumes; i++)
-        if (rv->vols[i] != s->volumes[i] || rv->versions[i] != s->volumes[i]->version) return 0;
+        if (rv->ids[i] != s->volumes[i]->id || rv->versions[i] != s->volumes[i]->version) return 0;
     return 1;
 }
 
@@ -239,7 +239,7 @@ static void build_grids(RasterVolumes *rv, const Scene *s, const Lamp *l, int li
                         c.x > act.hi.x + cell.x || c.y > act.hi.y + cell.y || c.z > act.hi.z + cell.z){ *t = 0; continue; }
                     *t = (float)optical_depth(s, c, l->pos);
                 }
-        rv->vols[k] = v;
+        rv->ids[k] = v->id;
         rv->versions[k] = v->version;
     }
     rv->nvolumes = s->nvolumes;

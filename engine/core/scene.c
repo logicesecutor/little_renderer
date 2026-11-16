@@ -102,8 +102,14 @@ static void *grow(void *p, int *cap, int need, size_t elem){
     return p;
 }
 
+// Numbers no two things share, across scenes (scene.h: Scene.tris_version, SceneMesh.id):
+// what was freed and made again, at the same addresses or not, never looks unchanged to
+// whoever holds a copy. (Scenes are changed from one thread.)
+static unsigned tris_versions, mesh_ids;
+
 // a triangle with normal indices n0..n2 (or -1)
 static int add_tri(Scene *s, Vec3 a, Vec3 b, Vec3 c, const int *n, int material){
+    s->tris_version = ++tris_versions;
     s->tris = grow(s->tris, &s->cap_tris, s->ntris + 1, sizeof(Triangle));
     Triangle *t = &s->tris[s->ntris];
     t->q = a;
@@ -115,6 +121,7 @@ static int add_tri(Scene *s, Vec3 a, Vec3 b, Vec3 c, const int *n, int material)
 }
 
 static int add_normal(Scene *s, Vec3 n){
+    s->tris_version = ++tris_versions;
     s->normals = grow(s->normals, &s->cap_normals, s->nnormals + 1, sizeof(Vec3));
     s->normals[s->nnormals] = v_norm(n);
     return s->nnormals++;
@@ -130,6 +137,7 @@ int scene_add_triangle(Scene *s, Vec3 a, Vec3 b, Vec3 c, const Vec3 *normals, in
 int scene_add_mesh(Scene *s, const Mesh *m, int material){
     // the mesh's vertex normals, normalized once, shared by all its triangles
     int base = s->nnormals;
+    s->tris_version = ++tris_versions;
     s->normals = grow(s->normals, &s->cap_normals, s->nnormals + m->nvn, sizeof(Vec3));
     for (int i = 0; i < m->nvn; i++) s->normals[s->nnormals++] = v_norm(m->vn[i]);
     // its texture coordinates (v turned over: OBJ's v = 0 is the bottom, ours the top)
@@ -628,6 +636,7 @@ int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
         scene_compute_tangents(m->tris, m->ntris, m->uvs, m->tangents, 0, m->nuvs);
     }
     m->version = 1;
+    m->id = ++mesh_ids;
     mesh_bounds(m);
     return s->nmeshes++;
 }
@@ -650,6 +659,7 @@ int scene_add_mesh_arrays(Scene *s, Triangle *tris, int ntris, Vec3 *normals, in
         }
     } else { free(uvs); free(tangents); }
     m->version = 1;
+    m->id = ++mesh_ids;
     mesh_bounds(m);
     return s->nmeshes++;
 }

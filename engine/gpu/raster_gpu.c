@@ -69,14 +69,13 @@ struct GpuRaster {
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
     WGPUBuffer ix;                         // the draws' transforms: the world, the instances
     size_t ix_cap;
-    struct { Geo geo; const Triangle *tris; int ntris; unsigned version; } *mg;   // the scene's meshes
+    struct { Geo geo; unsigned id; int ntris; unsigned version; } *mg;   // the scene's meshes (SceneMesh.id, version)
     int nmg;
     Geo unit[2];                           // the unit sphere and box (shape instances: the physics' bodies)
     // what is on the GPU now
     Primitive *prim_copy;
     int nprim_copy;
-    const Triangle *mesh_tris;
-    const Vec3 *mesh_normals;
+    unsigned mesh_version;                 // (the world's triangles: Scene.tris_version)
     int mesh_ntris;
     float *tmp_pos, *tmp_nrm, *tmp_tex;    // scratch for the uploads
     size_t tmp_cap;                        // vertices
@@ -343,10 +342,9 @@ static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, 
 
 // the world's mesh triangles: many, and they stay where they are: uploaded once
 static int upload_mesh(GpuRaster *r, const Scene *s){
-    if (r->mesh_tris == s->tris && r->mesh_ntris == s->ntris && r->mesh_normals == s->normals) return 1;
+    if (r->mesh_version == s->tris_version && r->mesh_ntris == s->ntris) return 1;
     if (!upload_tris(r, &r->mesh, s->tris, s->ntris, s->normals, s->uvs, s->tangents, s->nuvs, "scene mesh")) return 0;
-    r->mesh_tris = s->tris;
-    r->mesh_normals = s->normals;
+    r->mesh_version = s->tris_version;
     r->mesh_ntris = s->ntris;
     return 1;
 }
@@ -400,10 +398,10 @@ static int upload_instances(GpuRaster *r, const Scene *s){
     }
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
-        if (r->mg[m].geo.nverts && r->mg[m].tris == sm->tris && r->mg[m].ntris == sm->ntris && r->mg[m].version == sm->version)
+        if (r->mg[m].geo.nverts && r->mg[m].id == sm->id && r->mg[m].ntris == sm->ntris && r->mg[m].version == sm->version)
             continue;
         if (!upload_tris(r, &r->mg[m].geo, sm->tris, sm->ntris, sm->normals, sm->uvs, sm->tangents, sm->nuvs, "instanced mesh")) return 0;
-        r->mg[m].tris = sm->tris;
+        r->mg[m].id = sm->id;
         r->mg[m].ntris = sm->ntris;
         r->mg[m].version = sm->version;
     }

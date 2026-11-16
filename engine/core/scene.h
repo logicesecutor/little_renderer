@@ -184,6 +184,9 @@ typedef struct {
     Aabb box;                       // object-space bounds
     int dynamic;                    // its triangles change: bump version after changing them
     unsigned version;
+    unsigned id;                    // a number no two meshes share, of any scene (given when it is added):
+                                    // what holds a copy (the GPU) knows the mesh by it and its version,
+                                    // not by its arrays' addresses, which a later mesh can be given
     void *bvh;                      // the path tracer's BVH of it (rt/accel.c), built when needed
     void (*bvh_free)(void *bvh);
     unsigned bvh_version;           // the version it was built for
@@ -254,6 +257,9 @@ typedef struct Scene {
     int ntris, cap_tris;
     Vec3 *normals;          // unit vertex normals referenced by Triangle.n (growable array)
     int nnormals, cap_normals;
+    unsigned tris_version;  // a new number whenever a triangle or a normal is added, one no two lists
+                            // share (as inst_version below): the GPU's copies are known by it, not by
+                            // the arrays' addresses (a scene made again can be given the same ones)
     Material mats[MAX_MATS];
     int nmats;
     int light;              // index of the one quad light (-1: none)

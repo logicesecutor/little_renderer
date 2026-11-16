@@ -24,6 +24,8 @@ Volume *volume_create(int nx, int ny, int nz, Aabb bounds){
     v->sigma_t = d.sigma_t;
     v->albedo = d.albedo;
     v->g = d.g;
+    static uint32_t ids;           // (volumes are made from one thread)
+    v->id = ++ids;
     volume_update(v);
     return v;
 }

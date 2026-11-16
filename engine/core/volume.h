@@ -40,6 +40,9 @@ typedef struct Volume {
     // incremented by every volume_update: caches built from the density (the rasterizer's
     // light grid) compare it to know when to rebuild
     uint32_t version;
+    // a number no two volumes share (volume_create gives it): those caches know the volume by
+    // it, not by its address, which a volume made after this one is freed can be given
+    uint32_t id;
 } Volume;
 
 #ifndef VOLUME_BRICK
