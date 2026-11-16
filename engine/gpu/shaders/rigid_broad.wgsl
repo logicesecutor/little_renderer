@@ -33,7 +33,7 @@ fn meet(i: u32, j: u32) {
     else if (b.pos.w > 2.5) { push(2u, i, j); }
     else { push(select(0u, 1u, a.pos.w > 1.5 || b.pos.w > 1.5), i, j); }
 }
-fn cell_hash(e: vec3i, H: u32) -> u32 { return (u32(e.x) * 73856093u ^ u32(e.y) * 19349663u ^ u32(e.z) * 83492791u) & (H - 1u); }
+fn cell_hash(e: vec3i, H: u32) -> u32 { return ((u32(e.x) * 73856093u) ^ (u32(e.y) * 19349663u) ^ (u32(e.z) * 83492791u)) & (H - 1u); }
 fn around(c: vec3i, k: u32) -> vec3i { return c + vec3i(i32(k % 3u) - 1, i32((k / 3u) % 3u) - 1, i32(k / 9u) - 1); }
 /* 27 threads per body, one per cell around it (K_GRID; a thread per body went through all
    the bodies near it alone: 1500 big hulls in the room, 10 times slower than a thread per

@@ -14,7 +14,7 @@ fn grid_h() -> u32 { return u32(P.q.z); }
 fn grid_big(i: u32) -> bool { return body_radius(B[i]) > P.q.y; }
 fn grid_cell(p: vec3f) -> vec3i { return vec3i(floor(p / P.q.x)); }
 fn grid_hash(c: vec3i) -> u32 {   /* (K_BROAD's cell_hash) */
-    return (u32(c.x) * 73856093u ^ u32(c.y) * 19349663u ^ u32(c.z) * 83492791u) & (grid_h() - 1u);
+    return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)) & (grid_h() - 1u);
 }
 var<workgroup> sums: array<u32, 64>;
 @compute @workgroup_size(64)

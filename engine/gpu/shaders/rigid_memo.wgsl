@@ -51,4 +51,4 @@ fn rel_pose(ia: u32, ib: u32, t: ptr<function, vec3f>, q: ptr<function, vec4f>) 
     *q = qmul(vec4f(-qa.xyz, qa.w), B[ib].rot);
     *t = transpose(qmat(qa)) * (B[ib].pos.xyz - B[ia].pos.xyz);
 }
-fn pair_key(ia: u32, ib: u32) -> u32 { return (ia << 16u | ib) + 1u; }
+fn pair_key(ia: u32, ib: u32) -> u32 { return ((ia << 16u) | ib) + 1u; }

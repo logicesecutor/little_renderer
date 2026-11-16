@@ -64,7 +64,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
         for (var f = lid; f < S.nf; f += 64u) { hn[HF + f] = sn(S, f); }
         for (var e = lid; e < S.ne; e += 64u) {
             let F = bitcast<vec4u>(G[S.e0 + e]);
-            he[e] = vec2u(F.z | F.w << 16u, F.x | F.y << 16u);
+            he[e] = vec2u(F.z | (F.w << 16u), F.x | (F.y << 16u));
         }
     }
     workgroupBarrier();
@@ -78,7 +78,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     var bi = 0u;
     for (var f = lid; f < A.nf; f += 64u) {
         let s = min_along_c(1u, S, hcn(0u, A, f)) - sd(A, f);
-        if (s > MG) { atomicMax(&wsepa, 1u << 28u | f << 12u); }
+        if (s > MG) { atomicMax(&wsepa, (1u << 28u) | (f << 12u)); }
         if (s > best) { best = s; bi = f; }
     }
     ws[lid] = best; wi[lid] = bi; wj[lid] = 0u; wl[lid] = vec3f(0.0);
@@ -95,7 +95,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     bi = 0u;
     for (var f = lid; f < S.nf; f += 64u) {
         let s = min_along_c(0u, A, hcn(1u, S, f)) - sd(S, f);
-        if (s > MG) { atomicMax(&wsepa, 2u << 28u | f << 12u); }
+        if (s > MG) { atomicMax(&wsepa, (2u << 28u) | (f << 12u)); }
         if (s > best) { best = s; bi = f; }
     }
     workgroupBarrier();
@@ -141,7 +141,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             L = L / ll;
             if (dot(L, pa - A.pos) < 0.0) { L = -L; }
             let s = dot(L, pb - pa);
-            if (s > MG) { atomicMax(&wsepa, 3u << 28u | i << 12u | j); }
+            if (s > MG) { atomicMax(&wsepa, (3u << 28u) | (i << 12u) | j); }
             if (s > best) { best = s; bi = i; bj = j; bl = L; }
         }
     }
