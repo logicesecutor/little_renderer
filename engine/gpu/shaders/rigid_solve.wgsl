@@ -7,6 +7,13 @@
 @group(0) @binding(6) var<storage, read_write> Vo: array<vec4f>;
 @group(0) @binding(7) var<storage, read> Ji: array<vec4f>;
 @group(0) @binding(8) var<storage, read_write> Jo: array<vec4f>;
+/* Each iteration's corrections over-relaxed (SOR on the Jacobi iterations): the bodies' share
+   of a contact (mass splitting) makes each correction too timid where they have many, so a
+   pile took 16 iterations to come to rest; up to 1.8 times it, 10 do (mesh_rain, 600 hulls
+   asleep after 30 s, two runs: 16 plain 583-600, 8 plain 140-298, 8 over-relaxed 464-473, 10
+   over-relaxed 583-600). A contact alone on its bodies is exact in one iteration (a bounce):
+   1 + 0.8 (1 - 1 / the larger share count), the same number for both its bodies. */
+const OMEGA = 1.8;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let lane = lv.x & 7u;
@@ -41,10 +48,13 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             var d = Vi[2u * ia].xyz + cross(Vi[2u * ia + 1u].xyz, kra.xyz);
             if (ib != NONE) { d = d - (Vi[2u * ib].xyz + cross(Vi[2u * ib + 1u].xyz, krb.xyz)); }
             let n = kn.xyz;
-            let jn = max(kj.x + kt1.w * (krb.w - dot(d, n)), 0.0);
+            var sh = off[ia + 1u] - off[ia];
+            if (ib != NONE) { sh = max(sh, off[ib + 1u] - off[ib]); }
+            let om = 1.0 + (OMEGA - 1.0) * (1.0 - 1.0 / f32(max(sh, 1u)));
+            let jn = max(kj.x + om * kt1.w * (krb.w - dot(d, n)), 0.0);
             let lim = mu * jn;
-            let jt1 = clamp(kj.y - kt2.w * dot(d, kt1.xyz), -lim, lim);
-            let jt2 = clamp(kj.z - kj.w * dot(d, kt2.xyz), -lim, lim);
+            let jt1 = clamp(kj.y - om * kt2.w * dot(d, kt1.xyz), -lim, lim);
+            let jt2 = clamp(kj.z - om * kj.w * dot(d, kt2.xyz), -lim, lim);
             let imp = n * (jn - kj.x) + kt1.xyz * (jt1 - kj.y) + kt2.xyz * (jt2 - kj.z);
             /* both bodies' threads must get the very same impulse (or momentum is not kept,
                and piles never rest): the same instructions for both, the side applied after

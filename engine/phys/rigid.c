@@ -95,7 +95,7 @@ void rigid_init(RigidWorld *w){
     w->gravity = vec3(0, -981, 0);
     w->wall_restitution = 0.4f;
     w->wall_friction = 0.5f;
-    w->iterations = 16;
+    w->iterations = 10;
     w->linear_damping = 0.0f;
     w->angular_damping = 0.1f;
     w->warm_start = 1;
