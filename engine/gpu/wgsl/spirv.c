@@ -762,7 +762,21 @@ static Val binop(Cx *c, int opk, Val a, Val b, int line){
     Type *t = a.t;
     // matrices
     if (a.t->k == T_MAT || b.t->k == T_MAT){
-        if (opk != TK_STAR) wgsl_fail(c->W, line, "only * is supported on matrices");
+        if ((opk == TK_PLUS || opk == TK_MINUS) && a.t->k == T_MAT && b.t->k == T_MAT && a.t->n == b.t->n && a.t->e->n == b.t->e->n){
+            // matrix + / - matrix: column by column
+            uint32_t col[4], ct = tid(S, a.t->e);
+            for (int i = 0; i < a.t->n; i++){
+                uint32_t ca = nid(c), cb = nid(c);
+                col[i] = nid(c);
+                E(c, OpCompositeExtract, ct, ca, x, (uint32_t)i);
+                E(c, OpCompositeExtract, ct, cb, y, (uint32_t)i);
+                E(c, opk == TK_PLUS ? OpFAdd : OpFSub, ct, col[i], ca, cb);
+            }
+            uint32_t q[6] = {tid(S, a.t), r, col[0], col[1], col[2], col[3]};
+            op(S, FB(c), OpCompositeConstruct, 2 + a.t->n, q);
+            return mkval(a.t, r);
+        }
+        if (opk != TK_STAR) wgsl_fail(c->W, line, "only *, and + - of equal matrices, are supported on matrices");
         Type *rt;
         uint32_t o;
         if (a.t->k == T_MAT && b.t->k == T_MAT){ o = OpMatrixTimesMatrix; rt = t_mat(S, b.t->n, a.t->e->n); }
