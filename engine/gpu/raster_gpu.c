@@ -223,7 +223,6 @@ static void geo_reserve(GpuRaster *r, Geo *geo, size_t verts, const char *label)
     geo_bind(r, geo);
 }
 
-// primitives as triangles into tmp_pos / tmp_nrm (from vertex nv on); returns the new count
 // a vertex's texture coordinates and tangent (vtex: u, v, the tangent octahedral; its
 // handedness into the normal's w)
 static void put_tex(GpuRaster *r, size_t at, Vec2 uv, Vec4 tg){
@@ -233,6 +232,7 @@ static void put_tex(GpuRaster *r, size_t at, Vec2 uv, Vec4 tg){
     r->tmp_nrm[4 * at + 3] = (float)tg.w;
 }
 
+// primitives as triangles into tmp_pos / tmp_nrm / tmp_tex (from vertex nv on); returns the new count
 static size_t prims_to_tris(GpuRaster *r, const Primitive *pr, int n, size_t nv){
     for (int i = 0; i < n; i++){
         int nt = render_prim_tri_count(&pr[i]);
@@ -281,26 +281,7 @@ static int upload_prims(GpuRaster *r, const Scene *s){
     size_t ntri = 0;
     for (int i = 0; i < s->nprims; i++) ntri += (size_t)render_prim_tri_count(&s->prims[i]);
     if (!tmp_reserve(r, ntri * 3 + 3)) return 0;
-    size_t nv = 0;
-    for (int i = 0; i < s->nprims; i++){
-        const Primitive *pr = &s->prims[i];
-        int n = render_prim_tri_count(pr);
-        for (int sub = 0; sub < n; sub++){
-            Vec3 wp[3], wn[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, flat_at;
-            int has_n = 0;
-            render_prim_triangle(pr, sub, wp, wn, &has_n, &flat_at);
-            Vec2 uv[3];
-            Vec4 tg[3];
-            render_prim_texcoords(pr, sub, uv, tg);
-            int flag = pr->type == PRIM_QUAD ? (sub == 0 ? 1 : 2) : 0;
-            float code = (float)((pr->material & 15) + 16 * flag + 64 * (has_n != 0));
-            for (int k = 0; k < 3; k++, nv++){
-                put(r->tmp_pos + 4 * nv, wp[k], code);
-                put(r->tmp_nrm + 4 * nv, wn[k], 0);
-                put_tex(r, nv, uv[k], tg[k]);
-            }
-        }
-    }
+    size_t nv = prims_to_tris(r, s->prims, s->nprims, 0);
     geo_reserve(r, &r->prims, nv ? nv : 3, "scene primitives");
     if (nv){
         wgpuQueueWriteBuffer(r->g->queue, r->prims.pos, 0, r->tmp_pos, nv * 16);
@@ -366,6 +347,14 @@ static int upload_mesh(GpuRaster *r, const Scene *s){
     return 1;
 }
 
+static void rebind_all(GpuRaster *r){
+    geo_bind(r, &r->prims);
+    geo_bind(r, &r->mesh);
+    for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
+    geo_bind(r, &r->unit[0]);
+    geo_bind(r, &r->unit[1]);
+}
+
 // the transforms (record 0: the world as it is; then the instances), and the meshes' own
 // triangles (again when a dynamic one changed)
 static int upload_instances(GpuRaster *r, const Scene *s){
@@ -381,13 +370,7 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         uint32_t m = i && s->insts[i - 1].material >= 0 ? (uint32_t)s->insts[i - 1].material : 0xffffffffu;
         memcpy(o + 24, &m, 4);
     }
-    if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")){
-        geo_bind(r, &r->prims);
-        geo_bind(r, &r->mesh);
-        for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
-        geo_bind(r, &r->unit[0]);
-        geo_bind(r, &r->unit[1]);
-    }
+    if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")) rebind_all(r);
     wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, rec, n * 112);
     free(rec);
     if (s->nmeshes > r->nmg){
@@ -407,14 +390,6 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         r->mg[m].version = sm->version;
     }
     return 1;
-}
-
-static void rebind_all(GpuRaster *r){
-    geo_bind(r, &r->prims);
-    geo_bind(r, &r->mesh);
-    for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
-    geo_bind(r, &r->unit[0]);
-    geo_bind(r, &r->unit[1]);
 }
 
 // the environment's levels (all six one after the other) and the sky behind, when they change
@@ -559,13 +534,15 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         wgpuRenderPassEncoderSetBindGroup(pass, 0, sets[k]->bg, 0, NULL);
         wgpuRenderPassEncoderDraw(pass, wire ? sets[k]->nverts * 2 : sets[k]->nverts, 1, 0, 0);
     }
-    // the instances: their mesh's triangles, moved by their record (the draw's first instance)
-    for (int i = 0; i < s->ninsts; i++){
+    // the instances: their mesh's triangles, moved by their record (the draw's first instance);
+    // neighbours of the same mesh in one draw (the same triangles in the same order)
+    for (int i = 0, run; i < s->ninsts; i += run){
         int mesh = s->insts[i].mesh;
+        for (run = 1; i + run < s->ninsts && s->insts[i + run].mesh == mesh; run++){}
         Geo *geo = mesh >= 0 ? &r->mg[mesh].geo : &r->unit[mesh == INST_SPHERE ? 0 : 1];
         if (!geo->nverts || !geo->bg) continue;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
-        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, 1, 0, (uint32_t)i + 1);
+        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, (uint32_t)run, 0, (uint32_t)i + 1);
     }
     // the sky behind (any set's bind group: the uniforms and buffers are the same in all)
     if (sky){
