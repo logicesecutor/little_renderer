@@ -152,14 +152,18 @@ struct GpuFluid {
     WGPUBindGroupLayout bgl[NK];
     WGPUComputePipeline pipe[NK];
     WGPUBuffer fp;                // GFP
+    // the velocity is in u, v, w or in tu, tv, tw, taking turns: the advection writes the set
+    // it does not read, which is then the velocity (no copy back): `cur` = 1 when it is tu, tv, tw
     WGPUBuffer u, v, w, tu, tv, tw, p, div, solid, svel, cvel, omg, frc;
+    int cur;
     WGPUBuffer dens, d0, d1;
     WGPUBuffer bodies, around;    // per body: 6 vec4 in, 1 vec4 out
     size_t bodies_cap, around_cap;
     WGPUBuffer occ;               // the mesh bodies' shapes: which cells they fill
     size_t occ_cap;
     int nocc;                     // shapes uploaded
-    WGPUBindGroup bg[NK];         // the fluid kernels' bind groups (MARK and SAMP follow the bodies)
+    WGPUBindGroup bg[2][NK];      // the fluid kernels' bind groups, for each set the velocity can be in
+                                  // (MARK and SAMP follow the bodies)
     GLevel lv[POISSON_MAX_LEVELS];
     int nlevels;
     float *body_data;
@@ -254,23 +258,27 @@ static WGPUBuffer uniform(Gpu *g, const char *label, const void *data, size_t by
     return b;
 }
 
-#define BG(k, ...) do { WGPUBuffer b_[] = {__VA_ARGS__}; gf->bg[k] = gpu_bind(g, gf->bgl[k], b_, (int)(sizeof(b_) / sizeof(b_[0]))); } while (0)
+#define BG(k, ...) do { WGPUBuffer b_[] = {__VA_ARGS__}; gf->bg[a][k] = gpu_bind(g, gf->bgl[k], b_, (int)(sizeof(b_) / sizeof(b_[0]))); } while (0)
 #define LBG(dst, k, ...) do { WGPUBuffer b_[] = {__VA_ARGS__}; dst = gpu_bind(g, gf->bgl[k], b_, (int)(sizeof(b_) / sizeof(b_[0]))); } while (0)
 
 // the bind groups that do not depend on the bodies
 static void make_bind_groups(GpuFluid *gf){
     Gpu *g = gf->g;
-    BG(K_BOUND_, gf->fp, gf->u, gf->v, gf->w, gf->solid, gf->svel);
-    BG(K_FORCES_, gf->fp, gf->u, gf->v, gf->w, gf->dens);
-    BG(K_VA_, gf->fp, gf->u, gf->v, gf->w, gf->cvel);
-    BG(K_VB_, gf->fp, gf->cvel, gf->omg);
-    BG(K_VC_, gf->fp, gf->omg, gf->solid, gf->frc);
-    BG(K_VD_, gf->fp, gf->frc, gf->u, gf->v, gf->w);
-    BG(K_ADV_, gf->fp, gf->u, gf->v, gf->w, gf->tu, gf->tv, gf->tw);
-    BG(K_DIV_, gf->fp, gf->u, gf->v, gf->w, gf->solid, gf->div);
-    BG(K_GRAD_, gf->fp, gf->u, gf->v, gf->w, gf->p, gf->solid, gf->svel);
-    BG(K_D1_, gf->fp, gf->u, gf->v, gf->w, gf->d0, gf->d1);
-    BG(K_D2_, gf->fp, gf->u, gf->v, gf->w, gf->d0, gf->d1, gf->dens, gf->solid);
+    for (int a = 0; a < 2; a++){      // a: the set the velocity is in (the advection writes the other)
+        WGPUBuffer u = a ? gf->tu : gf->u, v = a ? gf->tv : gf->v, w = a ? gf->tw : gf->w;
+        WGPUBuffer tu = a ? gf->u : gf->tu, tv = a ? gf->v : gf->tv, tw = a ? gf->w : gf->tw;
+        BG(K_BOUND_, gf->fp, u, v, w, gf->solid, gf->svel);
+        BG(K_FORCES_, gf->fp, u, v, w, gf->dens);
+        BG(K_VA_, gf->fp, u, v, w, gf->cvel);
+        BG(K_VB_, gf->fp, gf->cvel, gf->omg);
+        BG(K_VC_, gf->fp, gf->omg, gf->solid, gf->frc);
+        BG(K_VD_, gf->fp, gf->frc, u, v, w);
+        BG(K_ADV_, gf->fp, u, v, w, tu, tv, tw);
+        BG(K_DIV_, gf->fp, u, v, w, gf->solid, gf->div);
+        BG(K_GRAD_, gf->fp, u, v, w, gf->p, gf->solid, gf->svel);
+        BG(K_D1_, gf->fp, u, v, w, gf->d0, gf->d1);
+        BG(K_D2_, gf->fp, u, v, w, gf->d0, gf->d1, gf->dens, gf->solid);
+    }
     for (int k = 0; k < gf->nlevels; k++){
         GLevel *l = &gf->lv[k];
         LBG(l->bg_links, K_LINKS_, l->lu[0], l->solid, l->links);
@@ -301,11 +309,13 @@ static void reserve_bodies(GpuFluid *gf, const RigidWorld *rw){
     if (grown) gf->nocc = 0;
     for (; gf->nocc < rw->ngeoms; gf->nocc++)          // shapes never change once made
         wgpuQueueWriteBuffer(g->queue, gf->occ, (uint64_t)gf->nocc * OCC_WORDS * 4, rw->geoms[gf->nocc]->occ, OCC_WORDS * 4);
-    if (!grown && gf->bg[K_MARK_]) return;
-    if (gf->bg[K_MARK_]) wgpuBindGroupRelease(gf->bg[K_MARK_]);
-    if (gf->bg[K_SAMP_]) wgpuBindGroupRelease(gf->bg[K_SAMP_]);
-    BG(K_MARK_, gf->fp, gf->bodies, gf->solid, gf->svel, gf->occ);
-    BG(K_SAMP_, gf->fp, gf->u, gf->v, gf->w, gf->bodies, gf->around);
+    if (!grown && gf->bg[0][K_MARK_]) return;
+    for (int a = 0; a < 2; a++){
+        if (gf->bg[a][K_MARK_]) wgpuBindGroupRelease(gf->bg[a][K_MARK_]);
+        if (gf->bg[a][K_SAMP_]) wgpuBindGroupRelease(gf->bg[a][K_SAMP_]);
+        BG(K_MARK_, gf->fp, gf->bodies, gf->solid, gf->svel, gf->occ);
+        BG(K_SAMP_, gf->fp, a ? gf->tu : gf->u, a ? gf->tv : gf->v, a ? gf->tw : gf->w, gf->bodies, gf->around);
+    }
 }
 
 static void level_params(GpuFluid *gf, int k){
@@ -340,7 +350,7 @@ static void free_all(GpuFluid *gf){
         for (size_t i = 0; i < sizeof(bgs) / sizeof(bgs[0]); i++) if (bgs[i]) wgpuBindGroupRelease(bgs[i]);
     }
     for (int k = 0; k < NK; k++){
-        if (gf->bg[k]) wgpuBindGroupRelease(gf->bg[k]);
+        for (int a = 0; a < 2; a++) if (gf->bg[a][k]) wgpuBindGroupRelease(gf->bg[a][k]);
         if (gf->pipe[k]) wgpuComputePipelineRelease(gf->pipe[k]);
         if (gf->bgl[k]) wgpuBindGroupLayoutRelease(gf->bgl[k]);
     }
@@ -580,34 +590,33 @@ static void air_step(void *user, PhysWorld *pw, real dt){
 
     const size_t nc = ncells(f), np = npoints(f);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    // 1. obstacles, forces, vorticity, advection (into tu, tv, tw)
+    // 1. obstacles, forces, vorticity, advection (into the other set, the velocity from then on)
+    int a = gf->cur;
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-    run(pass, gf, K_MARK_, gf->bg[K_MARK_], nc);
-    run(pass, gf, K_BOUND_, gf->bg[K_BOUND_], np);
-    run(pass, gf, K_FORCES_, gf->bg[K_FORCES_], np);
+    run(pass, gf, K_MARK_, gf->bg[a][K_MARK_], nc);
+    run(pass, gf, K_BOUND_, gf->bg[a][K_BOUND_], np);
+    run(pass, gf, K_FORCES_, gf->bg[a][K_FORCES_], np);
     if (f->vorticity > 0){
-        run(pass, gf, K_VA_, gf->bg[K_VA_], nc);
-        run(pass, gf, K_VB_, gf->bg[K_VB_], nc);
-        run(pass, gf, K_VC_, gf->bg[K_VC_], nc);
-        run(pass, gf, K_VD_, gf->bg[K_VD_], nc);
+        run(pass, gf, K_VA_, gf->bg[a][K_VA_], nc);
+        run(pass, gf, K_VB_, gf->bg[a][K_VB_], nc);
+        run(pass, gf, K_VC_, gf->bg[a][K_VC_], nc);
+        run(pass, gf, K_VD_, gf->bg[a][K_VD_], nc);
     }
-    run(pass, gf, K_BOUND_, gf->bg[K_BOUND_], np);
-    run(pass, gf, K_ADV_, gf->bg[K_ADV_], np);
+    run(pass, gf, K_BOUND_, gf->bg[a][K_BOUND_], np);
+    run(pass, gf, K_ADV_, gf->bg[a][K_ADV_], np);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
-    wgpuCommandEncoderCopyBufferToBuffer(enc, gf->tu, 0, gf->u, 0, nu(f) * 4);
-    wgpuCommandEncoderCopyBufferToBuffer(enc, gf->tv, 0, gf->v, 0, nv(f) * 4);
-    wgpuCommandEncoderCopyBufferToBuffer(enc, gf->tw, 0, gf->w, 0, nw(f) * 4);
+    a = gf->cur = 1 - a;
     // 2. projection: divergence, multigrid (the levels' obstacles and links first), gradient
     pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-    run(pass, gf, K_BOUND_, gf->bg[K_BOUND_], np);
-    run(pass, gf, K_DIV_, gf->bg[K_DIV_], nc);
+    run(pass, gf, K_BOUND_, gf->bg[a][K_BOUND_], np);
+    run(pass, gf, K_DIV_, gf->bg[a][K_DIV_], nc);
     for (int k = 0; k < gf->nlevels; k++){
         if (k > 0) run(pass, gf, K_CSOLID_, gf->lv[k].bg_csolid, lcells(&gf->lv[k]));
         run(pass, gf, K_LINKS_, gf->lv[k].bg_links, lcells(&gf->lv[k]));
     }
     for (int c = 0; c < f->pressure_cycles; c++) vcycle(pass, gf, 0);
-    run(pass, gf, K_GRAD_, gf->bg[K_GRAD_], np);
+    run(pass, gf, K_GRAD_, gf->bg[a][K_GRAD_], np);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
     // 3. the cloud
@@ -615,8 +624,8 @@ static void air_step(void *user, PhysWorld *pw, real dt){
         size_t nd = (size_t)cv->nx * cv->ny * cv->nz;
         wgpuCommandEncoderCopyBufferToBuffer(enc, gf->dens, 0, gf->d0, 0, nd * 4);
         pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-        run(pass, gf, K_D1_, gf->bg[K_D1_], nd);
-        run(pass, gf, K_D2_, gf->bg[K_D2_], nd);
+        run(pass, gf, K_D1_, gf->bg[a][K_D1_], nd);
+        run(pass, gf, K_D2_, gf->bg[a][K_D2_], nd);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
     }
@@ -624,7 +633,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     int sample = nb > 0 && !gf->around_pending;
     if (sample){
         pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-        run(pass, gf, K_SAMP_, gf->bg[K_SAMP_], (size_t)nb);
+        run(pass, gf, K_SAMP_, gf->bg[a][K_SAMP_], (size_t)nb);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
         gpu_buffer_reserve(g, &gf->around_rb, &gf->around_rb_cap, (size_t)nb * 16,

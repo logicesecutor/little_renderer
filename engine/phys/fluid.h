@@ -39,7 +39,11 @@ typedef struct {
     uint8_t *solid;            // per cell: 1 = inside a rigid body (set every step by the coupling)
     float *su, *sv, *sw;       // per cell: the body's velocity in those cells
     Volume *density;           // the cloud (not owned: the scene owns it), or NULL
-    float *d0, *d1;            // scratch for the density advection
+    float *d0, *d1;            // scratch for the density advection (d0: the densities before the step,
+                               // the density's own array of the step before: they change places)
+    int d0_lo[3], d0_hi[3];    // the voxels the last step wrote: where d0 differs from the density
+    unsigned d0_version;       // (while the density is still that step's: its version and array)
+    const float *d0_of;
     Vec3 *dvel;                // ... and the air's velocity at each voxel's centre
 
     // parameters (fluid_create sets the defaults)

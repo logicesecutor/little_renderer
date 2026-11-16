@@ -456,7 +456,22 @@ static void advect_density(Fluid *f, real dt){
     const int nx = v->nx, ny = v->ny;
     const size_t n = (size_t)nx * ny * v->nz;
     if (v->active.hi.x < v->active.lo.x) return;          // no cloud left
-    memcpy(f->d0, v->density, n * sizeof(float));
+    // The densities before the step are read while the new ones are written: the density's
+    // array becomes d0, and d0 the density's (the Volume owns whichever it has; both are n
+    // floats from calloc). d0 held the densities before the last step, which differ from
+    // today's only where that step wrote: those voxels are copied, not the whole grid. (If the
+    // density was changed by someone else since, all of it is.)
+    float *old = v->density, *cur = f->d0;
+    if (f->d0_of == old && f->d0_version == v->version){
+        const size_t row = (size_t)(f->d0_hi[0] - f->d0_lo[0] + 1) * sizeof(float);
+        for (int z = f->d0_lo[2]; z <= f->d0_hi[2]; z++)
+            for (int y = f->d0_lo[1]; y <= f->d0_hi[1] && f->d0_hi[0] >= f->d0_lo[0]; y++){
+                size_t i = ((size_t)z * ny + y) * nx + f->d0_lo[0];
+                memcpy(cur + i, old + i, row);
+            }
+    } else memcpy(cur, old, n * sizeof(float));
+    v->density = cur;
+    f->d0 = old;
     const float keep = (float)(f->dissipation * dt >= 1 ? 0 : 1 - f->dissipation * dt);
     const VoxGrid vg = voxgrid(v);
     // Only the voxels the cloud can reach this step: its box, grown by the largest distance
@@ -508,6 +523,9 @@ static void advect_density(Fluid *f, real dt){
                 v->density[i] = r < 1e-4f ? 0 : r;
             }
     volume_update(v);
+    for (int k = 0; k < 3; k++){ f->d0_lo[k] = lo1[k]; f->d0_hi[k] = hi1[k]; }
+    f->d0_version = v->version;
+    f->d0_of = v->density;
 }
 
 // ---- the step -------------------------------------------------------------------------------------
