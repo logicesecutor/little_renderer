@@ -1,9 +1,7 @@
 // render.c - offline renderer: one image of the Cornell box into a PNG file, made by the
 // path tracer (-backend rt, default) or the rasterizer (-backend raster). Run with -h.
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -11,12 +9,6 @@
 #include "app/gpu_frame.h"
 #include "app/options.h"
 #include "lr.h"
-
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;   // (casts: see Makefile, PRECFLAGS)
-}
 
 static int render_raster(const Options *opt, const Scene *scene){
     Framebuffer *fb = fb_create(opt->width, opt->height);
@@ -26,10 +18,10 @@ static int render_raster(const Options *opt, const Scene *scene){
     p.mode = opt->shading;
     printf("rasterizing %dx%d, %s shading\n", opt->width, opt->height, render_mode_name(p.mode));
 
-    double t0 = now_s();
+    double t0 = clock_s();
     fb_clear(fb, rgb8(0, 0, 0));
     render_scene(fb, scene, &p);
-    double ms = (now_s() - t0) * 1000.0;
+    double ms = (clock_s() - t0) * 1000.0;
     if (scene->nvolumes > 0 && opt->raster_clouds){
         // the media, raymarched over the opaque frame (raster/volume_march.h)
         RasterVolumes *rv = raster_volumes_create();
@@ -66,7 +58,7 @@ static int render_rt(const Options *opt, const Scene *scene){
            W, H, spp, opt->max_depth, threads, opt->clamp > 0 ? ", clamped" : "",
            opt->mis ? ", MIS" : "", opt->caustics_lt ? ", caustics by light tracing" : "");
 
-    double t0 = now_s();
+    double t0 = clock_s();
     int rows_done = 0;
     const real clamp = (real)opt->clamp;
 
@@ -113,11 +105,11 @@ static int render_rt(const Options *opt, const Scene *scene){
     if (opt->caustics_lt){
         // the caustic paths the path tracer left out, traced from the lamp
         long long photons = (long long)((double)W * H * spp * opt->photons);
-        double l0 = now_s();
+        double l0 = clock_s();
         light_trace_caustics(scene, &cam, W, H, photons, &tp, 0x5EED0F11A57ULL, img.px);
-        printf("light tracing: %lld light paths in %.1f s\n", photons, now_s() - l0);
+        printf("light tracing: %lld light paths in %.1f s\n", photons, clock_s() - l0);
     }
-    double secs = now_s() - t0;
+    double secs = clock_s() - t0;
     int err = image_write_png(&img, opt->out);
     if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
     else printf("wrote %s in %.1f s (%.2f M paths/s)\n", opt->out, secs, (double)W * H * spp / secs / 1e6);
@@ -135,7 +127,7 @@ static int render_gpu(const Options *opt, Scene *scene){
     RenderParams p = render_params_camera(scene->cam_from, scene->cam_at, scene->cam_up, scene->cam_vfov_deg, W, H);
     p.mode = opt->shading;
     int err = 0;
-    double t0 = now_s();
+    double t0 = clock_s();
     if (opt->backend == BACKEND_RASTER){
         printf("rasterizing %dx%d on the GPU (%s), %s shading\n", W, H, gpu_message(g), render_mode_name(p.mode));
         Framebuffer *fb = fb_create(W, H);
@@ -146,7 +138,7 @@ static int render_gpu(const Options *opt, Scene *scene){
         }
         err = fb_save_png(fb, opt->out);
         if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
-        else printf("wrote %s in %.1f ms (the first frame on a GPU includes making its pipelines)\n", opt->out, (now_s() - t0) * 1000.0);
+        else printf("wrote %s in %.1f ms (the first frame on a GPU includes making its pipelines)\n", opt->out, (clock_s() - t0) * 1000.0);
         fb_destroy(fb);
     } else {
         printf("path tracing %dx%d on the GPU (%s), %d samples/pixel, max %d bounces%s%s\n", W, H, gpu_message(g), opt->spp,
@@ -166,7 +158,7 @@ static int render_gpu(const Options *opt, Scene *scene){
             gpu_frame_close(g, v);
             return -1;
         }
-        double secs = now_s() - t0;
+        double secs = clock_s() - t0;
         err = image_write_png(&img, opt->out);
         if (err) fprintf(stderr, "could not write %s (does the folder exist?)\n", opt->out);
         else printf("wrote %s in %.2f s (%.1f M paths/s)\n", opt->out, secs, (double)W * H * opt->spp / secs / 1e6);

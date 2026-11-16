@@ -21,6 +21,7 @@
 #define LR_H
 
 #include "core/lrmath.h"
+#include "core/clock.h"
 #include "core/rng.h"
 #include "core/image.h"
 #include "core/png.h"

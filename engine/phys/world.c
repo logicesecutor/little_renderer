@@ -1,16 +1,9 @@
-#define _POSIX_C_SOURCE 200809L
 #include "phys/world.h"
+#include "core/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-static double now_ms(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-}
 
 void phys_init(PhysWorld *pw){
     memset(pw, 0, sizeof(*pw));
@@ -119,7 +112,7 @@ static void mark_solids(PhysWorld *pw){
 void phys_step(PhysWorld *pw, real dt){
     if (dt <= 0) return;
     RigidWorld *w = &pw->rigid;
-    double t0 = now_ms();
+    double t0 = clock_ms();
     // the air's forces, from the air as it is now, held for the substeps
     int n = w->nbodies;
     Vec3 forces[256];
@@ -130,14 +123,14 @@ void phys_step(PhysWorld *pw, real dt){
     for (int i = 0; i < n; i++) fs[i] = v_add(drag_force(pw, i, h), buoyancy_force(pw, i));
     if (!pw->rigid_step || !pw->rigid_step(pw->rigid_user, pw, dt, steps, fs)) rigid_steps(w, dt, steps, fs);
     if (fs != forces) free(fs);
-    double t1 = now_ms();
+    double t1 = clock_ms();
     if (pw->fluid && pw->air_step) pw->air_step(pw->air_user, pw, dt);
     else if (pw->fluid){
         mark_solids(pw);
         fluid_step(pw->fluid, dt);
     }
     pw->ms_rigid = t1 - t0;
-    pw->ms_fluid = now_ms() - t1;
+    pw->ms_fluid = clock_ms() - t1;
     pw->time += dt;
 }
 

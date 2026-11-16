@@ -11,7 +11,6 @@
 // tracer's acceleration structure, render, write frame_NNNN.png. At the end the frames
 // become a GIF with tools/frames_to_gif.py, run by uv (which fetches Pillow by itself) or,
 // without uv, by python3 (with Pillow installed).
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +21,6 @@
 #include <sys/stat.h>
 #define make_dir(p) mkdir((p), 0755)
 #endif
-#include <time.h>
 
 #include "app/frame.h"
 #include "app/gpu_frame.h"
@@ -31,12 +29,6 @@
 #include "gpu/rigid_gpu.h"
 #include "app/simdemo.h"
 #include "lr.h"
-
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-}
 
 int main(int argc, char **argv){
     Options o;
@@ -90,12 +82,12 @@ int main(int argc, char **argv){
            o.backend == BACKEND_RASTER ? (o.raster_clouds ? "rasterized, cloud raymarched" : "rasterized, no cloud") : "path traced");
     if (o.backend != BACKEND_RASTER) printf("  %d samples/pixel, max %d bounces%s\n", o.spp, o.max_depth,
                                             o.caustics_lt ? ", caustics by light tracing" : "");
-    double t0 = now_s(), phys_s = 0, render_s = 0;
+    double t0 = clock_s(), phys_s = 0, render_s = 0;
     for (int f = 0; f < o.sim.frames; f++){
-        double a = now_s();
+        double a = clock_s();
         if (f > 0) sim_step(&sim, &scene, 1.0 / o.sim.fps);
         else sim_step(&sim, &scene, 0);   // frame 0: the starting state (bodies due at t = 0)
-        double b = now_s();
+        double b = clock_s();
         phys_s += b - a;
 
         char path[600];
@@ -142,7 +134,7 @@ int main(int argc, char **argv){
             err = image_write_png(&img, path);
         }
         if (err){ fprintf(stderr, "could not write %s\n", path); return 1; }
-        double c = now_s();
+        double c = clock_s();
         render_s += c - b;
         char st[256];
         sim_status(&sim, st, sizeof(st));
@@ -152,7 +144,7 @@ int main(int argc, char **argv){
         fflush(stdout);
     }
     printf("\n%d frames in %s/ in %.0f s (physics %.1f s, rendering %.0f s)\n", o.sim.frames, o.out,
-           now_s() - t0, phys_s, render_s);
+           clock_s() - t0, phys_s, render_s);
 
     if (o.sim.gif){
         // uv reads the script's header (PEP 723) and runs it with Pillow; python3 is the

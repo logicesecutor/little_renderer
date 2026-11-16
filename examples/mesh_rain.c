@@ -20,11 +20,9 @@
 //                                                   settles and falls asleep (-sleep off: not)
 //
 // Keys: Space pause / resume the rain, + / - rain faster / slower, Esc quit.
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include "lr.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
@@ -33,12 +31,6 @@
 #define ROOM 555.0
 #define MAX_MODELS 8
 #define STEP (1.0 / 60.0)        // physics steps of at most 1/60 s (4 substeps each)
-
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
 
 typedef struct { int mesh, geom; const char *name; } Model;
 
@@ -148,8 +140,8 @@ int main(int argc, char **argv){
         void *dpy;
         uintptr_t wh;
         gpu = window_native(win, &dpy, &wh) ? gpu_create_window(dpy, wh, W, H) : NULL;
-        double t0 = now_s();
-        while (gpu && gpu_state(gpu) == GPU_PENDING && now_s() - t0 < 20) gpu_poll(gpu);
+        double t0 = clock_s();
+        while (gpu && gpu_state(gpu) == GPU_PENDING && clock_s() - t0 < 20) gpu_poll(gpu);
         if (gpu && gpu_state(gpu) == GPU_READY) gview = gpu_view_create(gpu, W, H);
         if (gview){
             grigid = gpu_rigid_create(gpu, &pw);
@@ -175,7 +167,7 @@ int main(int argc, char **argv){
     printf("\nkeys: Space pause the rain, + / - faster / slower, Esc quit\n"
            "raining %.0f meshes per second, at most %d in the room (then the oldest is dropped again)\n\n", rate, max_bodies);
 
-    double t_start = now_s(), t_last = t_start, t_title = t_start, spawn_debt = 0;
+    double t_start = clock_s(), t_last = t_start, t_title = t_start, spawn_debt = 0;
     double phys_ms = 0, draw_ms = 0, last_phys = 0, last_draw = 0;
     long frames = 0, title_frames = 0, total_frames = 0;
     int paused = 0, running = 1;
@@ -190,7 +182,7 @@ int main(int argc, char **argv){
             else if (ev.key == '+' || ev.key == '=') rate = rate < 1 ? 1 : rate * 1.5;
             else if (ev.key == '-') rate /= 1.5;
         }
-        double t = now_s(), dt = t - t_last;
+        double t = clock_s(), dt = t - t_last;
         t_last = t;
         // a slow frame shows slow motion, no jump: at most 2 steps per frame (3 made a slow
         // frame slower still, and 1500 cubes settled at 15 frames/s)
@@ -228,12 +220,12 @@ int main(int argc, char **argv){
         }
 
         // ---- physics (steps of at most 1/60 s), then the instances follow the bodies
-        double p0 = now_s();
+        double p0 = clock_s();
         int n = (int)(dt / STEP + 0.999);
         if (n < 1) n = 1;
         for (int k = 0; k < n; k++) phys_step(&pw, (real)(dt / n));
         phys_sync_scene(&pw, &scene);
-        double p1 = now_s();
+        double p1 = clock_s();
 
         // ---- draw
         if (gview){
@@ -255,7 +247,7 @@ int main(int argc, char **argv){
             render_scene(fb, &scene, &rp);
             window_present(win, fb);
         }
-        double p2 = now_s();
+        double p2 = clock_s();
         phys_ms += (p1 - p0) * 1000;
         draw_ms += (p2 - p1) * 1000;
         frames++;

@@ -1,12 +1,11 @@
-#define _POSIX_C_SOURCE 200809L   // clock_gettime
 #include "app/options.h"
+#include "core/clock.h"
 #include "gpu/gpu.h"
 #include "rt/probe.h"
 #include "core/env.h"
 
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -509,15 +508,9 @@ int options_setup_scene(const Options *o, Scene *s){
     return 0;
 }
 
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
-
 void options_bake_probe(const Options *o, Scene *s){
     if (!o->probe || (s->light < 0 && !s->env) || !(o->prog == PROG_VIEW || o->backend == BACKEND_RASTER)) return;
-    double t0 = now_s();
+    double t0 = clock_s();
     Env *p = probe_bake_scene(s, o->probe_res, o->probe_spp);
     if (!p) return;
     env_free(s->probe);
@@ -525,7 +518,7 @@ void options_bake_probe(const Options *o, Scene *s){
     irr_grid_free(s->irr);
     s->irr = probe_grid_bake_scene(s, PROBE_GRID_PATHS);
     printf("light probe: %d x %d, %d paths per texel, and %d x %d x %d for the diffuse light, %.0f ms (-probe off: none)\n",
-           p->w, p->h, o->probe_spp, s->irr ? s->irr->n[0] : 0, s->irr ? s->irr->n[1] : 0, s->irr ? s->irr->n[2] : 0, 1000 * (now_s() - t0));
+           p->w, p->h, o->probe_spp, s->irr ? s->irr->n[0] : 0, s->irr ? s->irr->n[1] : 0, s->irr ? s->irr->n[2] : 0, 1000 * (clock_s() - t0));
 }
 
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){

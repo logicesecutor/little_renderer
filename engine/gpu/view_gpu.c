@@ -31,6 +31,7 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 
 #include <stdio.h>
 #include <string.h>
+#include "core/clock.h"
 #include "core/volume.h"
 #include "gpu/gpu_internal.h"
 
@@ -758,7 +759,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     v->t_moved = 0;
     if (v->t_rows < 1) v->t_rows = 16;
     if (v->t_reps < 1) v->t_reps = 1;
-    v->t_pass_t0 = gpu_now_ms();
+    v->t_pass_t0 = clock_ms();
     return 1;
 }
 
@@ -773,7 +774,7 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
     v->t_bands = 0;
     v->den_bands = -1;
     v->t_moved = 1;
-    v->t_pass_t0 = gpu_now_ms();
+    v->t_pass_t0 = clock_ms();
     return 1;
 }
 
@@ -787,7 +788,7 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     v->t_inflight = 0;
     v->t_done = v->t_done_next;
     v->t_bands++;
-    double ms = gpu_now_ms() - v->t_submit_ms;
+    double ms = clock_ms() - v->t_submit_ms;
     // the time of a pass: from bands that did not begin an image (their time includes the guide
     // of the whole image), or a smaller one than known (the first includes making the pipelines).
     // A larger one from a band that began an image moves it a tenth of the way: while the
@@ -861,7 +862,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     v->t_inflight = 1;
-    v->t_submit_ms = gpu_now_ms();
+    v->t_submit_ms = clock_ms();
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -873,7 +874,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
         v->t_y = 0;
         v->t_passes += reps;
         v->t_index += (uint32_t)reps;
-        double now = gpu_now_ms();
+        double now = clock_ms();
         v->t_pass_ms = (now - v->t_pass_t0) / reps;
         v->t_pass_t0 = now;
     }

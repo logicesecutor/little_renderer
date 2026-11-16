@@ -12,8 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include "core/png.h"
+#include "core/clock.h"
 #include "png_tests.h"
 
 static int failures;
@@ -21,12 +21,6 @@ static int failures;
 static void check(const char *what, int ok){
     printf("  %-58s %s\n", what, ok ? "ok" : "FAIL");
     if (!ok) failures++;
-}
-
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 static void others(void){
@@ -123,13 +117,13 @@ static void speed(void){
             px[((size_t)y * w + x) * 3 + 1] = (unsigned char)(y * 200 / h + g);
             px[((size_t)y * w + x) * 3 + 2] = (unsigned char)(90 + ((x + y) >> 4 & 31) + g);
         }
-    double t0 = now_s();
+    double t0 = clock_s();
     size_t n;
     unsigned char *png = png_encode(w, h, 3, px, &n);
-    double t1 = now_s();
+    double t1 = clock_s();
     int rw, rh, rc;
     unsigned char *back = png ? png_decode(png, n, &rw, &rh, &rc, 3) : NULL;
-    double t2 = now_s();
+    double t2 = clock_s();
     printf("  %.1f MB -> %.2f MB (%.0f%%), written in %.0f ms, read in %.0f ms\n", w * h * 3 / 1e6, n / 1e6,
            100.0 * n / (w * h * 3), (t1 - t0) * 1e3, (t2 - t1) * 1e3);
     check("read back unchanged", back && !memcmp(back, px, (size_t)w * h * 3));

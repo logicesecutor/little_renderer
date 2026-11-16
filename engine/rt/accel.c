@@ -1,9 +1,8 @@
-#define _POSIX_C_SOURCE 200809L   // clock_gettime
 #include "rt/accel.h"
+#include "core/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 
 typedef struct {
     AccelKind kind;
@@ -16,12 +15,6 @@ typedef struct {
     real tlas_cost;          // its cost (bvh_cost) when it was built: refit until it grows
     int tlas_refits;
 } RtAccel;
-
-static double clock_ms(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;   // (casts: see Makefile, PRECFLAGS)
-}
 
 static void rt_accel_free(void *p){
     RtAccel *a = p;

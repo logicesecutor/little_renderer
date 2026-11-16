@@ -284,6 +284,7 @@ To show a path traced `Image`, convert each pixel with `image_pack_srgb` into
 | header | what you get |
 |---|---|
 | `core/lrmath.h` | `real`, `REAL_MAX`, `PI`, `r_sqrt`/`r_sin`/`r_pow`/... (float or double versions), `Vec2`/`Vec3`/`Vec4`, `Mat4`, `Mat3` and `Quat` (`mat3_*`, `quat_axis_angle`, `quat_mul`, `quat_rotate`, `quat_to_mat3`, `quat_integrate`), `vec3()`, `v_add`, `v_sub`, `v_mul` (per channel), `v_scale`, `v_neg`, `v_dot`, `v_cross`, `v_len`, `v_norm`, `v_max`, `v_reflect`, `v_refract`, `mat4_identity`, `mat4_mul`, `mat4_mul_vec4`, `mat4_mul_point`, `mat4_mul_dir`, `mat4_rotate_x`, `mat4_rotate_y`, `mat4_look_at`, `mat4_perspective` |
+| `core/clock.h` | `clock_s`, `clock_ms`: a monotonic clock, for timings |
 | `core/rng.h` | `Rng`, `rng_seed(rng, seed, stream)`, `rng_u32`, `rng_real` (in [0,1)), `onb_from_normal`, `sample_cosine_hemisphere` (`_u`: from 2 given numbers) |
 | `core/sampler.h` | `Sampler`, `sampler_make(rng, x, y, index, seed, on)`, `sampler_2d(s, dim, &a, &b)`, `sampler_1d`: a path's numbers from Owen-scrambled Sobol with a blue-noise shift per pixel; dimension ids `SAMPLE_CAMERA`, `SAMPLE_LIGHT(depth)`, `SAMPLE_DIR(depth)`, `SAMPLE_MISC(depth)`; `blue_noise_mask()` |
 | `core/image.h` | `Framebuffer` (`color` 0x00RRGGBB + `depth`), `rgb8`, `rgbf`, `fb_create`, `fb_destroy`, `fb_clear`, `fb_set_pixel`, `fb_show_depth`, `fb_save_png`; `Image` (linear `Vec3` pixels), `image_create`, `image_free`, `image_write_png` (sRGB); `image_srgb8`, `srgb_lut_init`, `image_pack_srgb` |

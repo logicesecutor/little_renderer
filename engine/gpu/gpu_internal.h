@@ -185,7 +185,6 @@ GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height);
 void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels);
 WGPUBuffer gpu_denoise_output(GpuDenoise *d);
 void gpu_denoise_destroy(GpuDenoise *d);
-double gpu_now_ms(void);
 
 // GPU views take the densities of some media straight from a GPU buffer (gpu/fluid_gpu.c)
 #define GPU_MAX_SOURCES 4

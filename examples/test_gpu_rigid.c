@@ -11,7 +11,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include "lr.h"
 #include "gpu/gpu.h"
 #include "gpu/rigid_gpu.h"
@@ -25,12 +24,6 @@ static void check(const char *what, double got, double want, double tol){
     int ok = err <= tol;
     printf("  %-52s %12.4f  (want %.4f +- %.4f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
     if (!ok) failures++;
-}
-
-static double now_ms(void){
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
 static double max_speed(const RigidWorld *w){
@@ -337,11 +330,11 @@ static void settled(void){
             for (int s = 0; s < 8 * 60; s++) phys_step(&w.pw, 1.0f / 60);
             gpu_rigid_sync(w.gr);
             if (gpu) gpu_wait(g);
-            double t0 = now_ms();
+            double t0 = clock_ms();
             for (int s = 0; s < 30; s++) phys_step(&w.pw, 1.0f / 60);
             gpu_rigid_sync(w.gr);
             if (gpu) gpu_wait(g);
-            ms[sl] = (now_ms() - t0) / 30;
+            ms[sl] = (clock_ms() - t0) / 30;
             if (sl) asleep = rigid_sleeping(&w.pw.rigid);
             world_free(&w);
         }
@@ -363,11 +356,11 @@ static void timings(void){
             if (!gpu && ns[k] > 1024){ ms[0] = -1; contacts[0] = 0; world_free(&w); continue; }
             int steps = 60;
             for (int s = 0; s < 30; s++) phys_step(&w.pw, 1.0f / 60);   // into the thick of it
-            double t0 = now_ms();
+            double t0 = clock_ms();
             for (int s = 0; s < steps; s++) phys_step(&w.pw, 1.0f / 60);
             gpu_rigid_sync(w.gr);
             if (gpu) gpu_wait(g);
-            ms[gpu] = (now_ms() - t0) / steps;
+            ms[gpu] = (clock_ms() - t0) / steps;
             contacts[gpu] = w.pw.rigid.ncontacts;
             world_free(&w);
         }

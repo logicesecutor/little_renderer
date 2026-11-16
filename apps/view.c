@@ -76,12 +76,6 @@ static const char *SIM_CONTROLS =
 
 #define HYBRID_SETTLE_S 0.12   // hybrid: start path tracing after the camera is still this long
 
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;   // (casts: see Makefile, PRECFLAGS)
-}
-
 // ---- camera as position + two angles ------------------------------------------------
 
 typedef struct {
@@ -262,7 +256,7 @@ enum { PROF_SIM, PROF_ACCEL, PROF_MOVE, PROF_MORE, PROF_WAIT, PROF_RASTER, PROF_
 static double prof[PROF_N];
 static long prof_frames;
 static int prof_on;
-#define PROF(k, stmt) do { double p0_ = now_s(); stmt; if (prof_on) prof[k] += now_s() - p0_; } while (0)
+#define PROF(k, stmt) do { double p0_ = clock_s(); stmt; if (prof_on) prof[k] += clock_s() - p0_; } while (0)
 static void prof_print(void){
     if (prof_frames <= 0) return;
     double s = 1000.0 / prof_frames, known = 0;
@@ -504,7 +498,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
 
 // one iteration: input, camera, physics, render, show. 0 = quit.
 static int frame(void){
-    const double frame_t0 = now_s();
+    const double frame_t0 = clock_s();
     // ---- 0. the GPU starts asynchronously: wait for it (or fall back to the CPU)
     if (gpu && !gview){
         GpuState gs = gpu_state(gpu);
@@ -687,7 +681,7 @@ static int frame(void){
     }
 
     // ---- 2. move the camera with the held keys (frame-rate independent: * dt)
-    double t = now_s(), dt = fmin(t - t_prev, 0.1);
+    double t = clock_s(), dt = fmin(t - t_prev, 0.1);
     t_prev = t;
     Vec3 f = view_forward(&view), r = view_right(&view), mv = vec3(0, 0, 0);
     if (in.fwd) mv = v_add(mv, f);
@@ -748,7 +742,7 @@ static int frame(void){
     if (gfluid && !use_raster && !(gview && o.gpu_trace > 0)) gpu_fluid_sync_cloud(gfluid);
     if (use_raster){
         if (raster_dirty){
-            double r0 = now_s();
+            double r0 = clock_s();
             RenderParams p = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
             p.mode = shading;
             // the surfaces: by the GPU rasterizer when it is there (at presentation), otherwise here
@@ -761,7 +755,7 @@ static int frame(void){
             if (o.raster_clouds && !gview) raster_draw_volumes(rvol, fb, &scene, &p, &o.march);
             last_rp = p;
             frame_volumes = o.raster_clouds && gview && scene.nvolumes > 0;
-            raster_ms = (now_s() - r0) * 1000.0;
+            raster_ms = (clock_s() - r0) * 1000.0;
             if (prof_on) prof[PROF_RASTER] += raster_ms / 1000.0;
             raster_dirty = 0;
             force_present = 1;
@@ -772,17 +766,17 @@ static int frame(void){
         if (acc.passes || acc.band_y || acc.scale != 1) accum_reset(&acc, 1);
         gpu_tracing = 0;
         reset = 0;
-        pass_t0 = now_s();
+        pass_t0 = clock_s();
     } else if (gview && o.gpu_trace > 0 && gpu_trace_frame(&cam, at, max_depth)){
         // done: the GPU path traces (every frame, the camera or the bodies moving or not)
     } else if (sim_moved){
         // the simulation moved: one pass of the new state, blended with the last ones
         int sc = preview_on ? preview : 1;
         accum_reset(&acc, sc);
-        pass_t0 = now_s();
+        pass_t0 = clock_s();
         for (int i = 0; i < o.move_spp; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp, o.sampler);
         acc.passes = o.move_spp;
-        pass_ms = (now_s() - pass_t0) * 1000.0;
+        pass_ms = (clock_s() - pass_t0) * 1000.0;
         ema_update(&ema, &acc, fb, changed);
         force_present = 1;
         gpu_tracing = 0;
@@ -793,31 +787,31 @@ static int frame(void){
         int sc = changed && preview_on && mode == BACKEND_RT ? preview : 1;
         accum_reset(&acc, sc);
         reset = 0;
-        pass_t0 = now_s();
+        pass_t0 = clock_s();
         if (changed){
             int n = sc > 1 ? o.move_spp : 1;          // -movespp: less grain, slower
             for (int i = 0; i < n; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp, o.sampler);
             acc.passes = n;
-            pass_ms = (now_s() - pass_t0) * 1000.0;
-            pass_t0 = now_s();
+            pass_ms = (clock_s() - pass_t0) * 1000.0;
+            pass_t0 = clock_s();
             accum_to_fb(&acc, fb);
             force_present = 1;
             if (sc > 1) reset = 1;  // next calm frame: back to full resolution
         }
     } else if (acc.passes < o.spp){
         // calm: refine at full resolution, a band of rows at a time (~20 ms each)
-        double b0 = now_s();
+        double b0 = clock_s();
         int y1 = acc.band_y + band < acc.rh ? acc.band_y + band : acc.rh;
         render_rows(&scene, &cam, &acc, acc.band_y, y1, max_depth, o.mis, (real)o.clamp, o.sampler);
-        double bt = now_s() - b0;
+        double bt = clock_s() - b0;
         if (bt < 0.010 && band < acc.rh) band *= 2;
         else if (bt > 0.040 && band > 1) band /= 2;
         acc.band_y = y1;
         if (acc.band_y >= acc.rh){
             acc.band_y = 0;
             acc.passes++;
-            pass_ms = (now_s() - pass_t0) * 1000.0;
-            pass_t0 = now_s();
+            pass_ms = (clock_s() - pass_t0) * 1000.0;
+            pass_t0 = clock_s();
             accum_to_fb(&acc, fb);
             force_present = 1;
         }
@@ -826,12 +820,12 @@ static int frame(void){
     }
 
     // ---- 4. show it
-    double tn = now_s();
+    double tn = clock_s();
     const int gpu_traced = !use_raster && gpu_tracing;
     const int gpu_passes = gpu_traced ? gpu_view_trace_passes(gview) : 0;
     int refining = !use_raster && !sim_moved &&     // bands land on screen ~30x per second
                    (gpu_traced ? gpu_passes < o.spp || gpu_passes != gpu_shown_passes : acc.passes < o.spp);
-    double present0 = now_s();
+    double present0 = clock_s();
     if (force_present || (refining && tn - last_present > 0.033)){
         if (!use_raster && !sim_moved && !gpu_traced) accum_to_fb(&acc, fb);
         if (gview){
@@ -870,11 +864,11 @@ static int frame(void){
         force_present = gpu_frame_owed;
     }
     if (prof_on){
-        prof[PROF_PRESENT] += now_s() - present0;
-        prof[PROF_FRAME] += now_s() - frame_t0;
+        prof[PROF_PRESENT] += clock_s() - present0;
+        prof[PROF_FRAME] += clock_s() - frame_t0;
         prof_frames++;
     }
-    prof_on = now_s() - t_start > 1.0;
+    prof_on = clock_s() - t_start > 1.0;
     if (tn - last_title > 0.5){
         char title[512];
         if (use_raster)
@@ -1027,7 +1021,7 @@ int main(int argc, char **argv){
     speed = o.speed;
     accel = scene_accel_kind(&scene);
     memset(&in, 0, sizeof(in));
-    t_start = t_prev = last_change = pass_t0 = sim_last = now_s();
+    t_start = t_prev = last_change = pass_t0 = sim_last = clock_s();
     rvol = raster_volumes_create();
     if (!rvol){ fprintf(stderr, "out of memory\n"); return 1; }
     ema = (Ema){calloc((size_t)W * H, sizeof(Vec3)), 0, 0};

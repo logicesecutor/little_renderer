@@ -1,15 +1,10 @@
 #define _POSIX_C_SOURCE 200809L   // nanosleep
 #include "app/gpu_frame.h"
+#include "core/clock.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-
-static double now_s(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
 
 static void nap_ms(int ms){
     struct timespec ts = {0, (long)ms * 1000000L};
@@ -62,7 +57,7 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
         // last submission may add a few passes more than spp, which only lowers the noise
         gpu_view_trace_more(view, s, rp, mp);
         gpu_wait(gpu);
-        if (p1 < 0){ p1 = gpu_view_trace_passes(view); t1 = now_s(); }   // after the first: pipelines made, caches warm
+        if (p1 < 0){ p1 = gpu_view_trace_passes(view); t1 = clock_s(); }   // after the first: pipelines made, caches warm
         int p = gpu_view_trace_passes(view) * 100 / (spp > 0 ? spp : 1);
         if (progress && p != shown){
             fprintf(stderr, "\r  %3d%%", p > 100 ? 100 : p);
@@ -75,7 +70,7 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
     int pn = gpu_view_trace_passes(view);
     if (progress && pn > p1 && p1 >= 0)
         printf("  GPU: %.2f ms per pass (1 sample per pixel; mean of %d passes after the first)\n",
-               (now_s() - t1) * 1000.0 / (pn - p1), pn - p1);
+               (clock_s() - t1) * 1000.0 / (pn - p1), pn - p1);
     TraceRead r = {img, 0};
     if (!gpu_view_trace_read(view, on_samples, &r)) return 1;
     while (!r.done && gpu_state(gpu) == GPU_READY) gpu_wait(gpu);

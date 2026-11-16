@@ -4,7 +4,6 @@
 //
 // Defaults to models/torus.obj and a procedural checkerboard.
 // Uses render_mesh (one mesh, directional light); for whole scenes see hello_raster.c.
-#define _POSIX_C_SOURCE 200809L
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,17 +15,10 @@
 #include <sys/stat.h>
 #define make_dir(p) mkdir((p), 0755)
 #endif
-#include <time.h>
 
 #include "lr.h"
 
 #define OUT_DIR "out"
-
-static double now_ms(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;   // (casts: see Makefile, PRECFLAGS)
-}
 
 static void save(const Framebuffer *fb, const char *name){
     char path[256];
@@ -125,9 +117,9 @@ static void demo_model(const Mesh *mesh, const Texture *tex){
     for (size_t s = 0; s < sizeof(shots) / sizeof(shots[0]); s++){
         p.mode = shots[s].mode;
         fb_clear(fb, bg);
-        double t0 = now_ms();
+        double t0 = clock_ms();
         render_mesh(fb, mesh, &p);
-        printf("  %-9s %6.2f ms\n", render_mode_name(p.mode), now_ms() - t0);
+        printf("  %-9s %6.2f ms\n", render_mode_name(p.mode), clock_ms() - t0);
         save(fb, shots[s].file);
     }
 

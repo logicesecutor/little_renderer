@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L   // clock_gettime
 #include "gpu/gpu.h"
 
 #include <stdio.h>
@@ -373,18 +372,6 @@ void gpu_destroy(Gpu *g){
 }
 
 // ---- helpers -------------------------------------------------------------------------------
-
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-double gpu_now_ms(void){ return emscripten_get_now(); }
-#else
-#include <time.h>
-double gpu_now_ms(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-}
-#endif
 
 WGPUShaderModule gpu_shader(Gpu *g, const char *label, const char *wgsl){
     WGPUShaderSourceWGSL src;

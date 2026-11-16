@@ -1,11 +1,10 @@
-#define _POSIX_C_SOURCE 200809L
 #include "raster/volume_march.h"
+#include "core/clock.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "core/volume.h"
 
@@ -17,12 +16,6 @@
 // traced cloud (bin/render -scene cloud).
 #define OCT_WEIGHT 0.7f
 #define OCT_DEPTH 0.3f
-
-static double now_ms(void){
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-}
 
 MarchParams march_default_params(void){
     MarchParams p = {128, 1.0f, 48, -1.0f, 3, 2.0f, 1};
@@ -419,9 +412,9 @@ void raster_draw_volumes(RasterVolumes *rv, Framebuffer *fb, const Scene *s, con
     mc.lamp = scene_lamp(s);
     mc.eye = p->eye;
 
-    double t0 = now_ms();
+    double t0 = clock_ms();
     if (!grids_valid(rv, s, mc.lamp.pos, mp->light_res)) build_grids(rv, s, &mc.lamp, mp->light_res);
-    double t1 = now_ms();
+    double t1 = clock_ms();
     rv->ms_light = t1 - t0;
 
     mc.amb = mp->ambient >= 0 ? vec3(mp->ambient, mp->ambient, mp->ambient) : ambient_estimate(s, &mc.lamp);
@@ -530,5 +523,5 @@ void raster_draw_volumes(RasterVolumes *rv, Framebuffer *fb, const Scene *s, con
     }
 #undef PIXEL_DIR
 #undef SURFACE
-    rv->ms_march = now_ms() - t1;
+    rv->ms_march = clock_ms() - t1;
 }
