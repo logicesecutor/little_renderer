@@ -138,7 +138,7 @@ struct GpuView {
     float lamp[3];
     GVol gv[GPU_MAX_VOLUMES];
     int light_valid;
-    float *depth_f;     // the z-buffer as 32-bit floats (the double build stores doubles)
+    float *depth_f;     // the double build: the z-buffer as 32-bit floats (it stores doubles)
     // screenshot: the next frame is also drawn into tex, copied into readback, mapped
     GpuCaptureFn cap_fn;
     void *cap_user;
@@ -208,12 +208,14 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     gpu_buffer_reserve(g, &v->light, &v->light_cap, 1024, WGPUBufferUsage_Storage, "light grid");
     v->vstat = gpu_buffer(g, "media boxes", GPU_MAX_VOLUMES * 48, WGPUBufferUsage_Storage);
     v->acc = gpu_buffer(g, "media box atomics", GPU_MAX_VOLUMES * 32, st);
-    v->depth_f = malloc((size_t)width * height * sizeof(float));
-    if (!v->depth_f){ free(v); return NULL; }
+    if (sizeof(real) != sizeof(float) && !(v->depth_f = malloc((size_t)width * height * sizeof(float)))){
+        gpu_view_destroy(v);
+        return NULL;
+    }
 
     char *src = malloc(strlen(TYPES) + strlen(COMMON) + strlen(LIGHT) + strlen(COMPOSITE) + strlen(STATS) + strlen(FINISH) +
                        strlen(FRAME_CPU) + strlen(FRAME_GPU) + 16);
-    if (!src){ free(v->depth_f); free(v); return NULL; }
+    if (!src){ gpu_view_destroy(v); return NULL; }
     strcpy(src, TYPES); strcat(src, "\n"); strcat(src, COMMON); strcat(src, "\n"); strcat(src, LIGHT);
     WGPUShaderModule ml = gpu_shader(g, "light grid", src);
     strcpy(src, TYPES); strcat(src, "\n"); strcat(src, COMMON); strcat(src, "\n"); strcat(src, FRAME_CPU); strcat(src, "\n");
@@ -674,8 +676,8 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
     // the frame: colors and depths of the CPU renderer
     const size_t np = (size_t)v->w * v->h;
     wgpuQueueWriteBuffer(g->queue, v->color, 0, fb->color, np * 4);
-    for (size_t i = 0; i < np; i++) v->depth_f[i] = (float)fb->depth[i];
-    wgpuQueueWriteBuffer(g->queue, v->depth, 0, v->depth_f, np * 4);
+    for (size_t i = 0; v->depth_f && i < np; i++) v->depth_f[i] = (float)fb->depth[i];
+    wgpuQueueWriteBuffer(g->queue, v->depth, 0, v->depth_f ? (const void *)v->depth_f : fb->depth, np * 4);
 
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, volumes);
