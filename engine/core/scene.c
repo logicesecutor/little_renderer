@@ -673,6 +673,12 @@ int scene_add_instance(Scene *s, int mesh, Xform xf, int material){
     return s->ninsts - 1;
 }
 
+// Every change of any scene's instances gets a number of its own (scene.h, inst_version): the
+// same number means the same instances, in another scene too (one made again after
+// scene_free starts its count where the last one stopped, not at 0). (Scenes are changed from
+// one thread.)
+static unsigned inst_versions;
+
 void scene_move_instance(Scene *s, int i, Xform xf){
     Instance *in = &s->insts[i];
     in->xf = xf;
@@ -685,7 +691,7 @@ void scene_move_instance(Scene *s, int i, Xform xf){
         for (int j = 0; j < 3; j++) r = r_fmax(r, v_len(vec3(xf.m[0][j], xf.m[1][j], xf.m[2][j])));
         in->box = (Aabb){v_sub(c, vec3(r, r, r)), v_add(c, vec3(r, r, r))};
     }
-    s->inst_version++;
+    s->inst_version = ++inst_versions;
 }
 
 Primitive unit_box_face(int f, int material){
@@ -722,7 +728,10 @@ void scene_mesh_changed(Scene *s, int mesh){
     mesh_bounds(m);
     m->version++;
     for (int i = 0; i < s->ninsts; i++)
-        if (s->insts[i].mesh == mesh) s->insts[i].box = xform_box(&s->insts[i].xf, m->box);
+        if (s->insts[i].mesh == mesh){
+            s->insts[i].box = xform_box(&s->insts[i].xf, m->box);
+            s->inst_version = ++inst_versions;      // (its box is in the top level and in the GPU's copy)
+        }
 }
 
 void scene_free(Scene *s){

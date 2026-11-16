@@ -212,6 +212,8 @@ struct GpuRigid {
     WGPUBindGroup bg_solve[2][2], bg_pos[2];     // by the contacts' parity, and the iteration's turn
     int turn;                                    // the iterations' buffers read next (vel[turn], imps[turn])
     float *staging;
+    unsigned char *par_cpu;                      // the substeps' parameters of a step, packed (kept)
+    size_t par_cpu_cap;
     // the bodies back: one readback at a time
     WGPUBuffer rb;
     size_t rb_cap;
@@ -629,8 +631,14 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     // write in between)
     gpu_buffer_reserve(g, &gr->par_all, &gr->par_all_cap, (size_t)steps * 256,
                        WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst, "bodies: parameters per substep");
-    unsigned char *par_cpu = calloc((size_t)steps, 256);
+    if (gr->par_cpu_cap < (size_t)steps * 256){
+        free(gr->par_cpu);
+        gr->par_cpu = malloc((size_t)steps * 256);
+        gr->par_cpu_cap = gr->par_cpu ? (size_t)steps * 256 : 0;
+    }
+    unsigned char *par_cpu = gr->par_cpu;
     if (!par_cpu) return 0;
+    memset(par_cpu, 0, (size_t)steps * 256);
     WGPUCommandEncoder enc = gpu_encoder(g, g->compute);
     {   // the memo's table written this step starts empty (its keys)
         uint64_t cap = 2 * (uint64_t)gr->cap_pairs, wr = (uint64_t)(gr->memo_rd ^ 1);
@@ -670,7 +678,6 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         memcpy(par_cpu + (size_t)s * 256, &P, sizeof(P));
     }
     wgpuQueueWriteBuffer(g->compute, gr->par_all, 0, par_cpu, (size_t)steps * 256);
-    free(par_cpu);
     for (int s = 0; s < steps; s++){
         wgpuCommandEncoderCopyBufferToBuffer(enc, gr->par_all, (uint64_t)s * 256, gr->par, 0, sizeof(GRP));
         WGPUComputePassEncoder pass = NULL;
@@ -815,6 +822,7 @@ void gpu_rigid_destroy(GpuRigid *gr){
         if (gr->bgl[k]) wgpuBindGroupLayoutRelease(gr->bgl[k]);
     }
     free(gr->staging);
+    free(gr->par_cpu);
     free(gr->last_f);
     free(gr);
 }

@@ -49,6 +49,10 @@ typedef struct {
 struct GpuRaster {
     Gpu *g;
     int w, h;
+    int inst_valid, inst_count;            // the instances' transforms as uploaded (upload_instances)
+    unsigned inst_version;
+    float *rec;                            // memory for packing them, kept
+    size_t rec_cap;
     WGPUTexture color_tex, depth_tex;
     WGPUTextureView color, depth;
     WGPUBuffer uni, tab;                   // the uniforms; the BSDF's tables
@@ -360,9 +364,19 @@ static void rebind_all(GpuRaster *r){
 static int upload_instances(GpuRaster *r, const Scene *s){
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     size_t n = 1 + (size_t)s->ninsts;
-    float *rec = calloc(n, 112);
-    if (!rec) return 0;
-    for (size_t i = 0; i < n; i++){
+    // (the same instances as last time, Scene.inst_version: they are there already)
+    const int same = r->ix && r->inst_valid && r->inst_version == s->inst_version && r->inst_count == s->ninsts;
+    float *rec = NULL;
+    if (!same){
+        if (r->rec_cap < n * 112){
+            free(r->rec);
+            r->rec = malloc(n * 112 + n * 28 + 1024);
+            r->rec_cap = r->rec ? n * 112 + n * 28 + 1024 : 0;
+        }
+        if (!(rec = r->rec)) return 0;
+        memset(rec, 0, n * 112);
+    }
+    for (size_t i = 0; i < n && !same; i++){
         Xform xf = i ? s->insts[i - 1].xf : xform_identity(), inv = i ? s->insts[i - 1].inv : xform_identity();
         float *o = rec + 28 * i;
         for (int a = 0; a < 3; a++)
@@ -370,9 +384,13 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         uint32_t m = i && s->insts[i - 1].material >= 0 ? (uint32_t)s->insts[i - 1].material : 0xffffffffu;
         memcpy(o + 24, &m, 4);
     }
-    if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")) rebind_all(r);
-    wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, rec, n * 112);
-    free(rec);
+    if (!same){
+        if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")) rebind_all(r);
+        wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, rec, n * 112);
+        r->inst_valid = 1;
+        r->inst_version = s->inst_version;
+        r->inst_count = s->ninsts;
+    }
     if (s->nmeshes > r->nmg){
         void *mg = realloc(r->mg, (size_t)s->nmeshes * sizeof(r->mg[0]));
         if (!mg) return 0;
@@ -569,6 +587,7 @@ void gpu_raster_destroy(GpuRaster *r){
         if (geo->tex){ wgpuBufferDestroy(geo->tex); wgpuBufferRelease(geo->tex); }
     }
     free(r->mg);
+    free(r->rec);
     if (r->ix){ wgpuBufferDestroy(r->ix); wgpuBufferRelease(r->ix); }
     if (r->fill[0]) wgpuRenderPipelineRelease(r->fill[0]);
     if (r->fill[1]) wgpuRenderPipelineRelease(r->fill[1]);

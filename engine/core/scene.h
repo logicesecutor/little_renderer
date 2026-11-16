@@ -288,7 +288,10 @@ typedef struct Scene {
     int nmeshes, cap_meshes;
     Instance *insts;
     int ninsts, cap_insts;
-    unsigned inst_version;  // changes whenever an instance is added or moved
+    unsigned inst_version;  // changes whenever an instance is added or moved (scene_add_instance,
+                            // scene_move_instance; scene_mesh_changed for its mesh's instances): what
+                            // holds a copy (the top level, the GPU) makes it again only then, so
+                            // change s->insts through these
 
     // Acceleration structure, owned by the backend that built it (the path tracer's
     // scene_set_accel). scene_free calls accel_free. Rebuild it after adding geometry.

@@ -232,6 +232,12 @@ struct GpuTrace {
     // what is on the GPU now
     Primitive *prim_copy;
     int nprim_copy;
+    // the instances as they were uploaded (upload_instances): nothing is packed or sent again
+    // while the scene's are the same (Scene.inst_version); memory for packing them, kept
+    int inst_valid, inst_count, inst_prim0, inst_tl;
+    unsigned inst_version;
+    void *sc_rec, *sc_box, *sc_nd, *sc_ax, *sc_hw;
+    size_t sc_rec_cap, sc_box_cap, sc_nd_cap, sc_ax_cap, sc_hw_cap;
     const Triangle *mesh_tris;
     const Vec3 *mesh_normals;
     int mesh_ntris, mesh_nnormals;
@@ -261,6 +267,7 @@ struct GpuTrace {
     int hw_nmesh, hw_tri_dirty, hw_prim_dirty, hw_unit_dirty;
     LRTlas hw_tlas;
     uint32_t hw_tlas_cap, hw_ninst;
+    int hw_tlas_dirty;       // the top level's records are newer than it is
 #endif
 };
 enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_WF0, NTS = TS_WF0 + 6 };
@@ -442,6 +449,16 @@ static void put(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y
 // ---- the BVH builder's C side --------------------------------------------------------------
 typedef struct { uint32_t n[4], m[4]; float lo[4], ext[4]; } BuildParams;
 #define BP_STRIDE 256
+
+// memory kept from one frame to the next: at least `bytes` at *p (NULL: none to be had)
+static void *scratch(void **p, size_t *cap, size_t bytes){
+    if (*cap >= bytes && *p) return *p;
+    size_t want = bytes + bytes / 4 + 256;
+    free(*p);
+    *p = malloc(want);
+    *cap = *p ? want : 0;
+    return *p;
+}
 
 static uint32_t pow2_at_least(uint32_t n){ uint32_t p = 2; while (p < n) p <<= 1; return p; }
 static int up_passes(int n){ int k = 0; while ((1 << k) < n) k++; return n > 1 ? 34 + k : 0; }
@@ -851,6 +868,7 @@ static int too_big(Gpu *g, size_t bytes){
 // everything but the world's BVH and primitives: the meshes, the room for the instances and
 // the top level, the normals, the world's triangles
 static int upload_layout(GpuTrace *t, const Scene *s){
+    t->inst_valid = 0;               // (the meshes' places are in the instances' records)
     Gpu *g = t->g;
     t->laid_out = 0;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
@@ -1002,6 +1020,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
 static int upload_world(GpuTrace *t, const Scene *s){
     Gpu *g = t->g;
     t->valid = 0;
+    t->inst_valid = 0;               // (the instances' records come after the primitives)
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     // the BVH: the scene's own if it has one (it must be up to date: scene_set_accel after
     // the geometry changed), otherwise one is built here
@@ -1028,6 +1047,7 @@ static int upload_world(GpuTrace *t, const Scene *s){
         // by the handle: a new buffer can get the address of the one just released, and the
         // layout, the normals among it, was then never written to it.)
         if (!upload_layout(t, s)) return 0;
+        t->inst_valid = 0;
     }
     uint32_t *nd = malloc((size_t)(slots ? slots : 1) * 32);
     uint32_t *ax = malloc((size_t)(b->nrefs ? b->nrefs : 1) * 4);
@@ -1173,7 +1193,7 @@ static int hw_records(GpuTrace *t, const Scene *s){
         }
     // the records: the world's triangles, its spheres and quads, the instances
     size_t most = (size_t)s->ninsts + 2;
-    LRTlasInstance *r = malloc(most * sizeof(*r));
+    LRTlasInstance *r = scratch(&t->sc_hw, &t->sc_hw_cap, most * sizeof(*r));
     if (!r) return 0;
     uint32_t n = 0;
     if (t->hw_tri) hw_record(&r[n++], NULL, HW_WTRI, 0, t->hw_tri);
@@ -1187,7 +1207,6 @@ static int hw_records(GpuTrace *t, const Scene *s){
     gpu_buffer_reserve(g, &t->hw_rec, &t->hw_rec_cap, most * sizeof(*r), WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
                        "top level: instances");
     if (n) wgpuQueueWriteBuffer(g->queue, t->hw_rec, 0, r, (size_t)n * sizeof(*r));
-    free(r);
     if (!t->hw_tlas || n > t->hw_tlas_cap){
         uint32_t cap = 64;
         while (cap < n) cap *= 2;
@@ -1197,19 +1216,24 @@ static int hw_records(GpuTrace *t, const Scene *s){
         if (!t->hw_tlas) return 0;
     }
     t->hw_ninst = n;
+    t->hw_tlas_dirty = 1;
     return 1;
 }
 
-// the bottom levels that changed, then the top level (every frame: instances move)
+// the bottom levels that changed, then the top level if they did or its records are new
+// (hw_records: whenever the instances moved)
 static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
     if (!t->hw || !t->hw_tlas) return;
+    int blas = (t->hw_tri_dirty && t->hw_tri) || (t->hw_prim_dirty && t->hw_prim) || (t->hw_unit_dirty && t->hw_unit);
     if (t->hw_tri_dirty && t->hw_tri) lrCommandEncoderBuildBlas(enc, t->hw_tri);
     if (t->hw_prim_dirty && t->hw_prim) lrCommandEncoderBuildBlas(enc, t->hw_prim);
     if (t->hw_unit_dirty && t->hw_unit) lrCommandEncoderBuildBlas(enc, t->hw_unit);
     t->hw_tri_dirty = t->hw_prim_dirty = t->hw_unit_dirty = 0;
     for (int m = 0; m < t->hw_nmesh; m++)
-        if (t->hw_mesh_dirty[m] && t->hw_mesh[m]){ lrCommandEncoderBuildBlas(enc, t->hw_mesh[m]); t->hw_mesh_dirty[m] = 0; }
+        if (t->hw_mesh_dirty[m] && t->hw_mesh[m]){ lrCommandEncoderBuildBlas(enc, t->hw_mesh[m]); t->hw_mesh_dirty[m] = 0; blas = 1; }
+    if (!blas && !t->hw_tlas_dirty) return;
     lrCommandEncoderBuildTlas(enc, t->hw_tlas, t->hw_rec, 0, t->hw_ninst);
+    t->hw_tlas_dirty = 0;
 }
 #endif
 
@@ -1217,13 +1241,19 @@ static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
 static int upload_instances(GpuTrace *t, const Scene *s){
     Gpu *g = t->g;
     t->ninst = s->ninsts;
+    // with ray queries the top level is the hardware's (hw_records): no BVH of the instances
+    const int bvh = !hw_on(t);
+    const Bvh *tl = bvh && t->tlas_mode == 1 ? scene_tlas(s) : NULL;
+    if (tl && !((uint32_t)tl->nnodes <= (uint32_t)(2 * t->inst_cap - 1) && tl->nrefs <= t->inst_cap)) tl = NULL;
+    // the same instances as last time (the camera moved, not they): nothing to send. (Not if
+    // a tree asked for then was never built, or the top level would now come from elsewhere.)
+    const int same = t->inst_valid && t->nbuild == 0 && t->inst_version == s->inst_version && t->inst_count == s->ninsts &&
+                     t->inst_prim0 == s->nprims && t->inst_tl == (tl != NULL);
     t->nbuild = 0;
-    if (s->ninsts > 0){
-        // with ray queries the top level is the hardware's (hw_records): no BVH of the instances
-        const int bvh = !hw_on(t);
-        float *rec = malloc((size_t)s->ninsts * 192);
-        float *box = bvh ? malloc((size_t)s->ninsts * 32) : NULL;
-        if (!rec || (bvh && !box)){ free(rec); free(box); return 0; }
+    if (s->ninsts > 0 && !same){
+        float *rec = scratch(&t->sc_rec, &t->sc_rec_cap, (size_t)s->ninsts * 192);
+        float *box = bvh ? scratch(&t->sc_box, &t->sc_box_cap, (size_t)s->ninsts * 32) : NULL;
+        if (!rec || (bvh && !box)) return 0;
         Aabb all = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
         for (int i = 0; i < s->ninsts; i++){
             const Instance *in = &s->insts[i];
@@ -1244,23 +1274,24 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             all.hi = vec3(r_fmax(all.hi.x, in->box.hi.x), r_fmax(all.hi.y, in->box.hi.y), r_fmax(all.hi.z, in->box.hi.z));
         }
         wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96, rec, (size_t)s->ninsts * 192);
-        free(rec);
-        const Bvh *tl = bvh && t->tlas_mode == 1 ? scene_tlas(s) : NULL;
-        if (tl && (uint32_t)tl->nnodes <= (uint32_t)(2 * t->inst_cap - 1) && tl->nrefs <= t->inst_cap){
+        if (tl){
             // the CPU's (SAH) top level, as it is
-            uint32_t *nd = malloc((size_t)tl->nnodes * 32), *ax = malloc((size_t)tl->nrefs * 4);
+            uint32_t *nd = scratch(&t->sc_nd, &t->sc_nd_cap, (size_t)tl->nnodes * 32);
+            uint32_t *ax = scratch(&t->sc_ax, &t->sc_ax_cap, (size_t)tl->nrefs * 4);
             if (nd && ax){
                 put_nodes(nd, tl, t->tlas_node0, t->tlas_ref0);
                 for (int i = 0; i < tl->nrefs; i++) ax[i] = (uint32_t)tl->refs[i];
                 wgpuQueueWriteBuffer(g->queue, t->nodes, (uint64_t)t->tlas_node0 * 32, nd, (size_t)tl->nnodes * 32);
                 wgpuQueueWriteBuffer(g->queue, t->aux, (uint64_t)t->tlas_ref0 * 4, ax, (size_t)tl->nrefs * 4);
             } else tl = NULL;
-            free(nd);
-            free(ax);
-        } else tl = NULL;
+        }
         if (!tl && bvh) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
-        free(box);
     }
+    t->inst_valid = 1;
+    t->inst_version = s->inst_version;
+    t->inst_count = s->ninsts;
+    t->inst_prim0 = s->nprims;
+    t->inst_tl = tl != NULL;
     // dynamic meshes: their new triangles, and a BVH of them built on the GPU in their place
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
@@ -1288,7 +1319,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         c->built = 1;
     }
 #ifdef LR_VK
-    if (hw_on(t) && !hw_records(t, s)) return 0;
+    if (hw_on(t) && !(same && t->hw_tlas) && !hw_records(t, s)){ t->inst_valid = 0; return 0; }
 #endif
     return 1;
 }
@@ -1848,6 +1879,7 @@ void gpu_trace_destroy(GpuTrace *t){
     for (int i = 0; i < 4; i++) if (hb[i]){ wgpuBufferDestroy(hb[i]); wgpuBufferRelease(hb[i]); }
 #endif
     free(t->mc);
+    free(t->sc_rec); free(t->sc_box); free(t->sc_nd); free(t->sc_ax); free(t->sc_hw);
     free(t->arena_boxes);
     free(t->arena_par);
     if (t->own_built) bvh_free(&t->own);
