@@ -22,6 +22,7 @@ struct Gpu {
     WGPUAdapter adapter;
     WGPUDevice device;
     WGPUQueue queue;
+    WGPUQueue compute;   // the physics': our Vulkan layer's second queue when it has one, else queue
     WGPUSurface surface;
     WGPUTextureFormat surface_format;
     int width, height;
@@ -124,7 +125,13 @@ void gpu_oct_encode(Vec3 d, float *out);
 // Submits one command buffer and returns a number for it (natively; 0 in a browser).
 // gpu_wait_for blocks until that submission is done (not the work submitted after it, as
 // gpu_wait would: the frame being drawn), then polls. In a browser it only polls.
+// gpu_submit_to: onto that queue (g->queue or g->compute). Nothing orders the two queues'
+// work: what one writes and the other reads needs the first's submission waited for.
 uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb);
+uint64_t gpu_submit_to(Gpu *g, WGPUQueue q, WGPUCommandBuffer cb);
+// an encoder whose command buffer goes to q (g->compute needs it: our Vulkan layer's queues
+// may be of two families)
+WGPUCommandEncoder gpu_encoder(Gpu *g, WGPUQueue q);
 void gpu_wait_for(Gpu *g, uint64_t submission);
 // a material's textures as GPU_WGSL_TEX reads them (indices past ntex: none)
 void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);

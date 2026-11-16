@@ -2,13 +2,15 @@
 // on Vulkan (engine/gpu/vk/*.c), in place of wgpu-native (`make VK=1`).
 //
 // How WebGPU's model maps here:
-// - one queue (graphics + compute); each submit signals a timeline semaphore with the next
-//   number: wgpuQueueSubmitForIndex returns it, wgpuDevicePoll waits for it;
+// - one queue (graphics + compute), a second when asked for (LR_VK_QUEUES=2,
+//   lrDeviceGetComputeQueue); each submit signals its queue's timeline semaphore with the
+//   next number: wgpuQueueSubmitForIndex returns it (the queue in bits 62-63),
+//   wgpuDevicePoll waits for it;
 // - objects are reference counted; a command buffer holds a reference to everything it uses
 //   until its submission is done, so releasing early (as WebGPU allows) is safe;
-// - every command is preceded by a full memory barrier (what WebGPU's usage tracking ends up
-//   doing for our dispatches, which nearly all depend on the one before): simple and safe,
-//   and room to be smarter later;
+// - every command is preceded by a barrier from the stages of the commands since the last
+//   one (vk_before: what WebGPU's usage tracking ends up doing for our dispatches, which
+//   nearly all depend on the one before);
 // - wgpuQueueWriteBuffer goes into an upload command buffer submitted before the next submit;
 // - images stay in the GENERAL layout (textureLoad only, no samplers).
 #ifndef LR_VK_IMPL_H
@@ -86,7 +88,7 @@ typedef struct Staging {
 
 typedef struct { uint64_t value; VkCommandBuffer cbs[16]; int ncb; Refs refs; } Sub;
 typedef struct {
-    uint64_t value;
+    uint64_t at[2];                  // done when each queue has reached its value (0: any)
     int kind;                        // 0 work done, 1 buffer mapped
     WGPUQueueWorkDoneCallbackInfo wd;
     WGPUBufferMapCallbackInfo map;
@@ -108,32 +110,48 @@ struct WGPUAdapterImpl {
     VkPhysicalDeviceProperties props;
     VkPhysicalDeviceMemoryProperties mem;
     uint32_t family;                 // a queue family with graphics and compute
+    uint32_t family_queues;          // how many queues it has (2 or more: a second one, lrDeviceGetComputeQueue)
     uint32_t ts_bits;                // its timestamp bits (0: none)
+    uint32_t cfamily;                // a family with compute and no graphics (VK_QUEUE_FAMILY_IGNORED: none)
+    uint32_t cts_bits;               // its timestamp bits
     int rt;                          // acceleration structures and ray queries (webgpu_rt.h)
     int subgroups;                   // WGSL's subgroups in compute shaders
     uint32_t sg_min, sg_max;         // the subgroups' sizes
     uint32_t as_scratch_align;
 };
 
-struct WGPUQueueImpl { Obj o; WGPUDevice dev; };
+// A queue: its submissions on its own timeline, its uploads (wgpuQueueWriteBuffer) since
+// its last submit, its command buffers. The device's main queue, and a second one when the
+// GPU has it (webgpu_rt.h, lrDeviceGetComputeQueue: work that runs alongside): of a family
+// with compute only if there is one (an asynchronous compute engine), else of the main
+// queue's family.
+struct WGPUQueueImpl {
+    Obj o;
+    WGPUDevice dev;
+    int index;                       // 0 the main queue, 1 the second
+    uint32_t family;
+    int ts;                          // its family has timestamps
+    VkQueue q;
+    VkCommandPool pool;
+    VkCommandBuffer *free_cbs; int nfree_cbs, cap_free_cbs;
+    VkSemaphore tl;                  // the timeline: submissions done
+    uint64_t submitted;
+    Sub *subs; int nsubs, cap_subs;  // submitted, not yet known done
+    VkCommandBuffer up; int up_open, up_dirty;
+    Refs up_refs;
+    Staging *stage_cur;
+};
 
 struct WGPUDeviceImpl {
     Obj o;
     WGPUAdapter ad;
     VkDevice vk;
-    VkQueue q;
-    struct WGPUQueueImpl queue;
-    VkCommandPool pool;
-    VkCommandBuffer *free_cbs; int nfree_cbs, cap_free_cbs;
+    struct WGPUQueueImpl queues[2];  // the main one, the second (nqueues = 2)
+    int nqueues;
+    int concurrent;                  // the queues are of two families: buffers shared by both
     VkDescriptorPool *dpools; int ndpools;
-    VkSemaphore tl;                  // the timeline: submissions done
-    uint64_t submitted;
-    Sub *subs; int nsubs, cap_subs;  // submitted, not yet known done
     Pending *pend; int npend, cap_pend;
-    // uploads (wgpuQueueWriteBuffer) since the last submit
-    VkCommandBuffer up; int up_open, up_dirty;
-    Refs up_refs;
-    Staging *stage_cur, *stage_free;
+    Staging *stage_free;             // staging memory to use again
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
     int rt;                          // ray queries asked for (WGPUNativeFeature_RayQuery) and on
@@ -220,6 +238,7 @@ struct WGPUQuerySetImpl {
 struct WGPUCommandEncoderImpl {
     Obj o;
     WGPUDevice dev;
+    WGPUQueue queue;                 // the one its commands go to (LRCommandEncoderQueue; else the main)
     VkCommandBuffer cb;
     Refs refs;
     VkFlags pend_stage, pend_write;  // what the commands since the last barrier did (vk_before)
@@ -229,6 +248,7 @@ struct WGPUCommandEncoderImpl {
 struct WGPUCommandBufferImpl {
     Obj o;
     WGPUDevice dev;
+    WGPUQueue queue;
     VkCommandBuffer cb;
     Refs refs;
     int submitted;
@@ -301,8 +321,8 @@ struct WGPUSurfaceImpl {
 
 // ---- between the files ----
 void vk_error(WGPUDevice dev, WGPUErrorType type, const char *fmt, ...);
-VkCommandBuffer vk_cb_get(WGPUDevice dev);                 // a command buffer, begun
-void vk_cb_put(WGPUDevice dev, VkCommandBuffer cb);         // back to the free list (not in flight)
+VkCommandBuffer vk_cb_get(WGPUQueue q);                     // a command buffer for q, begun
+void vk_cb_put(WGPUQueue q, VkCommandBuffer cb);            // back to q's free list (not in flight)
 void vk_barrier(VkCommandBuffer cb);                        // everything before, before everything after
 void vk_barrier_to_host(VkCommandBuffer cb);
 int vk_memory_type(WGPUAdapter ad, uint32_t bits, VkFlags want, VkFlags avoid);
@@ -312,8 +332,9 @@ VkFormat vk_format(WGPUTextureFormat f, uint32_t *texel, VkFlags *aspect);
 WGPUTextureFormat vk_wgpu_format(VkFormat f);
 void vk_image_layout(VkCommandBuffer cb, VkImage img, VkFlags aspect, uint32_t from, uint32_t to);
 void vk_texture_ready(WGPUDevice dev, VkCommandBuffer cb, WGPUTexture t);   // into GENERAL, once
-VkCommandBuffer vk_upload_cb(WGPUDevice dev);                 // the upload command buffer (a barrier first)
-int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr);
+VkCommandBuffer vk_upload_cb(WGPUQueue q);                    // a queue's upload command buffer (a barrier first)
+int vk_staging(WGPUQueue q, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr);
+#define VK_MAIN(dev) (&(dev)->queues[0])
 // the kinds of command, for the barriers between them (vk_before)
 enum { VK_CMD_DISPATCH, VK_CMD_INDIRECT, VK_CMD_TRANSFER, VK_CMD_BUILD, VK_CMD_RENDER };
 void vk_before(WGPUCommandEncoder e, int kind);              // a command of this kind into e: a barrier first

@@ -373,10 +373,11 @@ typedef enum {
     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR = 0x100000
 } VkBufferUsageFlagBits;
 
+enum { VK_SHARING_MODE_EXCLUSIVE = 0, VK_SHARING_MODE_CONCURRENT = 1 };
 typedef struct VkBufferCreateInfo {
     VkStructureType sType; const void *pNext; VkFlags flags;
     VkDeviceSize size; VkFlags usage;
-    uint32_t sharingMode;           // VK_SHARING_MODE_EXCLUSIVE = 0
+    uint32_t sharingMode;           // VK_SHARING_MODE_EXCLUSIVE, _CONCURRENT
     uint32_t queueFamilyIndexCount; const uint32_t *pQueueFamilyIndices;
 } VkBufferCreateInfo;
 

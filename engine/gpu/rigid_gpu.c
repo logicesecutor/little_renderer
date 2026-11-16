@@ -320,7 +320,7 @@ static int reserve(GpuRigid *gr, int nb){
     gr->cnt = storage(g, "bodies: contact counts", (cap + 1) * 4);
     gr->cursor = storage(g, "bodies: list cursors", cap * 4);
     gr->wake = storage(g, "bodies: to wake", cap * 4);
-    { uint32_t *z = calloc(cap, 4); if (z){ wgpuQueueWriteBuffer(g->queue, gr->wake, 0, z, cap * 4); free(z); } }
+    { uint32_t *z = calloc(cap, 4); if (z){ wgpuQueueWriteBuffer(g->compute, gr->wake, 0, z, cap * 4); free(z); } }
     gr->cap_pairs = 32 * cap;
     gr->pairs = storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
     gr->pc = storage(g, "bodies: pair counts", 16);
@@ -426,7 +426,7 @@ static void upload_shapes(GpuRigid *gr, const RigidWorld *w){
     if (!r.f) return;
     if (gpu_buffer_reserve(gr->g, &gr->shapes, &gr->shapes_cap, r.n * 16,
                            WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "bodies: shapes") && gr->bodies) make_groups(gr);
-    wgpuQueueWriteBuffer(gr->g->queue, gr->shapes, 0, r.f, r.n * 16);
+    wgpuQueueWriteBuffer(gr->g->compute, gr->shapes, 0, r.f, r.n * 16);
     free(r.f);
     gr->nshapes = w->ngeoms;
 }
@@ -574,7 +574,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             bi->dirty = 0;
             bi->force = bi->torque = vec3(0, 0, 0);
         }
-        wgpuQueueWriteBuffer(g->queue, gr->bodies, (uint64_t)first * BODY_BYTES, gr->staging, (size_t)(i - first) * BODY_BYTES);
+        wgpuQueueWriteBuffer(g->compute, gr->bodies, (uint64_t)first * BODY_BYTES, gr->staging, (size_t)(i - first) * BODY_BYTES);
     }
     gr->nb = nb;
     if (nb == 0) return 1;
@@ -583,7 +583,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         put4(f + 8 * i, forces ? forces[i] : vec3(0, 0, 0), 0);
         put4(f + 8 * i + 4, vec3(0, 0, 0), 0);
     }
-    wgpuQueueWriteBuffer(g->queue, gr->forces, 0, f, (size_t)nb * 32);
+    wgpuQueueWriteBuffer(g->compute, gr->forces, 0, f, (size_t)nb * 32);
 
     int steps = substeps > 0 ? substeps : 1;
     real h = dt / steps;
@@ -594,7 +594,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
                        WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst, "bodies: parameters per substep");
     unsigned char *par_cpu = calloc((size_t)steps, 256);
     if (!par_cpu) return 0;
-    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
+    WGPUCommandEncoder enc = gpu_encoder(g, g->compute);
     {   // the memo's table written this step starts empty (its keys)
         uint64_t cap = 2 * (uint64_t)gr->cap_pairs, wr = (uint64_t)(gr->memo_rd ^ 1);
         wgpuCommandEncoderClearBuffer(enc, gr->memo, wr * 13 * cap * 4, cap * 4);
@@ -623,7 +623,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         P.m[3] = (uint32_t)s;
         memcpy(par_cpu + (size_t)s * 256, &P, sizeof(P));
     }
-    wgpuQueueWriteBuffer(g->queue, gr->par_all, 0, par_cpu, (size_t)steps * 256);
+    wgpuQueueWriteBuffer(g->compute, gr->par_all, 0, par_cpu, (size_t)steps * 256);
     free(par_cpu);
     for (int s = 0; s < steps; s++){
         wgpuCommandEncoderCopyBufferToBuffer(enc, gr->par_all, (uint64_t)s * 256, gr->par, 0, sizeof(GRP));
@@ -670,7 +670,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     }
     gpu_timer_finish(gr->timer, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
-    gr->subs[gr->nsub % MAX_INFLIGHT] = gpu_submit(g, cb);
+    gr->subs[gr->nsub % MAX_INFLIGHT] = gpu_submit_to(g, g->compute, cb);
     gr->nsub++;
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
@@ -693,7 +693,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     wi.userdata1 = gr;
     gr->inflight++;
     gr->step_no++;
-    wgpuQueueOnSubmittedWorkDone(g->queue, wi);
+    wgpuQueueOnSubmittedWorkDone(g->compute, wi);
     if (gr->wait) gpu_rigid_sync(gr);
     return 1;
 }

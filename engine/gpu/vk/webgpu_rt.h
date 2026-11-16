@@ -71,4 +71,19 @@ void lrTlasRelease(LRTlas tlas);
 typedef struct { WGPUChainedStruct chain; } LRBindGroupLayoutEntryTlas;
 typedef struct { WGPUChainedStruct chain; LRTlas tlas; } LRBindGroupEntryTlas;
 
+// Not ray tracing, but our layer's too: a second queue, to run compute (the physics) beside
+// the main queue's work. Of a compute-only family when the GPU has one (its asynchronous
+// compute engine), else of the main queue's family. Only when asked for: LR_VK_QUEUES=2 (or
+// =same for a second of the main family); else this is the main queue itself. (On an RTX
+// 3070 mesh_rain was slower with it: 35 frames/s against 45, the same family 42.)
+// - Its command buffers come from encoders made for it: an LRCommandEncoderQueue chained
+//   to the WGPUCommandEncoderDescriptor. Compute, copies and builds only (no render passes),
+//   and buffers only (textures are the main queue's).
+// - Nothing orders the two queues' work: a buffer one queue writes and the other uses needs
+//   the first's submission waited for (wgpuDevicePoll with its wgpuQueueSubmitForIndex
+//   index) before the second's submit.
+WGPUQueue lrDeviceGetComputeQueue(WGPUDevice device);
+#define LRSType_CommandEncoderQueue ((WGPUSType)0x4C520003)
+typedef struct { WGPUChainedStruct chain; WGPUQueue queue; } LRCommandEncoderQueue;
+
 #endif

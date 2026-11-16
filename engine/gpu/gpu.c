@@ -113,6 +113,11 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
     if (status != WGPURequestDeviceStatus_Success){ fail(g, "no device", msg); return; }
     g->device = device;
     g->queue = wgpuDeviceGetQueue(device);
+#ifdef LR_VK
+    g->compute = lrDeviceGetComputeQueue(device);   // (not a reference of its own)
+#else
+    g->compute = g->queue;
+#endif
     configure_surface(g);
     WGPUAdapterInfo info;
     memset(&info, 0, sizeof(info));
@@ -282,14 +287,19 @@ static void on_idle(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1
 void gpu_wait(Gpu *g){
 #ifndef __EMSCRIPTEN__
     if (!g || g->state != GPU_READY) return;
-    int done = 0;
+    int done = 0, done2 = 1;
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowProcessEvents;
     wd.callback = on_idle;
     wd.userdata1 = &done;
     wgpuQueueOnSubmittedWorkDone(g->queue, wd);
-    while (!done && g->state == GPU_READY){
+    if (g->compute && g->compute != g->queue){       // and the second queue's work
+        done2 = 0;
+        wd.userdata1 = &done2;
+        wgpuQueueOnSubmittedWorkDone(g->compute, wd);
+    }
+    while (!(done && done2) && g->state == GPU_READY){
 #ifdef LR_WGPU_NATIVE
         wgpuDevicePoll(g->device, 1, NULL);   // sleeps until the GPU is done
 #endif
@@ -301,13 +311,33 @@ void gpu_wait(Gpu *g){
 #endif
 }
 
-uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb){
+uint64_t gpu_submit_to(Gpu *g, WGPUQueue q, WGPUCommandBuffer cb){
+    (void)g;
 #ifdef LR_WGPU_NATIVE
-    return (uint64_t)wgpuQueueSubmitForIndex(g->queue, 1, &cb);
+    return (uint64_t)wgpuQueueSubmitForIndex(q, 1, &cb);
 #else
-    wgpuQueueSubmit(g->queue, 1, &cb);
+    wgpuQueueSubmit(q, 1, &cb);
     return 0;
 #endif
+}
+uint64_t gpu_submit(Gpu *g, WGPUCommandBuffer cb){ return gpu_submit_to(g, g->queue, cb); }
+
+WGPUCommandEncoder gpu_encoder(Gpu *g, WGPUQueue q){
+#ifdef LR_VK
+    if (q && q != g->queue){
+        LRCommandEncoderQueue cq;
+        memset(&cq, 0, sizeof(cq));
+        cq.chain.sType = LRSType_CommandEncoderQueue;
+        cq.queue = q;
+        WGPUCommandEncoderDescriptor d;
+        memset(&d, 0, sizeof(d));
+        d.nextInChain = &cq.chain;
+        return wgpuDeviceCreateCommandEncoder(g->device, &d);
+    }
+#else
+    (void)q;
+#endif
+    return wgpuDeviceCreateCommandEncoder(g->device, NULL);
 }
 
 void gpu_wait_for(Gpu *g, uint64_t submission){

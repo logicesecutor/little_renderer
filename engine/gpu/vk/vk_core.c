@@ -272,7 +272,15 @@ WGPUFuture wgpuInstanceRequestAdapter(WGPUInstance instance, WGPURequestAdapterO
     for (uint32_t i = 0; i < nf; i++)
         if ((qf[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)){
             ad->family = i;
+            ad->family_queues = qf[i].queueCount;
             ad->ts_bits = qf[i].timestampValidBits;
+            break;
+        }
+    ad->cfamily = VK_QUEUE_FAMILY_IGNORED;
+    for (uint32_t i = 0; i < nf; i++)
+        if ((qf[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == VK_QUEUE_COMPUTE_BIT){
+            ad->cfamily = i;
+            ad->cts_bits = qf[i].timestampValidBits;
             break;
         }
     if (ad->family == VK_QUEUE_FAMILY_IGNORED){
@@ -397,9 +405,12 @@ static void device_free(Obj *o){
     if (d->vk){
         vk.vkDeviceWaitIdle(d->vk);
         wgpuDevicePoll(d, 1, NULL);
-        refs_release(&d->up_refs);
-        if (d->up_open){ vk.vkEndCommandBuffer(d->up); d->up_open = 0; }
-        if (d->stage_cur){ obj_unref(&d->stage_cur->o); d->stage_cur = NULL; }   // (onto the free list)
+        for (int k = 0; k < d->nqueues; k++){
+            WGPUQueue q = &d->queues[k];
+            refs_release(&q->up_refs);
+            if (q->up_open){ vk.vkEndCommandBuffer(q->up); q->up_open = 0; }
+            if (q->stage_cur){ obj_unref(&q->stage_cur->o); q->stage_cur = NULL; }   // (onto the free list)
+        }
         for (Staging *s = d->stage_free; s;){
             Staging *n = s->next;
             vk.vkDestroyBuffer(d->vk, s->buf, NULL);
@@ -408,12 +419,15 @@ static void device_free(Obj *o){
             s = n;
         }
         for (int i = 0; i < d->ndpools; i++) vk.vkDestroyDescriptorPool(d->vk, d->dpools[i], NULL);
-        if (d->pool) vk.vkDestroyCommandPool(d->vk, d->pool, NULL);
-        if (d->tl) vk.vkDestroySemaphore(d->vk, d->tl, NULL);
+        for (int k = 0; k < d->nqueues; k++){
+            if (d->queues[k].pool) vk.vkDestroyCommandPool(d->vk, d->queues[k].pool, NULL);
+            if (d->queues[k].tl) vk.vkDestroySemaphore(d->vk, d->queues[k].tl, NULL);
+        }
         vk.vkDestroyDevice(d->vk, NULL);
     }
     if (d->ad && d->ad->inst && d->ad->inst->device == d) d->ad->inst->device = NULL;
-    free(d->free_cbs); free(d->dpools); free(d->subs); free(d->pend);
+    for (int k = 0; k < 2; k++){ free(d->queues[k].subs); free(d->queues[k].free_cbs); }
+    free(d->dpools); free(d->pend);
     free(d);
 }
 
@@ -475,13 +489,25 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     want.features.shaderInt64 = have.features.shaderInt64;
     want.features.fragmentStoresAndAtomics = have.features.fragmentStoresAndAtomics;
     want.features.vertexPipelineStoresAndAtomics = have.features.vertexPipelineStoresAndAtomics;
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi;
-    memset(&qi, 0, sizeof(qi));
-    qi.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qi.queueFamilyIndex = adapter->family;
-    qi.queueCount = 1;
-    qi.pQueuePriorities = &prio;
+    // The main queue, and when asked for (LR_VK_QUEUES=2) a second: of a compute-only family
+    // if there is one, else of the main family if it has two (=same: of the main family).
+    // Not by default: it made mesh_rain slower (docs/PERFORMANCE.md).
+    const char *nq = getenv("LR_VK_QUEUES");
+    int same = nq && !strcmp(nq, "same"), one = !same && !(nq && !strcmp(nq, "2"));
+    uint32_t fam[2] = {adapter->family, adapter->family};
+    if (!one && !same && adapter->cfamily != VK_QUEUE_FAMILY_IGNORED){ d->nqueues = 2; fam[1] = adapter->cfamily; }
+    else d->nqueues = !one && adapter->family_queues >= 2 ? 2 : 1;
+    d->concurrent = d->nqueues == 2 && fam[1] != fam[0];
+    float prio[2] = {1.0f, 1.0f};
+    VkDeviceQueueCreateInfo qi[2];
+    memset(qi, 0, sizeof(qi));
+    for (int k = 0; k < 2; k++){
+        qi[k].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qi[k].queueFamilyIndex = fam[k];
+        qi[k].queueCount = 1;
+        qi[k].pQueuePriorities = prio;
+    }
+    if (d->nqueues == 2 && !d->concurrent) qi[0].queueCount = 2;
     // ray queries, when asked for: their extensions and features after Vulkan 1.3's
     VkPhysicalDeviceRayQueryFeaturesKHR erq;
     memset(&erq, 0, sizeof(erq));
@@ -516,8 +542,8 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     ci.pNext = &want;
-    ci.queueCreateInfoCount = 1;
-    ci.pQueueCreateInfos = &qi;
+    ci.queueCreateInfoCount = d->concurrent ? 2 : 1;
+    ci.pQueueCreateInfos = qi;
     ci.enabledExtensionCount = nexts;
     ci.ppEnabledExtensionNames = exts;
     VkResult r = vk.vkCreateDevice(adapter->pd, &ci, NULL, &d->vk);
@@ -536,15 +562,21 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
 #define X(f) vk.f = d->rt ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
     VK_RT_FNS(X)
 #undef X
-    vk.vkGetDeviceQueue(d->vk, adapter->family, 0, &d->q);
-    obj_init(&d->queue.o, NULL);
-    d->queue.dev = d;
-    VkCommandPoolCreateInfo pi;
-    memset(&pi, 0, sizeof(pi));
-    pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    pi.queueFamilyIndex = adapter->family;
-    vk.vkCreateCommandPool(d->vk, &pi, NULL, &d->pool);
+    for (int k = 0; k < d->nqueues; k++){
+        WGPUQueue q = &d->queues[k];
+        vk.vkGetDeviceQueue(d->vk, fam[k], d->concurrent ? 0 : (uint32_t)k, &q->q);
+        obj_init(&q->o, NULL);
+        q->dev = d;
+        q->index = k;
+        q->family = fam[k];
+        q->ts = (fam[k] == adapter->family ? adapter->ts_bits : adapter->cts_bits) > 0;
+        VkCommandPoolCreateInfo pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pi.queueFamilyIndex = fam[k];
+        vk.vkCreateCommandPool(d->vk, &pi, NULL, &q->pool);
+    }
     VkSemaphoreTypeCreateInfo ti;
     memset(&ti, 0, sizeof(ti));
     ti.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
@@ -553,27 +585,28 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     memset(&si, 0, sizeof(si));
     si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     si.pNext = &ti;
-    vk.vkCreateSemaphore(d->vk, &si, NULL, &d->tl);
+    for (int k = 0; k < d->nqueues; k++) vk.vkCreateSemaphore(d->vk, &si, NULL, &d->queues[k].tl);
     adapter->inst->device = d;
     callbackInfo.callback(WGPURequestDeviceStatus_Success, d, sv(""), callbackInfo.userdata1, callbackInfo.userdata2);
     return fut;
 }
 
-WGPUQueue wgpuDeviceGetQueue(WGPUDevice device){ return &device->queue; }
+WGPUQueue wgpuDeviceGetQueue(WGPUDevice device){ return &device->queues[0]; }
+WGPUQueue lrDeviceGetComputeQueue(WGPUDevice device){ return &device->queues[device->nqueues - 1]; }
 void wgpuQueueRelease(WGPUQueue queue){ (void)queue; }
 void wgpuDeviceRelease(WGPUDevice device){ if (device) obj_unref(&device->o); }
 
 // ---- command buffers ----
-VkCommandBuffer vk_cb_get(WGPUDevice dev){
+VkCommandBuffer vk_cb_get(WGPUQueue q){
     VkCommandBuffer cb = NULL;
-    if (dev->nfree_cbs) cb = dev->free_cbs[--dev->nfree_cbs];
+    if (q->nfree_cbs) cb = q->free_cbs[--q->nfree_cbs];
     else {
         VkCommandBufferAllocateInfo ai;
         memset(&ai, 0, sizeof(ai));
         ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool = dev->pool;
+        ai.commandPool = q->pool;
         ai.commandBufferCount = 1;
-        if (vk.vkAllocateCommandBuffers(dev->vk, &ai, &cb) != VK_SUCCESS) return NULL;
+        if (vk.vkAllocateCommandBuffers(q->dev->vk, &ai, &cb) != VK_SUCCESS) return NULL;
     }
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof(bi));
@@ -584,15 +617,15 @@ VkCommandBuffer vk_cb_get(WGPUDevice dev){
     return cb;
 }
 
-void vk_cb_put(WGPUDevice dev, VkCommandBuffer cb){
+void vk_cb_put(WGPUQueue q, VkCommandBuffer cb){
     if (!cb) return;
-    if (dev->nfree_cbs == dev->cap_free_cbs){
-        int cap = dev->cap_free_cbs ? 2 * dev->cap_free_cbs : 16;
-        VkCommandBuffer *v = realloc(dev->free_cbs, (size_t)cap * sizeof(*v));
-        if (!v){ vk.vkFreeCommandBuffers(dev->vk, dev->pool, 1, &cb); return; }
-        dev->free_cbs = v; dev->cap_free_cbs = cap;
+    if (q->nfree_cbs == q->cap_free_cbs){
+        int cap = q->cap_free_cbs ? 2 * q->cap_free_cbs : 16;
+        VkCommandBuffer *v = realloc(q->free_cbs, (size_t)cap * sizeof(*v));
+        if (!v){ vk.vkFreeCommandBuffers(q->dev->vk, q->pool, 1, &cb); return; }
+        q->free_cbs = v; q->cap_free_cbs = cap;
     }
-    dev->free_cbs[dev->nfree_cbs++] = cb;
+    q->free_cbs[q->nfree_cbs++] = cb;
 }
 
 void vk_barrier(VkCommandBuffer cb){
@@ -621,6 +654,12 @@ int vk_alloc_buffer(WGPUDevice dev, VkDeviceSize size, VkFlags usage, VkFlags me
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size ? size : 4;
     bi.usage = usage;
+    uint32_t fams[2] = {dev->queues[0].family, dev->queues[1].family};
+    if (dev->concurrent){            // (both queues' families use it, no ownership to pass)
+        bi.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        bi.queueFamilyIndexCount = 2;
+        bi.pQueueFamilyIndices = fams;
+    }
     if (vk.vkCreateBuffer(dev->vk, &bi, NULL, buf) != VK_SUCCESS) return 0;
     VkMemoryRequirements req;
     vk.vkGetBufferMemoryRequirements(dev->vk, *buf, &req);
@@ -719,12 +758,12 @@ static Staging *staging_get(WGPUDevice dev, VkDeviceSize need){
 }
 
 // room for n bytes in this submission's staging memory: its buffer and offset
-int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr){
-    Staging *s = dev->stage_cur;
+int vk_staging(WGPUQueue q, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off, unsigned char **ptr){
+    Staging *s = q->stage_cur;
     VkDeviceSize at = s ? (s->used + 15) & ~15ull : 0;
     if (!s || at + n > s->size){
-        if (s){ refs_add(&dev->up_refs, &s->o); obj_unref(&s->o); }
-        s = dev->stage_cur = staging_get(dev, n);
+        if (s){ refs_add(&q->up_refs, &s->o); obj_unref(&s->o); }
+        s = q->stage_cur = staging_get(q->dev, n);
         if (!s) return 0;
         at = 0;
     }
@@ -733,61 +772,63 @@ int vk_staging(WGPUDevice dev, VkDeviceSize n, VkBuffer *buf, VkDeviceSize *off,
     return 1;
 }
 
-VkCommandBuffer vk_upload_cb(WGPUDevice dev){
-    if (!dev->up_open){
-        dev->up = vk_cb_get(dev);
-        dev->up_open = dev->up != NULL;
-        dev->up_dirty = 0;
+VkCommandBuffer vk_upload_cb(WGPUQueue q){
+    if (!q->up_open){
+        q->up = vk_cb_get(q);
+        q->up_open = q->up != NULL;
+        q->up_dirty = 0;
     }
-    if (dev->up_dirty) vk_barrier(dev->up);
-    dev->up_dirty = 1;
-    return dev->up;
+    if (q->up_dirty) vk_barrier(q->up);
+    q->up_dirty = 1;
+    return q->up;
 }
 
 void wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t off, void const *data, size_t size){
     WGPUDevice dev = queue->dev;
     if (!buffer || !size) return;
-    VkCommandBuffer cb = vk_upload_cb(dev);
+    VkCommandBuffer cb = vk_upload_cb(queue);
     if (!cb) return;
-    refs_add(&dev->up_refs, &buffer->o);
+    refs_add(&queue->up_refs, &buffer->o);
     if (size <= 65536 && !(size & 3) && !(off & 3)){
         vk.vkCmdUpdateBuffer(cb, buffer->vk, off, size, data);      // (in the command buffer itself)
         return;
     }
     VkBuffer sb; VkDeviceSize so; unsigned char *p;
-    if (!vk_staging(dev, size, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
+    if (!vk_staging(queue, size, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
     memcpy(p, data, size);
     VkBufferCopy c = {so, off, size};
     vk.vkCmdCopyBuffer(cb, sb, buffer->vk, 1, &c);
 }
 
 // ---- submissions ----
-static int sub_push(WGPUDevice dev, Sub *s){
-    if (dev->nsubs == dev->cap_subs){
-        int cap = dev->cap_subs ? 2 * dev->cap_subs : 16;
-        Sub *v = realloc(dev->subs, (size_t)cap * sizeof(*v));
+static int sub_push(WGPUQueue q, Sub *s){
+    if (q->nsubs == q->cap_subs){
+        int cap = q->cap_subs ? 2 * q->cap_subs : 16;
+        Sub *v = realloc(q->subs, (size_t)cap * sizeof(*v));
         if (!v) return 0;
-        dev->subs = v; dev->cap_subs = cap;
+        q->subs = v; q->cap_subs = cap;
     }
-    dev->subs[dev->nsubs++] = *s;
+    q->subs[q->nsubs++] = *s;
     return 1;
 }
 
-static uint64_t submit_ex(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs, VkCommandBuffer extra, VkSemaphore signal){
+static uint64_t submit_ex(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs, VkCommandBuffer extra, VkSemaphore signal){
+    WGPUDevice dev = q->dev;
     Sub s;
     memset(&s, 0, sizeof(s));
-    if (dev->up_open){
-        if (dev->stage_cur){ refs_add(&dev->up_refs, &dev->stage_cur->o); obj_unref(&dev->stage_cur->o); dev->stage_cur = NULL; }
-        vk_barrier(dev->up);
-        vk.vkEndCommandBuffer(dev->up);
-        s.cbs[s.ncb++] = dev->up;
-        s.refs = dev->up_refs;
-        memset(&dev->up_refs, 0, sizeof(dev->up_refs));
-        dev->up_open = 0;
+    if (q->up_open){
+        if (q->stage_cur){ refs_add(&q->up_refs, &q->stage_cur->o); obj_unref(&q->stage_cur->o); q->stage_cur = NULL; }
+        vk_barrier(q->up);
+        vk.vkEndCommandBuffer(q->up);
+        s.cbs[s.ncb++] = q->up;
+        s.refs = q->up_refs;
+        memset(&q->up_refs, 0, sizeof(q->up_refs));
+        q->up_open = 0;
     }
     for (size_t i = 0; i < n && s.ncb < 16; i++){
         WGPUCommandBuffer c = cbs[i];
         if (!c || c->submitted || !c->cb) continue;
+        if (c->queue != q){ vk_error(dev, WGPUErrorType_Validation, "wgpuQueueSubmit: a command buffer encoded for the other queue (LRCommandEncoderQueue)"); continue; }
         s.cbs[s.ncb++] = c->cb;
         for (int k = 0; k < c->refs.n; k++) refs_add(&s.refs, c->refs.v[k]);
         refs_release(&c->refs);
@@ -795,10 +836,10 @@ static uint64_t submit_ex(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs
         c->submitted = 1;
     }
     if (extra && s.ncb < 16) s.cbs[s.ncb++] = extra;
-    uint64_t value = ++dev->submitted;
+    uint64_t value = ++q->submitted;
     // the timeline, and a binary semaphore (a window's image presentable) if asked (its
     // value is not used)
-    VkSemaphore sig[2] = {dev->tl, signal};
+    VkSemaphore sig[2] = {q->tl, signal};
     uint64_t sigv[2] = {value, 0};
     VkTimelineSemaphoreSubmitInfo ts;
     memset(&ts, 0, sizeof(ts));
@@ -813,22 +854,24 @@ static uint64_t submit_ex(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs
     si.pCommandBuffers = s.cbs;
     si.signalSemaphoreCount = signal ? 2 : 1;
     si.pSignalSemaphores = sig;
-    VkResult r = vk.vkQueueSubmit(dev->q, 1, &si, 0);
+    VkResult r = vk.vkQueueSubmit(q->q, 1, &si, 0);
     if (r != VK_SUCCESS){ vk_error(dev, WGPUErrorType_Internal, "vkQueueSubmit failed (%d)", r); dev->lost = 1; }
     s.value = value;
-    sub_push(dev, &s);
+    sub_push(q, &s);
     return value;
 }
 
-static uint64_t submit(WGPUDevice dev, size_t n, WGPUCommandBuffer const *cbs){ return submit_ex(dev, n, cbs, NULL, 0); }
-uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal){ return submit_ex(dev, 0, NULL, cb, signal); }
+static uint64_t submit(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs){ return submit_ex(q, n, cbs, NULL, 0); }
+uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal){ return submit_ex(VK_MAIN(dev), 0, NULL, cb, signal); }
 
 void wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const *commands){
-    submit(queue->dev, commandCount, commands);
+    submit(queue, commandCount, commands);
 }
 
+// a submission's index: its number on its queue's timeline, the queue in the top bits
+#define SUB_QUEUE_SHIFT 62
 WGPUSubmissionIndex wgpuQueueSubmitForIndex(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const *commands){
-    return (WGPUSubmissionIndex)submit(queue->dev, commandCount, commands);
+    return (WGPUSubmissionIndex)(submit(queue, commandCount, commands) | (uint64_t)queue->index << SUB_QUEUE_SHIFT);
 }
 
 static void pend_push(WGPUDevice dev, Pending *p){
@@ -841,16 +884,16 @@ static void pend_push(WGPUDevice dev, Pending *p){
     dev->pend[dev->npend++] = *p;
 }
 
-// the work up to now (uploads included: submitted if waiting)
-static uint64_t current(WGPUDevice dev){
-    if (dev->up_open) submit(dev, 0, NULL);
-    return dev->submitted;
+// a queue's work up to now (its uploads included: submitted if waiting)
+static uint64_t current(WGPUQueue q){
+    if (q->up_open) submit(q, 0, NULL);
+    return q->submitted;
 }
 
 WGPUFuture wgpuQueueOnSubmittedWorkDone(WGPUQueue queue, WGPUQueueWorkDoneCallbackInfo callbackInfo){
     Pending p;
     memset(&p, 0, sizeof(p));
-    p.value = current(queue->dev);
+    p.at[queue->index] = current(queue);
     p.kind = 0;
     p.wd = callbackInfo;
     pend_push(queue->dev, &p);
@@ -863,7 +906,7 @@ WGPUFuture wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t offset
     WGPUDevice dev = buffer->dev;
     Pending p;
     memset(&p, 0, sizeof(p));
-    p.value = current(dev);
+    for (int k = 0; k < dev->nqueues; k++) p.at[k] = current(&dev->queues[k]);   // (whichever used it)
     p.kind = 1;
     p.map = callbackInfo;
     p.buf = buffer;
@@ -882,31 +925,37 @@ void const *wgpuBufferGetConstMappedRange(WGPUBuffer buffer, size_t offset, size
 
 void wgpuBufferUnmap(WGPUBuffer buffer){ buffer->map_ok = 0; }
 
-// what is done: command buffers back, references given back, callbacks called
-static WGPUBool poll(WGPUDevice dev, int wait, uint64_t until){
+// What is done: command buffers back, references given back, callbacks called. wait: first
+// until each queue q has reached until[q] (0: not waited for).
+static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
     if (!dev || !dev->vk) return 1;
-    if (wait && until){
-        VkSemaphoreWaitInfo wi;
-        memset(&wi, 0, sizeof(wi));
-        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        wi.semaphoreCount = 1;
-        wi.pSemaphores = &dev->tl;
-        wi.pValues = &until;
-        vk.vkWaitSemaphores(dev->vk, &wi, ~0ull);
+    uint64_t done[2] = {0, 0};
+    int busy = 0;
+    for (int q = 0; q < dev->nqueues; q++){
+        WGPUQueue Q = &dev->queues[q];
+        if (wait && until && until[q]){
+            VkSemaphoreWaitInfo wi;
+            memset(&wi, 0, sizeof(wi));
+            wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+            wi.semaphoreCount = 1;
+            wi.pSemaphores = &Q->tl;
+            wi.pValues = &until[q];
+            vk.vkWaitSemaphores(dev->vk, &wi, ~0ull);
+        }
+        vk.vkGetSemaphoreCounterValue(dev->vk, Q->tl, &done[q]);
+        int k = 0;
+        for (; k < Q->nsubs && Q->subs[k].value <= done[q]; k++){
+            Sub *s = &Q->subs[k];
+            for (int i = 0; i < s->ncb; i++) vk_cb_put(Q, s->cbs[i]);
+            refs_release(&s->refs);
+        }
+        if (k){ memmove(Q->subs, Q->subs + k, (size_t)(Q->nsubs - k) * sizeof(Sub)); Q->nsubs -= k; }
+        busy += Q->nsubs;
     }
-    uint64_t done = 0;
-    vk.vkGetSemaphoreCounterValue(dev->vk, dev->tl, &done);
-    int k = 0;
-    for (; k < dev->nsubs && dev->subs[k].value <= done; k++){
-        Sub *s = &dev->subs[k];
-        for (int i = 0; i < s->ncb; i++) vk_cb_put(dev, s->cbs[i]);
-        refs_release(&s->refs);
-    }
-    if (k){ memmove(dev->subs, dev->subs + k, (size_t)(dev->nsubs - k) * sizeof(Sub)); dev->nsubs -= k; }
     // the callbacks (taken off the list first: one may ask for another)
     for (int i = 0; i < dev->npend;){
         Pending p = dev->pend[i];
-        if (p.value > done){ i++; continue; }
+        if (p.at[0] > done[0] || p.at[1] > done[1]){ i++; continue; }
         memmove(dev->pend + i, dev->pend + i + 1, (size_t)(dev->npend - i - 1) * sizeof(Pending));
         dev->npend--;
         if (p.kind == 0){
@@ -919,15 +968,22 @@ static WGPUBool poll(WGPUDevice dev, int wait, uint64_t until){
             obj_unref(&p.buf->o);
         }
     }
-    return dev->nsubs == 0;
+    return busy == 0;
 }
 
+// a submission's index (wgpuQueueSubmitForIndex), or with wait and none, everything so far
 WGPUBool wgpuDevicePoll(WGPUDevice device, WGPUBool wait, WGPUSubmissionIndex const *submissionIndex){
     if (!device) return 1;
-    uint64_t until = submissionIndex ? (uint64_t)*submissionIndex : (wait ? current(device) : 0);
+    uint64_t until[2] = {0, 0};
+    if (submissionIndex){
+        uint64_t x = (uint64_t)*submissionIndex;
+        int q = (int)(x >> SUB_QUEUE_SHIFT);
+        if (q < device->nqueues) until[q] = x & ((1ull << SUB_QUEUE_SHIFT) - 1);
+    } else if (wait)
+        for (int q = 0; q < device->nqueues; q++) until[q] = current(&device->queues[q]);
     return poll(device, wait, until);
 }
 
 void wgpuInstanceProcessEvents(WGPUInstance instance){
-    if (instance && instance->device) poll(instance->device, 0, 0);
+    if (instance && instance->device) poll(instance->device, 0, NULL);
 }

@@ -302,7 +302,7 @@ void wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture *st){
         vk.vkResetFences(dev->vk, 1, &s->acquired);
         // what it held is not kept (the engine clears it): from UNDEFINED, into GENERAL
         WGPUTexture t = s->tex[idx];
-        VkCommandBuffer cb = vk_upload_cb(dev);
+        VkCommandBuffer cb = vk_upload_cb(VK_MAIN(dev));
         if (cb) vk_image_layout(cb, t->img, t->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         t->ready = 1;
         s->cur = (int)idx;
@@ -320,7 +320,7 @@ WGPUStatus wgpuSurfacePresent(WGPUSurface s){
     WGPUDevice dev = s->dev;
     uint32_t idx = (uint32_t)s->cur;
     s->cur = -1;
-    VkCommandBuffer cb = vk_cb_get(dev);
+    VkCommandBuffer cb = vk_cb_get(VK_MAIN(dev));
     if (!cb) return WGPUStatus_Error;
     vk_image_layout(cb, s->tex[idx]->img, s->tex[idx]->aspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     vk.vkEndCommandBuffer(cb);
@@ -333,7 +333,7 @@ WGPUStatus wgpuSurfacePresent(WGPUSurface s){
     pi.swapchainCount = 1;
     pi.pSwapchains = &s->sc;
     pi.pImageIndices = &idx;
-    VkResult r = vk.vkQueuePresentKHR(dev->q, &pi);
+    VkResult r = vk.vkQueuePresentKHR(VK_MAIN(dev)->q, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) s->stale = 1;
     else if (r != VK_SUCCESS) return WGPUStatus_Error;
     return WGPUStatus_Success;

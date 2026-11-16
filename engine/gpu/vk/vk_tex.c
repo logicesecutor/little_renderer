@@ -135,7 +135,7 @@ WGPUTexture wgpuDeviceCreateTexture(WGPUDevice device, WGPUTextureDescriptor con
         return NULL;
     }
     vk.vkBindImageMemory(device->vk, t->img, t->mem, 0);
-    VkCommandBuffer cb = vk_upload_cb(device);
+    VkCommandBuffer cb = vk_upload_cb(VK_MAIN(device));
     if (cb) vk_texture_ready(device, cb, t);
     return t;
 }
@@ -216,12 +216,12 @@ void wgpuQueueWriteTexture(WGPUQueue q, WGPUTexelCopyTextureInfo const *dst, voi
     size_t need = (size_t)bpr * rows * (layers - 1) + (size_t)bpr * (ext->height - 1) + (size_t)ext->width * t->texel;
     if (layout->offset + need > size){ vk_error(dev, WGPUErrorType_Validation, "wgpuQueueWriteTexture: data too small"); return; }
     if (bpr % t->texel){ vk_error(dev, WGPUErrorType_Validation, "wgpuQueueWriteTexture: bytesPerRow not a whole number of texels"); return; }
-    VkCommandBuffer cb = vk_upload_cb(dev);
+    VkCommandBuffer cb = vk_upload_cb(q);
     if (!cb) return;
     VkBuffer sb; VkDeviceSize so; unsigned char *p;
-    if (!vk_staging(dev, need, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
+    if (!vk_staging(q, need, &sb, &so, &p)){ vk_error(dev, WGPUErrorType_OutOfMemory, "no staging memory"); return; }
     memcpy(p, (const unsigned char *)data + layout->offset, need);
-    refs_add(&dev->up_refs, &t->o);
+    refs_add(&q->up_refs, &t->o);
     vk_texture_ready(dev, cb, t);
     VkBufferImageCopy r;
     region(&r, t, so, bpr, rows, dst, ext);

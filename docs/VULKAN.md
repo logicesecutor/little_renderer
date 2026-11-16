@@ -66,6 +66,19 @@ combines its threads' values (the solver's 8 threads per body; the hull test's l
 (`mesh_rain` 1500 hulls: the solver 1.40 / 1.41 ms, the hull test 2.91 / 3.03 ms, without /
 with), since those kernels wait on memory, not on their barriers. So the engine does not use
 them; the support stays for kernels that will.
+A second queue (`LR_VK_QUEUES=2`): `lrDeviceGetComputeQueue` (webgpu_rt.h), of a family with
+compute only if the GPU has one (its asynchronous compute engine; buffers are then shared by
+both families, `VK_SHARING_MODE_CONCURRENT`), else a second queue of the main family
+(`LR_VK_QUEUES=same`). Each queue has its own timeline, uploads and command buffers; an
+encoder is made for it with an `LRCommandEncoderQueue` chained to its descriptor, and a
+submission index carries its queue in the top bits. The engine runs the rigid bodies there
+(`gpu_encoder`, `gpu_submit_to`, `g->compute`); the air stays on the main queue, as the cloud
+is drawn from its buffers. Measured on 2026-11-16 (RTX 3070, `mesh_rain` 1500 hulls, about
+4.7 ms of physics and 18 ms of drawing per frame): one queue 44-45 frames/s, the compute
+family 34-35, a second queue of the main family 42 (a smaller window and 3 steps in flight
+instead of 2: the same). The two workloads fill the GPU each and slow each other down
+rather than filling each other's gaps, so it is off by default; the main queue is then
+`lrDeviceGetComputeQueue`'s answer and nothing changes.
 
 `LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
 commands): the tests, `render`, `sim` and `view` run clean.
@@ -134,7 +147,8 @@ What has to be written:
    - 64-bit atomics (the caustics' sums, today two 32-bit halves);
    - subgroup operations (prefix sums, reductions, the contact lists, PLOC);
    - bindless textures (PBR5's atlases become a choice, not a need);
-   - a second queue: the physics while the image renders;
+   - a second queue: the physics while the image renders (done, off by default: slower
+     on `mesh_rain`, see above);
    - **hardware ray tracing (R6)**: acceleration structures and ray queries in the existing
      kernels (the shape WebGPU's own proposal of October 2026 takes): each mesh a bottom
      level, our instances the top level's (transform, a 24-bit index to the material and

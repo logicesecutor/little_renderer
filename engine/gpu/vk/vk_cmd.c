@@ -7,18 +7,21 @@
 // ---- encoders and command buffers ----
 static void encoder_free(Obj *o){
     WGPUCommandEncoder e = (WGPUCommandEncoder)o;
-    if (e->cb && !e->finished){ vk.vkEndCommandBuffer(e->cb); vk_cb_put(e->dev, e->cb); }
+    if (e->cb && !e->finished){ vk.vkEndCommandBuffer(e->cb); vk_cb_put(e->queue, e->cb); }
     refs_release(&e->refs);
     free(e);
 }
 
 WGPUCommandEncoder wgpuDeviceCreateCommandEncoder(WGPUDevice device, WGPUCommandEncoderDescriptor const *descriptor){
-    (void)descriptor;
     WGPUCommandEncoder e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     obj_init(&e->o, encoder_free);
     e->dev = device;
-    e->cb = vk_cb_get(device);
+    e->queue = VK_MAIN(device);
+    for (const WGPUChainedStruct *c = descriptor ? descriptor->nextInChain : NULL; c; c = c->next)
+        if (c->sType == LRSType_CommandEncoderQueue && ((const LRCommandEncoderQueue *)c)->queue)
+            e->queue = ((const LRCommandEncoderQueue *)c)->queue;
+    e->cb = vk_cb_get(e->queue);
     if (!e->cb){ free(e); return NULL; }
     e->pend_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     e->pend_write = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -80,7 +83,7 @@ void vk_before(WGPUCommandEncoder e, int kind){
 
 static void cmdbuf_free(Obj *o){
     WGPUCommandBuffer c = (WGPUCommandBuffer)o;
-    if (c->cb) vk_cb_put(c->dev, c->cb);          // never submitted
+    if (c->cb) vk_cb_put(c->queue, c->cb);        // never submitted
     refs_release(&c->refs);
     free(c);
 }
@@ -91,6 +94,7 @@ WGPUCommandBuffer wgpuCommandEncoderFinish(WGPUCommandEncoder e, WGPUCommandBuff
     if (!c) return NULL;
     obj_init(&c->o, cmdbuf_free);
     c->dev = e->dev;
+    c->queue = e->queue;
     vk_barrier_to_host(e->cb);                     // (readbacks: the host sees what was written)
     vk.vkEndCommandBuffer(e->cb);
     c->cb = e->cb;
@@ -162,7 +166,7 @@ WGPUComputePassEncoder wgpuCommandEncoderBeginComputePass(WGPUCommandEncoder e, 
     if (!p) return NULL;
     obj_init(&p->o, cpass_free);
     p->enc = e;
-    if (d && d->timestampWrites && d->timestampWrites->querySet){
+    if (d && d->timestampWrites && d->timestampWrites->querySet && e->queue->ts){
         const WGPUPassTimestampWrites *tw = d->timestampWrites;
         p->ts = tw->querySet;
         p->ts_end = tw->endOfPassWriteIndex;
