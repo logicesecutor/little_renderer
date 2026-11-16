@@ -343,7 +343,7 @@ static void settled(void){
 }
 
 static void timings(void){
-    printf("time per 1/60 s step (4 substeps, 16 iterations), CPU vs GPU, while the pile falls and settles:\n");
+    printf("time per 1/60 s step (4 substeps, 10 iterations), CPU vs GPU, while the pile falls and settles:\n");
     int ns[] = {64, 256, 1024, 2048};
     for (size_t k = 0; k < sizeof(ns) / sizeof(ns[0]); k++){
         double ms[2];

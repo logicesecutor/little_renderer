@@ -93,7 +93,7 @@ typedef struct {
     struct PairMemos *memos; // what decided each pair of hulls last step (rigid.c, P3)
 } RigidWorld;
 
-void rigid_init(RigidWorld *w);   // gravity 981 down, no room, 16 iterations
+void rigid_init(RigidWorld *w);   // gravity 981 down, no room, 10 iterations
 void rigid_free(RigidWorld *w);
 void rigid_set_room(RigidWorld *w, Aabb room);
 

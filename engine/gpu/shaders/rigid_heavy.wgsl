@@ -1,11 +1,4 @@
 // rigid_heavy.wgsl - used by engine/gpu/rigid_gpu.c (K_HEAVY)
-@group(0) @binding(6) var<storage, read> G: array<vec4f>;
-/* what decided each pair last step (rigid.c's memos, P3): two tables, last step's (read) and
-   this step's (written, cleared before), each `cap` keys then `cap` entries of 12 words: the
-   feature (type, i, j), the pose of b in a's frame at the full test (t; q as x, y, z, w) */
-@group(0) @binding(7) var<storage, read_write> memo: array<atomic<u32>>;
-/* the feature whose contacts K_HULLC makes for pair k: type, i, j; w = 1 (0: none) */
-@group(0) @binding(8) var<storage, read_write> feat: array<vec4u>;
 var<workgroup> ws: array<f32, 64>;
 var<workgroup> wi: array<u32, 64>;
 var<workgroup> wj: array<u32, 64>;
@@ -13,7 +6,6 @@ var<workgroup> wl: array<vec3f, 64>;
 var<workgroup> wsep: u32;
 var<workgroup> wsepa: atomic<u32>;
 var<workgroup> wcount: u32;
-var<workgroup> wft: vec4u;                 /* the feature remembered: type, i, j; w = 1 reuse it */
 /* The pair's corners and face normals in the world frame, made once for the whole workgroup
    (the tests below read each many times: a mat3 product and a load each time otherwise), when
    both hulls fit: a's at [0, HC) and [0, HF), b's at [HC, 2 HC) and [HF, 2 HF) */
@@ -55,62 +47,19 @@ fn reduce_max_f(lid: u32) {
     workgroupBarrier();
 }
 
-fn qmul(a: vec4f, b: vec4f) -> vec4f {
-    return vec4f(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
-}
-fn memo_cap() -> u32 { return 2u * P.m.z; }
-fn memo_base(t: u32) -> u32 { return t * 13u * memo_cap(); }
-fn memo_hash(key: u32) -> u32 { return (key * 2654435761u) >> 8u; }
-/* the entry of key in table t: its index, or NONE */
-fn memo_find(t: u32, key: u32) -> u32 {
-    let cap = memo_cap();
-    let base = memo_base(t);
-    var h = memo_hash(key) & (cap - 1u);
-    for (var n = 0u; n < 32u; n++) {
-        let k = atomicLoad(&memo[base + h]);
-        if (k == key) { return h; }
-        if (k == 0u) { return NONE; }
-        h = (h + 1u) & (cap - 1u);
-    }
-    return NONE;
-}
-fn memo_word(t: u32, e: u32, w: u32) -> u32 { return atomicLoad(&memo[memo_base(t) + memo_cap() + e * 12u + w]); }
-fn memo_put(t: u32, key: u32, ft: vec3u, tr: vec3f, q: vec4f) {
-    let cap = memo_cap();
-    let base = memo_base(t);
-    var h = memo_hash(key) & (cap - 1u);
-    for (var n = 0u; n < 32u; n++) {
-        let r = atomicCompareExchangeWeak(&memo[base + h], 0u, key);
-        if (r.exchanged || r.old_value == key) {
-            let d = base + cap + h * 12u;
-            atomicStore(&memo[d], ft.x); atomicStore(&memo[d + 1u], ft.y); atomicStore(&memo[d + 2u], ft.z);
-            atomicStore(&memo[d + 4u], bitcast<u32>(tr.x)); atomicStore(&memo[d + 5u], bitcast<u32>(tr.y));
-            atomicStore(&memo[d + 6u], bitcast<u32>(tr.z));
-            atomicStore(&memo[d + 8u], bitcast<u32>(q.x)); atomicStore(&memo[d + 9u], bitcast<u32>(q.y));
-            atomicStore(&memo[d + 10u], bitcast<u32>(q.z)); atomicStore(&memo[d + 11u], bitcast<u32>(q.w));
-            return;
-        }
-        h = (h + 1u) & (cap - 1u);
-    }
-}
-
+/* the pairs K_HULLPRE queued (pc[4]): one workgroup each */
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let lid = lv.x;
-    let k = wid.x + wid.y * nw.x;
-    if (lid == 0u) { wcount = min(atomicLoad(&pc[1]), P.m.z); wsep = 0u; atomicStore(&wsepa, 0u); }
+    let q = wid.x + wid.y * nw.x;
+    if (lid == 0u) { wcount = min(atomicLoad(&pc[4]), P.m.z); wsep = 0u; atomicStore(&wsepa, 0u); }
     let count = workgroupUniformLoad(&wcount);
-    if (k >= count) { return; }
+    if (q >= count) { return; }
+    let k = feat[P.m.z + q].x;
     let pr = pairs[P.m.z + k];
     let ia = pr.x;
     let ib = pr.y;
-    if (lid == 0u) { feat[k] = vec4u(0u); }
     MG = margin_of(ia, ib);
-    if (ib == NONE) { if (lid == 0u) { hull_walls(ia); } return; }
-    let ka = u32(B[ia].pos.w + 0.5);
-    let kb = u32(B[ib].pos.w + 0.5);
-    if (ka == 0u) { if (lid == 0u) { sphere_convex(ia, ib); } return; }
-    if (kb == 0u) { if (lid == 0u) { sphere_convex(ib, ia); } return; }
     let A = shape_of(ia);
     let S = shape_of(ib);
     if (lid == 0u) { wcached = select(0u, 1u, A.nv <= HC && S.nv <= HC && A.nf <= HF && S.nf <= HF && S.ne <= HE); }
@@ -126,65 +75,11 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
         }
     }
     workgroupBarrier();
-    /* b in a's frame, and what decided the pair last step */
-    let key = (ia << 16u | ib) + 1u;
+    let key = pair_key(ia, ib);
     let rd = u32(P.h2.w);                   /* the table read this step (the other is written) */
-    let qa = B[ia].rot;
-    let ca = vec4f(-qa.xyz, qa.w);
-    let qrel = qmul(ca, B[ib].rot);
-    let trel = transpose(qmat(qa)) * (B[ib].pos.xyz - B[ia].pos.xyz);
-    var mt = vec3f(0.0);
-    var mq = vec4f(0.0, 0.0, 0.0, 1.0);
-    if (lid == 0u) {
-        wft = vec4u(0u);
-        let e = memo_find(rd, key);
-        if (e != NONE) {
-            let ty = memo_word(rd, e, 0u);
-            mt = vec3f(bitcast<f32>(memo_word(rd, e, 4u)), bitcast<f32>(memo_word(rd, e, 5u)), bitcast<f32>(memo_word(rd, e, 6u)));
-            mq = vec4f(bitcast<f32>(memo_word(rd, e, 8u)), bitcast<f32>(memo_word(rd, e, 9u)),
-                       bitcast<f32>(memo_word(rd, e, 10u)), bitcast<f32>(memo_word(rd, e, 11u)));
-            let rmin = min(body_radius(B[ia]), body_radius(B[ib]));
-            let still = length(trel - mt) < 0.01 * rmin && abs(dot(qrel, mq)) > 0.99996;
-            wft = vec4u(ty, memo_word(rd, e, 1u), memo_word(rd, e, 2u), select(0u, 1u, still));
-        }
-    }
-    let ft = workgroupUniformLoad(&wft);
-    /* apart last step: still apart along that axis? (all threads: one reduction) */
-    if (ft.x >= 1u && ft.x <= 3u) {
-        var lo = -1e30;                     /* the largest of -(b along L) and of (a along L) */
-        var hi = -1e30;
-        var L = vec3f(0.0);
-        var off = 0.0;
-        if (ft.x == 1u) { L = hcn(0u, A, ft.y); off = sd(A, ft.y); }
-        else if (ft.x == 2u) { L = hcn(1u, S, ft.y); off = sd(S, ft.y); }
-        else { L = edge_axis(A, S, ft.y, ft.z); }
-        if (ft.x == 2u) {                   /* a's corners along b's face normal */
-            for (var v = lid; v < A.nv; v += 64u) { lo = max(lo, -dot(hcv(0u, A, v), L)); }
-        } else {
-            for (var v = lid; v < S.nv; v += 64u) { lo = max(lo, -dot(hcv(1u, S, v), L)); }
-        }
-        if (ft.x == 3u) { for (var v = lid; v < A.nv; v += 64u) { hi = max(hi, dot(hcv(0u, A, v), L)); } }
-        ws[lid] = lo;
-        reduce_max_f(lid);
-        let mn = -workgroupUniformLoad(&ws[0]);
-        ws[lid] = hi;
-        reduce_max_f(lid);
-        let mx = workgroupUniformLoad(&ws[0]);
-        var gap = mn - off;
-        if (ft.x == 3u) { gap = select(-1e30, mn - mx, dot(L, L) > 0.0); }
-        if (gap > MG) {
-            if (lid == 0u) { memo_put(1u - rd, key, ft.xyz, mt, mq); }
-            return;
-        }
-    }
-    /* touching last step and barely moved since the full test: the same feature */
-    if (ft.x >= 4u && ft.w == 1u) {
-        if (lid == 0u) {
-            feat[k] = vec4u(ft.xyz, 1u);
-            memo_put(1u - rd, key, ft.xyz, mt, mq);
-        }
-        return;
-    }
+    var trel: vec3f;
+    var qrel: vec4f;
+    rel_pose(ia, ib, &trel, &qrel);
     /* the full test. a's faces */
     var best = -1e30;
     var bi = 0u;
