@@ -3,7 +3,7 @@
 // time and every function is looked up by name).
 //
 // The layouts follow the Vulkan specification (1.3, plus the ray tracing extensions);
-// tools/vk_check.c compares each struct's size and field offsets with the official headers
+// tools/vk_check.py compares each struct's size and field offsets with the official headers
 // (a development check, built only where the headers are installed).
 #ifndef LR_VK_H
 #define LR_VK_H
@@ -25,7 +25,6 @@ typedef uint64_t VkDeviceAddress;
 typedef int32_t VkResult;
 
 #define VK_TRUE 1u
-#define VK_FALSE 0u
 #define VK_WHOLE_SIZE (~0ull)
 #define VK_QUEUE_FAMILY_IGNORED (~0u)
 #define VK_MAX_PHYSICAL_DEVICE_NAME_SIZE 256
@@ -40,9 +39,7 @@ typedef int32_t VkResult;
 
 // results
 #define VK_SUCCESS 0
-#define VK_NOT_READY 1
 #define VK_TIMEOUT 2
-#define VK_INCOMPLETE 5
 #define VK_SUBOPTIMAL_KHR 1000001003
 #define VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
 
@@ -74,7 +71,6 @@ VK_HANDLE64(VkRenderPass);
 VK_HANDLE64(VkSurfaceKHR);
 VK_HANDLE64(VkSwapchainKHR);
 VK_HANDLE64(VkAccelerationStructureKHR);
-#define VK_NULL_HANDLE 0
 
 // structure types (VkStructureType)
 typedef enum {
@@ -465,7 +461,6 @@ typedef struct VkComputePipelineCreateInfo {
 typedef struct VkCommandPoolCreateInfo {
     VkStructureType sType; const void *pNext; VkFlags flags; uint32_t queueFamilyIndex;
 } VkCommandPoolCreateInfo;
-#define VK_COMMAND_POOL_CREATE_TRANSIENT_BIT 1u
 #define VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT 2u
 
 typedef struct VkCommandBufferAllocateInfo {
@@ -705,7 +700,6 @@ typedef struct VkPhysicalDeviceSubgroupSizeControlProperties {
 #define VK_GEOMETRY_TYPE_AABBS_KHR 1
 #define VK_GEOMETRY_TYPE_INSTANCES_KHR 2
 #define VK_GEOMETRY_OPAQUE_BIT_KHR 0x1
-#define VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR 0x1
 #define VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR 0x4
 #define VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR 0x8
 #define VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR 0

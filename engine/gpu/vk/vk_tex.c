@@ -143,9 +143,6 @@ WGPUTexture wgpuDeviceCreateTexture(WGPUDevice device, WGPUTextureDescriptor con
 void wgpuTextureAddRef(WGPUTexture t){ if (t) obj_ref(&t->o); }
 void wgpuTextureDestroy(WGPUTexture t){ (void)t; }        // freed with its last reference
 void wgpuTextureRelease(WGPUTexture t){ if (t) obj_unref(&t->o); }
-uint32_t wgpuTextureGetWidth(WGPUTexture t){ return t->w; }
-uint32_t wgpuTextureGetHeight(WGPUTexture t){ return t->h; }
-WGPUTextureFormat wgpuTextureGetFormat(WGPUTexture t){ return t->format; }
 
 // ---- views ----
 static void view_free(Obj *o){
@@ -238,16 +235,4 @@ void wgpuCommandEncoderCopyTextureToBuffer(WGPUCommandEncoder e, WGPUTexelCopyTe
     VkBufferImageCopy r;
     region(&r, t, dst->layout.offset, dst->layout.bytesPerRow, dst->layout.rowsPerImage, src, size);
     vk.vkCmdCopyImageToBuffer(e->cb, t->img, VK_IMAGE_LAYOUT_GENERAL, dst->buffer->vk, 1, &r);
-}
-
-void wgpuCommandEncoderCopyBufferToTexture(WGPUCommandEncoder e, WGPUTexelCopyBufferInfo const *src,
-                                           WGPUTexelCopyTextureInfo const *dst, WGPUExtent3D const *size){
-    WGPUTexture t = dst->texture;
-    if (!t || !size->width || !size->height) return;
-    vk_before(e, VK_CMD_TRANSFER);
-    refs_add(&e->refs, &t->o);
-    refs_add(&e->refs, &src->buffer->o);
-    VkBufferImageCopy r;
-    region(&r, t, src->layout.offset, src->layout.bytesPerRow, src->layout.rowsPerImage, dst, size);
-    vk.vkCmdCopyBufferToImage(e->cb, src->buffer->vk, t->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
 }

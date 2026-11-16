@@ -34,7 +34,7 @@ for m in re.finditer(r'typedef struct (\w+)\s*\{(.*?)\}\s*(\w+);', body, re.S):
 
 consts = re.findall(r'^\s*(VK_[A-Z0-9_]+)\s*=\s*', body, re.M) + \
          re.findall(r'^#define (VK_[A-Z0-9_]+) [^\n(]', body, re.M)
-skip = {'VK_HANDLE', 'VK_HANDLE64', 'VK_NULL_HANDLE', 'VK_MAKE_API_VERSION', 'VK_API_VERSION_1_3'}
+skip = {'VK_HANDLE', 'VK_HANDLE64', 'VK_MAKE_API_VERSION', 'VK_API_VERSION_1_3'}
 consts = [c for c in dict.fromkeys(consts) if c not in skip and not c.endswith('MAX_ENUM')]
 
 def program(header, prefix):

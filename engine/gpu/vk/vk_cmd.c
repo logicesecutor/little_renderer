@@ -146,7 +146,6 @@ WGPUQuerySet wgpuDeviceCreateQuerySet(WGPUDevice device, WGPUQuerySetDescriptor 
     return q;
 }
 
-void wgpuQuerySetDestroy(WGPUQuerySet q){ (void)q; }
 void wgpuQuerySetRelease(WGPUQuerySet q){ if (q) obj_unref(&q->o); }
 
 // (Vulkan counts in ticks of timestampPeriod ns: 1 on NVIDIA; other GPUs would need a scale)

@@ -271,11 +271,6 @@ void wgpuSurfaceConfigure(WGPUSurface s, WGPUSurfaceConfiguration const *cfg){
     if (!make_swapchain(s)) s->stale = 1;
 }
 
-void wgpuSurfaceUnconfigure(WGPUSurface s){
-    destroy_swapchain(s);
-    if (s->dev){ obj_unref(&s->dev->o); s->dev = NULL; }
-}
-
 void wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture *st){
     WGPUChainedStruct *next = st->nextInChain;
     memset(st, 0, sizeof(*st));
