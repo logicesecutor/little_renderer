@@ -143,7 +143,13 @@ int crate = scene_add_instance(&s, INST_BOX, xform_axes(quat_to_mat3(q), vec3(50
 
 With many moving instances, after moving them call `scene_update_instances(&s, NULL)`
 (the CPU path tracer's tree over the instances is rebuilt, the scene's own trees stay)
-instead of `scene_set_accel`.
+instead of `scene_set_accel`. Only what reads that tree needs it: the CPU path tracer and
+the probe's bake, and the GPU path tracer when `gpu_view_trace_reads_tlas` says so (it
+copies the tree; with ray queries on our Vulkan layer it does not). The rasterizers never
+do, so a program that only rasterizes while things move can leave it out (the viewer calls
+it when one of those is about to run; nothing happens if the tree is up to date). Change
+instances through `scene_add_instance` and `scene_move_instance`: they number each change
+(`Scene.inst_version`), and the tree and the GPU's copies are made again only for a new number.
 
 Physics moves instances for you: every body (PHYSICS.md 4.1) is drawn as an instance, of
 the unit sphere or box, or of its mesh. A mesh whose triangles change (a cloth, a deforming body) is made with `.dynamic = 1`

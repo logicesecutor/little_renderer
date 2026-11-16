@@ -60,6 +60,11 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp);
 // it every frame something moved, then gpu_view_trace_more, then gpu_view_present_traced; the
 // passes per frame stay within ~10 ms while it moves.
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history);
+// 1 = gpu_view_trace_move copies the scene's top level over its instances (scene_tlas: keep it
+// up to date with scene_update_instances, or the GPU builds one, a little slower to trace);
+// 0 = it never reads it (ray queries on our Vulkan layer, LR_GPU_TLAS=gpu): moving instances
+// then need no tree on the CPU at all.
+int gpu_view_trace_reads_tlas(const GpuView *v);
 // Call every frame: unless the previous band is still running, submits the next one (p and mp
 // as in gpu_view_present: the media are made ready the same way).
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp);

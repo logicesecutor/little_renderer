@@ -302,6 +302,14 @@ static void present_with_hud(Framebuffer *f){
     window_present(win, f);
     if (on) hud_restore(f, hud_w, hud_h, HUD_X, HUD_Y, saved);
 }
+// The CPU's trees over what the physics moves (the top level over the instances, 1.3 ms for
+// the 5000 of -demo sky) are made when something is about to read them, not every simulated
+// frame: the CPU path tracer and the probe's bake trace through them, and the GPU path tracer
+// copies the top level unless it builds its own (gpu_view_trace_reads_tlas). The rasterizers
+// and the ray queries of our Vulkan layer never do. (Nothing to do when they are up to date:
+// the scene counts its instances' moves, Scene.inst_version.)
+static void scene_trees(void){ PROF(PROF_ACCEL, scene_update_instances(&scene, &o.ap)); }
+
 static GpuFluid *gfluid;     // -sim on: the air and the cloud stepped on the GPU
 static GpuRigid *grigid;     // -sim on: the balls and boxes stepped on the GPU
 
@@ -436,6 +444,7 @@ static void idle(int ms){
 // the scene: the CPU path traces from now on.
 static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
     GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
+    scene_trees();               // (the meshes' own trees are copied when the scene is new)
     if (!gpu_view_trace_start(gview, &scene, &tp)){
         o.gpu_trace = 0;
         gpu_tracing = 0;
@@ -474,6 +483,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
         int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
         gpu_scene_moved = 0;
         int moved;
+        if (gpu_view_trace_reads_tlas(gview)) scene_trees();
         PROF(PROF_MOVE, moved = gpu_view_trace_move(gview, &scene, &tp, keep));
         if (!moved){
             o.gpu_trace = 0;
@@ -621,6 +631,7 @@ static int frame(void){
                 force_present = 1;
                 break;
             case 'l':
+                scene_trees();                     // the bake traces the scene
                 options_bake_probe(&o, &scene);
                 fflush(stdout);
                 raster_dirty = 1;
@@ -721,9 +732,8 @@ static int frame(void){
         sim_last = t;
         sim_moved = 0;
         if (!sim_paused && sdt > 0){
-            PROF(PROF_SIM, sim_step(&sim, &scene, sdt));
-            PROF(PROF_ACCEL, scene_update_instances(&scene, &o.ap));   // the bodies are instances: the world stays
-            sim_moved = 1;
+            PROF(PROF_SIM, sim_step(&sim, &scene, sdt));   // the bodies are instances: the world stays
+            sim_moved = 1;                                  // (their trees: scene_trees, when read)
             raster_dirty = 1;
         }
     }
@@ -773,6 +783,7 @@ static int frame(void){
         // the simulation moved: one pass of the new state, blended with the last ones
         int sc = preview_on ? preview : 1;
         accum_reset(&acc, sc);
+        scene_trees();
         pass_t0 = clock_s();
         for (int i = 0; i < o.move_spp; i++) render_rows(&scene, &cam, &acc, 0, acc.rh, max_depth, o.mis, (real)o.clamp, o.sampler);
         acc.passes = o.move_spp;
@@ -787,6 +798,7 @@ static int frame(void){
         int sc = changed && preview_on && mode == BACKEND_RT ? preview : 1;
         accum_reset(&acc, sc);
         reset = 0;
+        scene_trees();
         pass_t0 = clock_s();
         if (changed){
             int n = sc > 1 ? o.move_spp : 1;          // -movespp: less grain, slower
@@ -800,6 +812,7 @@ static int frame(void){
         }
     } else if (acc.passes < o.spp){
         // calm: refine at full resolution, a band of rows at a time (~20 ms each)
+        scene_trees();               // (after a pause or a change of mode: made once)
         double b0 = clock_s();
         int y1 = acc.band_y + band < acc.rh ? acc.band_y + band : acc.rh;
         render_rows(&scene, &cam, &acc, acc.band_y, y1, max_depth, o.mis, (real)o.clamp, o.sampler);

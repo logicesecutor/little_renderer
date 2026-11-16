@@ -1331,6 +1331,8 @@ static void upload_sky(GpuTrace *t, const Scene *s){
     free(cdf);
 }
 
+int gpu_trace_reads_tlas(const GpuTrace *t){ return t->tlas_mode == 1 && !hw_on(t); }
+
 int gpu_trace_sync(GpuTrace *t, const Scene *s){
     upload_sky(t, s);
     if (!t->txt) t->txt = gpu_buffer(t->g, "path tracer: the textures' table", sizeof(t->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
