@@ -196,6 +196,7 @@ struct GpuRigid {
     uint32_t grid_h;                             // its slots (a power of 2)
     int memo_rd;                                 // its table read this step (the other is written)
     WGPUBuffer tris, store, scount;              // body - mesh: the triangles to test, their contacts per pair
+    int meshes;                                  // (at full size once the world has a fixed mesh: 2.5 KB a pair)
     size_t cap_pairs;                            // per list
     WGPUBuffer shapes;                           // the hulls' and meshes' shapes (G), and the unit box
     size_t shapes_cap;
@@ -314,10 +315,29 @@ static void release_sized(GpuRigid *gr){
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
 }
 
+// the body - mesh pairs' buffers: a world without a fixed mesh has no such pair, and one entry
+static void reserve_mesh_pairs(GpuRigid *gr, int meshes){
+    Gpu *g = gr->g;
+    size_t pairs = meshes ? gr->cap_pairs : 1;
+    release(&gr->tris); release(&gr->store); release(&gr->scount);
+    gr->tris = storage(g, "bodies: triangles to test", 64 * pairs * 8);
+    gr->store = storage(g, "bodies: mesh contacts", 64 * pairs * 32);
+    gr->scount = storage(g, "bodies: mesh contact counts", pairs * 4);
+    gr->meshes = meshes;
+}
+
+static int has_meshes(const RigidWorld *w){
+    for (int i = 0; i < w->ngeoms; i++) if (w->geoms[i]->kind == BODY_MESH) return 1;
+    return 0;
+}
+
 // room for nb bodies (and their contacts); 1 = the buffers were made again (their bodies lost)
-static int reserve(GpuRigid *gr, int nb){
+static int reserve(GpuRigid *gr, int nb, int meshes){
     size_t want = (size_t)(nb > 0 ? nb : 1);
-    if (want <= gr->cap_bodies && gr->bodies) return 0;
+    if (want <= gr->cap_bodies && gr->bodies){
+        if (meshes && !gr->meshes){ reserve_mesh_pairs(gr, 1); make_groups(gr); }   // the world's first mesh
+        return 0;
+    }
     size_t cap = 64;
     while (cap < want) cap *= 2;
     Gpu *g = gr->g;
@@ -337,9 +357,7 @@ static int reserve(GpuRigid *gr, int nb){
     gr->pairs = storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
     gr->pc = storage(g, "bodies: pair counts", 32);
     gr->args = gpu_buffer(g, "bodies: pair dispatches", 96, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst);
-    gr->tris = storage(g, "bodies: triangles to test", 64 * gr->cap_pairs * 8);
-    gr->store = storage(g, "bodies: mesh contacts", 64 * gr->cap_pairs * 32);
-    gr->scount = storage(g, "bodies: mesh contact counts", gr->cap_pairs * 4);
+    reserve_mesh_pairs(gr, meshes);
     gr->memo = storage(g, "bodies: hull pairs remembered", 2 * 13 * (2 * gr->cap_pairs) * 4);   // (zeroed: empty)
     gr->memo_rd = 0;
     gr->feat = storage(g, "bodies: hull pairs' features, K_HEAVY's queue", 2 * gr->cap_pairs * 16);
@@ -579,7 +597,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     }
     // the bodies the CPU changed (or all of them, into new buffers), in runs of neighbours:
     // one write per run, not per body; and the forces
-    int fresh = reserve(gr, nb);
+    int fresh = reserve(gr, nb, has_meshes(w));
     upload_shapes(gr, w);
     for (int i = 0; i < nb;){
         Body *b = &w->bodies[i];
@@ -751,7 +769,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     }
     gr->par = gpu_buffer(g, "bodies: parameters", sizeof(GRP), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     upload_shapes(gr, &pw->rigid);
-    reserve(gr, pw->rigid.nbodies);
+    reserve(gr, pw->rigid.nbodies, has_meshes(&pw->rigid));
     for (int i = 0; i < pw->rigid.nbodies; i++) pw->rigid.bodies[i].dirty = 1;
     live[live_slot()] = gr;
     pw->rigid_step = rigid_step_gpu;

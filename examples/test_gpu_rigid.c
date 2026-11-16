@@ -219,6 +219,19 @@ static void test_meshes(void){
     check("box on the mesh: centre height", w.pw.rigid.bodies[bx].pos.y, 120, 1.5);
     check("on the mesh: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 2);
     world_free(&w);
+
+    // a mesh brought into a world already running on the GPU (its pairs' buffers are made then)
+    world_init(&w, 1);
+    rigid_set_room(&w.pw.rigid, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
+    s = rigid_add_sphere(&w.pw.rigid, vec3(220, 300, 278), 25, 1);
+    world_start(&w, 1);
+    world_run(&w, 0.1);
+    n = box_tris(tri, vec3(120, 50, 120), mat3_identity(), vec3(0, 50, 0));
+    gm = rigid_geom_mesh(&w.pw.rigid, tri, n);
+    rigid_add_mesh_collider(&w.pw.rigid, gm, xform_make(vec3(278, 0, 278), mat3_identity().m, 1));
+    world_run(&w, 4.0);
+    check("ball on a mesh added later: centre height", w.pw.rigid.bodies[s].pos.y, 125, 1.5);
+    world_free(&w);
 }
 
 // n bodies (2/3 balls, 1/3 boxes) dropped in a room sized for them
