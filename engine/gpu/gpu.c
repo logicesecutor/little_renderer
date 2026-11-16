@@ -471,8 +471,19 @@ struct GpuTimer {
     long rounds;
 };
 
+// the timers alive: a readback's callback can arrive (cancelled) after gpu_timer_destroy
+#define MAX_LIVE_TIMERS 32
+static GpuTimer *live_timers[MAX_LIVE_TIMERS];
+static int timer_is_live(const GpuTimer *t){
+    for (int i = 0; i < MAX_LIVE_TIMERS; i++) if (t && live_timers[i] == t) return 1;
+    return 0;
+}
+
 GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     if (!g || !g->timestamps || passes <= 0) return NULL;
+    int slot = 0;
+    while (slot < MAX_LIVE_TIMERS && live_timers[slot]) slot++;
+    if (slot == MAX_LIVE_TIMERS) return NULL;           // (no timing: its callbacks would be ignored)
     GpuTimer *t = calloc(1, sizeof(*t));
     if (!t) return NULL;
     t->g = g;
@@ -492,6 +503,12 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     t->qs = wgpuDeviceCreateQuerySet(g->device, &qd);
     t->resolve = gpu_buffer(g, "timer: resolve", (size_t)passes * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
     t->readback = gpu_buffer(g, "timer: readback", (size_t)passes * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    if (!t->stage_of || !t->pending_stage || !t->pass_units || !t->pending_units || !t->units || !t->ns || !t->calls ||
+        !t->qs || !t->resolve || !t->readback){
+        gpu_timer_destroy(t);                           // no memory for it: no timing
+        return NULL;
+    }
+    live_timers[slot] = t;
     return t;
 }
 
@@ -509,7 +526,8 @@ const WGPUPassTimestampWrites *gpu_timer_next(GpuTimer *t, int stage){
 static void on_times(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     GpuTimer *t = u1;
-    if (status != WGPUMapAsyncStatus_Success) return;
+    if (!timer_is_live(t)) return;                      // cancelled as it was destroyed: t is gone
+    if (status != WGPUMapAsyncStatus_Success){ t->pending = 0; return; }   // nothing is mapped; the next round is timed
     const uint64_t *ts = wgpuBufferGetConstMappedRange(t->readback, 0, (size_t)t->npending * 16);
     if (ts){
         for (int i = 0; i < t->npending; i++){
@@ -574,6 +592,7 @@ void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
 void gpu_timer_destroy(GpuTimer *t){
     if (!t) return;
     for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    for (int i = 0; i < MAX_LIVE_TIMERS; i++) if (live_timers[i] == t) live_timers[i] = NULL;
     if (t->qs) wgpuQuerySetRelease(t->qs);      // (wgpu-native has no wgpuQuerySetDestroy)
     if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
     if (t->readback){ wgpuBufferDestroy(t->readback); wgpuBufferRelease(t->readback); }

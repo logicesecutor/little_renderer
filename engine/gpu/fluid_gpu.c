@@ -420,8 +420,9 @@ void gpu_fluid_attach_view(GpuFluid *gf, GpuView *v){
 static void on_around(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     GpuFluid *gf = u1;
-    if (status != WGPUMapAsyncStatus_Success || !is_live(gf)) return;   // cancelled: gf may be gone
-    gf->around_pending = 0;
+    if (!is_live(gf)) return;                           // cancelled as it was destroyed: gf is gone
+    gf->around_pending = 0;                             // (also after a failure: the next step asks again)
+    if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
     const float *a = wgpuBufferGetConstMappedRange(gf->around_rb, 0, (size_t)gf->around_n * 16);
     if (a){
         if (gf->around_cpu_cap < gf->around_n){
@@ -440,8 +441,9 @@ static void on_around(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
 static void on_cloud(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     GpuFluid *gf = u1;
-    if (status != WGPUMapAsyncStatus_Success || !is_live(gf)) return;
+    if (!is_live(gf)) return;
     gf->dens_pending = 0;
+    if (status != WGPUMapAsyncStatus_Success) return;
     Volume *v = gf->cloud;
     size_t n = (size_t)v->nx * v->ny * v->nz;
     const float *d = wgpuBufferGetConstMappedRange(gf->dens_rb, 0, n * 4);

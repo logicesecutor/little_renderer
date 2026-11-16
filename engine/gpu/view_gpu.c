@@ -452,15 +452,14 @@ static void ensure_capture(GpuView *v){
 static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)u2;
     GpuView *v = u1;
-    if (status != WGPUMapAsyncStatus_Success){
-        // cancelled or aborted: the view or the device is going away, v may be gone already
-        if (status == WGPUMapAsyncStatus_Error){
-            fprintf(stderr, "GPU: reading the frame back failed: %.*s\n", (int)msg.length, msg.data ? msg.data : "");
-            v->cap_pending = 0;
-        }
+    if (!view_is_live(v)) return;       // cancelled as the view was destroyed: v is gone
+    v->cap_pending = 0;                 // (also after a failure: the next frame can be asked for)
+    if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
+        if (status == WGPUMapAsyncStatus_Error)
+            fprintf(stderr, "GPU: reading the frame back failed: %.*s\n",
+                    msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
         return;
     }
-    v->cap_pending = 0;
     const uint8_t *src = wgpuBufferGetConstMappedRange(v->cap_buf, 0, (size_t)v->cap_row * v->h);
     uint32_t *px = malloc((size_t)v->w * v->h * sizeof(uint32_t));
     if (src && px){
@@ -896,8 +895,9 @@ int gpu_view_trace_reads_tlas(const GpuView *v){ return !v || !v->trace || gpu_t
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     GpuView *v = u1;
-    if (status != WGPUMapAsyncStatus_Success || !view_is_live(v)) return;
-    v->t_rb_pending = 0;
+    if (!view_is_live(v)) return;                       // cancelled as it was destroyed: v is gone
+    v->t_rb_pending = 0;                                // (also after a failure: it can be asked for again)
+    if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
     size_t bytes = (size_t)v->w * v->h * 16;
     const float *p = wgpuBufferGetConstMappedRange(v->t_rb, 0, bytes);
     if (p && v->t_read_fn) v->t_read_fn(v->t_read_user, p, v->w, v->h);

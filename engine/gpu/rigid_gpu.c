@@ -482,8 +482,9 @@ static void pack_body(const RigidWorld *w, const Body *b, float *o){
 static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;
     GpuRigid *gr = u1;
-    if (status != WGPUMapAsyncStatus_Success || !is_live(gr)) return;
-    gr->rb_pending = 0;
+    if (!is_live(gr)) return;                           // cancelled as it was destroyed: gr is gone
+    gr->rb_pending = 0;                                 // (also after a failure: the next step asks again)
+    if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
     RigidWorld *w = &gr->pw->rigid;
     const float *d = wgpuBufferGetConstMappedRange(gr->rb, 0, (size_t)gr->rb_n * BODY_BYTES + 16);
     if (d){
