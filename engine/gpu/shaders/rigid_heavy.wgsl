@@ -39,13 +39,6 @@ fn reduce_max(lid: u32) {
     }
     workgroupBarrier();
 }
-fn reduce_max_f(lid: u32) {
-    for (var st = 32u; st > 0u; st = st >> 1u) {
-        workgroupBarrier();
-        if (lid < st && ws[lid + st] > ws[lid]) { ws[lid] = ws[lid + st]; }
-    }
-    workgroupBarrier();
-}
 
 /* the pairs K_HULLPRE queued (pc[4]): one workgroup each */
 @compute @workgroup_size(64)

@@ -166,7 +166,7 @@ struct WGPUBufferImpl {
     uint64_t size;
     WGPUBufferUsage usage;
     unsigned char *mapped;           // host-visible buffers: mapped for good
-    int map_pending, map_ok;
+    int map_ok;
 };
 
 struct WGPUTextureImpl {
@@ -177,7 +177,6 @@ struct WGPUTextureImpl {
     WGPUTextureFormat format;
     VkFormat vkformat;
     uint32_t texel;                  // bytes per texel
-    int swapchain;                   // a window's image: PRESENT layout between frames
     WGPUTextureUsage usage;
     uint32_t w, h, layers, mips;
     VkFlags aspect;
@@ -202,7 +201,6 @@ struct WGPUBindGroupLayoutImpl {
     WGPUDevice dev;
     VkDescriptorSetLayout vk;
     BglEntry *e; int n;
-    int ndynamic;
 };
 
 struct WGPUPipelineLayoutImpl {

@@ -13,7 +13,6 @@ typedef struct {
     unsigned tlas_version;   // Scene.inst_version it was built for
     int tlas_n;              // and the instances it holds
     real tlas_cost;          // its cost (bvh_cost) when it was built: refit until it grows
-    int tlas_refits;
 } RtAccel;
 
 static void rt_accel_free(void *p){
@@ -165,13 +164,10 @@ static void build_tlas(RtAccel *a, const Scene *s, const AccelParams *p){
     Aabb *boxes = malloc((size_t)s->ninsts * sizeof(Aabb));
     if (!boxes){ bvh_free(&a->tlas); a->tlas_n = -1; return; }
     for (int i = 0; i < s->ninsts; i++) boxes[i] = s->insts[i].box;
-    if (same && bvh_refit_boxes(&a->tlas, boxes) <= TLAS_REFIT_GROWTH * a->tlas_cost){
-        a->tlas_refits++;
-    } else {
+    if (!(same && bvh_refit_boxes(&a->tlas, boxes) <= TLAS_REFIT_GROWTH * a->tlas_cost)){
         bvh_free(&a->tlas);
         bvh_build_boxes(&a->tlas, boxes, s->ninsts, p ? p->bvh_leaf : 4, p ? p->bvh_bins : 16, BVH_SPLIT_SAH);
         a->tlas_cost = bvh_cost(&a->tlas);
-        a->tlas_refits = 0;
     }
     free(boxes);
 }

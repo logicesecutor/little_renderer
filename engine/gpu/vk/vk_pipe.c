@@ -116,7 +116,6 @@ WGPUBindGroupLayout wgpuDeviceCreateBindGroupLayout(WGPUDevice device, WGPUBindG
         l->e[i].binding = e->binding;
         l->e[i].type = t;
         l->e[i].dynamic = dyn;
-        l->ndynamic += dyn;
     }
     VkDescriptorSetLayoutCreateInfo ci;
     memset(&ci, 0, sizeof(ci));

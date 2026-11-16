@@ -244,7 +244,6 @@ static int make_swapchain(WGPUSurface s){
         t->usage = s->cfg.usage;
         t->w = ext.width; t->h = ext.height;
         t->layers = t->mips = 1;
-        t->swapchain = 1;
         s->tex[i] = t;
         vk.vkCreateSemaphore(dev->vk, &si, NULL, &s->presentable[i]);
     }

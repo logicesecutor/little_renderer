@@ -97,7 +97,7 @@ struct GpuView {
     WGPUBindGroupLayout hud_bgl;
     WGPUBuffer hud_u, hud_px;
     size_t hud_cap;
-    int hud_w, hud_h, hud_x, hud_y;
+    int hud_w;                  // its width (0: none)
     // explicit: "auto" would drop the bindings a shader does not read
     WGPUBindGroupLayout light_bgl, comp_bgl, comp_gpu_bgl, stats_bgl, finish_bgl;
     GpuRaster *raster;          // the scene's surfaces drawn on the GPU (created when first used)
@@ -948,12 +948,11 @@ void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
     if (!argb || w <= 0 || h <= 0 || x + w > v->w || y + h > v->h || x < 0 || y < 0){ v->hud_w = 0; return; }
     Gpu *g = v->g;
     size_t bytes = (size_t)w * h * 4;
-    if (gpu_buffer_reserve(g, &v->hud_px, &v->hud_cap, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst,
-                           "text over the image") < 0) return;
+    gpu_buffer_reserve(g, &v->hud_px, &v->hud_cap, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "text over the image");
     wgpuQueueWriteBuffer(g->queue, v->hud_px, 0, argb, bytes);
     float u[8] = {(float)x, (float)y, (float)w, (float)h, (float)v->w, (float)v->h, 0, 0};
     wgpuQueueWriteBuffer(g->queue, v->hud_u, 0, u, sizeof(u));
-    v->hud_w = w; v->hud_h = h; v->hud_x = x; v->hud_y = y;
+    v->hud_w = w;
 }
 
 void gpu_view_destroy(GpuView *v){

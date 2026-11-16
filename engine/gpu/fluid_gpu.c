@@ -159,7 +159,6 @@ struct GpuFluid {
     WGPUBuffer occ;               // the mesh bodies' shapes: which cells they fill
     size_t occ_cap;
     int nocc;                     // shapes uploaded
-    int nb_bodies;                // bodies the bind groups below were made for
     WGPUBindGroup bg[NK];         // the fluid kernels' bind groups (MARK and SAMP follow the bodies)
     GLevel lv[POISSON_MAX_LEVELS];
     int nlevels;

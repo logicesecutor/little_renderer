@@ -911,7 +911,6 @@ WGPUFuture wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t offset
     p.map = callbackInfo;
     p.buf = buffer;
     obj_ref(&buffer->o);
-    buffer->map_pending = 1;
     pend_push(dev, &p);
     WGPUFuture f = {4};
     return f;
@@ -961,7 +960,6 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
         if (p.kind == 0){
             if (p.wd.callback) p.wd.callback(WGPUQueueWorkDoneStatus_Success, sv(""), p.wd.userdata1, p.wd.userdata2);
         } else {
-            p.buf->map_pending = 0;
             p.buf->map_ok = p.buf->mapped != NULL;
             if (p.map.callback) p.map.callback(p.buf->map_ok ? WGPUMapAsyncStatus_Success : WGPUMapAsyncStatus_Error,
                                                sv(p.buf->map_ok ? "" : "not a mappable buffer"), p.map.userdata1, p.map.userdata2);

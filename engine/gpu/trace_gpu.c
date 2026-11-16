@@ -151,7 +151,6 @@ typedef struct {
     int n;
     uint32_t node0, ref0, ref_add;      // a leaf's shape id: its item + ref_add
     size_t box_at, par_at;              // its boxes and parameters, in the arena
-    int npar;
     int ploc;                           // built by PLOC (else LBVH)
 } GpuBuild;
 
@@ -515,7 +514,6 @@ static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, 
         memcpy(par + (size_t)k++ * BP_STRIDE, &q, sizeof(q));
     }
     b->par_at = first;
-    b->npar = npar;
     t->nbuild++;
 }
 

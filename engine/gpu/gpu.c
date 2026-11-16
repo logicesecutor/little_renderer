@@ -165,9 +165,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     memset(&dd, 0, sizeof(dd));
     dd.label = gpu_str("little_renderer");
     // ask for the largest storage buffers the adapter allows: the cloud's grids are big
-    WGPULimits want;
-    memset(&want, 0, sizeof(want));
-    want = lim;
+    WGPULimits want = lim;
     dd.requiredLimits = &want;
 #ifndef __EMSCRIPTEN__
     // timed passes (gpu_timer): only when asked, natively
