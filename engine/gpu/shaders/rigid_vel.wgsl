@@ -8,7 +8,7 @@
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
     let first = P.m.w == 0u;
-    if (i == 0u && first) { atomicStore(&cnt[0], 0u); for (var l = 0u; l < 4u; l++) { atomicStore(&pc[l], 0u); } }
+    if (i == 0u && first) { atomicStore(&cnt[0], 0u); for (var l = 0u; l < 5u; l++) { atomicStore(&pc[l], 0u); } }
     if (i >= P.n.x) { return; }
     if (first) { atomicStore(&cnt[1u + i], 0u); }
     var b = B[i];
