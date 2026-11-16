@@ -67,6 +67,11 @@ static void test_bounce(void){
     rigid_free(&w);
 }
 
+// the momentum tests' tolerance: the impulses' solver keeps momentum exactly (each impulse is
+// equal and opposite); AVBD moves one body at a time, which keeps it only as far as its
+// iterations converge (here to about a percent of the momenta that met)
+static real momentum_tolerance(const RigidWorld *w, real exact){ return w->solver == RIGID_AVBD ? 0.02f : exact; }
+
 static void test_momentum(void){
     printf("momentum (no gravity, spheres and boxes colliding)\n");
     RigidWorld w;
@@ -86,9 +91,9 @@ static void test_momentum(void){
     for (int k = 0; k < 600; k++) rigid_step(&w, 1.0 / 600);
     Vec3 p1 = rigid_momentum(&w);
     real scale = v_len(p0) + 1e5;
-    check("momentum x change / total", (p1.x - p0.x) / scale, 0, 1e-4);
-    check("momentum y change / total", (p1.y - p0.y) / scale, 0, 1e-4);
-    check("momentum z change / total", (p1.z - p0.z) / scale, 0, 1e-4);
+    check("momentum x change / total", (p1.x - p0.x) / scale, 0, momentum_tolerance(&w, 1e-4));
+    check("momentum y change / total", (p1.y - p0.y) / scale, 0, momentum_tolerance(&w, 1e-4));
+    check("momentum z change / total", (p1.z - p0.z) / scale, 0, momentum_tolerance(&w, 1e-4));
     // collisions happened: the first two spheres turned around
     check("sphere a turned around (vx < 0)", w.bodies[a].vel.x < 0, 1, 0);
     rigid_free(&w);
@@ -360,10 +365,11 @@ static void test_hulls(void){
     w.bodies[a1].vel = vec3(200, 0, 0);
     w.bodies[a2].vel = vec3(-100, 0, 0);
     Vec3 p0 = rigid_momentum(&w);
+    // (their momenta cancel: relative to the sum of their sizes)
+    real scale = v_len(w.bodies[a1].vel) * w.bodies[a1].mass + v_len(w.bodies[a2].vel) * w.bodies[a2].mass;
     for (int k = 0; k < 960; k++) rigid_step(&w, 1.0 / 960);
     Vec3 p1 = rigid_momentum(&w);
-    real scale = v_len(p0) + 1e-6f;
-    check("hulls: momentum change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
+    check("hulls: momentum change / sum of momenta", v_len(v_sub(p1, p0)) / scale, 0, momentum_tolerance(&w, 1e-4));
     check("hulls: they met (first one slowed down)", w.bodies[a1].vel.x < 150, 1, 0);
     rigid_free(&w);
 }

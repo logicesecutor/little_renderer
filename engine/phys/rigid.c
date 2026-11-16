@@ -96,6 +96,7 @@ void rigid_init(RigidWorld *w){
     w->wall_restitution = 0.4f;
     w->wall_friction = 0.5f;
     w->iterations = 10;
+    { const char *e = getenv("LR_RIGID"); w->solver = e && !strcmp(e, "avbd") ? RIGID_AVBD : RIGID_PGS; }
     w->linear_damping = 0.0f;
     w->angular_damping = 0.1f;
     w->warm_start = 1;
@@ -938,49 +939,254 @@ static void apply(Body *a, Body *b, Mat3 ia, Mat3 ib, Vec3 ra, Vec3 rb, Vec3 j){
     }
 }
 
-// One step of dt in `substeps` substeps (rigid.h). The contacts are found once, at the start
-// (with margins: pair_margin), and followed through the substeps by their points in each
-// body's frame: in each substep a contact's depth is its depth when found minus how far its
-// two points have moved apart along the normal since. Looking for contacts is the costly
-// part (the hulls' separating axes, the meshes' triangles), so this does it once instead of
-// once per substep; the solver itself still runs every substep, stiff as before.
-void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
-    if (dt <= 0) return;
-    if (substeps < 1) substeps = 1;
-    const real h = dt / substeps;
-    // the sleeping bodies (those that stay asleep) are fixed for this step: inv_mass 0
-    int nsleep = w->sleep ? wake_bodies(w, dt, forces) : 0;
-    real *sleep_m = nsleep ? malloc((size_t)w->nbodies * sizeof(real)) : NULL;
-    if (sleep_m) for (int i = 0; i < w->nbodies; i++){
-        Body *b = &w->bodies[i];
-        sleep_m[i] = b->inv_mass;
-        if (b->sleeping) b->inv_mass = 0;
+// ---- the AVBD solver (Giles, Diaz, Yuksel, "Augmented Vertex Block Descent", SIGGRAPH 2025) --
+//
+// On the positions: each body in turn moves to where its inertia (to the position it would
+// reach unhindered, y = x + h v + h^2 g) balances the forces of its contacts, the others held
+// where they are (a 6 x 6 solve: mass / h^2 plus each contact row's stiffness k J J^T). A
+// contact row's force is k C + lambda, clamped (the normal only pushes, friction within
+// mu |normal|); after each iteration lambda takes that force and k grows by AVBD_BETA |C|
+// while the force is within its bounds (an augmented Lagrangian: stiff contacts without
+// stiff springs). C is linearized at the step's start (the 2D reference's way): C0 + J dx.
+// The overlap a contact starts with is left out of the iterations (they only stop further
+// approach) and taken out after the velocities are known, by one more pass of positions
+// alone ("post-stabilization": the push out gains no speed). The velocities are the moves
+// over h; the bounce, as a last pass on them.
+
+// stiffnesses relative to the lighter moving body's mass / h^2 (a contact as stiff as its
+// body's inertia over a step): the smallest, the growth per unit (cm) of violation, the largest
+#define AVBD_KMIN 0.003f
+#define AVBD_BETA 0.1f
+#define AVBD_KMAX 10.0f
+#define AVBD_ITERATIONS 5         // per substep (each body solved once in each), then the last pass
+#define AVBD_GAMMA 0.99f          // stiffness kept from the step before
+#define AVBD_MARGIN 0.05f         // overlap left (units): contacts that rest stay contacts
+#define AVBD_MAX_TURN 0.3f        // the most a body turns in one of its solves (radians)
+
+// A x = b for a 6 x 6 symmetric positive definite A (Cholesky); 0 if it is not
+static int solve6(real A[6][6], real b[6], real x[6]){
+    real L[6][6];
+    for (int i = 0; i < 6; i++)
+        for (int j = 0; j <= i; j++){
+            real sum = A[i][j];
+            for (int k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+            if (i == j){ if (sum <= 0) return 0; L[i][i] = r_sqrt(sum); }
+            else L[i][j] = sum / L[j][j];
+        }
+    real y[6];
+    for (int i = 0; i < 6; i++){ real sum = b[i]; for (int k = 0; k < i; k++) sum -= L[i][k] * y[k]; y[i] = sum / L[i][i]; }
+    for (int i = 5; i >= 0; i--){ real sum = y[i]; for (int k = i + 1; k < 6; k++) sum -= L[k][i] * x[k]; x[i] = sum / L[i][i]; }
+    return 1;
+}
+
+// the rotation from q0 to q, as a vector (small angles: twice the quaternion's vector part)
+static Vec3 rot_delta(Quat q, Quat q0){
+    Quat d = quat_mul(q, quat(q0.w, -q0.x, -q0.y, -q0.z));
+    real sg = d.w < 0 ? -2.0f : 2.0f;
+    return vec3(d.x * sg, d.y * sg, d.z * sg);
+}
+
+typedef struct {
+    Vec3 x0, y;               // where it starts, where it would go unhindered
+    Quat q0, qy;
+    Vec3 vy, wy;              // and its velocities then
+    Mat3 I;                   // its inertia (world frame)
+} AvbdBody;
+
+// a contact row's violation now: C0 (its start, the overlap left out unless `full`) + J dx
+static real avbd_c(const RigidWorld *w, const AvbdBody *ab, const Contact *c, int r, Vec3 d, Vec3 ja, Vec3 jb, real c0, int full){
+    const Body *a = &w->bodies[c->a];
+    real C = (full || c0 > 0 || r > 0) ? c0 : 0;
+    if (r > 0 && !full) C = 0;                     // (a sliding anchor's drift: the last pass too)
+    C += v_dot(d, v_sub(a->pos, ab[c->a].x0)) + v_dot(ja, rot_delta(a->rot, ab[c->a].q0));
+    if (c->b >= 0){
+        const Body *b = &w->bodies[c->b];
+        C -= v_dot(d, v_sub(b->pos, ab[c->b].x0)) + v_dot(jb, rot_delta(b->rot, ab[c->b].q0));
     }
-    // the contacts (the previous step's are kept for warm starting)
-    { Contact *t = w->prev; w->prev = w->contacts; w->contacts = t;
-      int tc = w->cap_prev; w->cap_prev = w->cap_contacts; w->cap_contacts = tc;
-      w->nprev = w->ncontacts; w->ncontacts = 0; }
-    memos_step(w);
-    find_contacts(w, dt);
-    for (int k = 0; k < w->ncontacts; k++){
+    return C;
+}
+
+// the contacts' rows at the substep's start (x0, q0): direction, angular Jacobians of a and b, C0
+typedef struct { Vec3 d[3], ja[3], jb[3]; real c0[3]; } AvbdRows;
+
+static void avbd_rows(const AvbdBody *ab, const Contact *c, AvbdRows *R){
+    Vec3 ra = quat_rotate(ab[c->a].q0, c->la), pa = v_add(ab[c->a].x0, ra);
+    Vec3 rb = vec3(0, 0, 0), pb = c->lb;
+    if (c->b >= 0){ rb = quat_rotate(ab[c->b].q0, c->lb); pb = v_add(ab[c->b].x0, rb); }
+    Vec3 dir[3] = {c->n, c->t1, c->t2};
+    for (int r = 0; r < 3; r++){
+        R->d[r] = dir[r];
+        R->ja[r] = v_cross(ra, dir[r]);
+        R->jb[r] = v_cross(rb, dir[r]);
+        R->c0[r] = v_dot(dir[r], v_sub(pa, pb));
+    }
+    // the normal's: the separation along n (the contact's points both start at its point:
+    // minus the depth when found, plus how far they have moved apart since), with the margin
+    R->c0[0] = -c->depth0 + R->c0[0] + AVBD_MARGIN;
+}
+
+// a row's force bounds: the normal pushes (<= 0); friction within mu |the normal's|
+static void avbd_bounds(const Contact *c, int r, real *lo, real *hi){
+    if (r == 0){ *lo = -REAL_MAX; *hi = 0; return; }
+    real f = c->mu * r_fabs(c->lam[0]);
+    *lo = -f; *hi = f;
+}
+
+static void avbd_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
+    const int nb = w->nbodies, nc = w->ncontacts;
+    AvbdBody *ab = malloc((size_t)(nb > 0 ? nb : 1) * sizeof(AvbdBody));
+    AvbdRows *rows = malloc((size_t)(nc > 0 ? nc : 1) * sizeof(AvbdRows));
+    int *start = calloc((size_t)nb + 1, sizeof(int)), *list = malloc((size_t)(2 * nc > 0 ? 2 * nc : 1) * sizeof(int));
+    if (!ab || !rows || !start || !list){ perror("malloc"); exit(1); }
+    // each body's contacts (2 c + side)
+    for (int k = 0; k < nc; k++){ start[w->contacts[k].a + 1]++; if (w->contacts[k].b >= 0) start[w->contacts[k].b + 1]++; }
+    for (int i = 0; i < nb; i++) start[i + 1] += start[i];
+    { int *at = malloc((size_t)(nb > 0 ? nb : 1) * sizeof(int));
+      if (!at){ perror("malloc"); exit(1); }
+      memcpy(at, start, (size_t)nb * sizeof(int));
+      for (int k = 0; k < nc; k++){ list[at[w->contacts[k].a]++] = 2 * k; if (w->contacts[k].b >= 0) list[at[w->contacts[k].b]++] = 2 * k + 1; }
+      free(at); }
+    for (int k = 0; k < nc; k++){
         Contact *c = &w->contacts[k];
-        onb_from_normal(c->n, &c->t1, &c->t2);
-        // Warm start: the same contact last step (same bodies, within 1 unit) needed some
-        // impulse to stay put; it starts from that, and the iterations only correct the change.
-        // A resting stack then converges in a few steps instead of sinking and jittering.
-        if (!w->warm_start) continue;
-        for (int q = 0; q < w->nprev; q++){
-            const Contact *o = &w->prev[q];
-            if (o->a != c->a || o->b != c->b) continue;
-            Vec3 d = v_sub(o->p, c->p);
-            if (v_dot(d, d) > 1.0f || v_dot(o->n, c->n) < 0.95f) continue;
-            c->jn = o->jn; c->jt1 = o->jt1; c->jt2 = o->jt2;
-            // stopped at the surface by a speculative contact in the last substep, without a
-            // bounce yet: it still owes one, from its speed then
-            if (o->jn > 0) c->vn0 = o->vn0;
-            break;
+        const Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+        c->mu = b ? r_sqrt(a->friction * b->friction) : r_sqrt(a->friction * w->wall_friction);
+        // (mass_n: the scale of its stiffness, m / h^2 of the lighter moving body)
+        real ma = a->inv_mass > 0 ? a->mass : REAL_MAX, mb = b && b->inv_mass > 0 ? b->mass : REAL_MAX;
+        real hh = dt / substeps;
+        c->mass_n = r_fmin(ma, mb) < REAL_MAX ? r_fmin(ma, mb) / (hh * hh) : 1;
+        for (int r = 0; r < 3; r++) c->k[r] = r_fmin(r_fmax(AVBD_GAMMA * c->k[r], AVBD_KMIN * c->mass_n), AVBD_KMAX * c->mass_n);
+        // the approach speed it may bounce from (as the impulses' solver)
+        Vec3 ra = quat_rotate(a->rot, c->la), rb = b ? quat_rotate(b->rot, c->lb) : vec3(0, 0, 0);
+        c->vn0 = r_fmin(c->vn0, v_dot(rel_velocity(a, b, ra, rb), c->n));
+    }
+    const real h = dt / substeps, ih2 = 1 / (h * h);
+    for (int s = 0; s < substeps; s++){
+        for (int i = 0; i < nb; i++){
+            Body *b = &w->bodies[i];
+            AvbdBody *q = &ab[i];
+            q->x0 = b->pos; q->q0 = b->rot;
+            if (b->inv_mass == 0){ q->y = b->pos; q->qy = b->rot; q->vy = q->wy = vec3(0, 0, 0); continue; }
+            Vec3 f = forces ? v_add(b->force, forces[i]) : b->force;
+            Vec3 acc = v_add(w->gravity, v_scale(f, b->inv_mass));
+            Vec3 wv = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_scale(b->torque, h)));
+            q->vy = v_add(b->vel, v_scale(acc, h));
+            q->wy = wv;
+            q->y = v_add(b->pos, v_scale(q->vy, h));
+            q->qy = quat_integrate(b->rot, wv, h);
+            Mat3 r = quat_to_mat3(b->rot);
+            Vec3 in = vec3(b->inv_inertia.x > 0 ? 1 / b->inv_inertia.x : 0, b->inv_inertia.y > 0 ? 1 / b->inv_inertia.y : 0,
+                           b->inv_inertia.z > 0 ? 1 / b->inv_inertia.z : 0);
+            q->I = mat3_mul(mat3_mul(r, mat3_diag(in)), mat3_transpose(r));
+            // the first guess (the reference's adaptive warm start): moved on by its velocity, and
+            // by as much of gravity as it fell with last step (a body at rest: none, so it does
+            // not start each step pressed into what holds it)
+            real gg = v_dot(w->gravity, w->gravity);
+            real wt = gg > 0 ? r_fmin(r_fmax(v_dot(b->acc, w->gravity) / gg, 0), 1) : 1;
+            b->pos = v_add(b->pos, v_add(v_scale(b->vel, h), v_scale(v_add(v_scale(w->gravity, wt), v_scale(f, b->inv_mass)), h * h)));
+            b->rot = q->qy;
+        }
+        for (int k = 0; k < nc; k++) avbd_rows(ab, &w->contacts[k], &rows[k]);
+        // a pass more than the iterations: the last, positions alone with the overlaps taken out
+        const int iters = AVBD_ITERATIONS;
+        for (int it = 0; it <= iters; it++){
+            int full = it == iters;
+            if (full)                              // (from y: exact in free flight)
+                for (int i = 0; i < nb; i++){
+                    Body *b = &w->bodies[i];
+                    if (b->inv_mass == 0) continue;
+                    Vec3 v = v_add(ab[i].vy, v_scale(v_sub(b->pos, ab[i].y), 1 / h));
+                    b->acc = v_scale(v_sub(v, b->vel), 1 / h);
+                    b->vel = v;
+                    b->angvel = v_add(ab[i].wy, v_scale(rot_delta(b->rot, ab[i].qy), 1 / h));
+                }
+            // the primal: each body, the others where they are now
+            for (int i = 0; i < nb; i++){
+                Body *b = &w->bodies[i];
+                if (b->inv_mass == 0) continue;
+                const AvbdBody *q = &ab[i];
+                real A[6][6] = {{0}}, g[6], x[6];
+                Vec3 dx = v_sub(b->pos, q->y), dr = rot_delta(b->rot, q->qy);
+                Vec3 ir = mat3_mul_vec(q->I, dr);
+                for (int u = 0; u < 3; u++){
+                    A[u][u] = b->mass * ih2;
+                    for (int v = 0; v < 3; v++) A[3 + u][3 + v] = q->I.m[u][v] * ih2;
+                }
+                g[0] = b->mass * ih2 * dx.x; g[1] = b->mass * ih2 * dx.y; g[2] = b->mass * ih2 * dx.z;
+                g[3] = ih2 * ir.x; g[4] = ih2 * ir.y; g[5] = ih2 * ir.z;
+                for (int e = start[i]; e < start[i + 1]; e++){
+                    const Contact *c = &w->contacts[list[e] >> 1];
+                    const AvbdRows *R = &rows[list[e] >> 1];
+                    real sg = (list[e] & 1) ? -1.0f : 1.0f;
+                    for (int r = 0; r < 3; r++){
+                        if (r > 0 && c->lam[0] == 0 && !full) continue;   // (no push, no friction)
+                        real C = avbd_c(w, ab, c, r, R->d[r], R->ja[r], R->jb[r], R->c0[r], full);
+                        real lo, hi;
+                        avbd_bounds(c, r, &lo, &hi);
+                        real f0 = c->k[r] * C + c->lam[r], f = r_fmin(r_fmax(f0, lo), hi);
+                        if (f == 0 && f0 >= hi) continue;  // (apart: no force)
+                        Vec3 jl = v_scale(R->d[r], sg), ja = v_scale((list[e] & 1) ? R->jb[r] : R->ja[r], sg);
+                        real J[6] = {jl.x, jl.y, jl.z, ja.x, ja.y, ja.z};
+                        // (at a bound the force no longer changes with C: no stiffness)
+                        real kk = f0 > lo && f0 < hi ? c->k[r] : 0;
+                        for (int u = 0; u < 6; u++){
+                            g[u] += J[u] * f;
+                            for (int v = 0; v < 6; v++) A[u][v] += kk * J[u] * J[v];
+                        }
+                    }
+                }
+                if (!solve6(A, g, x)) continue;
+                // (a trust region: the contacts are linear in the turn only while it is small;
+                // a pile's deep overlaps asked for more and blew up)
+                real t = r_sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5]);
+                if (t > AVBD_MAX_TURN) for (int u = 0; u < 6; u++) x[u] *= AVBD_MAX_TURN / t;
+                b->pos = v_sub(b->pos, vec3(x[0], x[1], x[2]));
+                b->rot = quat_integrate(b->rot, vec3(-x[3], -x[4], -x[5]), 1);
+            }
+            if (full) break;
+            // the dual: each row's force, its stiffness up while the force is within bounds
+            for (int k = 0; k < nc; k++){
+                Contact *c = &w->contacts[k];
+                const AvbdRows *R = &rows[k];
+                for (int r = 0; r < 3; r++){
+                    real C = avbd_c(w, ab, c, r, R->d[r], R->ja[r], R->jb[r], R->c0[r], 0);
+                    real lo, hi;
+                    avbd_bounds(c, r, &lo, &hi);
+                    real l = r_fmin(r_fmax(c->k[r] * C + c->lam[r], lo), hi);
+                    c->lam[r] = l;
+                    if (l > lo && l < hi) c->k[r] = r_fmin(c->k[r] + AVBD_BETA * c->mass_n * r_fabs(C), AVBD_KMAX * c->mass_n);
+                }
+            }
+        }
+        // damping, and the bounce: an approach faster than BOUNCE_THRESHOLD comes back at e
+        // times its speed (sequential impulses on the normals alone, over the new velocities)
+        for (int i = 0; i < nb; i++){
+            Body *b = &w->bodies[i];
+            if (b->inv_mass == 0) continue;
+            b->vel = v_scale(b->vel, 1.0f / (1.0f + w->linear_damping * h));
+            b->angvel = v_scale(b->angvel, 1.0f / (1.0f + w->angular_damping * h));
+        }
+        if (s == substeps - 1){
+            Mat3 zero = {{{0}}};
+            for (int it = 0; it < 4; it++)
+                for (int k = 0; k < nc; k++){
+                    Contact *c = &w->contacts[k];
+                    if (c->vn0 >= -BOUNCE_THRESHOLD || c->lam[0] == 0) continue;
+                    Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+                    real e = b ? r_fmax(a->restitution, b->restitution) : r_fmax(a->restitution, w->wall_restitution);
+                    Mat3 ia = a->inv_mass > 0 ? body_inv_inertia_world(a) : zero, ib = b && b->inv_mass > 0 ? body_inv_inertia_world(b) : zero;
+                    Vec3 ra = quat_rotate(a->rot, c->la), rb = b ? quat_rotate(b->rot, c->lb) : vec3(0, 0, 0);
+                    real m = eff_mass(a, b, ia, ib, ra, rb, c->n);
+                    real vn = v_dot(rel_velocity(a, b, ra, rb), c->n), want = -e * c->vn0;
+                    if (vn < want) apply(a, b, ia, ib, ra, rb, v_scale(c->n, m * (want - vn)));
+                }
+            for (int k = 0; k < nc; k++) if (w->contacts[k].lam[0] != 0) w->contacts[k].vn0 = 0;
         }
     }
+    free(ab); free(rows); free(start); free(list);
+}
+
+// the sequential impulses' substeps (rigid_steps; the contacts found and warm started)
+static void pgs_steps(RigidWorld *w, int substeps, real h, const Vec3 *forces){
     Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
     int *act = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(int));
     if (!iw || !act){ perror("malloc"); exit(1); }
@@ -1076,10 +1282,59 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         }
     }
 
-    if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
-    if (w->sleep) fall_asleep(w, dt, forces);
     free(iw);
     free(act);
+}
+
+// One step of dt in `substeps` substeps (rigid.h). The contacts are found once, at the start
+// (with margins: pair_margin), and followed through the substeps by their points in each
+// body's frame: in each substep a contact's depth is its depth when found minus how far its
+// two points have moved apart along the normal since. Looking for contacts is the costly
+// part (the hulls' separating axes, the meshes' triangles), so this does it once instead of
+// once per substep; the solver itself still runs every substep, stiff as before.
+void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
+    if (dt <= 0) return;
+    if (substeps < 1) substeps = 1;
+    const real h = dt / substeps;
+    // the sleeping bodies (those that stay asleep) are fixed for this step: inv_mass 0
+    int nsleep = w->sleep ? wake_bodies(w, dt, forces) : 0;
+    real *sleep_m = nsleep ? malloc((size_t)w->nbodies * sizeof(real)) : NULL;
+    if (sleep_m) for (int i = 0; i < w->nbodies; i++){
+        Body *b = &w->bodies[i];
+        sleep_m[i] = b->inv_mass;
+        if (b->sleeping) b->inv_mass = 0;
+    }
+    // the contacts (the previous step's are kept for warm starting)
+    { Contact *t = w->prev; w->prev = w->contacts; w->contacts = t;
+      int tc = w->cap_prev; w->cap_prev = w->cap_contacts; w->cap_contacts = tc;
+      w->nprev = w->ncontacts; w->ncontacts = 0; }
+    memos_step(w);
+    find_contacts(w, dt);
+    for (int k = 0; k < w->ncontacts; k++){
+        Contact *c = &w->contacts[k];
+        onb_from_normal(c->n, &c->t1, &c->t2);
+        // Warm start: the same contact last step (same bodies, within 1 unit) needed some
+        // impulse to stay put; it starts from that, and the iterations only correct the change.
+        // A resting stack then converges in a few steps instead of sinking and jittering.
+        if (!w->warm_start) continue;
+        for (int q = 0; q < w->nprev; q++){
+            const Contact *o = &w->prev[q];
+            if (o->a != c->a || o->b != c->b) continue;
+            Vec3 d = v_sub(o->p, c->p);
+            if (v_dot(d, d) > 1.0f || v_dot(o->n, c->n) < 0.95f) continue;
+            c->jn = o->jn; c->jt1 = o->jt1; c->jt2 = o->jt2;
+            for (int r = 0; r < 3; r++){ c->k[r] = o->k[r]; c->lam[r] = o->lam[r]; }
+            // stopped at the surface by a speculative contact in the last substep, without a
+            // bounce yet: it still owes one, from its speed then
+            if (o->jn > 0 || o->lam[0] != 0) c->vn0 = o->vn0;
+            break;
+        }
+    }
+    if (w->solver == RIGID_AVBD) avbd_steps(w, dt, substeps, forces);
+    else pgs_steps(w, substeps, h, forces);
+
+    if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
+    if (w->sleep) fall_asleep(w, dt, forces);
     for (int i = 0; i < w->nbodies; i++) w->bodies[i].force = w->bodies[i].torque = vec3(0, 0, 0);
 }
 

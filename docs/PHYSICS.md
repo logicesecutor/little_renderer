@@ -244,6 +244,44 @@ began. Bouncing a gap that is about to close, or bouncing from the speed after t
 has stopped the bodies, made piles jump and blow up, as did an uncapped push out (a light
 balloon squeezed into a wall by heavy balls was shot out ever faster).
 
+### 1.3b The other solver: AVBD (`LR_RIGID=avbd`, CPU)
+
+`rigid_init` reads the environment variable `LR_RIGID`: `avbd` picks Augmented Vertex Block
+Descent (Giles, Diaz, Yuksel, SIGGRAPH 2025) instead of the impulses (`RigidWorld.solver`).
+The contacts are the same (found, matched and warm started as above); what solves them
+works on positions, not velocities:
+
+- each substep starts from where every body would be unhindered, `y = x + h v + h² g`
+  (the first guess adds only as much of gravity as the body fell with in the step before,
+  so a body at rest does not start pressed into what holds it);
+- an iteration moves each body in turn to where its inertia balances its contacts' forces,
+  the other bodies held where they are: a 6 x 6 solve (Cholesky) of
+  `M/h² + Σ k J Jᵀ` against `M/h² (x − y) + Σ J f`, with each row's force
+  `f = clamp(k C + λ)` (the normal only pushes, friction within `μ |λn|`) and `C` the row's
+  violation linearized at the step's start;
+- after the iteration each row's `λ` takes that force and its stiffness `k` grows by
+  `β |C|` while the force is within its bounds (the augmented Lagrangian: stiff contacts
+  without stiff springs); `k` and `λ` carry to the next step (`k` × 0.99);
+- the stiffnesses are relative to the lighter moving body's `m / h²` (from 0.003 to 10 of
+  it, growing by 0.1 of it per unit of violation): absolute ones were too soft for heavy
+  boxes or, at a balloon's mass, stiff enough to blow up;
+- the overlap a contact starts with is left out of the iterations; the velocities are
+  taken (`v = vy + (x − y) / h`), and one more pass of positions alone takes it out
+  without giving speed to the push ("post-stabilization");
+- a body turns by at most 0.3 rad in one of its solves (a trust region: the contacts are
+  linear in the turn only while it is small; a pile's deep overlaps blew up without it);
+- the bounce is a last pass of sequential impulses on the normals, over the new velocities.
+
+5 iterations per substep (and the same substeps) pass all the tests; with 4 two stacked
+hulls kept trembling in the double build. AVBD moves one body at a time, so it keeps
+momentum only as far as the iterations converge (a percent of the momenta that met: the
+momentum tests allow that for it); on the CPU it costs about as much as the impulses (the
+whole `test_physics` 0.9 s against 0.8 s on Windows; mesh_rain with 1000 hulls, -gpu off,
+1.3 s of physics a frame against 1.4 s: the contacts dominate). Static-friction anchors
+(the paper's "stick") are not done: within a step the tangent rows already hold the points
+where they were, and the tests' resting boxes do not drift. On the GPU the bodies still
+use the impulses (1.4).
+
 ### 1.4 The bodies on the GPU (`gpu/rigid_gpu.c`)
 
 With a GPU (`view -sim on`, `sim`; `-gpurigid off` to keep them on the CPU) the bodies are
@@ -829,6 +867,8 @@ the time of every pass at the end (natively; WEB.md 3).
 - E. Catto, "Iterative Dynamics with Temporal Coherence", GDC 2005; Box2D (contact
   clipping, warm starting); "Solver2D", 2024, and Box2D v3 (the soft step: contacts found
   once per step, followed through the substeps; speculative contacts; the push-out cap).
+- C. Giles, E. Diaz, C. Yuksel, "Augmented Vertex Block Descent", ACM TOG (SIGGRAPH)
+  2025, and its 2D reference demo (avbd-demo2d).
 - D. Baraff, "Physically Based Modeling: Rigid Body Simulation", SIGGRAPH course notes 2001.
 - R. Tonge, F. Benevolenski, A. Voroshilov, "Mass Splitting for Jitter-Free Parallel Rigid
   Body Simulation", SIGGRAPH 2012.

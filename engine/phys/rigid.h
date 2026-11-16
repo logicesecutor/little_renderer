@@ -59,6 +59,7 @@ typedef struct {
     int sleeping;            // 1: at rest, not moved until something wakes it (rigid_steps)
     real sleep_time;         // how long it has been still (s)
     Vec3 sleep_force;        // the external force on it when it fell asleep
+    Vec3 acc;                // its last step's acceleration (RIGID_AVBD's first guess)
 } Body;
 
 typedef struct {
@@ -71,7 +72,16 @@ typedef struct {
     // solver state
     Vec3 ra, rb, t1, t2;
     real mass_n, mass_t1, mass_t2, bias, mu, jn, jt1, jt2;
+    // the AVBD solver's (RIGID_AVBD): per row (normal, tangents) the stiffness and the force,
+    // kept from step to step as the impulses are (mass_n: there, the stiffnesses' scale)
+    real k[3], lam[3];
 } Contact;
+
+// RIGID_PGS: sequential impulses on the velocities (substeps of iterations);
+// RIGID_AVBD: Augmented Vertex Block Descent on the positions (Giles et al., SIGGRAPH 2025):
+// each body in turn moves to balance its inertia against its contacts, stiff contacts by an
+// augmented Lagrangian (the same substeps, AVBD_ITERATIONS passes in each)
+typedef enum { RIGID_PGS, RIGID_AVBD } RigidSolver;
 
 typedef struct {
     Body *bodies;
@@ -80,7 +90,8 @@ typedef struct {
     Aabb room;               // all bodies stay inside this box (6 walls)
     int has_room;
     real wall_restitution, wall_friction;
-    int iterations;          // impulse iterations per step (more = stiffer stacks)
+    int iterations;          // impulse iterations per substep (more = stiffer stacks)
+    RigidSolver solver;      // RIGID_PGS (default) or RIGID_AVBD (LR_RIGID=avbd)
     real linear_damping, angular_damping;   // fraction of velocity lost per second
     Contact *contacts;       // of the last step
     int ncontacts, cap_contacts;
