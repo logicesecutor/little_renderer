@@ -12,6 +12,23 @@ var<workgroup> wsep: u32;
 var<workgroup> wsepa: atomic<u32>;
 var<workgroup> wcount: u32;
 var<workgroup> wft: vec4u;                 /* the feature remembered: type, i, j; w = 1 reuse it */
+/* The pair's corners and face normals in the world frame, made once for the whole workgroup
+   (the tests below read each many times: a mat3 product and a load each time otherwise), when
+   both hulls fit: a's at [0, HC) and [0, HF), b's at [HC, 2 HC) and [HF, 2 HF) */
+const HC = 64u;
+const HF = 128u;
+var<workgroup> hv: array<vec3f, 128>;
+var<workgroup> hn: array<vec3f, 256>;
+var<workgroup> wcached: u32;
+var<private> cached: bool;
+/* corner k / face f's normal of a (side 0) or b (side 1) */
+fn hcv(side: u32, s: Shape, k: u32) -> vec3f { if (cached) { return hv[side * HC + k]; } return sv(s, k); }
+fn hcn(side: u32, s: Shape, f: u32) -> vec3f { if (cached) { return hn[side * HF + f]; } return sn(s, f); }
+fn min_along_c(side: u32, s: Shape, d: vec3f) -> f32 {
+    var m = 1e30;
+    for (var k = 0u; k < s.nv; k++) { m = min(m, dot(hcv(side, s, k), d)); }
+    return m;
+}
 
 /* the largest ws (and its i, j, axis) into element 0 */
 fn reduce_max(lid: u32) {
@@ -136,6 +153,15 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     if (kb == 0u) { if (lid == 0u) { sphere_convex(ib, ia); } return; }
     let A = shape_of(ia);
     let S = shape_of(ib);
+    if (lid == 0u) { wcached = select(0u, 1u, A.nv <= HC && S.nv <= HC && A.nf <= HF && S.nf <= HF); }
+    cached = workgroupUniformLoad(&wcached) != 0u;
+    if (cached) {
+        for (var v = lid; v < A.nv; v += 64u) { hv[v] = sv(A, v); }
+        for (var v = lid; v < S.nv; v += 64u) { hv[HC + v] = sv(S, v); }
+        for (var f = lid; f < A.nf; f += 64u) { hn[f] = sn(A, f); }
+        for (var f = lid; f < S.nf; f += 64u) { hn[HF + f] = sn(S, f); }
+    }
+    workgroupBarrier();
     /* b in a's frame, and what decided the pair last step */
     let key = (ia << 16u | ib) + 1u;
     let rd = u32(P.h2.w);                   /* the table read this step (the other is written) */
@@ -165,15 +191,15 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
         var hi = -1e30;
         var L = vec3f(0.0);
         var off = 0.0;
-        if (ft.x == 1u) { L = sn(A, ft.y); off = sd(A, ft.y); }
-        else if (ft.x == 2u) { L = sn(S, ft.y); off = sd(S, ft.y); }
+        if (ft.x == 1u) { L = hcn(0u, A, ft.y); off = sd(A, ft.y); }
+        else if (ft.x == 2u) { L = hcn(1u, S, ft.y); off = sd(S, ft.y); }
         else { L = edge_axis(A, S, ft.y, ft.z); }
         if (ft.x == 2u) {                   /* a's corners along b's face normal */
-            for (var v = lid; v < A.nv; v += 64u) { lo = max(lo, -dot(sv(A, v), L)); }
+            for (var v = lid; v < A.nv; v += 64u) { lo = max(lo, -dot(hcv(0u, A, v), L)); }
         } else {
-            for (var v = lid; v < S.nv; v += 64u) { lo = max(lo, -dot(sv(S, v), L)); }
+            for (var v = lid; v < S.nv; v += 64u) { lo = max(lo, -dot(hcv(1u, S, v), L)); }
         }
-        if (ft.x == 3u) { for (var v = lid; v < A.nv; v += 64u) { hi = max(hi, dot(sv(A, v), L)); } }
+        if (ft.x == 3u) { for (var v = lid; v < A.nv; v += 64u) { hi = max(hi, dot(hcv(0u, A, v), L)); } }
         ws[lid] = lo;
         reduce_max_f(lid);
         let mn = -workgroupUniformLoad(&ws[0]);
@@ -199,7 +225,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     var best = -1e30;
     var bi = 0u;
     for (var f = lid; f < A.nf; f += 64u) {
-        let s = min_along(S, sn(A, f)) - sd(A, f);
+        let s = min_along_c(1u, S, hcn(0u, A, f)) - sd(A, f);
         if (s > MG) { atomicMax(&wsepa, 1u << 28u | f << 12u); }
         if (s > best) { best = s; bi = f; }
     }
@@ -216,7 +242,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     best = -1e30;
     bi = 0u;
     for (var f = lid; f < S.nf; f += 64u) {
-        let s = min_along(A, sn(S, f)) - sd(S, f);
+        let s = min_along_c(0u, A, hcn(1u, S, f)) - sd(S, f);
         if (s > MG) { atomicMax(&wsepa, 2u << 28u | f << 12u); }
         if (s > best) { best = s; bi = f; }
     }
@@ -237,15 +263,15 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     var bl = vec3f(0.0, 1.0, 0.0);
     for (var i = lid; i < A.ne; i += 64u) {
         let E = bitcast<vec4u>(G[A.e0 + i]);
-        let a = sn(A, E.z);
-        let b = sn(A, E.w);
-        let pa = sv(A, E.x);
-        let da = sv(A, E.y) - pa;
+        let a = hcn(0u, A, E.z);
+        let b = hcn(0u, A, E.w);
+        let pa = hcv(0u, A, E.x);
+        let da = hcv(0u, A, E.y) - pa;
         let bxa = cross(b, a);
         for (var j = 0u; j < S.ne; j++) {
             let F = bitcast<vec4u>(G[S.e0 + j]);
-            let c = -sn(S, F.z);
-            let d = -sn(S, F.w);
+            let c = -hcn(1u, S, F.z);
+            let d = -hcn(1u, S, F.w);
             let cba = dot(c, bxa);
             let dba = dot(d, bxa);
             if (cba * dba >= 0.0) { continue; }
@@ -253,8 +279,8 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             let adc = dot(a, dxc);
             let bdc = dot(b, dxc);
             if (adc * bdc >= 0.0 || cba * bdc <= 0.0) { continue; }
-            let pb = sv(S, F.x);
-            let db = sv(S, F.y) - pb;
+            let pb = hcv(1u, S, F.x);
+            let db = hcv(1u, S, F.y) - pb;
             var L = cross(da, db);
             let ll = length(L);
             if (ll < 1e-6 * length(da) * length(db)) { continue; }
