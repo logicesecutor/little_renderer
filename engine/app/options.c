@@ -40,13 +40,17 @@ void options_usage(Program prog, FILE *f){
                "  -sim on|off                run the physics demo                       (off)\n"
                "  -demo drop|blast           which one                                  (drop)\n"
              : "");
-    if (view) fprintf(f,
+    fprintf(f,
         "backend\n"
-        "  -backend hybrid|rt|raster  hybrid = rasterizer while moving, path tracer when still (hybrid)\n"
+        "%s"
         "  -shading phong|gouraud|flat|wireframe   rasterizer shading       (phong)\n"
-        "  -rastercloud on|off        rasterizer: draw clouds and fog by raymarching (on)\n"
+        "  -rastercloud on|off        rasterizer: draw %s by raymarching (on)\n"
         "  -march n / -lightres n     raymarching: max steps per ray / light grid size (128 / 48)\n"
-        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n"
+        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n%s",
+        view ? "  -backend hybrid|rt|raster  hybrid = rasterizer while moving, path tracer when still (hybrid)\n"
+             : sim ? "  -backend rt|raster         path tracer, or rasterizer (raymarched cloud: fast) (rt)\n"
+             : "  -backend rt|raster         path tracer or rasterizer                (rt)\n",
+        sim ? "the cloud" : "clouds and fog", view ? "2" : "1", !view ? "" :
         "  -gpu on|off|offscreen      render (rasterizer, path tracer, clouds) and simulate the air on the GPU\n"
         "                             (WebGPU; on when the build has it: make web, or make deps natively);\n"
         "                             offscreen: the GPU draws into a texture read back to the canvas\n"
@@ -55,21 +59,7 @@ void options_usage(Program prog, FILE *f){
         "  -gpuraster on|off          with the GPU: the rasterizer's triangles are drawn there too\n"
         "  -gputrace on|off           with the GPU: it path traces too (in rt mode every frame, while the\n"
         "                             camera or the physics move: each frame reprojected and denoised)\n"
-        "                             (default: on, off for a software GPU, which is slower than the CPU at it)\n", view ? "2" : "1");
-    else if (sim) fprintf(f,
-        "backend\n"
-        "  -backend rt|raster         path tracer, or rasterizer (raymarched cloud: fast) (rt)\n"
-        "  -shading phong|gouraud|flat|wireframe   rasterizer shading       (phong)\n"
-        "  -rastercloud on|off        rasterizer: draw the cloud by raymarching (on)\n"
-        "  -march n / -lightres n     raymarching: max steps per ray / light grid size (128 / 48)\n"
-        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n", view ? "2" : "1");
-    else fprintf(f,
-        "backend\n"
-        "  -backend rt|raster         path tracer or rasterizer                (rt)\n"
-        "  -shading phong|gouraud|flat|wireframe   rasterizer shading       (phong)\n"
-        "  -rastercloud on|off        rasterizer: draw clouds and fog by raymarching (on)\n"
-        "  -march n / -lightres n     raymarching: max steps per ray / light grid size (128 / 48)\n"
-        "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n", view ? "2" : "1");
+        "                             (default: on, off for a software GPU, which is slower than the CPU at it)\n");
     fprintf(f,
         "\n"
         "image and quality\n"
@@ -179,6 +169,25 @@ static Vec3 parse_vec3(Program prog, const char *s){
     return vec3(x, y, z);
 }
 
+static int on_off(Program prog, const char *opt, const char *v){
+    if (!strcmp(v, "on")) return 1;
+    if (strcmp(v, "off")){
+        char msg[64];
+        snprintf(msg, sizeof(msg), "expected on or off after %s, got", opt);
+        fail(prog, msg, v);
+    }
+    return 0;
+}
+
+// v's index in names (NULL-terminated)
+static int pick(Program prog, const char *v, const char *const *names, const char *unknown){
+    for (int i = 0; names[i]; i++) if (!strcmp(v, names[i])) return i;
+    fail(prog, unknown, v);
+    return 0;
+}
+
+static const char *const SCENES[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase", "sky", NULL};
+
 void options_parse(Options *o, Program prog, int argc, char **argv){
     memset(o, 0, sizeof(*o));
     o->prog = prog;
@@ -263,11 +272,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-orbit")) o->orbit = atof(v);
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
-        else if (!strcmp(a, "-photoncache")){
-            if (!strcmp(v, "on")) o->photon_cache = 1;
-            else if (!strcmp(v, "off")) o->photon_cache = 0;
-            else fail(prog, "expected on or off after -photoncache, got", v);
-        }
+        else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);
         else if (!strcmp(a, "-density")) o->cloud.sigma_t = atof(v);
         else if (!strcmp(a, "-albedo"))  o->cloud.albedo = parse_color(prog, v);
         else if (!strcmp(a, "-g"))       o->cloud.g = atof(v);
@@ -285,11 +290,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-skyrot"))  o->scene.sky_rot = (real)atof(v);
         else if (!strcmp(a, "-proberes")) o->probe_res = atoi(v);
         else if (!strcmp(a, "-probespp")) o->probe_spp = atoi(v);
-        else if (!strcmp(a, "-probe")){
-            if (!strcmp(v, "on")) o->probe = 1;
-            else if (!strcmp(v, "off")) o->probe = 0;
-            else fail(prog, "expected on or off after -probe, got", v);
-        }
+        else if (!strcmp(a, "-probe")) o->probe = on_off(prog, a, v);
         else if (!strcmp(a, "-photons")) o->photons = atof(v);
         else if (!strcmp(a, "-march"))   o->march.max_steps = atoi(v);
         else if (!strcmp(a, "-lightres")) o->march.light_res = atoi(v);
@@ -300,41 +301,13 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             else if (!strcmp(v, "offscreen")) o->gpu = 2;
             else fail(prog, "expected on, off or offscreen after -gpu, got", v);
         }
-        else if (!strcmp(a, "-gpurigid")){
-            if (!strcmp(v, "on")) o->gpu_rigid = 1;
-            else if (!strcmp(v, "off")) o->gpu_rigid = 0;
-            else fail(prog, "expected on or off after -gpurigid, got", v);
-        }
-        else if (!strcmp(a, "-gpufluid")){
-            if (!strcmp(v, "on")) o->gpu_fluid = 1;
-            else if (!strcmp(v, "off")) o->gpu_fluid = 0;
-            else fail(prog, "expected on or off after -gpufluid, got", v);
-        }
-        else if (!strcmp(a, "-gpuraster")){
-            if (!strcmp(v, "on")) o->gpu_raster = 1;
-            else if (!strcmp(v, "off")) o->gpu_raster = 0;
-            else fail(prog, "expected on or off after -gpuraster, got", v);
-        }
-        else if (!strcmp(a, "-gputrace")){
-            if (!strcmp(v, "on")) o->gpu_trace = 1;
-            else if (!strcmp(v, "off")) o->gpu_trace = 0;
-            else fail(prog, "expected on or off after -gputrace, got", v);
-        }
-        else if (!strcmp(a, "-wavefront")){
-            if (!strcmp(v, "on")) o->wavefront = 1;
-            else if (!strcmp(v, "off")) o->wavefront = 0;
-            else fail(prog, "expected on or off after -wavefront, got", v);
-        }
-        else if (!strcmp(a, "-denoise")){
-            if (!strcmp(v, "on")) o->denoise = 1;
-            else if (!strcmp(v, "off")) o->denoise = 0;
-            else fail(prog, "expected on or off after -denoise, got", v);
-        }
-        else if (!strcmp(a, "-rastercloud")){
-            if (!strcmp(v, "on")) o->raster_clouds = 1;
-            else if (!strcmp(v, "off")) o->raster_clouds = 0;
-            else fail(prog, "expected on or off after -rastercloud, got", v);
-        }
+        else if (!strcmp(a, "-gpurigid")) o->gpu_rigid = on_off(prog, a, v);
+        else if (!strcmp(a, "-gpufluid")) o->gpu_fluid = on_off(prog, a, v);
+        else if (!strcmp(a, "-gpuraster")) o->gpu_raster = on_off(prog, a, v);
+        else if (!strcmp(a, "-gputrace")) o->gpu_trace = on_off(prog, a, v);
+        else if (!strcmp(a, "-wavefront")) o->wavefront = on_off(prog, a, v);
+        else if (!strcmp(a, "-denoise")) o->denoise = on_off(prog, a, v);
+        else if (!strcmp(a, "-rastercloud")) o->raster_clouds = on_off(prog, a, v);
         else if (!strcmp(a, "-frames"))  o->sim.frames = atoi(v);
         else if (!strcmp(a, "-fps"))     o->sim.fps = atof(v);
         else if (!strcmp(a, "-balls"))   o->sim.balls = atoi(v);
@@ -351,38 +324,22 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             else if (!strcmp(v, "off")) o->sim.collider = 0;
             else fail(prog, "-collider takes on or off", v);
         }
-        else if (!strcmp(a, "-sim") && prog == PROG_VIEW){
-            if (!strcmp(v, "on")) o->sim.on = 1;
-            else if (!strcmp(v, "off")) o->sim.on = 0;
-            else fail(prog, "expected on or off after -sim, got", v);
-        } else if (!strcmp(a, "-gif") && prog == PROG_SIM){
-            if (!strcmp(v, "on")) o->sim.gif = 1;
-            else if (!strcmp(v, "off")) o->sim.gif = 0;
-            else fail(prog, "expected on or off after -gif, got", v);
-        } else if (!strcmp(a, "-demo") && prog != PROG_RENDER){
-            if (!strcmp(v, "drop")) o->sim.demo = SIM_DROP;
-            else if (!strcmp(v, "blast")) o->sim.demo = SIM_BLAST;
-            else fail(prog, "unknown demo", v);
-        }
+        else if (!strcmp(a, "-sim") && prog == PROG_VIEW) o->sim.on = on_off(prog, a, v);
+        else if (!strcmp(a, "-gif") && prog == PROG_SIM) o->sim.gif = on_off(prog, a, v);
+        else if (!strcmp(a, "-demo") && prog != PROG_RENDER)
+            o->sim.demo = (SimDemo)pick(prog, v, (const char *const[]){"drop", "blast", NULL}, "unknown demo");
         else if (!strcmp(a, "-sampler")){
             if (!strcmp(v, "sobol")) o->sampler = 1;
             else if (!strcmp(v, "random")) o->sampler = 0;
             else fail(prog, "expected sobol or random after -sampler, got", v);
         }
-        else if (!strcmp(a, "-mis")){
-            if (!strcmp(v, "on")) o->mis = 1;
-            else if (!strcmp(v, "off")) o->mis = 0;
-            else fail(prog, "expected on or off after -mis, got", v);
-        } else if (!strcmp(a, "-caustics")){
+        else if (!strcmp(a, "-mis")) o->mis = on_off(prog, a, v);
+        else if (!strcmp(a, "-caustics")){
             if (!strcmp(v, "lt")) o->caustics_lt = 1;
             else if (!strcmp(v, "pt")) o->caustics_lt = 0;
             else fail(prog, "expected lt or pt after -caustics, got", v);
         }
-        else if (!strcmp(a, "-cloud")){
-            if (!strcmp(v, "on")) o->use_cloud = 1;
-            else if (!strcmp(v, "off")) o->use_cloud = 0;
-            else fail(prog, "expected on or off after -cloud, got", v);
-        }
+        else if (!strcmp(a, "-cloud")) o->use_cloud = on_off(prog, a, v);
         else if (!strcmp(a, "-backend")){
             backend_set = 1;
             if (!strcmp(v, "rt")) o->backend = BACKEND_RT;
@@ -395,30 +352,12 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
             o->shading = (RenderMode)m;
         } else if (!strcmp(a, "-scene")){
             scene_set = 1;
-            if (!strcmp(v, "boxes")) o->scene.kind = SCENE_BOXES;
-            else if (!strcmp(v, "spheres")) o->scene.kind = SCENE_SPHERES;
-            else if (!strcmp(v, "mesh")) o->scene.kind = SCENE_MESH;
-            else if (!strcmp(v, "cloud")) o->scene.kind = SCENE_CLOUD;
-            else if (!strcmp(v, "empty")) o->scene.kind = SCENE_EMPTY;
-            else if (!strcmp(v, "showcase")) o->scene.kind = SCENE_SHOWCASE;
-            else if (!strcmp(v, "sky")) o->scene.kind = SCENE_SKY;
-            else fail(prog, "unknown scene", v);
-        } else if (!strcmp(a, "-mat")){
-            if (!strcmp(v, "diffuse")) o->scene.mesh_mat = MAT_DIFFUSE;
-            else if (!strcmp(v, "mirror")) o->scene.mesh_mat = MAT_MIRROR;
-            else if (!strcmp(v, "glass")) o->scene.mesh_mat = MAT_GLASS;
-            else fail(prog, "unknown material", v);
-        } else if (!strcmp(a, "-accel")){
-            if (!strcmp(v, "auto")) o->accel = -1;
-            else if (!strcmp(v, "none")) o->accel = ACCEL_NONE;
-            else if (!strcmp(v, "octree")) o->accel = ACCEL_OCTREE;
-            else if (!strcmp(v, "bvh")) o->accel = ACCEL_BVH;
-            else fail(prog, "unknown acceleration", v);
-        } else if (!strcmp(a, "-bvhsplit")){
-            if (!strcmp(v, "sah")) o->ap.bvh_split = BVH_SPLIT_SAH;
-            else if (!strcmp(v, "middle")) o->ap.bvh_split = BVH_SPLIT_MIDDLE;
-            else fail(prog, "unknown BVH split", v);
-        } else fail(prog, "unknown option", a);
+            o->scene.kind = (SceneKind)pick(prog, v, SCENES, "unknown scene");
+        } else if (!strcmp(a, "-mat"))   // (the order of MatType, AccelKind, BvhSplit)
+            o->scene.mesh_mat = (MatType)pick(prog, v, (const char *const[]){"diffuse", "mirror", "glass", NULL}, "unknown material");
+        else if (!strcmp(a, "-accel")) o->accel = pick(prog, v, (const char *const[]){"auto", "none", "octree", "bvh", NULL}, "unknown acceleration") - 1;
+        else if (!strcmp(a, "-bvhsplit")) o->ap.bvh_split = (BvhSplit)pick(prog, v, (const char *const[]){"sah", "middle", NULL}, "unknown BVH split");
+        else fail(prog, "unknown option", a);
     }
 
     if (o->width <= 0 || o->height <= 0) fail(prog, "image size must be positive, got", "-n/-width/-height");
@@ -450,14 +389,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     }
     // a glTF model and no scene: the room with the model (SCENE_MESH)
     if (o->scene.gltf_path && !scene_set) o->scene.kind = SCENE_MESH;
-    if (!o->out){
-        static const char *rt[] = {"out/cornell_boxes.png", "out/cornell_spheres.png", "out/cornell_mesh.png",
-                                   "out/cornell_cloud.png", "out/cornell_empty.png", "out/cornell_showcase.png",
-                                   "out/sky.png"};
-        static const char *ra[] = {"out/cornell_boxes_raster.png", "out/cornell_spheres_raster.png",
-                                   "out/cornell_mesh_raster.png", "out/cornell_cloud_raster.png", "out/cornell_empty_raster.png",
-                                   "out/cornell_showcase_raster.png", "out/sky_raster.png"};
-        o->out = o->backend == BACKEND_RASTER ? ra[o->scene.kind] : rt[o->scene.kind];
+    if (!o->out){   // out/cornell_<scene>[_raster].png, out/sky[_raster].png
+        static char out[64];
+        snprintf(out, sizeof(out), "out/%s%s%s.png", o->scene.kind == SCENE_SKY ? "" : "cornell_", SCENES[o->scene.kind],
+                 o->backend == BACKEND_RASTER ? "_raster" : "");
+        o->out = out;
     }
 }
 
@@ -522,9 +458,8 @@ void options_bake_probe(const Options *o, Scene *s){
 }
 
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){
-    static const char *scenes[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase", "sky"};
     static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
-    fprintf(f, "bin/render -scene %s", scenes[o->scene.kind]);
+    fprintf(f, "bin/render -scene %s", SCENES[o->scene.kind]);
     if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
     if (o->scene.gltf_path && (o->scene.kind == SCENE_MESH || o->scene.kind == SCENE_SKY)) fprintf(f, " -gltf %s", o->scene.gltf_path);
     else if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
