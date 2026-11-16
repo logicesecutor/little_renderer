@@ -175,6 +175,10 @@ struct GpuTrace {
     // the bind groups of every frame, kept (gpu_bind_cached): the tracer's (0), the light
     // tracer's (1) and the photon cache's (2); the resolve, the reprojection, the cache's fade
     GpuBindCache bc_trace[3], bc_resolve, bc_reproject, bc_decay;
+    // the BVH builds' (one per build of a frame, and PLOC's two) and the wavefront kernels':
+    // each pass's parameters are chosen by a dynamic offset, so a build or a kernel has one
+    // bind group for all its dispatches, kept from frame to frame
+    GpuBindCache bc_build[8], bc_ploc[8], bc_wf[6];
     WGPUComputePipeline dc_pipe;
     WGPUBuffer grid, dc_params, pc_params;
     double pc_paths;         // light paths in the grid, faded as the grid is
@@ -393,14 +397,14 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
         t->rp_params = gpu_buffer(g, "reprojection parameters", 9 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     }
     // the BVH builder
-    t->bd_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URWWWW");
+    t->bd_bgl = gpu_layout(g, WGPUShaderStage_Compute, "DRWWWW");   // (D: a pass's parameters, at its offset)
     t->bd_morton = gpu_compute(g, "BVH builder: morton", BUILD, "morton", t->bd_bgl);
     t->bd_sort = gpu_compute(g, "BVH builder: sort", BUILD, "bsort", t->bd_bgl);
     t->bd_hier = gpu_compute(g, "BVH builder: hierarchy", BUILD, "hier", t->bd_bgl);
     t->bd_leaves = gpu_compute(g, "BVH builder: leaves", BUILD, "leaves", t->bd_bgl);
     t->bd_up = gpu_compute(g, "BVH builder: boxes", BUILD, "up", t->bd_bgl);
-    t->pl_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UWW");
-    t->pl_bgl_args = gpu_layout(g, WGPUShaderStage_Compute, "UWWW");
+    t->pl_bgl = gpu_layout(g, WGPUShaderStage_Compute, "DWW");
+    t->pl_bgl_args = gpu_layout(g, WGPUShaderStage_Compute, "DWWW");
     t->pl_init = gpu_compute(g, "BVH builder (PLOC): init", PLOC, "init", t->pl_bgl_args);
     t->pl_nn = gpu_compute(g, "BVH builder (PLOC): nearest", PLOC, "nn", t->pl_bgl);
     t->pl_mark = gpu_compute(g, "BVH builder (PLOC): mark", PLOC, "mark", t->pl_bgl);
@@ -542,41 +546,35 @@ static void build_dispatch(GpuTrace *t, WGPUComputePassEncoder pass, WGPUCompute
     memset(e, 0, sizeof(e));
     WGPUBuffer bufs[6] = {t->bd_par, t->bd_boxes, t->bd_keys, t->nodes, t->aux, t->bd_flags};
     for (int i = 0; i < 6; i++){ e[i].binding = (uint32_t)i; e[i].buffer = bufs[i]; e[i].size = WGPU_WHOLE_SIZE; }
-    e[0].offset = b->par_at + (size_t)par * BP_STRIDE; e[0].size = sizeof(BuildParams);
+    e[0].size = sizeof(BuildParams);          // (at the dynamic offset: this pass's)
     e[1].offset = b->box_at; e[1].size = (size_t)b->n * 32;
     e[2].size = keys_bytes;
     e[5].size = flags_bytes;
-    WGPUBindGroupDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.layout = t->bd_bgl;
-    d.entryCount = 6;
-    d.entries = e;
-    WGPUBindGroup bg = wgpuDeviceCreateBindGroup(t->g->device, &d);
+    // one bind group for all the build's passes, the same next frame while the build is (it
+    // was one per pass, made every frame: 114 of them for a top level over 1500 instances)
+    WGPUBindGroup bg = gpu_bind_cached(t->g, &t->bc_build[b - t->builds], t->bd_bgl, e, 6, NULL);
+    uint32_t off = (uint32_t)(b->par_at + (size_t)par * BP_STRIDE);
     wgpuComputePassEncoderSetPipeline(pass, pipe);
-    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
     gpu_dispatch(pass, threads);
-    wgpuBindGroupRelease(bg);
 }
 
-// PLOC's bind group: parameters `par`, the nodes, its lists (and the dispatch sizes)
-static WGPUBindGroup ploc_group(GpuTrace *t, const GpuBuild *b, int par, int with_args){
+// A PLOC dispatch of build b: the nodes, its lists (and with_args the dispatch sizes), and
+// the parameters `par`, by their offset: the build's two bind groups (without and with the
+// sizes) are kept, as build_dispatch's
+static void ploc_dispatch(GpuTrace *t, WGPUComputePassEncoder pass, WGPUComputePipeline pipe, const GpuBuild *b, int par,
+                          int with_args, size_t threads, WGPUBuffer args, uint64_t at){
     WGPUBindGroupEntry e[4];
     memset(e, 0, sizeof(e));
     WGPUBuffer bufs[4] = {t->bd_par, t->nodes, t->pl_buf, t->pl_args};
     for (int i = 0; i < 4; i++){ e[i].binding = (uint32_t)i; e[i].buffer = bufs[i]; e[i].size = WGPU_WHOLE_SIZE; }
-    e[0].offset = b->par_at + (size_t)par * BP_STRIDE; e[0].size = sizeof(BuildParams);
+    e[0].size = sizeof(BuildParams);
     e[2].size = ploc_words(b->n) * 4;
-    WGPUBindGroupDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.layout = with_args ? t->pl_bgl_args : t->pl_bgl;
-    d.entryCount = with_args ? 4 : 3;
-    d.entries = e;
-    return wgpuDeviceCreateBindGroup(t->g->device, &d);
-}
-
-static void ploc_dispatch(WGPUComputePassEncoder pass, WGPUComputePipeline pipe, WGPUBindGroup bg, size_t threads, WGPUBuffer args, uint64_t at){
+    WGPUBindGroup bg = gpu_bind_cached(t->g, &t->bc_ploc[b - t->builds], with_args ? t->pl_bgl_args : t->pl_bgl, e,
+                                       with_args ? 4 : 3, NULL);
+    uint32_t off = (uint32_t)(b->par_at + (size_t)par * BP_STRIDE);
     wgpuComputePassEncoderSetPipeline(pass, pipe);
-    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
     if (args){ wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, args, at); return; }
     size_t groups = (threads + 255) / 256;
     uint32_t gx = groups < 65535 ? (uint32_t)groups : 65535u;
@@ -586,29 +584,20 @@ static void ploc_dispatch(WGPUComputePassEncoder pass, WGPUComputePipeline pipe,
 // PLOC over a build's leaves (in Morton order: after morton, bsort and leaves)
 static void ploc_build(GpuTrace *t, WGPUComputePassEncoder pass, const GpuBuild *b, int par){
     if (b->ploc == 2){                  // in one workgroup
-        WGPUBindGroup gs = ploc_group(t, b, 0, 0);
-        ploc_dispatch(pass, t->pl_small, gs, 1, NULL, 0);
-        wgpuBindGroupRelease(gs);
+        ploc_dispatch(t, pass, t->pl_small, b, 0, 0, 1, NULL, 0);
         return;
     }
     int rounds = ploc_rounds(b->n, t->ploc_small);
     WGPUBuffer ia = b->n <= PLOC_DIRECT_MAX ? NULL : t->pl_args;
-    WGPUBindGroup g0 = ploc_group(t, b, par, 1);
-    ploc_dispatch(pass, t->pl_init, g0, (size_t)b->n, NULL, 0);
-    wgpuBindGroupRelease(g0);
+    ploc_dispatch(t, pass, t->pl_init, b, par, 1, (size_t)b->n, NULL, 0);
     for (int r = 0; r < rounds; r++){
-        WGPUBindGroup ga = ploc_group(t, b, par + r, 1), gs = ploc_group(t, b, par + r, 0);
         uint64_t at = (uint64_t)(r & 1) * 16;
-        ploc_dispatch(pass, t->pl_nn, gs, (size_t)b->n, ia, at);
-        ploc_dispatch(pass, t->pl_mark, gs, (size_t)b->n, ia, at);
-        ploc_dispatch(pass, t->pl_top, ga, 1, NULL, 0);
-        ploc_dispatch(pass, t->pl_scatter, gs, (size_t)b->n, ia, at);
-        wgpuBindGroupRelease(gs);
-        wgpuBindGroupRelease(ga);
+        ploc_dispatch(t, pass, t->pl_nn, b, par + r, 0, (size_t)b->n, ia, at);
+        ploc_dispatch(t, pass, t->pl_mark, b, par + r, 0, (size_t)b->n, ia, at);
+        ploc_dispatch(t, pass, t->pl_top, b, par + r, 1, 1, NULL, 0);
+        ploc_dispatch(t, pass, t->pl_scatter, b, par + r, 0, (size_t)b->n, ia, at);
     }
-    WGPUBindGroup gs = ploc_group(t, b, par + rounds, 0);   // the rest, in one workgroup
-    ploc_dispatch(pass, t->pl_small, gs, 1, NULL, 0);
-    wgpuBindGroupRelease(gs);
+    ploc_dispatch(t, pass, t->pl_small, b, par + rounds, 0, 1, NULL, 0);   // the rest, in one workgroup
 }
 
 // the BVHs queued since the last call (the top level over the instances, dynamic meshes')
@@ -1211,6 +1200,7 @@ static int hw_records(GpuTrace *t, const Scene *s){
         uint32_t cap = 64;
         while (cap < n) cap *= 2;
         for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);   // (they bind the top level)
+        for (int k = 0; k < 6; k++) gpu_bind_cache_clear(&t->bc_wf[k]);
         lrTlasRelease(t->hw_tlas);
         t->hw_tlas = lrDeviceCreateTlas(g->device, cap, gpu_str("the scene's top level"));
         t->hw_tlas_cap = t->hw_tlas ? cap : 0;
@@ -1520,14 +1510,16 @@ static void dispatch(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pi
 
 enum { WF_GEN, WF_EXT, WF_SHADE, WF_ARGS, WF_SHADOW, WF_RESOLVE, NWF };
 static const char *const WF_ENTRY[NWF] = {"wf_gen", "wf_ext", "wf_shade", "wf_args", "wf_shadow", "wf_resolve"};
-// the bindings each kernel uses (index = binding; as gpu_layout): within 8 storage buffers each
+// the bindings each kernel uses (index = binding; as gpu_layout): within 8 storage buffers each.
+// (4, the parameters: D, the wave's copy chosen by a dynamic offset, as the single kernel's)
 static const char *const WF_LAYOUT[NWF] = {
-    "----U----WU-W",      // gen: parameters, samples (their count seeds the path), blue noise, WF
-    "----URRRR---W",      // ext: the BVH and shapes, WF
-    "URRRU-RRR-U-WW--TTTU", // shade: media, shapes and normals, blue noise, WF, WC, the sky, the textures
+    "----D----WU-W",      // gen: parameters, samples (their count seeds the path), blue noise, WF
+    "----DRRRR---W",      // ext: the BVH and shapes, WF
+    "URRRD-RRR-U-WW--TTTU", // shade: media, shapes and normals, blue noise, WF, WC, the sky, the textures
     "------------WWW",    // args: WF, WC, WA
-    "URRRURRRR---W",      // shadow: media, the BVH and shapes, WF
-    "----U----W--W"};     // resolve: samples, WF
+    "URRRDRRRR---W",      // shadow: media, the BVH and shapes, WF
+    "----D----W--W"};     // resolve: samples, WF
+_Static_assert(NWF == 6, "GpuTrace.wf_bgl, wf_pipe, bc_wf");
 #define WF_PATH_BYTES 140          // per path: 8 vec4 of state, hit and shadow ray, 3 queue entries
 #define WF_BYTES_MAX (96u << 20)   // WF at most 96 MB (browsers' default limit per buffer: 128 MB)
 #define MAX_WAVES 64
@@ -1586,16 +1578,19 @@ static int wf_ready(GpuTrace *t){
     return t->wf_made;
 }
 
-static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks,
-                             WGPUBuffer vstat){
+// kernel k's bind group, kept (gpu_bind_cached): the same for every wave and pass, whose
+// parameters are chosen by the dynamic offset of binding 4 (it was a group per kernel, wave
+// and pass, made every frame)
+static WGPUBindGroup wf_bind(GpuTrace *t, int k, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
     WGPUBuffer b[20] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
                         t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa, NULL, NULL, NULL, NULL, t->txt};
     WGPUBindGroupEntry e[21];
     memset(e, 0, sizeof(e));
     int n = 0;
+    const void *chain = NULL;
 #ifdef LR_VK
     LRBindGroupEntryTlas te;
-    if (t->hw && WF_LAYOUT[k][5] == 'R') hw_entry(t, &e[n++], &te);
+    if (t->hw && WF_LAYOUT[k][5] == 'R'){ hw_entry(t, &e[n++], &te); chain = t->hw_tlas; }
 #endif
     for (int i = 0; WF_LAYOUT[k][i]; i++){
         if (WF_LAYOUT[k][i] == '-') continue;
@@ -1603,17 +1598,11 @@ static WGPUBindGroup wf_bind(GpuTrace *t, int k, uint64_t toff, WGPUBuffer frame
         if (WF_LAYOUT[k][i] == 'T') e[n].textureView = i == 16 ? t->sky_view : (i == 17 ? t->skyc_view : t->gt.view);
         else {
             e[n].buffer = b[i];
-            e[n].offset = i == 4 ? toff : 0;
-            e[n].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;
+            e[n].size = i == 4 ? sizeof(GTP) : WGPU_WHOLE_SIZE;   // (4: at the dynamic offset)
         }
         n++;
     }
-    WGPUBindGroupDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.layout = t->wf_bgl[k];
-    d.entryCount = (size_t)n;
-    d.entries = e;
-    return wgpuDeviceCreateBindGroup(t->g->device, &d);
+    return gpu_bind_cached(t->g, &t->bc_wf[k], t->wf_bgl[k], e, n, chain);
 }
 
 static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuTraceParams *tp, int y0, int rows,
@@ -1678,16 +1667,16 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
 #define WF_STEP(k, call) do { \
         if (prof) pass = timed_pass(t, enc, TS_WF0 + (k), (k) == WF_GEN || (k) == WF_RESOLVE ? units / waves : units / waves / iters); \
         wgpuComputePassEncoderSetPipeline(pass, (k) == WF_SHADE && shade_sky ? shade_sky : t->wf_pipe[k]); \
-        wgpuComputePassEncoderSetBindGroup(pass, 0, bg[k], 0, NULL); \
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bg[k], WF_LAYOUT[k][4] == 'D', &toff); \
         call; \
         if (prof){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); } \
     } while (0)
+    WGPUBindGroup bg[NWF];
+    for (int k = 0; k < NWF; k++) bg[k] = wf_bind(t, k, frame_u, dens, bricks, vstat);
     for (int r = 0; r < repeats; r++)
         for (int w = 0; w < waves; w++){
-            uint64_t toff = ((uint64_t)r * waves + w) * GTP_STRIDE;
+            uint32_t toff = (uint32_t)(((size_t)r * waves + w) * GTP_STRIDE);
             size_t n = (size_t)t->w * (rows - w * t->wf_rows < t->wf_rows ? rows - w * t->wf_rows : t->wf_rows);
-            WGPUBindGroup bg[NWF];
-            for (int k = 0; k < NWF; k++) bg[k] = wf_bind(t, k, toff, frame_u, dens, bricks, vstat);
             WF_STEP(WF_GEN, gpu_dispatch(pass, n));
             for (int it = 0; it < iters; it++){
                 WF_STEP(WF_EXT, if (it == 0) gpu_dispatch(pass, n); else wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, t->wfa, 0));
@@ -1696,7 +1685,6 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
                 WF_STEP(WF_SHADOW, wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, t->wfa, 16));
             }
             WF_STEP(WF_RESOLVE, gpu_dispatch(pass, n));
-            for (int k = 0; k < NWF; k++) wgpuBindGroupRelease(bg[k]);
         }
 #undef WF_STEP
     if (!prof){
@@ -1849,6 +1837,8 @@ void gpu_trace_destroy(GpuTrace *t){
         if (t->wf_bgl[k]) wgpuBindGroupLayoutRelease(t->wf_bgl[k]);
     }
     for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);
+    for (int k = 0; k < 8; k++){ gpu_bind_cache_clear(&t->bc_build[k]); gpu_bind_cache_clear(&t->bc_ploc[k]); }
+    for (int k = 0; k < 6; k++) gpu_bind_cache_clear(&t->bc_wf[k]);
     gpu_bind_cache_clear(&t->bc_resolve); gpu_bind_cache_clear(&t->bc_reproject); gpu_bind_cache_clear(&t->bc_decay);
     WGPUBuffer wfb[] = {t->wf, t->wfc, t->wfa, t->wf_params};
     for (int i = 0; i < 4; i++) if (wfb[i]){ wgpuBufferDestroy(wfb[i]); wgpuBufferRelease(wfb[i]); }
