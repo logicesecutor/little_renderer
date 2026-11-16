@@ -141,7 +141,7 @@ Two more shapes come from a triangle mesh (the scene's `SceneMesh`, in its own s
 hull against the other's corners (92 faces × 48 corners, twice) and some 19 000 pairs of
 edges. Each pair of hulls keeps, from one step to the next, what decided it
 (`convex_collide_cached`; the "memos" in `rigid.c`, the same tables on the GPU in
-`K_HEAVY`): the **axis that separated** them, or the **feature of least overlap** (a face
+`rigid_memo.wgsl`): the **axis that separated** them, or the **feature of least overlap** (a face
 of either hull, or a pair of edges) with the pose of one hull in the other's frame when
 that full test ran. Next step:
 
@@ -186,7 +186,7 @@ So the impulse that exactly stops the approach is `j = m_eff · (−v_rel · n)`
 
 With many contacts, fixing one disturbs the others. **Sequential impulses** (Catto,
 "Iterative Dynamics with Temporal Coherence", GDC 2005) visits every contact many times
-(16 iterations per step) and each time applies the change of impulse needed, while
+(10 iterations per substep) and each time applies the change of impulse needed, while
 clamping the **accumulated** impulse of each contact to `≥ 0` (contacts push, never
 pull). This is projected Gauss–Seidel on the contact constraints: it converges to the
 impulses that satisfy all of them at once.
@@ -260,15 +260,16 @@ in each substep:
 | pass | when | what it does |
 |---|---|---|
 | forces | every substep | gravity, the air's drag and buoyancy, damping |
-| pairs | once per step | one thread per pair of bodies (n²/2) tests the bounding spheres (with the margin) and sorts the pair into three lists: simple (balls and boxes), hulls, body–mesh |
-| contacts | once per step | the simple pairs one thread each (`rigid.c`'s tests); hull pairs one workgroup each, 64 threads sharing the separating-axis search (`convex.c`'s SAT and face clipping); the walls |
+| grid | once per step | the bodies hashed into cells of three times the radius of those up to twice the average (count, prefix sum, place); bigger ones (fixed meshes) on a list of their own |
+| pairs | once per step | 27 threads per body, one per cell around it, test the bounding spheres (with the margin) against the bodies there and the big ones, and sort the pair into three lists: simple (balls and boxes), hulls, body–mesh (it was a thread per pair of bodies, n²/2: 8000 bodies 1.5 ms, now 0.13) |
+| contacts | once per step | the simple pairs one thread each (`rigid.c`'s tests); the hull pairs one thread each for the walls, balls and what the memo settles (apart along last step's axis, or the same feature), the rest one workgroup each, 64 threads sharing the separating-axis search (`convex.c`'s SAT), then the face clipping one thread per pair |
 | meshes | once per step | for each body near a fixed mesh one workgroup walks the mesh's tree breadth first and lists the triangles near the body; then one thread per triangle runs the test, and the best 4 contacts of each pair are kept |
 | contact lists | once per step | each body's contacts: count, prefix sum, fill |
 | prepare | every substep | each contact's points where its bodies are now, its depth, masses and target (as the CPU's) |
 | warm start | every substep | each body's velocities with its contacts' starting impulses (from the last substep or step) |
-| solve | every substep | 16 iterations of one pass each: every body (8 threads, sharing its contact list) works out its contacts' impulses from the velocities before the iteration and adds them to its own; each contact is worked out by both its bodies, the same way, and its first body keeps the result |
+| solve | every substep | 10 iterations of one pass each: every body (8 threads, sharing its contact list) works out its contacts' impulses from the velocities before the iteration and adds them to its own; each contact is worked out by both its bodies, the same way, and its first body keeps the result. The corrections are over-relaxed (up to 1.8 times, by the bodies' contact counts: mass splitting makes them timid), so 10 settle a pile as 16 did |
 | move | every substep | integrate |
-| wake, sleep | once per step | sleeping (1.5): which sleeping bodies wake (one thread per pair), and, at the end, how long each has been still and who falls asleep |
+| wake, sleep | once per step | sleeping (1.5): which sleeping bodies wake (through the grid, as the pairs), and, at the end, how long each has been still and who falls asleep |
 
 The lists' sizes are only known on the GPU, so their dispatches are indirect (a small
 kernel writes the workgroup counts).
