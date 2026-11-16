@@ -77,7 +77,9 @@ int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finishe
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU
 // Reads the image back (asynchronously, like gpu_view_capture): fn gets w * h values of
 // 4 floats, the sum of the samples (linear RGB) and their count. 0 if a read is already on
-// its way. The image at full precision, for saving (bin/render, bin/sim).
+// its way. The image at full precision, for saving (bin/render, bin/sim). If the read fails
+// (the buffer could not be mapped) fn is called with sum_count = NULL: once 1 was returned,
+// fn is always called, unless the device is lost or the view destroyed first.
 typedef void (*GpuTraceReadFn)(void *user, const float *sum_count, int w, int h);
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user);
 double gpu_view_trace_pass_ms(const GpuView *v);    // how long the last one took
@@ -94,7 +96,8 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 void gpu_view_destroy(GpuView *v);
 
 // Reads back the next frame gpu_view_present draws (a screenshot of the GPU's image):
-// fn is called later, when the GPU has finished, with w * h pixels 0x00RRGGBB. One read at a
+// fn is called later, when the GPU has finished, with w * h pixels 0x00RRGGBB, or with
+// pixels = NULL if they could not be read back. One read at a
 // time: returns 0 (and does nothing) while the previous one is still on its way.
 // Offscreen (gpu_create with no canvas) this is how frames are shown at all: ask for every one.
 typedef void (*GpuCaptureFn)(void *user, const uint32_t *pixels, int w, int h);

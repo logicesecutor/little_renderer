@@ -34,10 +34,11 @@ void gpu_frame_close(Gpu *gpu, GpuView *view){
     gpu_destroy(gpu);
 }
 
-typedef struct { Image *img; int done; } TraceRead;
+typedef struct { Image *img; int done; } TraceRead;   // done: 1 = read, -1 = the read failed
 
 static void on_samples(void *user, const float *sc, int w, int h){
     TraceRead *r = user;
+    if (!sc){ r->done = -1; return; }
     for (int i = 0; i < w * h; i++){
         float n = sc[4 * i + 3];
         r->img->px[i] = n > 0 ? vec3(sc[4 * i] / n, sc[4 * i + 1] / n, sc[4 * i + 2] / n) : vec3(0, 0, 0);
@@ -75,13 +76,14 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
     TraceRead r = {img, 0};
     if (!gpu_view_trace_read(view, on_samples, &r)) return 1;
     while (!r.done && gpu_state(gpu) == GPU_READY) gpu_wait(gpu);
-    return r.done ? 0 : 1;
+    return r.done == 1 ? 0 : 1;
 }
 
 typedef struct { Framebuffer *fb; int done; } FrameRead;
 
 static void on_frame(void *user, const uint32_t *px, int w, int h){
     FrameRead *r = user;
+    if (!px){ r->done = -1; return; }       // it could not be read back
     if (w == r->fb->w && h == r->fb->h) memcpy(r->fb->color, px, (size_t)w * h * sizeof(uint32_t));
     r->done = 1;
 }
@@ -92,5 +94,5 @@ int gpu_frame_raster(Gpu *gpu, GpuView *view, const Scene *s, const RenderParams
     if (!gpu_view_capture(view, on_frame, &r)) return 1;
     if (!gpu_view_present_scene(view, s, rp, mp, volumes)) return 1;
     while (!r.done && gpu_state(gpu) == GPU_READY) gpu_wait(gpu);
-    return r.done ? 0 : 1;
+    return r.done == 1 ? 0 : 1;
 }

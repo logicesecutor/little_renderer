@@ -377,6 +377,11 @@ static int shot_started;      // -autoquit: it was asked for
 
 static void save_traced(void *user, const float *sc, int w, int h){
     (void)user;
+    if (!sc){                    // the read failed: no screenshot, and nothing waits for one
+        fprintf(stderr, "no screenshot: the GPU's image could not be read back (%s not written)\n", shot_path);
+        shot_waiting = 0;
+        return;
+    }
     Image img = image_create(w, h);
     for (int i = 0; i < w * h; i++){
         float c = sc[4 * i + 3];
@@ -405,6 +410,18 @@ static void gpu_screenshot(void){
 // a frame read back from the GPU: shown (offscreen), and kept as a screenshot if one was asked
 static void on_gpu_frame(void *user, const uint32_t *px, int w, int h){
     (void)user;
+    if (!px){                    // the read failed: this frame is not shown, a screenshot not made
+#ifndef __EMSCRIPTEN__
+        if (shot_waiting && shot_path[0]){
+            fprintf(stderr, "no screenshot: the GPU's frame could not be read back (%s not written)\n", shot_path);
+            shot_path[0] = 0;
+            shot_waiting = 0;
+        }
+#else
+        want_shot = 0;
+#endif
+        return;
+    }
 #ifndef __EMSCRIPTEN__
     if (shot_waiting && shot_path[0]){
         Framebuffer shot = {w, h, (uint32_t *)px, NULL};

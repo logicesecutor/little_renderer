@@ -467,10 +467,13 @@ static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, voi
         if (status == WGPUMapAsyncStatus_Error)
             fprintf(stderr, "GPU: reading the frame back failed: %.*s\n",
                     msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+        // whoever waits for the frame is told (the device is still ready: it would wait for ever)
+        if (v->cap_fn) v->cap_fn(v->cap_user, NULL, v->w, v->h);
         return;
     }
     const uint8_t *src = wgpuBufferGetConstMappedRange(v->cap_buf, 0, (size_t)v->cap_row * v->h);
     uint32_t *px = malloc((size_t)v->w * v->h * sizeof(uint32_t));
+    if (!(src && px) && v->cap_fn) v->cap_fn(v->cap_user, NULL, v->w, v->h);
     if (src && px){
         int bgra = v->g->surface_format == WGPUTextureFormat_BGRA8Unorm;
         for (int y = 0; y < v->h; y++)
@@ -899,14 +902,21 @@ int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
 int gpu_view_trace_reads_tlas(const GpuView *v){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace); }
 
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
+    (void)u2;
     GpuView *v = u1;
     if (!view_is_live(v)) return;                       // cancelled as it was destroyed: v is gone
     v->t_rb_pending = 0;                                // (also after a failure: it can be asked for again)
-    if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
+    if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
+        if (status == WGPUMapAsyncStatus_Error)
+            fprintf(stderr, "GPU: reading the path traced image back failed: %.*s\n",
+                    msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+        // whoever waits for the image is told (the device is still ready: it would wait for ever)
+        if (v->t_read_fn) v->t_read_fn(v->t_read_user, NULL, v->w, v->h);
+        return;
+    }
     size_t bytes = (size_t)v->w * v->h * 16;
     const float *p = wgpuBufferGetConstMappedRange(v->t_rb, 0, bytes);
-    if (p && v->t_read_fn) v->t_read_fn(v->t_read_user, p, v->w, v->h);
+    if (v->t_read_fn) v->t_read_fn(v->t_read_user, p, v->w, v->h);     // (p NULL: failed too)
     wgpuBufferUnmap(v->t_rb);
 }
 
@@ -915,6 +925,7 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
     Gpu *g = v->g;
     size_t bytes = (size_t)v->w * v->h * 16;
     if (!v->t_rb) v->t_rb = gpu_buffer(g, "path tracer readback", bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    if (!v->t_rb) return 0;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     if (v->t_prep == 1) gpu_trace_clear(v->trace, enc);
     wgpuCommandEncoderCopyBufferToBuffer(enc, traced_image(v, enc), 0, v->t_rb, 0, bytes);

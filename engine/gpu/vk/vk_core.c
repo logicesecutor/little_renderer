@@ -994,9 +994,14 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
             if (p.map.callback) p.map.callback(WGPUMapAsyncStatus_Aborted, sv("device lost"), p.map.userdata1, p.map.userdata2);
             obj_unref(&p.buf->o);
         } else {
-            p.buf->map_ok = p.buf->mapped != NULL;
+            // LR_VK_FAIL_MAP=n, to test what waits for a readback: the n-th map fails (the device is not lost)
+            static int fail_map = -1, nmaps;
+            if (fail_map < 0){ const char *e = getenv("LR_VK_FAIL_MAP"); fail_map = e ? atoi(e) : 0; }
+            const int fail = fail_map > 0 && ++nmaps == fail_map;
+            p.buf->map_ok = p.buf->mapped != NULL && !fail;
             if (p.map.callback) p.map.callback(p.buf->map_ok ? WGPUMapAsyncStatus_Success : WGPUMapAsyncStatus_Error,
-                                               sv(p.buf->map_ok ? "" : "not a mappable buffer"), p.map.userdata1, p.map.userdata2);
+                                               sv(p.buf->map_ok ? "" : fail ? "LR_VK_FAIL_MAP" : "not a mappable buffer"),
+                                               p.map.userdata1, p.map.userdata2);
             obj_unref(&p.buf->o);
         }
     }
