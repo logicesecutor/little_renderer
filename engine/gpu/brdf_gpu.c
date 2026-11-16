@@ -14,8 +14,7 @@
 
 #ifdef LR_GPU
 
-extern const char lr_wgsl_bsdf[];   // engine/gpu/shaders/bsdf.wgsl
-const char *const GPU_WGSL_BSDF = lr_wgsl_bsdf;
+GPU_WGSL_EXPORT(GPU_WGSL_BSDF, bsdf);
 
 void gpu_bsdf_tables(float *out){
     memcpy(out, BRDF_E, sizeof(BRDF_E));
@@ -25,8 +24,7 @@ void gpu_bsdf_tables(float *out){
 }
 
 // ---- the check: the WGSL on cases, against the C ----
-extern const char lr_wgsl_brdf_check[];   // engine/gpu/shaders/brdf_check.wgsl
-static const char *CHECK = lr_wgsl_brdf_check;
+GPU_WGSL(CHECK, brdf_check);
 
 static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)msg; (void)u2;

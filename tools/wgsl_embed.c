@@ -5,7 +5,7 @@
 //     wgsl_embed out.c a.wgsl b.wgsl ...
 //
 // writes out.c with `const char lr_wgsl_a[]`, `lr_wgsl_b[]`, ...: each file's text, line for
-// line. A file using one declares it: extern const char lr_wgsl_a[];
+// line. A file using one names it with GPU_WGSL (gpu/gpu_internal.h).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,18 +35,15 @@ int main(int argc, char **argv){
         FILE *in = fopen(path, "rb");
         if (!in){ fclose(out); remove(tmp); return fail("cannot read", path); }
         fprintf(out, "\nconst char lr_wgsl_%.*s[] =\n    \"", (int)(n - 5), base);
-        int c, col = 0, any = 0;
+        int c;
         while ((c = fgetc(in)) != EOF){
-            any = 1;
             if (c == '\r') continue;
-            if (c == '\n'){ fputs("\\n\"\n    \"", out); col = 0; continue; }
+            if (c == '\n'){ fputs("\\n\"\n    \"", out); continue; }
             if (c == '\\' || c == '"' || c == '?') fputc('\\', out);      // ('?': no trigraphs)
             if (c == '\t') fputs("\\t", out);
             else if (c < 32 || c > 126) fprintf(out, "\\%03o", c);
             else fputc(c, out);
-            col++;
         }
-        (void)any; (void)col;
         fputs("\";\n", out);
         fclose(in);
     }

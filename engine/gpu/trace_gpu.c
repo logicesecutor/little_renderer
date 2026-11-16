@@ -30,8 +30,7 @@
 #include "rt/accel.h"
 #include "rt/bvh.h"
 
-extern const char lr_wgsl_trace[];   // engine/gpu/shaders/trace.wgsl
-static const char *TRACE = lr_wgsl_trace;
+GPU_WGSL(TRACE, trace);
 
 // Reprojection: the new image's pixels take the samples of the previous image where their
 // surface was (both images' planes, the new one's guide already made by gbuf). The guide's
@@ -47,23 +46,19 @@ static const char *TRACE = lr_wgsl_trace;
 // the streak it drags a bright sample into, along the motion) stays short. (Taking the
 // nearest old pixel instead does not blur, but duplicates pixels under subpixel motion: the
 // noise lines up in streaks, worse.)
-extern const char lr_wgsl_trace_wave[];   // engine/gpu/shaders/trace_wave.wgsl
-static const char *WAVE = lr_wgsl_trace_wave;
+GPU_WGSL(WAVE, trace_wave);
 
-extern const char lr_wgsl_trace_reproject[];   // engine/gpu/shaders/trace_reproject.wgsl
-static const char *REPROJECT = lr_wgsl_trace_reproject;
+GPU_WGSL(REPROJECT, trace_reproject);
 
 // The image to show or read back: the path tracer's (its samples, or denoised) plus the
 // caustics the path tracer left out: the light tracer's (exact, averaged over its passes),
 // blended with the photon cache's while the light tracer has few passes (weight P / (P + 8)).
 // The cache is read where the camera sees a diffuse surface directly (the 5th plane: the
 // point and the transmittance up to it), bilinearly between the cells along the surface.
-extern const char lr_wgsl_trace_resolve[];   // engine/gpu/shaders/trace_resolve.wgsl
-static const char *RESOLVE = lr_wgsl_trace_resolve;
+GPU_WGSL(RESOLVE, trace_resolve);
 
 // the photon cache fades: every sum times a factor
-extern const char lr_wgsl_trace_decay[];   // engine/gpu/shaders/trace_decay.wgsl
-static const char *DECAY = lr_wgsl_trace_decay;
+GPU_WGSL(DECAY, trace_decay);
 
 // ---- the BVH builder: a linear BVH (Karras 2012, "Maximizing Parallelism in the
 // Construction of BVHs, Octrees, and k-d Trees"), entirely on the GPU ----
@@ -78,8 +73,7 @@ static const char *DECAY = lr_wgsl_trace_decay;
 //          one dispatch's threads do not see each other's writes, the next dispatch does
 // The nodes are this path tracer's: internal i at node0 + i, leaf j at node0 + n - 1 + j,
 // the root at node0.
-extern const char lr_wgsl_trace_build[];   // engine/gpu/shaders/trace_build.wgsl
-static const char *BUILD = lr_wgsl_trace_build;
+GPU_WGSL(BUILD, trace_build);
 
 // ---- the BVH builder, PLOC (Meister & Bittner 2018, "Parallel Locally-Ordered Clustering
 // for Bounding Volume Hierarchy Construction"): the leaves in Morton order (morton, bsort,
@@ -103,8 +97,7 @@ static const char *BUILD = lr_wgsl_trace_build;
 // pl: [0], [1]: the count of the lists 0 and 1, [2] the list in use, [3] its count | the two
 // lists (2 n) | the nearest (n) | the marks' sums in their block (n) | the blocks' sums (2 per
 // 256) | the clusters' boxes (8 words each: 2 n - 1)
-extern const char lr_wgsl_trace_ploc[];   // engine/gpu/shaders/trace_ploc.wgsl
-static const char *PLOC = lr_wgsl_trace_ploc;
+GPU_WGSL(PLOC, trace_ploc);
 
 #ifdef LR_VK
 // ---- hardware ray tracing (our Vulkan layer, gpu/vk/webgpu_rt.h) ----
@@ -115,8 +108,7 @@ static const char *PLOC = lr_wgsl_trace_ploc;
 // first triangle in the SBT offset, which ray queries leave unused; a ball or a box: the
 // unit box, hit here in its own space). Triangles are opaque: the hardware keeps the
 // nearest; a box is a candidate the loop below tests against the nearest so far.
-extern const char lr_wgsl_trace_hw_traverse[];   // engine/gpu/shaders/trace_hw_traverse.wgsl
-static const char *HW_TRAVERSE = lr_wgsl_trace_hw_traverse;
+GPU_WGSL(HW_TRAVERSE, trace_hw_traverse);
 #define HW_WTRI 0xffffffu
 #define HW_WPRIM 0xfffffeu
 #define HW_BINDING 20

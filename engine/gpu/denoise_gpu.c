@@ -26,8 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern const char lr_wgsl_denoise[];   // engine/gpu/shaders/denoise.wgsl
-static const char *DENOISE = lr_wgsl_denoise;
+GPU_WGSL(DENOISE, denoise);
 
 #define PASSES 5
 

@@ -37,9 +37,11 @@ struct Gpu {
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
 };
 
-// The shaders are files of their own, engine/gpu/shaders/<name>.wgsl, carried inside the
-// library as strings (tools/wgsl_embed.c, by the Makefile): a file using one declares
-//     extern const char lr_wgsl_<name>[];
+// The shaders are files of their own, engine/gpu/shaders/<file>.wgsl, carried inside the
+// library as strings lr_wgsl_<file> (tools/wgsl_embed.c, by the Makefile). A C file using one
+// gives it a name: GPU_WGSL(name, file), or GPU_WGSL_EXPORT for the other files of gpu/ too.
+#define GPU_WGSL(name, file) extern const char lr_wgsl_##file[]; static const char *name = lr_wgsl_##file
+#define GPU_WGSL_EXPORT(name, file) extern const char lr_wgsl_##file[]; const char *const name = lr_wgsl_##file
 
 static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU_STRLEN}; return v; }
 

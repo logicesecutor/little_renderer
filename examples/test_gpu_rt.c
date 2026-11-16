@@ -24,8 +24,7 @@ static void check(const char *what, int ok){
 
 // Each ray: from (x, y, -10) along +z. Out: t (-1 none), kind, custom data, primitive;
 // the instance, the barycentrics, front facing.
-extern const char lr_wgsl_test_rt[];   // engine/gpu/shaders/test_rt.wgsl
-static const char *KERNEL = lr_wgsl_test_rt;
+GPU_WGSL(KERNEL, test_rt);
 
 #define NX 32
 #define NY 32

@@ -26,102 +26,74 @@ void gpu_fluid_destroy(GpuFluid *gf){ (void)gf; }
 // voxels of the cloud, or over bodies. The comments of phys/fluid.c explain the method.
 
 // the step's parameters (struct GFP on the C side)
-extern const char lr_wgsl_fluid_head[];   // engine/gpu/shaders/fluid_head.wgsl
-static const char *FHEAD = lr_wgsl_fluid_head;
+GPU_WGSL(FHEAD, fluid_head);
 
 // trilinear sample of array QA (dims S, x fastest), clamped to the grid (sample3 in fluid.c);
 // QN names the function. QM: the same, also returning the min and max of the 8 values.
-extern const char lr_wgsl_fluid_sample[];   // engine/gpu/shaders/fluid_sample.wgsl
-static const char *SAMPLE = lr_wgsl_fluid_sample;
-extern const char lr_wgsl_fluid_sample_mm[];   // engine/gpu/shaders/fluid_sample_mm.wgsl
-static const char *SAMPLE_MM = lr_wgsl_fluid_sample_mm;
+GPU_WGSL(SAMPLE, fluid_sample);
+GPU_WGSL(SAMPLE_MM, fluid_sample_mm);
 
 // the air velocity at a world point (needs u, v, w and their samplers)
-extern const char lr_wgsl_fluid_vel[];   // engine/gpu/shaders/fluid_vel.wgsl
-static const char *VEL = lr_wgsl_fluid_vel;
+GPU_WGSL(VEL, fluid_vel);
 
 // obstacles (needs solid)
-extern const char lr_wgsl_fluid_solid[];   // engine/gpu/shaders/fluid_solid.wgsl
-static const char *SOLID = lr_wgsl_fluid_solid;
+GPU_WGSL(SOLID, fluid_solid);
 
 // 1 if the face's value is fixed by a wall or a body, and the value (needs solid, svel)
-extern const char lr_wgsl_fluid_fixed[];   // engine/gpu/shaders/fluid_fixed.wgsl
-static const char *FIXED = lr_wgsl_fluid_fixed;
+GPU_WGSL(FIXED, fluid_fixed);
 
 /* the cells inside each body become obstacles moving with it (mark_solids in world.c);
    a body is 6 vec4: position (w: 0 sphere, 1 box, 2 + k a mesh body whose cells are bits
    k.. of occ: 48^3 over [-half, half] of its own frame, phys/convex.h), its 3 axes (w: half
    sizes), velocity (w: bounding radius), angular velocity (w: radius of the drag samples) */
-extern const char lr_wgsl_fluid_mark[];   // engine/gpu/shaders/fluid_mark.wgsl
-static const char *K_MARK = lr_wgsl_fluid_mark;
+GPU_WGSL(K_MARK, fluid_mark);
 
 /* walls and bodies fix the faces they touch (enforce_boundaries) */
-extern const char lr_wgsl_fluid_bound[];   // engine/gpu/shaders/fluid_bound.wgsl
-static const char *K_BOUND = lr_wgsl_fluid_bound;
+GPU_WGSL(K_BOUND, fluid_bound);
 
 /* wind and buoyancy (add_forces) */
-extern const char lr_wgsl_fluid_forces[];   // engine/gpu/shaders/fluid_forces.wgsl
-static const char *K_FORCES = lr_wgsl_fluid_forces;
+GPU_WGSL(K_FORCES, fluid_forces);
 
 /* vorticity confinement in 4 passes: velocity at the cell centers; vorticity and its length;
    the force N x omega; spread to the faces */
-extern const char lr_wgsl_fluid_va[];   // engine/gpu/shaders/fluid_va.wgsl
-static const char *K_VA = lr_wgsl_fluid_va;
-extern const char lr_wgsl_fluid_vb[];   // engine/gpu/shaders/fluid_vb.wgsl
-static const char *K_VB = lr_wgsl_fluid_vb;
-extern const char lr_wgsl_fluid_vc[];   // engine/gpu/shaders/fluid_vc.wgsl
-static const char *K_VC = lr_wgsl_fluid_vc;
-extern const char lr_wgsl_fluid_vd[];   // engine/gpu/shaders/fluid_vd.wgsl
-static const char *K_VD = lr_wgsl_fluid_vd;
+GPU_WGSL(K_VA, fluid_va);
+GPU_WGSL(K_VB, fluid_vb);
+GPU_WGSL(K_VC, fluid_vc);
+GPU_WGSL(K_VD, fluid_vd);
 
 /* semi-Lagrangian advection of the velocity into tu, tv, tw */
-extern const char lr_wgsl_fluid_adv[];   // engine/gpu/shaders/fluid_adv.wgsl
-static const char *K_ADV = lr_wgsl_fluid_adv;
+GPU_WGSL(K_ADV, fluid_adv);
 
 /* the divergence, minus what the expansion sources ask for */
-extern const char lr_wgsl_fluid_div[];   // engine/gpu/shaders/fluid_div.wgsl
-static const char *K_DIV = lr_wgsl_fluid_div;
+GPU_WGSL(K_DIV, fluid_div);
 
 /* u -= grad p across the faces the pressure acts on */
-extern const char lr_wgsl_fluid_grad[];   // engine/gpu/shaders/fluid_grad.wgsl
-static const char *K_GRAD = lr_wgsl_fluid_grad;
+GPU_WGSL(K_GRAD, fluid_grad);
 
 /* the cloud, MacCormack: one step backwards into d1, then the correction */
-extern const char lr_wgsl_fluid_d1[];   // engine/gpu/shaders/fluid_d1.wgsl
-static const char *K_D1 = lr_wgsl_fluid_d1;
-extern const char lr_wgsl_fluid_d2[];   // engine/gpu/shaders/fluid_d2.wgsl
-static const char *K_D2 = lr_wgsl_fluid_d2;
+GPU_WGSL(K_D1, fluid_d1);
+GPU_WGSL(K_D2, fluid_d2);
 
 /* the air around each body: the mean over 14 points on a shell just outside it */
-extern const char lr_wgsl_fluid_samp[];   // engine/gpu/shaders/fluid_samp.wgsl
-static const char *K_SAMP = lr_wgsl_fluid_samp;
+GPU_WGSL(K_SAMP, fluid_samp);
 
 // ---- the multigrid kernels (phys/poisson.c), on the levels' own parameters ----------------------
 
-extern const char lr_wgsl_fluid_level_head[];   // engine/gpu/shaders/fluid_level_head.wgsl
-static const char *LHEAD = lr_wgsl_fluid_level_head;
+GPU_WGSL(LHEAD, fluid_level_head);
 
 // neighbors of a cell through its links (needs p, links)
-extern const char lr_wgsl_fluid_nsum[];   // engine/gpu/shaders/fluid_nsum.wgsl
-static const char *NSUM = lr_wgsl_fluid_nsum;
+GPU_WGSL(NSUM, fluid_nsum);
 
-extern const char lr_wgsl_fluid_links[];   // engine/gpu/shaders/fluid_links.wgsl
-static const char *K_LINKS = lr_wgsl_fluid_links;
+GPU_WGSL(K_LINKS, fluid_links);
 /* a coarse cell is solid only if all its fine cells are (L: the fine level) */
-extern const char lr_wgsl_fluid_csolid[];   // engine/gpu/shaders/fluid_csolid.wgsl
-static const char *K_CSOLID = lr_wgsl_fluid_csolid;
-extern const char lr_wgsl_fluid_smooth[];   // engine/gpu/shaders/fluid_smooth.wgsl
-static const char *K_SMOOTH = lr_wgsl_fluid_smooth;
-extern const char lr_wgsl_fluid_resid[];   // engine/gpu/shaders/fluid_resid.wgsl
-static const char *K_RESID = lr_wgsl_fluid_resid;
+GPU_WGSL(K_CSOLID, fluid_csolid);
+GPU_WGSL(K_SMOOTH, fluid_smooth);
+GPU_WGSL(K_RESID, fluid_resid);
 /* the coarse right-hand side: the mean residual of the fine fluid cells (L: the fine level) */
-extern const char lr_wgsl_fluid_restrict[];   // engine/gpu/shaders/fluid_restrict.wgsl
-static const char *K_RESTRICT = lr_wgsl_fluid_restrict;
-extern const char lr_wgsl_fluid_prolong[];   // engine/gpu/shaders/fluid_prolong.wgsl
-static const char *K_PROLONG = lr_wgsl_fluid_prolong;
+GPU_WGSL(K_RESTRICT, fluid_restrict);
+GPU_WGSL(K_PROLONG, fluid_prolong);
 /* the coarsest grid: 40 sweeps by one workgroup, which can wait for itself */
-extern const char lr_wgsl_fluid_coarsest[];   // engine/gpu/shaders/fluid_coarsest.wgsl
-static const char *K_COARSEST = lr_wgsl_fluid_coarsest;
+GPU_WGSL(K_COARSEST, fluid_coarsest);
 
 // ---- the C side ---------------------------------------------------------------------------------
 

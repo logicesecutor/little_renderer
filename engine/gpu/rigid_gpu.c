@@ -32,53 +32,43 @@ int gpu_rigid_skipped(const GpuRigid *gr){ (void)gr; return 0; }
 // and followed through the substeps by la and lb (K_PREP).
 // cnt[0] counts the contacts, cnt[1 + i] those of body i; off[] (n + 1) are where each body's
 // contacts start in L[], as 2 c (it is a) or 2 c + 1 (it is b).
-extern const char lr_wgsl_rigid_head[];   // engine/gpu/shaders/rigid_head.wgsl
-static const char *RHEAD = lr_wgsl_rigid_head;
+GPU_WGSL(RHEAD, rigid_head);
 
 /* velocities from the forces (gravity, the air's, held for the substeps); the contact counts cleared */
-extern const char lr_wgsl_rigid_vel[];   // engine/gpu/shaders/rigid_vel.wgsl
-static const char *K_VEL = lr_wgsl_rigid_vel;
+GPU_WGSL(K_VEL, rigid_vel);
 
 /* contacts, in three steps: every pair of bodies by their bounding spheres (n i + j for the
    pair i < j, then the n walls), into two lists: balls and boxes (these tests), hulls and
    meshes (K_CONVEX); then each list, one thread per entry, launched as many as the lists
    hold (indirect dispatch). */
-extern const char lr_wgsl_rigid_narrow[];   // engine/gpu/shaders/rigid_narrow.wgsl
-static const char *K_NARROW = lr_wgsl_rigid_narrow;
+GPU_WGSL(K_NARROW, rigid_narrow);
 
 
 /* sleeping (rigid.c's): which sleeping bodies wake up this step: a body faster than the wake
    speed near one (one thread per pair, as K_BROAD), or the air's force on it changed by a
    quarter of its weight (one thread per body) */
-extern const char lr_wgsl_rigid_wake[];   // engine/gpu/shaders/rigid_wake.wgsl
-static const char *K_WAKE = lr_wgsl_rigid_wake;
+GPU_WGSL(K_WAKE, rigid_wake);
 
 /* the end of a step: how long each body has been still; those still long enough fall asleep:
    velocity 0, and vel.w = 0 (to the others a fixed body) with the mass kept in f.z */
-extern const char lr_wgsl_rigid_sleep[];   // engine/gpu/shaders/rigid_sleep.wgsl
-static const char *K_SLEEP = lr_wgsl_rigid_sleep;
+GPU_WGSL(K_SLEEP, rigid_sleep);
 
 /* the pairs whose bounding spheres meet (and the walls), sorted into the two lists */
-extern const char lr_wgsl_rigid_broad[];   // engine/gpu/shaders/rigid_broad.wgsl
-static const char *K_BROAD = lr_wgsl_rigid_broad;
+GPU_WGSL(K_BROAD, rigid_broad);
 
 /* the two lists' lengths as workgroup counts (indirect dispatch: x, 1, 1 at args[0] and args[4]) */
-extern const char lr_wgsl_rigid_args[];   // engine/gpu/shaders/rigid_args.wgsl
-static const char *K_ARGS = lr_wgsl_rigid_args;
+GPU_WGSL(K_ARGS, rigid_args);
 
 /* the triangles' list's length (after K_MESHQ), at args[12] */
-extern const char lr_wgsl_rigid_args2[];   // engine/gpu/shaders/rigid_args2.wgsl
-static const char *K_ARGS2 = lr_wgsl_rigid_args2;
+GPU_WGSL(K_ARGS2, rigid_args2);
 
 /* the balls' and boxes' list */
-extern const char lr_wgsl_rigid_simple[];   // engine/gpu/shaders/rigid_simple.wgsl
-static const char *K_SIMPLE = lr_wgsl_rigid_simple;
+GPU_WGSL(K_SIMPLE, rigid_simple);
 
 /* the hulls' list: one workgroup per pair, its 64 threads sharing the separating axis
    test (the faces of each, the pairs of edges), the best axis found by a reduction; then the
    first thread makes the contacts (convex.c's order of preference, so the same choices) */
-extern const char lr_wgsl_rigid_heavy[];   // engine/gpu/shaders/rigid_heavy.wgsl
-static const char *K_HEAVY = lr_wgsl_rigid_heavy;
+GPU_WGSL(K_HEAVY, rigid_heavy);
 
 /* hulls and fixed meshes (phys/convex.c, the same tests): G holds, per shape, two header
    rows (h0: corners, faces, edges, kind 2; or tree nodes, triangles, 0, kind 3. h1: where
@@ -86,54 +76,45 @@ static const char *K_HEAVY = lr_wgsl_rigid_heavy;
    corner index per row), the edges (a, b, fa, fb); a mesh: its tree's nodes (lo, left; hi,
    right; first, count) and triangles (3 corners each, in the leaves' order). Boxes use the
    unit box (P.m.x) scaled by their half sizes. */
-extern const char lr_wgsl_rigid_convex[];   // engine/gpu/shaders/rigid_convex.wgsl
-static const char *K_CONVEX = lr_wgsl_rigid_convex;
+GPU_WGSL(K_CONVEX, rigid_convex);
 
 
 /* body - fixed mesh pairs, in parallel: each pair walks its mesh's tree and lists the
    triangles near the body (one entry per triangle); each entry is tested by its own thread
    and its contacts gathered per pair (at most 64); then each pair keeps 4 of them */
-extern const char lr_wgsl_rigid_meshq[];   // engine/gpu/shaders/rigid_meshq.wgsl
-static const char *K_MESHQ = lr_wgsl_rigid_meshq;
+GPU_WGSL(K_MESHQ, rigid_meshq);
 
-extern const char lr_wgsl_rigid_meshtri[];   // engine/gpu/shaders/rigid_meshtri.wgsl
-static const char *K_MESHTRI = lr_wgsl_rigid_meshtri;
+GPU_WGSL(K_MESHTRI, rigid_meshtri);
 
-extern const char lr_wgsl_rigid_meshflush[];   // engine/gpu/shaders/rigid_meshflush.wgsl
-static const char *K_MESHFLUSH = lr_wgsl_rigid_meshflush;
+GPU_WGSL(K_MESHFLUSH, rigid_meshflush);
 
 
 /* where each body's contacts go: off[i] = the contacts of the bodies before i (an exclusive
    prefix sum, P8). One workgroup of 256 threads: each adds up its run of n / 256 bodies,
    the 256 sums are scanned together (Hillis-Steele, 8 rounds), then each thread writes its
    run's offsets from its sum's start. A few thousand bodies are a run of 4-16 each. */
-extern const char lr_wgsl_rigid_scan[];   // engine/gpu/shaders/rigid_scan.wgsl
-static const char *K_SCAN = lr_wgsl_rigid_scan;
+GPU_WGSL(K_SCAN, rigid_scan);
 
 /* each contact into its bodies' lists */
-extern const char lr_wgsl_rigid_fill[];   // engine/gpu/shaders/rigid_fill.wgsl
-static const char *K_FILL = lr_wgsl_rigid_fill;
+GPU_WGSL(K_FILL, rigid_fill);
 
 /* each contact before solving, every substep: where its points are now (la, lb moved with
    their bodies) and so its depth, arms, tangents, effective masses with each body's mass
    split among its contacts, the bias (bounce, push-out, or for a gap how fast it may close),
    and the impulse to start from (warm start), applied first: in the step's first substep
    the same contact's in the step before, then its own of the substep before */
-extern const char lr_wgsl_rigid_prep[];   // engine/gpu/shaders/rigid_prep.wgsl
-static const char *K_PREP = lr_wgsl_rigid_prep;
+GPU_WGSL(K_PREP, rigid_prep);
 
 /* Each body's contact list, read 8 entries at a time by its 8 threads (a thread per body
    waited on one contact after the other); the 8 results added up by the first thread in the
    list's order (summed in another order, piles came to rest less often: 600 hulls asleep in
    40 s 3 times out of 6, against 6 of 6). LANES(...) declares the workgroup's memory;
    chunks() is how many rounds of 8 the longest list in the workgroup needs. */
-extern const char lr_wgsl_rigid_lanes[];   // engine/gpu/shaders/rigid_lanes.wgsl
-static const char *K_LANES = lr_wgsl_rigid_lanes;
+GPU_WGSL(K_LANES, rigid_lanes);
 
 /* the warm start: each body's velocities with its contacts' starting impulses (each with the
    whole mass: the shares average back to it), into V (the iterations' velocities) */
-extern const char lr_wgsl_rigid_apply[];   // engine/gpu/shaders/rigid_apply.wgsl
-static const char *K_APPLY = lr_wgsl_rigid_apply;
+GPU_WGSL(K_APPLY, rigid_apply);
 
 /* One iteration, one pass (P10; it was two: every contact's impulse, then every body's
    sum): each body goes through its contacts, works out each one's impulse from the
@@ -142,12 +123,10 @@ static const char *K_APPLY = lr_wgsl_rigid_apply;
    same numbers; its first body keeps the result (Jo, and C.j for the next substep). A
    fixed or sleeping body does only its first-body contacts (their impulses) and keeps its
    velocities; the fixed mesh, never a first body, nothing. 8 threads per body (K_LANES). */
-extern const char lr_wgsl_rigid_solve[];   // engine/gpu/shaders/rigid_solve.wgsl
-static const char *K_SOLVE = lr_wgsl_rigid_solve;
+GPU_WGSL(K_SOLVE, rigid_solve);
 
 /* velocities -> positions, orientations */
-extern const char lr_wgsl_rigid_pos[];   // engine/gpu/shaders/rigid_pos.wgsl
-static const char *K_POS = lr_wgsl_rigid_pos;
+GPU_WGSL(K_POS, rigid_pos);
 
 // ---- the C side ----------------------------------------------------------------------------
 

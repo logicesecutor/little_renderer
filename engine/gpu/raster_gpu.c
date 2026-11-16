@@ -23,8 +23,7 @@
 #include <string.h>
 #include "core/env.h"
 
-extern const char lr_wgsl_raster_shader[];   // engine/gpu/shaders/raster_shader.wgsl
-static const char *SHADER = lr_wgsl_raster_shader;
+GPU_WGSL(SHADER, raster_shader);
 
 typedef struct {
     float vp[16], eye[4], lamp[32];

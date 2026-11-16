@@ -43,38 +43,29 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 
 #define TYPES GPU_WGSL_TYPES
 #define COMMON GPU_WGSL_MEDIA
-extern const char lr_wgsl_types[];   // engine/gpu/shaders/types.wgsl
-const char *const GPU_WGSL_TYPES = lr_wgsl_types;
+GPU_WGSL_EXPORT(GPU_WGSL_TYPES, types);
 
-extern const char lr_wgsl_media[];   // engine/gpu/shaders/media.wgsl
-const char *const GPU_WGSL_MEDIA = lr_wgsl_media;
+GPU_WGSL_EXPORT(GPU_WGSL_MEDIA, media);
 
-extern const char lr_wgsl_view_light[];   // engine/gpu/shaders/view_light.wgsl
-static const char *LIGHT = lr_wgsl_view_light;
+GPU_WGSL(LIGHT, view_light);
 
 // the frame the media are drawn over: a framebuffer of the CPU renderers (two buffers)...
-extern const char lr_wgsl_view_frame_cpu[];   // engine/gpu/shaders/view_frame_cpu.wgsl
-static const char *FRAME_CPU = lr_wgsl_view_frame_cpu;
+GPU_WGSL(FRAME_CPU, view_frame_cpu);
 // ...or what the GPU rasterizer drew (two textures)
-extern const char lr_wgsl_view_frame_gpu[];   // engine/gpu/shaders/view_frame_gpu.wgsl
-static const char *FRAME_GPU = lr_wgsl_view_frame_gpu;
+GPU_WGSL(FRAME_GPU, view_frame_gpu);
 
-extern const char lr_wgsl_view_composite[];   // engine/gpu/shaders/view_composite.wgsl
-static const char *COMPOSITE = lr_wgsl_view_composite;
+GPU_WGSL(COMPOSITE, view_composite);
 
 /* The text over the image (the frame rate; app/hud.c draws it into argb pixels): a rectangle
    of the canvas, its pixels from the buffer, blended over what the composite pass drew. */
-extern const char lr_wgsl_view_hud[];   // engine/gpu/shaders/view_hud.wgsl
-static const char *HUD = lr_wgsl_view_hud;
+GPU_WGSL(HUD, view_hud);
 
 /* What volume_update does on the CPU, for media whose densities live on the GPU (and, the
    same way, for all the others): the majorant of every brick (with the voxel of interpolation
    around it), and, with atomics, the box of the voxels with density > 0 and their maximum. */
-extern const char lr_wgsl_view_stats[];   // engine/gpu/shaders/view_stats.wgsl
-static const char *STATS = lr_wgsl_view_stats;
+GPU_WGSL(STATS, view_stats);
 
-extern const char lr_wgsl_view_finish[];   // engine/gpu/shaders/view_finish.wgsl
-static const char *FINISH = lr_wgsl_view_finish;
+GPU_WGSL(FINISH, view_finish);
 
 // ---- the CPU side ---------------------------------------------------------------------------
 

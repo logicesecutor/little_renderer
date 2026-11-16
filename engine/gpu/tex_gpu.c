@@ -14,8 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern const char lr_wgsl_tex[];   // engine/gpu/shaders/tex.wgsl
-const char *const GPU_WGSL_TEX = lr_wgsl_tex;
+GPU_WGSL_EXPORT(GPU_WGSL_TEX, tex);
 
 void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]){
     #define TX(i) ((i) > 0 && (i) <= ntex ? (uint32_t)(i) : 0u)

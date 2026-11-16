@@ -104,7 +104,7 @@ used for 2D drawing any more, so reload the page with `?gpu=off` or `?gpu=offscr
 
 The shaders are WGSL, one file each in `engine/gpu/shaders/` (`trace.wgsl`, `rigid_solve.wgsl`,
 ...). The build turns them into C strings inside the library (`tools/wgsl_embed.c`: a file
-`x.wgsl` becomes `lr_wgsl_x`, which the C file using it declares), so the engine stays a C
+`x.wgsl` becomes `lr_wgsl_x`, which the C file using it names with `GPU_WGSL`), so the engine stays a C
 library with nothing to load at run time, natively or in a browser. Some are pieces put
 together by their C file (the path tracer's module, the air's kernels with their samplers). Every kernel has an explicit binding
 layout. The `gpu` layer may use `core`, `raster` (the raymarching model) and `phys`
