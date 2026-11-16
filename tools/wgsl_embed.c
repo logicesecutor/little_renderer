@@ -1,11 +1,11 @@
-// wgsl_embed.c - the shaders (engine/gpu/shaders/*.wgsl) as C strings, so the engine carries
+// wgsl_embed.c - the shaders (engine/gpu/shaders/*/*.wgsl) as C strings, so the engine carries
 // them inside (no files to find at run time, natively or in a browser). Built and run by the
 // Makefile:
 //
 //     wgsl_embed out.c a.wgsl b.wgsl ...
 //
 // writes out.c with `const char lr_wgsl_a[]`, `lr_wgsl_b[]`, ...: each file's text, line for
-// line. A file using one names it with GPU_WGSL (gpu/gpu_internal.h).
+// line, named after the file alone (dir/a.wgsl is lr_wgsl_a, so the names must not repeat). A file using one names it with GPU_WGSL (gpu/gpu_internal.h).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

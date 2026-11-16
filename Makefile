@@ -75,11 +75,11 @@ SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard engine/gpu/vk/*
 OBJ = $(patsubst engine/%.c,$(BUILD)/%.o,$(SRC)) $(BUILD)/wgsl_shaders.o
 LIB = $(BUILD)/liblr.a
 
-# the shaders: engine/gpu/shaders/*.wgsl, carried inside the library as C strings
+# the shaders: engine/gpu/shaders/<folder>/*.wgsl, carried inside the library as C strings
 # (lr_wgsl_<name>), made by tools/wgsl_embed.c (built with the same compiler: HOSTCC for
 # another one)
 HOSTCC ?= $(CC)
-WGSL_FILES = $(sort $(wildcard engine/gpu/shaders/*.wgsl))
+WGSL_FILES = $(sort $(wildcard engine/gpu/shaders/*/*.wgsl))
 WGSL_EMBED = build/tools/wgsl_embed$(EXE)
 WGSL_C = build/gen/wgsl_shaders.c
 
@@ -150,7 +150,7 @@ check-layers:
 	for f in engine/core/*; do grep -Hn '#include "' $$f | grep -v '"core/' && ok=0; done; \
 	for l in raster rt phys platform; do for f in engine/$$l/*; do \
 	  grep -Hn '#include "' $$f | grep -v -e '"core/' -e "\"$$l/" && ok=0; done; done; \
-	for f in engine/gpu/*; do grep -Hn '#include "' $$f | grep -v -e '"core/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' && ok=0; done; \
+	for f in engine/gpu/*.[ch]; do grep -Hn '#include "' $$f | grep -v -e '"core/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' && ok=0; done; \
 	if [ $$ok = 1 ]; then echo "layers ok"; else echo "layer violations above"; exit 1; fi
 
 # ---- models -----------------------------------------------------------------------------
