@@ -156,7 +156,11 @@ struct GpuFluid {
     // it does not read, which is then the velocity (no copy back): `cur` = 1 when it is tu, tv, tw
     WGPUBuffer u, v, w, tu, tv, tw, p, div, solid, svel, cvel, omg, frc;
     int cur;
-    WGPUBuffer dens, d0, d1;
+    // the cloud's two buffers take turns with them: it is in dens[cur], and its advection
+    // reads that one and writes the other, where it is when the step ends (no copy either);
+    // d1: MacCormack's first step. `link`: where the views that draw it find it (NULL: no cloud)
+    WGPUBuffer dens[2], d1;
+    GpuDensity *link;
     WGPUBuffer bodies, around;    // per body: 6 vec4 in, 1 vec4 out
     size_t bodies_cap, around_cap;
     WGPUBuffer occ;               // the mesh bodies' shapes: which cells they fill
@@ -273,7 +277,7 @@ static void make_bind_groups(GpuFluid *gf){
         WGPUBuffer u = a ? gf->tu : gf->u, v = a ? gf->tv : gf->v, w = a ? gf->tw : gf->w;
         WGPUBuffer tu = a ? gf->u : gf->tu, tv = a ? gf->v : gf->tv, tw = a ? gf->w : gf->tw;
         BG(K_BOUND_, gf->fp, u, v, w, gf->solid, gf->svel);
-        BG(K_FORCES_, gf->fp, u, v, w, gf->dens);
+        BG(K_FORCES_, gf->fp, u, v, w, gf->dens[a]);
         BG(K_VA_, gf->fp, u, v, w, gf->cvel);
         BG(K_VB_, gf->fp, gf->cvel, gf->omg);
         BG(K_VC_, gf->fp, gf->omg, gf->solid, gf->frc);
@@ -281,8 +285,10 @@ static void make_bind_groups(GpuFluid *gf){
         BG(K_ADV_, gf->fp, u, v, w, tu, tv, tw);
         BG(K_DIV_, gf->fp, u, v, w, gf->solid, gf->div);
         BG(K_GRAD_, gf->fp, u, v, w, gf->p, gf->solid, gf->svel);
-        BG(K_D1_, gf->fp, u, v, w, gf->d0, gf->d1);
-        BG(K_D2_, gf->fp, u, v, w, gf->d0, gf->d1, gf->dens, gf->solid);
+        // (the cloud's advection runs after the velocity's, which made this set the velocity:
+        // the cloud is still in the other set's buffer, and goes into this one's)
+        BG(K_D1_, gf->fp, u, v, w, gf->dens[1 - a], gf->d1);
+        BG(K_D2_, gf->fp, u, v, w, gf->dens[1 - a], gf->d1, gf->dens[a], gf->solid);
     }
     for (int k = 0; k < gf->nlevels; k++){
         GLevel *l = &gf->lv[k];
@@ -344,7 +350,7 @@ static void level_params(GpuFluid *gf, int k){
 
 static void free_all(GpuFluid *gf){
     WGPUBuffer bufs[] = {gf->fp, gf->u, gf->v, gf->w, gf->tu, gf->tv, gf->tw, gf->p, gf->div, gf->solid, gf->svel, gf->cvel,
-                         gf->omg, gf->frc, gf->dens, gf->d0, gf->d1, gf->bodies, gf->around, gf->around_rb, gf->dens_rb, gf->occ};
+                         gf->omg, gf->frc, gf->dens[0], gf->dens[1], gf->d1, gf->bodies, gf->around, gf->around_rb, gf->dens_rb, gf->occ};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
     for (int k = 0; k < gf->nlevels; k++){
         GLevel *l = &gf->lv[k];
@@ -358,6 +364,10 @@ static void free_all(GpuFluid *gf){
         for (int a = 0; a < 2; a++) if (gf->bg[a][k]) wgpuBindGroupRelease(gf->bg[a][k]);
         if (gf->pipe[k]) wgpuComputePipelineRelease(gf->pipe[k]);
         if (gf->bgl[k]) wgpuBindGroupLayoutRelease(gf->bgl[k]);
+    }
+    if (gf->link){
+        gf->link->buf = NULL;                 // (the views that still hold it see the cloud gone)
+        gpu_density_release(gf->link);
     }
     free(gf->body_data);
     free(gf->around_cpu);
@@ -394,14 +404,20 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     gf->omg = storage(g, "vorticity", n * 16);
     gf->frc = storage(g, "vorticity force", n * 16);
     size_t nd = gf->cloud ? (size_t)gf->cloud->nx * gf->cloud->ny * gf->cloud->nz : 1;
-    gf->dens = storage(g, "cloud", nd * 4);
-    gf->d0 = storage(g, "cloud d0", nd * 4);
+    gf->dens[0] = storage(g, "cloud", nd * 4);
+    gf->dens[1] = storage(g, "cloud (the other turn)", nd * 4);
     gf->d1 = storage(g, "cloud d1", nd * 4);
+    if (gf->cloud){
+        if (!(gf->link = calloc(1, sizeof(*gf->link)))){ free_all(gf); return NULL; }
+        gf->link->volume = gf->cloud->id;
+        gf->link->buf = gf->dens[0];
+        gf->link->refs = 1;
+    }
     wgpuQueueWriteBuffer(g->queue, gf->u, 0, f->u, nu(f) * 4);
     wgpuQueueWriteBuffer(g->queue, gf->v, 0, f->v, nv(f) * 4);
     wgpuQueueWriteBuffer(g->queue, gf->w, 0, f->w, nw(f) * 4);
     wgpuQueueWriteBuffer(g->queue, gf->p, 0, f->p, n * 4);
-    if (gf->cloud) wgpuQueueWriteBuffer(g->queue, gf->dens, 0, gf->cloud->density, nd * 4);
+    if (gf->cloud) wgpuQueueWriteBuffer(g->queue, gf->dens[0], 0, gf->cloud->density, nd * 4);
     // the pressure levels: the same sizes as the CPU's multigrid
     gf->nlevels = f->poisson.nlevels;
     for (int k = 0; k < gf->nlevels; k++){
@@ -428,7 +444,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
 }
 
 void gpu_fluid_attach_view(GpuFluid *gf, GpuView *v){
-    if (gf && gf->cloud) gpu_view_volume_on_gpu(v, gf->cloud, gf->dens);
+    if (gf && gf->link) gpu_view_volume_on_gpu(v, gf->link);
 }
 
 // ---- readbacks ----------------------------------------------------------------------------------
@@ -485,7 +501,7 @@ void gpu_fluid_sync_cloud(GpuFluid *gf){
     size_t bytes = (size_t)gf->cloud->nx * gf->cloud->ny * gf->cloud->nz * 4;
     if (!gf->dens_rb) gf->dens_rb = gpu_buffer(g, "cloud readback", bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    wgpuCommandEncoderCopyBufferToBuffer(enc, gf->dens, 0, gf->dens_rb, 0, bytes);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, gf->dens[gf->cur], 0, gf->dens_rb, 0, bytes);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
@@ -633,10 +649,10 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     run(pass, gf, K_GRAD_, gf->bg[a][K_GRAD_], np);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
-    // 3. the cloud
+    // 3. the cloud, from the other set's buffer into this one's
     if (cv){
         size_t nd = (size_t)cv->nx * cv->ny * cv->nz;
-        wgpuCommandEncoderCopyBufferToBuffer(enc, gf->dens, 0, gf->d0, 0, nd * 4);
+        gf->link->buf = gf->dens[a];
         pass = step_pass(gf, enc, FT_CLOUD);
         run(pass, gf, K_D1_, gf->bg[a][K_D1_], nd);
         run(pass, gf, K_D2_, gf->bg[a][K_D2_], nd);

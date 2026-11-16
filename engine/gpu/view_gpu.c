@@ -133,8 +133,7 @@ struct GpuView {
     GpuTraceReadFn t_read_fn;
     void *t_read_user;
     // media whose densities are already on the GPU (a GPU fluid's cloud): copied, not uploaded
-    const Volume *src_vol[GPU_MAX_SOURCES];
-    WGPUBuffer src_buf[GPU_MAX_SOURCES];
+    GpuDensity *src[GPU_MAX_SOURCES];
     int nsrc;
     // what is on the GPU now
     uint32_t vol_ids[GPU_MAX_VOLUMES];     // (Volume.id: not its address, which a later one can be given)
@@ -359,13 +358,30 @@ static WGPUBindGroupEntry entry(uint32_t binding, WGPUBuffer b){
 // densities, bricks and light grid layout of the scene's media; uploads what changed.
 // Returns 1 if the light grids must be recomputed.
 static WGPUBuffer gpu_source(const GpuView *v, const Volume *vol){
-    for (int i = 0; i < v->nsrc; i++) if (v->src_vol[i] == vol) return v->src_buf[i];
+    for (int i = 0; i < v->nsrc; i++) if (v->src[i]->volume == vol->id) return v->src[i]->buf;
     return NULL;
+}
+
+void gpu_density_release(GpuDensity *d){
+    if (d && --d->refs <= 0) free(d);
+}
+
+// the fluids that are gone leave the list; 1 if any did (their media are the CPU's again)
+static int sources_prune(GpuView *v){
+    int gone = 0;
+    for (int i = 0; i < v->nsrc; ){
+        if (v->src[i]->buf){ i++; continue; }
+        gpu_density_release(v->src[i]);
+        v->src[i] = v->src[--v->nsrc];
+        gone = 1;
+    }
+    return gone;
 }
 
 static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, MarchLamp *lamp, WGPUCommandEncoder enc){
     Gpu *g = v->g;
     int n = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
+    if (sources_prune(v)) v->nvols = -1;      // copy everything again
     int changed = n != v->nvols || mp->light_res != v->light_res ||
                   lamp->pos.x != v->lamp[0] || lamp->pos.y != v->lamp[1] || lamp->pos.z != v->lamp[2];
     for (int k = 0; k < n && !changed; k++)
@@ -469,23 +485,25 @@ static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, voi
     wgpuBufferUnmap(v->cap_buf);
 }
 
-void gpu_view_volume_on_gpu(GpuView *v, const Volume *vol, WGPUBuffer density){
-    if (!v || !vol) return;
+void gpu_view_volume_on_gpu(GpuView *v, GpuDensity *d){
+    if (!v || !d) return;
+    sources_prune(v);
     v->nvols = -1;   // copy everything again
-    for (int i = 0; i < v->nsrc; i++)
-        if (v->src_vol[i] == vol){
-            if (density) v->src_buf[i] = density;
-            else {                                   // back to the CPU's densities
-                v->nsrc--;
-                v->src_vol[i] = v->src_vol[v->nsrc];
-                v->src_buf[i] = v->src_buf[v->nsrc];
-            }
+    for (int i = 0; i < v->nsrc; i++){
+        if (v->src[i] == d) return;
+        if (v->src[i]->volume == d->volume){         // another fluid has the medium now
+            gpu_density_release(v->src[i]);
+            v->src[i] = d;
+            d->refs++;
             return;
         }
-    if (density && v->nsrc < GPU_MAX_SOURCES){
-        v->src_vol[v->nsrc] = vol;
-        v->src_buf[v->nsrc++] = density;
     }
+    if (v->nsrc == GPU_MAX_SOURCES){
+        fprintf(stderr, "GPU: a view draws at most %d media from the GPU's own densities\n", GPU_MAX_SOURCES);
+        return;
+    }
+    v->src[v->nsrc++] = d;
+    d->refs++;
 }
 
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){
@@ -977,6 +995,7 @@ void gpu_view_destroy(GpuView *v){
     if (v->cap_buf){ wgpuBufferDestroy(v->cap_buf); wgpuBufferRelease(v->cap_buf); }
     if (v->t_rb){ wgpuBufferDestroy(v->t_rb); wgpuBufferRelease(v->t_rb); }
     if (v->cap_tex){ wgpuTextureDestroy(v->cap_tex); wgpuTextureRelease(v->cap_tex); }
+    for (int i = 0; i < v->nsrc; i++) gpu_density_release(v->src[i]);
     free(v->depth_f);
     free(v);
 }

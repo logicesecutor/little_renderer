@@ -23,7 +23,8 @@ typedef struct GpuFluid GpuFluid;
 
 // takes over pw->fluid, starting from its current state; NULL if there is no fluid or GPU
 GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw);
-// v draws the cloud from the GPU's densities (no copy through the CPU)
+// v draws the cloud from the GPU's densities (no copy through the CPU), for as long as both
+// are there: either can be destroyed first (with gf gone, v draws the CPU's cloud again)
 void gpu_fluid_attach_view(GpuFluid *gf, GpuView *v);
 // asks for the cloud's densities back in the CPU's Volume (asynchronously: they arrive a
 // frame or so later, then volume_update runs), for the CPU renderers

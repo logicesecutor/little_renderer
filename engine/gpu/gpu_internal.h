@@ -215,11 +215,20 @@ void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels
 WGPUBuffer gpu_denoise_output(GpuDenoise *d);
 void gpu_denoise_destroy(GpuDenoise *d);
 
-// GPU views take the densities of some media straight from a GPU buffer (gpu/fluid_gpu.c)
+// GPU views take the densities of some media straight from a GPU buffer (a GPU fluid's cloud,
+// gpu/fluid_gpu.c). What the two share: the fluid says where the densities are now (its
+// buffers take turns), and NULL when it is destroyed; a view asks each time it copies them,
+// and lets go when it is destroyed or finds the fluid gone. Whichever goes first, the other
+// never meets a buffer that was freed. Each holds a reference; the last one frees it.
+typedef struct GpuDensity {
+    uint32_t volume;         // whose densities: Volume.id
+    WGPUBuffer buf;          // where they are now; NULL: no longer on the GPU
+    int refs;
+} GpuDensity;
 #define GPU_MAX_SOURCES 4
 struct GpuView;
-struct Volume;
-void gpu_view_volume_on_gpu(struct GpuView *v, const struct Volume *vol, WGPUBuffer density);
+void gpu_view_volume_on_gpu(struct GpuView *v, GpuDensity *d);   // (v takes a reference)
+void gpu_density_release(GpuDensity *d);
 #endif
 
 #endif
