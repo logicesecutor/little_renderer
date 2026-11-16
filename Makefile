@@ -93,7 +93,7 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/test_gpu_basic $(BIN)/test_gpu_rt $(BIN)/test_gpu_trace $(BIN)/hello_physics \
+                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_gpu_fluid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/test_gpu_basic $(BIN)/test_gpu_rt $(BIN)/test_gpu_trace $(BIN)/hello_physics \
                               $(BIN)/mesh_rain)
 
 all: lib apps examples
@@ -225,7 +225,7 @@ view-dragon: $(BIN)/view$(EXE)
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
 # the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the physics (CPU and GPU)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE) $(BIN)/test_gpu_basic$(EXE) $(BIN)/test_gpu_rt$(EXE) $(BIN)/test_gpu_trace$(EXE)
+test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE) $(BIN)/test_gpu_fluid$(EXE) $(BIN)/test_gpu_basic$(EXE) $(BIN)/test_gpu_rt$(EXE) $(BIN)/test_gpu_trace$(EXE)
 	mkdir -p out
 	$(BIN)/test_medium
 	$(BIN)/test_png
@@ -238,6 +238,7 @@ test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BI
 	$(BIN)/test_gpu_brdf
 	$(BIN)/test_physics
 	$(BIN)/test_gpu_rigid
+	$(BIN)/test_gpu_fluid
 	$(BIN)/test_gpu_rt
 	$(BIN)/test_gpu_trace
 
@@ -322,7 +323,8 @@ $(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
 	$(EMCC) $(WEBFLAGS) $(WEB_SRC) -o $@
 
 # a local web server for the page (the browser will not run WebAssembly from file://)
-# the GPU air against the CPU air (open web/build/test_gpu_fluid.html, or see docs/WEB.md)
+# the GPU air against the CPU air in a browser (open web/build/test_gpu_fluid.html, or see
+# docs/WEB.md; natively it is part of make test)
 webtest: $(WEB)/test_gpu_fluid.html
 $(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) examples/test_gpu_fluid.c
 	@mkdir -p $(WEB)

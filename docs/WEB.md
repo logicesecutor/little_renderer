@@ -123,6 +123,7 @@ Rules the GPU code follows, because a browser is asynchronous:
 
 ```sh
 make webtest      # -> web/build/test_gpu_fluid.html; open it through make serve
+make test         # natively: bin/test_gpu_fluid is one of the unit tests (skipped without a GPU)
 ```
 
 The path tracer and the rasterizer are checked image against image (headless Chromium,
@@ -135,7 +136,10 @@ tie differently).
 `examples/test_gpu_fluid.c` steps two identical worlds (a cloud, wind, buoyancy,
 vorticity, a moving obstacle, an explosion) for 40 steps, one on the CPU and one on the
 GPU, and compares the clouds voxel by voxel: they agree to about 1e-4 of the largest
-density (the GPU and the CPU do not round alike, so not to the last bit). The clouds of
+density (the GPU and the CPU do not round alike, so not to the last bit). Natively it then
+draws the cloud from the fluid's own buffers and from the copy read back to the CPU (the same
+frame, to the last bit), with the view or the fluid destroyed first and the world made
+again, as the viewer's restart does. The clouds of
 `-rastercloud` drawn by the GPU and by the CPU differ by 0.2 levels out of 255 on average.
 
 ### 2.4 The denoiser (`-denoise`, key `X`)
