@@ -109,7 +109,8 @@ static void test_basics(void){
     world_start(&w, 1);
     world_run(&w, 1.0);
     Vec3 p1 = rigid_momentum(&w.pw.rigid);
-    check("momentum: change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
+    // (AVBD moves one body at a time: momentum kept as far as its iterations converge, test_physics.c)
+    check("momentum: change / total", v_len(v_sub(p1, p0)) / scale, 0, w.pw.rigid.solver == RIGID_AVBD ? 0.02 : 1e-3);
     check("momentum: sphere a turned around (vx < 0)", w.pw.rigid.bodies[a].vel.x < 0, 1, 0);
     world_free(&w);
 

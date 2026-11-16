@@ -279,10 +279,36 @@ momentum tests allow that for it); on the CPU it costs about as much as the impu
 whole `test_physics` 0.9 s against 0.8 s on Windows; mesh_rain with 1000 hulls, -gpu off,
 1.3 s of physics a frame against 1.4 s: the contacts dominate). Static-friction anchors
 (the paper's "stick") are not done: within a step the tangent rows already hold the points
-where they were, and the tests' resting boxes do not drift. On the GPU the bodies still
-use the impulses (1.4).
+where they were, and the tests' resting boxes do not drift.
 
-### 1.4 The bodies on the GPU (`gpu/rigid_gpu.c`)
+On the GPU (`gpu/rigid_gpu.c`, the `rigid_a*.wgsl` kernels) the same solver runs with the
+same constants, from the same contacts (1.4: found once per step, followed by `la`, `lb`):
+
+- the bodies are coloured once per step so that no two of a colour touch (8 rounds of
+  speculative colouring: each uncoloured body picks the smallest colour its coloured
+  neighbours and the neighbours that come first, by a hash, do not have, and keeps it unless
+  such a neighbour picked the same; 12-14 colours in `mesh_rain`'s pile, 0-3 bodies of 1500
+  left, solved with the last colour. Jones–Plassmann, a colour only for a body that no
+  uncoloured neighbour comes before, left 100 after 16 rounds, and the pile shook), and
+  listed by colour;
+- per substep: each body's start and first guess, each contact's rows; then each iteration
+  is a dispatch per colour (each body of the colour, 8 threads, each through every 8th of
+  its contacts, the sums added up by the first, the 6 x 6 system solved in 3 x 3 blocks by
+  its Schur complement, everything over the body's `m / h²` so that it stays in range for
+  floats) and one over the contacts (forces and stiffnesses); the velocities, a last pass of
+  positions per colour, and in the last substep the bounces;
+- the colour a pass solves is in a small buffer that the last workgroup of each pass moves
+  on (no buffer copies between the passes), and the passes per iteration are the colours the
+  last step read back used.
+
+All the GPU tests pass with it (`LR_RIGID=avbd bin/test_gpu_rigid`, wgpu and our Vulkan
+layer), but it costs more than the impulses there: its passes are sequential, a colour after
+the other (about 12 x 6 x 4 dispatches a step against 40), each with a few hundred bodies.
+RTX 3070, ms of GPU per step: `mesh_rain` 1500 hulls 12.8 against 4.7 (the solver 9.2
+against 2.1), 8000 small hulls 13.3 against 10.0 (6.0 against 3.6); `test_gpu_rigid`'s
+falling pile of 1024 balls and boxes 0.9 against 0.4. So the impulses stay the default.
+
+### 1.4 The bodies on the GPU (`gpu/rigid_gpu.c`, the impulses; AVBD: 1.3b)
 
 With a GPU (`view -sim on`, `sim`; `-gpurigid off` to keep them on the CPU) the bodies are
 stepped there, all of them: balls, boxes, hulls, fixed meshes and the walls. The state stays

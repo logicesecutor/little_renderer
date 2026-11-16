@@ -142,6 +142,48 @@ GPU_WGSL(K_SOLVE, rigid_solve);
 /* velocities -> positions, orientations */
 GPU_WGSL(K_POS, rigid_pos);
 
+/* ---- the AVBD solver (LR_RIGID=avbd; rigid.c's avbd_steps, PHYSICS.md 1.3b) ----
+   The same contacts (found once per step, followed through the substeps), solved on the
+   positions: the bodies coloured so that no two of a colour touch (once per step), then per
+   substep each body's 6 x 6 solve, one colour after the other, each iteration followed by
+   every contact's forces and stiffnesses. In this mode a contact keeps: ra, rb = the arms at
+   the substep's start (rb.w: the normal's C0), t1, t2 = the tangents (w: their C0), j = the
+   rows' forces lambda (w: the stiffnesses' scale, m / h^2), imp = their stiffnesses (w:
+   friction); AB (8 vec4 a body): where it started the substep (x0, q0), where it would go
+   unhindered (y, qy), its velocities then, the acceleration of its last substep, its colour's
+   pass and place in it; CTL: the colour being solved, workgroups done, colours used, -, the
+   bodies of each colour's pass (32). */
+GPU_WGSL(K_AVBD, rigid_avbd);
+GPU_WGSL(K_AVBDC, rigid_avbdc);
+/* each body where it starts and would go, and the first guess; in the first substep its
+   colour cleared */
+GPU_WGSL(K_ASTART, rigid_astart);
+/* half a round of colouring (speculative: each uncoloured body picks a colour, then keeps it
+   unless a neighbour that comes first picked the same); AVBD_ROUNDS of them, the rest solved
+   in the last colour's pass. (Jones-Plassmann, a colour only for the bodies no uncoloured
+   neighbour comes before, left 100 of mesh_rain's 1500 hulls uncoloured after 16 rounds) */
+GPU_WGSL(K_ACOLOR, rigid_acolor);
+static const char *K_APICK = "const PICK = true;", *K_AKEEP = "const PICK = false;";
+/* the bodies listed by colour (ORDER): counted, then placed */
+GPU_WGSL(K_ACOUNT, rigid_acount);
+GPU_WGSL(K_APLACE, rigid_aplace);
+/* each contact's rows at the substep's start; in the first, its last step's forces */
+GPU_WGSL(K_AROWS, rigid_arows);
+/* the bodies of one colour each to their balance, 8 threads a body (the last workgroup
+   moves on the colour) */
+GPU_WGSL(K_APRIMAL, rigid_aprimal);
+static const char *K_AITER = "const FULL = false;", *K_AFULL = "const FULL = true;";
+/* each contact's forces and stiffnesses after an iteration */
+GPU_WGSL(K_ADUAL, rigid_adual);
+/* the velocities from the moves, before the last pass (the overlaps out, no speed gained) */
+GPU_WGSL(K_AVEL, rigid_avel);
+/* the bounces, the last substep: into V, then into the bodies */
+GPU_WGSL(K_ABOUNCE, rigid_abounce);
+GPU_WGSL(K_AEND, rigid_aend);
+#define AVBD_ROUNDS 8                         // colouring rounds (each two dispatches)
+#define AVBD_MAX_COLOURS 32                   // passes at most (K_ACOLOR: colours 0..31)
+#define AVBD_ITERATIONS 5                     // as rigid.c's
+
 // ---- the C side ----------------------------------------------------------------------------
 
 typedef struct {
@@ -152,7 +194,8 @@ typedef struct {
 } GRP;
 
 enum { R_GCOUNT, R_GSCAN, R_GPLACE, R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HULLPRE, R_ARGS3, R_HEAVY, R_HULLC, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
-       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, NR };
+       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP,
+       R_ASTART, R_APICK, R_AKEEP, R_ACOUNT, R_APLACE, R_AROWS, R_APRIMAL, R_AFULL, R_ADUAL, R_AVEL, R_ABOUNCE, R_AEND, NR };
 static const struct { const char *name, *types; const char **part[4]; } RK[NR] = {
     {"bodies: grid (count)", "URW",  {&K_GCOUNT, &K_GRID}},
     {"bodies: grid (scan)", "URW",   {&K_GSCAN, &K_GRID}},
@@ -177,6 +220,18 @@ static const struct { const char *name, *types; const char **part[4]; } RK[NR] =
     {"bodies: move",     "UWR",      {&K_POS}},
     {"bodies: wake",     "URWWWRR",  {&K_WAKES, &K_BROAD}},
     {"bodies: sleep",    "UWR",      {&K_SLEEP}},
+    {"bodies: avbd start", "UWWWWW", {&K_AVBD, &K_ASTART}},
+    {"bodies: avbd colours (pick)", "URRRWWW", {&K_APICK, &K_AVBD, &K_ACOLOR}},
+    {"bodies: avbd colours (keep)", "URRRWWW", {&K_AKEEP, &K_AVBD, &K_ACOLOR}},
+    {"bodies: avbd colour counts", "URWW", {&K_AVBD, &K_ACOUNT}},
+    {"bodies: avbd by colour", "URRWW", {&K_AVBD, &K_APLACE}},
+    {"bodies: avbd rows", "URWWRRRR", {&K_AVBD, &K_AROWS}},
+    {"bodies: avbd primal", "UWRRRRWR", {&K_AITER, &K_AVBD, &K_AVBDC, &K_APRIMAL}},
+    {"bodies: avbd last pass", "UWRRRRWR", {&K_AFULL, &K_AVBD, &K_AVBDC, &K_APRIMAL}},
+    {"bodies: avbd dual", "URWWRW",  {&K_AVBD, &K_AVBDC, &K_ADUAL}},
+    {"bodies: avbd velocities", "UWWW", {&K_AVBD, &K_AVEL}},
+    {"bodies: avbd bounce", "URRRRW", {&K_AVBD, &K_ABOUNCE}},
+    {"bodies: avbd end", "UWR",      {&K_AEND}},
 };
 
 #define BODY_BYTES 128
@@ -203,6 +258,8 @@ struct GpuRigid {
     uint32_t unit_box;                           // its shape index in G
     WGPUBuffer contacts[2], lists[2], offs[2];   // this step's and the one before's
     WGPUBuffer vel[2], imps[2];                  // the iterations' velocities and impulses, in turns (K_SOLVE)
+    WGPUBuffer ab, col, tent, ctl, order;        // AVBD: the bodies' substep state, colours (and picks), the passes' control, by colour
+    int colours;                                 // AVBD: colours used in the last step read back
     size_t cap_bodies, cap_contacts;             // what the buffers hold
     int nb;                                      // bodies on the GPU
     int prev_nb;                                 // bodies in the last substep (its lists)
@@ -233,7 +290,9 @@ struct GpuRigid {
 
 static const char *const RK_NAMES[NR] = {"grid: count", "grid: scan", "grid: place", "forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
     "contacts: hulls, the memo", "hulls to test", "contacts: hulls", "contacts: hulls' faces", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
-    "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep"};
+    "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep",
+    "avbd: start", "avbd: colours (pick)", "avbd: colours (keep)", "avbd: colour counts", "avbd: by colour", "avbd: rows", "avbd: primal (a colour)", "avbd: last pass (a colour)", "avbd: dual", "avbd: velocities",
+    "avbd: bounce", "avbd: end"};
 
 // the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
 // out of the list would have its callbacks ignored (its bodies never back): creation is
@@ -301,6 +360,18 @@ static void make_groups(GpuRigid *gr){
         { WGPUBuffer b_[] = {gr->par, gr->bodies, gr->vel[p]}; gr->bg_pos[p] = gpu_bind(g, gr->bgl[R_POS], b_, 3); }
         BG(R_WAKE, gr->par, gr->bodies, gr->pairs, gr->pc, gr->wake, gr->forces, gr->grid);
         BG(R_SLEEP, gr->par, gr->bodies, gr->forces);
+        BG(R_ASTART, gr->par, gr->bodies, gr->ab, gr->col, gr->ctl, gr->tent);
+        BG(R_APICK, gr->par, C, O, L, gr->col, gr->tent, gr->ctl);
+        BG(R_AKEEP, gr->par, C, O, L, gr->col, gr->tent, gr->ctl);
+        BG(R_ACOUNT, gr->par, gr->col, gr->ab, gr->ctl);
+        BG(R_APLACE, gr->par, gr->col, gr->ab, gr->ctl, gr->order);
+        BG(R_AROWS, gr->par, gr->bodies, C, gr->cnt, gr->ab, Cp, Lp, Op);
+        BG(R_APRIMAL, gr->par, gr->bodies, C, O, L, gr->ab, gr->ctl, gr->order);
+        BG(R_AFULL, gr->par, gr->bodies, C, O, L, gr->ab, gr->ctl, gr->order);
+        BG(R_ADUAL, gr->par, gr->bodies, C, gr->cnt, gr->ab, gr->ctl);
+        BG(R_AVEL, gr->par, gr->bodies, gr->ab, gr->ctl);
+        BG(R_ABOUNCE, gr->par, gr->bodies, C, O, L, gr->vel[0]);
+        BG(R_AEND, gr->par, gr->bodies, gr->vel[0]);
 #undef BG
     }
 }
@@ -310,7 +381,8 @@ static void make_groups(GpuRigid *gr){
 static void release_sized(GpuRigid *gr){
     WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
-                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->feat, &gr->grid, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1]};
+                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->feat, &gr->grid, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1],
+                         &gr->ab, &gr->col, &gr->tent, &gr->ctl, &gr->order};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
 }
 
@@ -343,6 +415,12 @@ static int reserve(GpuRigid *gr, int nb){
     gr->memo = storage(g, "bodies: hull pairs remembered", 2 * 13 * (2 * gr->cap_pairs) * 4);   // (zeroed: empty)
     gr->memo_rd = 0;
     gr->feat = storage(g, "bodies: hull pairs' features, K_HEAVY's queue", 2 * gr->cap_pairs * 16);
+    gr->ab = storage(g, "bodies: avbd state", cap * 128);
+    { float *z = calloc(cap, 128); if (z){ wgpuQueueWriteBuffer(g->compute, gr->ab, 0, z, cap * 128); free(z); } }
+    gr->col = storage(g, "bodies: avbd colours", cap * 4);
+    gr->tent = storage(g, "bodies: avbd colours picked", cap * 4);
+    gr->ctl = storage(g, "bodies: avbd control", 36 * 4);
+    gr->order = storage(g, "bodies: avbd by colour", cap * 4);
     for (int p = 0; p < 2; p++){
         gr->contacts[p] = storage(g, "contacts", gr->cap_contacts * CONTACT_BYTES);
         gr->lists[p] = storage(g, "contact lists", gr->cap_contacts * 2 * 4);
@@ -491,6 +569,7 @@ static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
         uint32_t nc;
         memcpy(&nc, d + 32 * (size_t)gr->rb_n, 4);
         w->ncontacts = (int)(nc < gr->cap_contacts ? nc : gr->cap_contacts);
+        if (w->solver == RIGID_AVBD){ uint32_t nk; memcpy(&nk, d + 32 * (size_t)gr->rb_n + 1, 4); gr->colours = (int)nk; }
     }
     wgpuBufferUnmap(gr->rb);
 }
@@ -624,6 +703,9 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     for (int i = 0; i < nb; i++) if (w->bodies[i].shape != BODY_MESH){ rsum += body_radius_of(&w->bodies[i]); nr++; }
     rbig = nr ? 2 * rsum / nr : 1;
     for (int i = 0; i < nb; i++){ real r = body_radius_of(&w->bodies[i]); if (r <= rbig && r > rmax) rmax = r; }
+    // AVBD: as many colour passes as the last step read back used (the bodies past them go in the last)
+    const int avbd = w->solver == RIGID_AVBD;
+    int passes = gr->colours < 1 ? 8 : gr->colours > AVBD_MAX_COLOURS ? AVBD_MAX_COLOURS : gr->colours;
     for (int s = 0; s < steps; s++){
         GRP P;
         memset(&P, 0, sizeof(P));
@@ -647,6 +729,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         P.m[2] = (uint32_t)gr->cap_pairs;
         P.m[3] = (uint32_t)s;
         P.q[0] = (float)(3 * (rmax > 0 ? rmax : 1)); P.q[1] = (float)rbig; P.q[2] = (float)gr->grid_h;
+        P.q[3] = (float)passes;                  // AVBD: the colour passes per iteration
         memcpy(par_cpu + (size_t)s * 256, &P, sizeof(P));
     }
     wgpuQueueWriteBuffer(g->compute, gr->par_all, 0, par_cpu, (size_t)steps * 256);
@@ -677,14 +760,37 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_SCAN, 1);
             dispatch(enc, &pass, gr, R_FILL, gr->cap_contacts);
         }
-        dispatch(enc, &pass, gr, R_PREP, gr->cap_contacts);
-        dispatch(enc, &pass, gr, R_APPLY, 8 * (size_t)nb);              // the warm start, into vel[0]; 8 threads a body
-        gr->turn = 0;
-        for (int it = 0; it < w->iterations; it++){
-            dispatch(enc, &pass, gr, R_SOLVE, 8 * (size_t)nb);          // vel, imps [turn] -> [!turn]; 8 threads a body
-            gr->turn ^= 1;
+        if (avbd){
+            dispatch(enc, &pass, gr, R_ASTART, (size_t)nb);
+            if (s == 0){
+                for (int r = 0; r < AVBD_ROUNDS; r++){
+                    dispatch(enc, &pass, gr, R_APICK, (size_t)nb);
+                    dispatch(enc, &pass, gr, R_AKEEP, (size_t)nb);
+                }
+                dispatch(enc, &pass, gr, R_ACOUNT, (size_t)nb);
+                dispatch(enc, &pass, gr, R_APLACE, (size_t)nb);
+            }
+            dispatch(enc, &pass, gr, R_AROWS, gr->cap_contacts);
+            for (int it = 0; it < AVBD_ITERATIONS; it++){
+                for (int c = 0; c < passes; c++) dispatch(enc, &pass, gr, R_APRIMAL, 8 * (size_t)nb);   // 8 threads a body
+                dispatch(enc, &pass, gr, R_ADUAL, gr->cap_contacts);
+            }
+            dispatch(enc, &pass, gr, R_AVEL, (size_t)nb);
+            for (int c = 0; c < passes; c++) dispatch(enc, &pass, gr, R_AFULL, 8 * (size_t)nb);
+            if (s == steps - 1){
+                dispatch(enc, &pass, gr, R_ABOUNCE, (size_t)nb);
+                dispatch(enc, &pass, gr, R_AEND, (size_t)nb);
+            }
+        } else {
+            dispatch(enc, &pass, gr, R_PREP, gr->cap_contacts);
+            dispatch(enc, &pass, gr, R_APPLY, 8 * (size_t)nb);          // the warm start, into vel[0]; 8 threads a body
+            gr->turn = 0;
+            for (int it = 0; it < w->iterations; it++){
+                dispatch(enc, &pass, gr, R_SOLVE, 8 * (size_t)nb);      // vel, imps [turn] -> [!turn]; 8 threads a body
+                gr->turn ^= 1;
+            }
+            dispatch(enc, &pass, gr, R_POS, (size_t)nb);                // vel[turn] back into the bodies
         }
-        dispatch(enc, &pass, gr, R_POS, (size_t)nb);                    // vel[turn] back into the bodies
         if (s == steps - 1 && w->sleep){
             // the end of the step: who falls asleep
             dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
@@ -701,6 +807,8 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         wgpuCommandEncoderCopyBufferToBuffer(enc, gr->bodies, 0, gr->rb, 0, (size_t)nb * BODY_BYTES);
         // the contact count (cnt[0] of the last substep's buffers)
         wgpuCommandEncoderCopyBufferToBuffer(enc, gr->cnt, 0, gr->rb, (size_t)nb * BODY_BYTES, 4);
+        // AVBD: the colours used (CTL[2])
+        if (avbd) wgpuCommandEncoderCopyBufferToBuffer(enc, gr->ctl, 8, gr->rb, (size_t)nb * BODY_BYTES + 4, 4);
     }
     gpu_timer_finish(gr->timer, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
