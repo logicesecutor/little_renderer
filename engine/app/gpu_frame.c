@@ -50,11 +50,12 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
                     Image *img, int progress){
     GpuTraceParams tp = {*cam, max_depth, mis, clamp, !sampler, photons, 0};
     if (!gpu_view_trace_start(view, s, &tp)) return 1;
+    gpu_view_trace_limit(view, spp);          // exactly spp: the same image every time
     int shown = -1, p1 = -1;
     double t1 = 0;
     while (gpu_view_trace_passes(view) < spp && gpu_state(gpu) == GPU_READY){
         // one band (or, once the GPU proves fast, several whole passes) at a time; the
-        // last submission may add a few passes more than spp, which only lowers the noise
+        // last submission as many passes as are left (gpu_view_trace_limit)
         gpu_view_trace_more(view, s, rp, mp);
         gpu_wait(gpu);
         if (p1 < 0){ p1 = gpu_view_trace_passes(view); t1 = clock_s(); }   // after the first: pipelines made, caches warm

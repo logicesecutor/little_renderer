@@ -523,6 +523,7 @@ static int frame(void){
                    gpu_offscreen(gpu) ? " (offscreen, read back to the canvas)" : "");
             gpu_view_trace_denoise(gview, o.denoise);
             gpu_view_trace_wavefront(gview, o.wavefront);
+            gpu_view_trace_limit(gview, o.spp);
             if (o.gpu_trace < 0){
                 o.gpu_trace = !gpu_software(gpu);
                 if (!o.gpu_trace) printf("GPU: a software GPU: the CPU path traces (faster here; -gputrace on to try it anyway)\n");

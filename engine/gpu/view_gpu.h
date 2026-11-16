@@ -68,6 +68,11 @@ int gpu_view_trace_reads_tlas(const GpuView *v);
 // Call every frame: unless the previous band is still running, submits the next one (p and mp
 // as in gpu_view_present: the media are made ready the same way).
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp);
+// No image gets more than spp samples per pixel (0, the default: no limit; a fast GPU is
+// given several passes per submission, as many as its speed allows, so an image asked for
+// until gpu_view_trace_passes reaches n could end with a few more, a different number from
+// run to run). With the limit, gpu_view_trace_more does nothing once an image has them all.
+void gpu_view_trace_limit(GpuView *v, int spp);
 int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finished
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU
 // Reads the image back (asynchronously, like gpu_view_capture): fn gets w * h values of

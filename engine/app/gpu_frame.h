@@ -19,6 +19,7 @@ void gpu_frame_close(Gpu *gpu, GpuView *view);
 // sampler: 1 = Sobol + blue noise, 0 = plain random numbers (core/sampler.h). photons > 0:
 // caustics by light tracing, this many light paths per pixel and sample (0: path traced).
 // progress = 1 prints a percentage. 0 on success, 1 if this GPU cannot hold the scene.
+// Exactly spp samples (it sets gpu_view_trace_limit(view, spp)): the same image every time.
 int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, const RenderParams *rp,
                     const MarchParams *mp, int spp, int max_depth, int mis, real clamp, int sampler, real photons,
                     Image *img, int progress);

@@ -18,6 +18,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ 
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_reads_tlas(const GpuView *v){ (void)v; return 0; }
+void gpu_view_trace_limit(GpuView *v, int spp){ (void)v; (void)spp; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; }
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
@@ -114,6 +115,7 @@ struct GpuView {
     int t_sub_prep;             // and it begins an image (its time includes the whole image's guide)
     double t_gpu_pass_ms;       // a whole pass, as the last band took
     int t_y, t_rows, t_reps;    // next row; rows per band and passes per submit (both adapt to the GPU)
+    int t_limit;                // gpu_view_trace_limit: the most passes of an image (0: no limit)
     int t_passes;               // samples per pixel submitted
     int t_done, t_done_next;    // finished; and what that becomes when the running band ends
     int t_inflight;             // a band is running
@@ -815,6 +817,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     // one band in flight at most (also for a new image's start: on a slow GPU, frames go on
     // showing the last image until the band ends, rather than piling work up on the queue)
     if (!v || !v->trace || v->t_inflight) return;
+    if (v->t_limit > 0 && v->t_passes >= v->t_limit) return;   // the image has all its samples
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
@@ -831,6 +834,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     int whole = v->t_y == 0 && v->t_rows >= v->h;
     int rows = v->t_rows < v->h - v->t_y ? v->t_rows : v->h - v->t_y;
     int reps = whole ? v->t_reps : 1;
+    if (v->t_limit > 0 && reps > v->t_limit - v->t_passes) reps = v->t_limit - v->t_passes;   // (>= 1: checked above)
     // something is moving: a frame each, so no more passes than fit in ~10 ms
     v->t_live = v->t_moved;
     v->t_moved = 0;
@@ -884,6 +888,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     v->t_done_next = v->t_passes;
 }
 
+void gpu_view_trace_limit(GpuView *v, int spp){ if (v) v->t_limit = spp > 0 ? spp : 0; }
 int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
 int gpu_view_trace_reads_tlas(const GpuView *v){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace); }
