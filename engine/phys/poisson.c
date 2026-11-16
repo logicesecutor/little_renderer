@@ -100,7 +100,10 @@ static inline real neighbors(const PoissonLevel *l, const float *p, size_t i, un
     if (m & 8u)  s += p[i + sy];
     if (m & 16u) s += p[i - sz];
     if (m & 32u) s += p[i + sz];
-    *k = __builtin_popcount(m & 63u) + (int)(m >> 6);
+    unsigned c = m & 63u;                    // its bits counted (no popcount instruction assumed)
+    c = c - ((c >> 1) & 0x15u);
+    c = (c & 0x33u) + ((c >> 2) & 0x33u);
+    *k = (int)((c + (c >> 4)) & 0xfu) + (int)(m >> 6);
     return s;
 }
 
