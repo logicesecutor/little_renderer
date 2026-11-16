@@ -13,7 +13,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     if (first) { atomicStore(&cnt[1u + i], 0u); }
     var b = B[i];
     if (first && b.f.y > 0.5 && atomicLoad(&wake[i]) != 0u) {
-        /* woken (K_WAKE): its mass back, still at rest */
+        /* woken (K_BROAD, WAKE): its mass back, still at rest */
         b.vel = vec4f(0.0, 0.0, 0.0, b.f.z);
         b.f = vec4f(0.0);
         B[i].f = b.f;

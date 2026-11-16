@@ -10,6 +10,7 @@ struct RP {
                       w: the memo's table read this step (K_HEAVY) */
     m: vec4u,      /* the unit box's shape in G (boxes against hulls), shapes, room in each pair list,
                       the substep (contacts are found in the first) */
+    q: vec4f,      /* the grid (K_GRID): its cells' size, the radius beyond which a body is on the big list, its slots */
 };
 @group(0) @binding(0) var<uniform> P: RP;
 struct Body { pos: vec4f, rot: vec4f, vel: vec4f, ang: vec4f, half: vec4f, iner: vec4f, f: vec4f, t: vec4f };
