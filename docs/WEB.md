@@ -416,6 +416,7 @@ To write a different program, compile your own C file with the engine like `apps
 | problem | cause / fix |
 |---|---|
 | `emcc: command not found` | `source /f/Tools/emsdk/emsdk_env.sh` in this shell |
+| `wgpuBufferAddRef` undeclared (and `wgpuTextureAddRef`, `wgpuTextureViewAddRef`) | a `webgpu.h` from before the renaming: `make web WGPU_REFERENCE=1` uses `wgpu...Reference` (`gpu_ref_buffer` in `gpu/gpu_internal.h`). The port `make web` asks for (emdawnwebgpu) has `AddRef` |
 | the page stays on "loading..." | open it through `make serve`, not as a file |
 | `GPU not used (no adapter ...)` | the browser has no WebGPU: a recent Chrome or Edge; on Linux Chrome may need `--enable-unsafe-webgpu --enable-features=Vulkan` |
 | black image, `GPU lost (device destroyed by the browser)` | the browser cannot show WebGPU on this canvas (seen in headless browsers): `?gpu=offscreen` |

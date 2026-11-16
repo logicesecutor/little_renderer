@@ -45,6 +45,22 @@ struct Gpu {
 
 static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU_STRLEN}; return v; }
 
+// One more reference to a buffer, a texture or a view (the bind groups kept by
+// gpu_bind_cached, the shared atlas). The webgpu.h of today names it wgpu...AddRef:
+// wgpu-native's, our layer's, and Dawn's port for Emscripten (--use-port=emdawnwebgpu, what
+// make web uses). Headers from before the renaming (an older wgpu-native, the webgpu.h older
+// Emscriptens carried themselves) have wgpu...Reference: build with -DLR_WGPU_REFERENCE
+// there (make web WGPU_REFERENCE=1).
+#ifdef LR_WGPU_REFERENCE
+static inline void gpu_ref_buffer(WGPUBuffer b){ wgpuBufferReference(b); }
+static inline void gpu_ref_texture(WGPUTexture t){ wgpuTextureReference(t); }
+static inline void gpu_ref_view(WGPUTextureView v){ wgpuTextureViewReference(v); }
+#else
+static inline void gpu_ref_buffer(WGPUBuffer b){ wgpuBufferAddRef(b); }
+static inline void gpu_ref_texture(WGPUTexture t){ wgpuTextureAddRef(t); }
+static inline void gpu_ref_view(WGPUTextureView v){ wgpuTextureViewAddRef(v); }
+#endif
+
 WGPUShaderModule gpu_shader(Gpu *g, const char *label, const char *wgsl);
 WGPUBuffer gpu_buffer(Gpu *g, const char *label, size_t size, WGPUBufferUsage usage);
 // (re)creates *buf if it is missing or smaller than size; returns 1 if it was recreated

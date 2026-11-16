@@ -700,8 +700,8 @@ WGPUBindGroup gpu_bind_cached(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, 
     for (int i = 0; i < w->n; i++){
         w->e[i] = e[i];
         w->e[i].nextInChain = NULL;
-        if (e[i].buffer) wgpuBufferAddRef(e[i].buffer);
-        if (e[i].textureView) wgpuTextureViewAddRef(e[i].textureView);
+        if (e[i].buffer) gpu_ref_buffer(e[i].buffer);
+        if (e[i].textureView) gpu_ref_view(e[i].textureView);
     }
     return w->bg;
 }

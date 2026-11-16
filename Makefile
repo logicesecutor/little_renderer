@@ -311,7 +311,8 @@ WEB_MODELS = models/cube.obj models/sphere.obj models/torus.obj models/torus_den
              models/dragon_recon/dragon_vrip_res4.ply $(if $(WEB_DRAGON),$(DRAGON))
 WEB_SRC = $(SRC) $(WGSL_C) apps/view.c
 # the GPU backend: WebGPU through Dawn's bindings for Emscripten (fetched by emcc once)
-WEBGPU = -DLR_GPU --use-port=emdawnwebgpu
+# (WGPU_REFERENCE=1: for a webgpu.h from before wgpu...Reference became wgpu...AddRef)
+WEBGPU = -DLR_GPU --use-port=emdawnwebgpu $(if $(WGPU_REFERENCE),-DLR_WGPU_REFERENCE)
 WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pragmas $(WEBGPU) -sDEFAULT_TO_CXX \
           -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB \
           -sEXIT_RUNTIME=0 -sENVIRONMENT=web

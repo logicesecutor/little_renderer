@@ -193,8 +193,8 @@ int gpu_textures_sync(Gpu *g, GpuTextures *gt, const Scene *s){
     if (gt->tex == a->tex && gt->view == a->view) return 0;
     textures_release(gt);
     memcpy(gt, a, sizeof(*gt));
-    wgpuTextureAddRef(gt->tex);
-    wgpuTextureViewAddRef(gt->view);
+    gpu_ref_texture(gt->tex);
+    gpu_ref_view(gt->view);
     return 1;
 }
 
