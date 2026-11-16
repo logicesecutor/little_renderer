@@ -98,6 +98,8 @@ struct GpuView {
     WGPURenderPipeline hud_pipe;
     WGPUBindGroupLayout hud_bgl;
     WGPUBuffer hud_u, hud_px;
+    // the bind groups of every frame, kept (gpu_bind_cached)
+    GpuBindCache bc_comp, bc_comp_gpu, bc_hud, bc_stats[GPU_MAX_VOLUMES], bc_finish[GPU_MAX_VOLUMES], bc_light[GPU_MAX_VOLUMES];
     size_t hud_cap;
     int hud_w;                  // its width (0: none)
     // explicit: "auto" would drop the bindings a shader does not read
@@ -354,15 +356,6 @@ static WGPUBindGroupEntry entry(uint32_t binding, WGPUBuffer b){
     return e;
 }
 
-static WGPUBindGroup bind(Gpu *g, WGPUBindGroupLayout layout, const WGPUBindGroupEntry *e, size_t n){
-    WGPUBindGroupDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.layout = layout;
-    d.entryCount = n;
-    d.entries = e;
-    return wgpuDeviceCreateBindGroup(g->device, &d);
-}
-
 // densities, bricks and light grid layout of the scene's media; uploads what changed.
 // Returns 1 if the light grids must be recomputed.
 static WGPUBuffer gpu_source(const GpuView *v, const Volume *vol){
@@ -546,19 +539,17 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
         for (int k = 0; k < n; k++){
             WGPUBindGroupEntry e[5] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks),
                                        entry(3, v->acc), entry(4, v->sel_u[k])};
-            WGPUBindGroup bg = bind(g, v->stats_bgl, e, 5);
+            WGPUBindGroup bg = gpu_bind_cached(g, &v->bc_stats[k], v->stats_bgl, e, 5, NULL);
             uint32_t groups = (v->gv[k].bdims[0] * v->gv[k].bdims[1] * v->gv[k].bdims[2] + 63) / 64;
             uint32_t gx = groups < 65535 ? groups : 65535;
             wgpuComputePassEncoderSetPipeline(sp, v->stats_pipe);
             wgpuComputePassEncoderSetBindGroup(sp, 0, bg, 0, NULL);
             wgpuComputePassEncoderDispatchWorkgroups(sp, gx, (groups + gx - 1) / gx, 1);
-            wgpuBindGroupRelease(bg);
             WGPUBindGroupEntry f[4] = {entry(0, v->frame_u), entry(1, v->acc), entry(2, v->vstat), entry(3, v->sel_u[k])};
-            bg = bind(g, v->finish_bgl, f, 4);
+            bg = gpu_bind_cached(g, &v->bc_finish[k], v->finish_bgl, f, 4, NULL);
             wgpuComputePassEncoderSetPipeline(sp, v->finish_pipe);
             wgpuComputePassEncoderSetBindGroup(sp, 0, bg, 0, NULL);
             wgpuComputePassEncoderDispatchWorkgroups(sp, 1, 1, 1);
-            wgpuBindGroupRelease(bg);
         }
         wgpuComputePassEncoderEnd(sp);
         wgpuComputePassEncoderRelease(sp);
@@ -566,7 +557,7 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
         for (int k = 0; k < n; k++){
             WGPUBindGroupEntry e[6] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks),
                                        entry(3, v->light), entry(4, v->sel_u[k]), entry(5, v->vstat)};
-            WGPUBindGroup bg = bind(g, v->light_bgl, e, 6);
+            WGPUBindGroup bg = gpu_bind_cached(g, &v->bc_light[k], v->light_bgl, e, 6, NULL);
             WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(enc, NULL);
             wgpuComputePassEncoderSetPipeline(cp, v->light_pipe);
             wgpuComputePassEncoderSetBindGroup(cp, 0, bg, 0, NULL);
@@ -574,14 +565,13 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
                                                      (v->gv[k].ldims[2] + 3) / 4);
             wgpuComputePassEncoderEnd(cp);
             wgpuComputePassEncoderRelease(cp);
-            wgpuBindGroupRelease(bg);
         }
         v->light_valid = 1;
     }
 }
 
-// The second half: the composite pass (pipe, with the frame's inputs in bg, which is
-// released here) onto the canvas (unless offscreen) and the readback texture if a capture
+// The second half: the composite pass (pipe, with the frame's inputs in bg, a kept one:
+// gpu_bind_cached) onto the canvas (unless offscreen) and the readback texture if a capture
 // was asked for; then everything is submitted.
 static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pipe, WGPUBindGroup bg){
     Gpu *g = v->g;
@@ -624,11 +614,10 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
         if (target == 0 && v->hud_w > 0 && v->hud_pipe){
             // the text, on the canvas only (screenshots stay clean)
             WGPUBuffer hb[2] = {v->hud_u, v->hud_px};
-            WGPUBindGroup hg = gpu_bind(g, v->hud_bgl, hb, 2);
+            WGPUBindGroup hg = gpu_bind_cached_buffers(g, &v->bc_hud, v->hud_bgl, hb, 2);
             wgpuRenderPassEncoderSetPipeline(pass, v->hud_pipe);
             wgpuRenderPassEncoderSetBindGroup(pass, 0, hg, 0, NULL);
             wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
-            wgpuBindGroupRelease(hg);
         }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -650,7 +639,6 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
-    wgpuBindGroupRelease(bg);
     if (capture){
         v->cap_pending = 2;
         WGPUBufferMapCallbackInfo mi;
@@ -685,7 +673,7 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
     frame_begin(v, enc, s, p, mp, volumes);
     WGPUBindGroupEntry e[7] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks),
                                entry(3, v->light), entry(4, v->color), entry(5, v->depth), entry(6, v->vstat)};
-    frame_end(v, enc, v->comp_pipe, bind(g, v->comp_bgl, e, 7));
+    frame_end(v, enc, v->comp_pipe, gpu_bind_cached(g, &v->bc_comp, v->comp_bgl, e, 7, NULL));
 }
 
 // The path tracer's image to show or read back: the samples, or with the denoiser on, the
@@ -732,7 +720,7 @@ static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, 
     e[4].size = e[5].size = 0;
     e[4].textureView = gpu_raster_color(v->raster);
     e[5].textureView = gpu_raster_depth(v->raster);
-    frame_end(v, enc, v->comp_gpu_pipe, bind(g, v->comp_gpu_bgl, e, 8));
+    frame_end(v, enc, v->comp_gpu_pipe, gpu_bind_cached(g, &v->bc_comp_gpu, v->comp_gpu_bgl, e, 8, NULL));
     return 1;
 }
 
@@ -964,6 +952,11 @@ void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
 
 void gpu_view_destroy(GpuView *v){
     if (!v) return;
+    GpuBindCache *bcs[] = {&v->bc_comp, &v->bc_comp_gpu, &v->bc_hud};
+    for (size_t i = 0; i < sizeof(bcs) / sizeof(bcs[0]); i++) gpu_bind_cache_clear(bcs[i]);
+    for (int k = 0; k < GPU_MAX_VOLUMES; k++){
+        gpu_bind_cache_clear(&v->bc_stats[k]); gpu_bind_cache_clear(&v->bc_finish[k]); gpu_bind_cache_clear(&v->bc_light[k]);
+    }
     WGPUBuffer bufs[] = {v->frame_u, v->dens, v->bricks, v->light, v->color, v->depth,
                          v->vstat, v->acc, v->hud_u, v->hud_px};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }

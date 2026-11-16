@@ -647,6 +647,72 @@ WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, 
     return wgpuDeviceCreateBindGroup(g->device, &d);
 }
 
+static void bind_way_free(struct GpuBindWay *w){
+    if (!w->bg) return;
+    wgpuBindGroupRelease(w->bg);
+    for (int i = 0; i < w->n; i++){
+        if (w->e[i].buffer) wgpuBufferRelease(w->e[i].buffer);
+        if (w->e[i].textureView) wgpuTextureViewRelease(w->e[i].textureView);
+    }
+    w->bg = NULL;
+    w->n = 0;
+}
+
+void gpu_bind_cache_clear(GpuBindCache *c){
+    for (int k = 0; k < GPU_BIND_WAYS; k++) bind_way_free(&c->way[k]);
+}
+
+WGPUBindGroup gpu_bind_cached(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, const WGPUBindGroupEntry *e, int n, const void *chain){
+    c->clock++;
+    struct GpuBindWay *oldest = &c->way[0];
+    int keyed = n <= GPU_BIND_ENTRIES;
+    for (int i = 0; i < n && keyed; i++) if (e[i].sampler) keyed = 0;
+    for (int k = 0; k < GPU_BIND_WAYS; k++){
+        struct GpuBindWay *w = &c->way[k];
+        if (w->bg && c->clock - w->used > GPU_BIND_KEEP) bind_way_free(w);
+        if (!w->bg){ oldest = w; continue; }
+        int same = keyed && w->layout == bgl && w->n == n && w->chain == chain;
+        for (int i = 0; i < n && same; i++)
+            same = w->e[i].binding == e[i].binding && w->e[i].buffer == e[i].buffer && w->e[i].offset == e[i].offset &&
+                   w->e[i].size == e[i].size && w->e[i].textureView == e[i].textureView;
+        if (same){ w->used = c->clock; return w->bg; }
+        if (oldest->bg && c->clock - w->used > c->clock - oldest->used) oldest = w;
+    }
+    struct GpuBindWay *w = oldest;
+    bind_way_free(w);
+    WGPUBindGroupDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.layout = bgl;
+    d.entryCount = (size_t)n;
+    d.entries = e;
+    w->bg = wgpuDeviceCreateBindGroup(g->device, &d);
+    w->used = c->clock;
+    w->layout = keyed ? bgl : NULL;          // (not keyed: made again next time)
+    w->chain = chain;
+    w->n = keyed ? n : 0;
+    for (int i = 0; i < w->n; i++){
+        w->e[i] = e[i];
+        w->e[i].nextInChain = NULL;
+        if (e[i].buffer) wgpuBufferAddRef(e[i].buffer);
+        if (e[i].textureView) wgpuTextureViewAddRef(e[i].textureView);
+    }
+    return w->bg;
+}
+
+WGPUBindGroup gpu_bind_cached_buffers(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){
+    WGPUBindGroupEntry e[16];
+    memset(e, 0, sizeof(e));
+    int m = 0;
+    for (int i = 0; i < n && i < 16; i++){
+        if (!bufs[i]) continue;                  // a number the layout skips ('-')
+        e[m].binding = (uint32_t)i;
+        e[m].buffer = bufs[i];
+        e[m].size = WGPU_WHOLE_SIZE;
+        m++;
+    }
+    return gpu_bind_cached(g, c, bgl, e, m, NULL);
+}
+
 void gpu_dispatch(WGPUComputePassEncoder pass, size_t threads){
     if (!threads) return;
     size_t groups = (threads + 63) / 64;

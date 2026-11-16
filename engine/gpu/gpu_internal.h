@@ -60,6 +60,33 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
 WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channels, const float *data);
 WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl);
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n);
+// A bind group that is asked for every frame, made once: the last few (GPU_BIND_WAYS) sets of
+// entries a call site used are kept with their groups (a tracer's two sample buffers taking
+// turns stay both), and a new one is made only when the buffers or views bound change (a
+// buffer that grew, another image). The cache holds a reference to what it binds, so a new
+// buffer never has the address of one a kept group still means; a set not asked for in the
+// last GPU_BIND_KEEP calls is let go, with its buffers. Buffers and texture views only (no
+// samplers). The group returned belongs to the cache: do not release it.
+#define GPU_BIND_WAYS 4
+#define GPU_BIND_ENTRIES 20
+#define GPU_BIND_KEEP 16
+typedef struct {
+    struct GpuBindWay {
+        WGPUBindGroup bg;
+        WGPUBindGroupLayout layout;
+        const void *chain;           // (see gpu_bind_cached)
+        int n;
+        unsigned used;               // the cache's clock when it was last asked for
+        WGPUBindGroupEntry e[GPU_BIND_ENTRIES];
+    } way[GPU_BIND_WAYS];
+    unsigned clock;
+} GpuBindCache;
+// e[i].nextInChain is passed on to the device but not compared: `chain` stands for what the
+// chained structures bind (a top level's handle; NULL without any), and the caller clears the
+// cache when that object is made again (its address may be the old one's).
+WGPUBindGroup gpu_bind_cached(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, const WGPUBindGroupEntry *e, int n, const void *chain);
+WGPUBindGroup gpu_bind_cached_buffers(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n);   // as gpu_bind
+void gpu_bind_cache_clear(GpuBindCache *c);
 // `threads` invocations of a kernel with @workgroup_size(64): the workgroups are spread over x
 // and y (at most 65535 per axis); the kernel's index is gid.x + gid.y * num_workgroups.x * 64
 void gpu_dispatch(WGPUComputePassEncoder pass, size_t threads);

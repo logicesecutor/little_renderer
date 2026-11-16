@@ -38,6 +38,7 @@ struct GpuDenoise {
     WGPUBuffer u[PASSES + 1];      // the parameters of each pass
     WGPUBuffer a, b;               // ping-pong (irradiance and variance, packed)
     WGPUBuffer guide, out;         // the guide, packed; the image
+    GpuBindCache bc[PASSES + 1];   // each pass's bind group, kept
 };
 
 GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
@@ -70,25 +71,24 @@ void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels
     Gpu *g = d->g;
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
     // prep: pixels -> a (and the guide); then a -> b, b -> a, ...; the last pass (the 5th) -> out
-    WGPUBindGroup bgs[PASSES + 1];
     for (int i = 0; i <= PASSES; i++){
         WGPUBuffer in = i == 0 ? d->b : (i % 2 ? d->a : d->b);
         WGPUBuffer to = i == 0 ? d->a : (i % 2 ? d->b : d->a);
         WGPUBuffer bufs[6] = {d->u[i], pixels, in, to, d->guide, d->out};
-        bgs[i] = gpu_bind(g, d->bgl, bufs, 6);
+        WGPUBindGroup bg = gpu_bind_cached_buffers(g, &d->bc[i], d->bgl, bufs, 6);   // (kept: pixels is one of two or three)
         wgpuComputePassEncoderSetPipeline(pass, i == 0 ? d->prep : d->atrous);
-        wgpuComputePassEncoderSetBindGroup(pass, 0, bgs[i], 0, NULL);
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         gpu_dispatch(pass, (size_t)d->w * d->h);
     }
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
-    for (int i = 0; i <= PASSES; i++) wgpuBindGroupRelease(bgs[i]);
 }
 
 WGPUBuffer gpu_denoise_output(GpuDenoise *d){ return d->out; }
 
 void gpu_denoise_destroy(GpuDenoise *d){
     if (!d) return;
+    for (int i = 0; i <= PASSES; i++) gpu_bind_cache_clear(&d->bc[i]);
     WGPUBuffer bufs[PASSES + 5] = {d->a, d->b, d->guide, d->out};
     for (int i = 0; i <= PASSES; i++) bufs[4 + i] = d->u[i];
     for (int i = 0; i < PASSES + 5; i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }

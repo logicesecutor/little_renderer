@@ -172,6 +172,9 @@ struct GpuTrace {
     int caus_passes, specular;
     // the photon cache (the viewer): grid, its fading, its light paths' parameters
     WGPUBindGroupLayout dc_bgl;
+    // the bind groups of every frame, kept (gpu_bind_cached): the tracer's (0), the light
+    // tracer's (1) and the photon cache's (2); the resolve, the reprojection, the cache's fade
+    GpuBindCache bc_trace[3], bc_resolve, bc_reproject, bc_decay;
     WGPUComputePipeline dc_pipe;
     WGPUBuffer grid, dc_params, pc_params;
     double pc_paths;         // light paths in the grid, faded as the grid is
@@ -1210,6 +1213,7 @@ static int hw_records(GpuTrace *t, const Scene *s){
     if (!t->hw_tlas || n > t->hw_tlas_cap){
         uint32_t cap = 64;
         while (cap < n) cap *= 2;
+        for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);   // (they bind the top level)
         lrTlasRelease(t->hw_tlas);
         t->hw_tlas = lrDeviceCreateTlas(g->device, cap, gpu_str("the scene's top level"));
         t->hw_tlas_cap = t->hw_tlas ? cap : 0;
@@ -1496,18 +1500,16 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
                                 : timed_pass(t, enc, light ? TS_LIGHT : TS_TRACE,
                                              light ? repeats : (double)threads * repeats / ((double)t->w * t->h));
     wgpuComputePassEncoderSetPipeline(pass, pipe);
-    WGPUBindGroupDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.layout = light ? t->lt_bgl : t->bgl;
-    d.entryCount = (size_t)nent;
-    d.entries = e;
-    WGPUBindGroup bg = wgpuDeviceCreateBindGroup(t->g->device, &d);
+    const void *chain = NULL;
+#ifdef LR_VK
+    if (t->hw) chain = t->hw_tlas;
+#endif
+    WGPUBindGroup bg = gpu_bind_cached(t->g, &t->bc_trace[light], light ? t->lt_bgl : t->bgl, e, nent, chain);
     for (int r = 0; r < repeats; r++){
         uint32_t off = (uint32_t)(r * GTP_STRIDE);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
         gpu_dispatch(pass, threads);
     }
-    wgpuBindGroupRelease(bg);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
 }
@@ -1749,14 +1751,13 @@ void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, cons
         struct { float k[4]; uint32_t n[4]; } D = {{(float)fade, 0, 0, 0}, {PC_CELLS * 4, 0, 0, 0}};
         wgpuQueueWriteBuffer(g->queue, t->dc_params, 0, &D, sizeof(D));
         WGPUBuffer b[2] = {t->dc_params, t->grid};
-        WGPUBindGroup bg = gpu_bind(g, t->dc_bgl, b, 2);
+        WGPUBindGroup bg = gpu_bind_cached_buffers(g, &t->bc_decay, t->dc_bgl, b, 2);
         WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
         wgpuComputePassEncoderSetPipeline(pass, t->dc_pipe);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         gpu_dispatch(pass, (size_t)PC_CELLS * 4);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
-        wgpuBindGroupRelease(bg);
         t->pc_paths *= fade;
     }
     write_params(t, t->pc_params, s, tp, 0, t->h, nvolumes, index ^ 0x5bd1e995u, 1, 1.0f);
@@ -1779,14 +1780,13 @@ WGPUBuffer gpu_trace_resolve(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer bas
          use_cache ? (float)(1.0 / (t->pc_paths * 256.0)) : 0.0f, t->cell}};
     wgpuQueueWriteBuffer(t->g->queue, t->rs_params, 0, &R, sizeof(R));
     WGPUBuffer b[6] = {t->rs_params, base, t->caus, t->final, t->grid ? t->grid : t->caus, t->acc[t->cur]};
-    WGPUBindGroup bg = gpu_bind(t->g, t->rs_bgl, b, 6);
+    WGPUBindGroup bg = gpu_bind_cached_buffers(t->g, &t->bc_resolve, t->rs_bgl, b, 6);
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
     wgpuComputePassEncoderSetPipeline(pass, t->rs_pipe);
     wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
     gpu_dispatch(pass, (size_t)t->w * t->h);
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
-    wgpuBindGroupRelease(bg);
     return t->final;
 }
 
@@ -1820,14 +1820,13 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
         R.dims[0] = (uint32_t)t->w; R.dims[1] = (uint32_t)t->h; R.dims[2] = (uint32_t)history;
         wgpuQueueWriteBuffer(g->queue, t->rp_params, 0, &R, sizeof(R));
         WGPUBuffer b[3] = {t->rp_params, t->acc[1 - t->cur], t->acc[t->cur]};
-        WGPUBindGroup bg = gpu_bind(g, t->rp_bgl, b, 3);
+        WGPUBindGroup bg = gpu_bind_cached_buffers(g, &t->bc_reproject, t->rp_bgl, b, 3);
         WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
         wgpuComputePassEncoderSetPipeline(pass, t->rp_pipe);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         gpu_dispatch(pass, (size_t)t->w * t->h);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
-        wgpuBindGroupRelease(bg);
     }
     t->cam = tp->cam;
     t->has_image = 1;
@@ -1852,6 +1851,8 @@ void gpu_trace_destroy(GpuTrace *t){
         if (t->wf_pipe[k]) wgpuComputePipelineRelease(t->wf_pipe[k]);
         if (t->wf_bgl[k]) wgpuBindGroupLayoutRelease(t->wf_bgl[k]);
     }
+    for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);
+    gpu_bind_cache_clear(&t->bc_resolve); gpu_bind_cache_clear(&t->bc_reproject); gpu_bind_cache_clear(&t->bc_decay);
     WGPUBuffer wfb[] = {t->wf, t->wfc, t->wfa, t->wf_params};
     for (int i = 0; i < 4; i++) if (wfb[i]){ wgpuBufferDestroy(wfb[i]); wgpuBufferRelease(wfb[i]); }
     if (t->ck_buf){ wgpuBufferDestroy(t->ck_buf); wgpuBufferRelease(t->ck_buf); }

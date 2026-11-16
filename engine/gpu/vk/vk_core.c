@@ -746,6 +746,7 @@ WGPUBuffer wgpuDeviceCreateBuffer(WGPUDevice device, WGPUBufferDescriptor const 
 
 void wgpuBufferDestroy(WGPUBuffer buffer){ (void)buffer; }   // freed with its last reference
 void wgpuBufferRelease(WGPUBuffer buffer){ if (buffer) obj_unref(&buffer->o); }
+void wgpuBufferAddRef(WGPUBuffer buffer){ if (buffer) obj_ref(&buffer->o); }
 
 // ---- uploads ----
 static void staging_free(Obj *o){
