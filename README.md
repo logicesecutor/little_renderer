@@ -93,10 +93,12 @@ To build your own program on the engine, start with `examples/hello_rt.c` (40 li
 
 ```mermaid
 flowchart LR
-    core["core<br/>math · scene · meshes · volumes"] --> raster["raster<br/>rasterizer"]
-    core --> rt["rt<br/>path tracer"]
-    core --> phys["phys<br/>bodies · air · cloud"]
-    core --> platform["platform<br/>X11 · Win32 · canvas"]
+    base["base<br/>math · random · noise"] --> formats["formats<br/>PNG · JPEG · HDR · JSON"]
+    formats --> scene["scene<br/>scene · meshes · textures · volumes"]
+    scene --> raster["raster<br/>rasterizer"]
+    scene --> rt["rt<br/>path tracer"]
+    scene --> phys["phys<br/>bodies · air · cloud"]
+    scene --> platform["platform<br/>X11 · Win32 · canvas"]
     raster --> gpu["gpu<br/>WebGPU backend"]
     rt --> gpu
     phys --> gpu

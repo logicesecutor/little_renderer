@@ -1,4 +1,4 @@
-// test_gpu_brdf.c - the BSDF in WGSL (gpu/brdf_gpu.c) against the C (core/brdf.h), on the
+// test_gpu_brdf.c - the BSDF in WGSL (gpu/brdf_gpu.c) against the C (scene/brdf.h), on the
 // same inputs: materials of every kind, views and lights in every direction, the sampling's
 // numbers. Both must give the same evaluation and density, and draw the same direction with
 // the same weight (to float precision: a case on the edge of a decision, say a lobe's
@@ -9,8 +9,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "core/brdf.h"
-#include "core/rng.h"
+#include "scene/brdf.h"
+#include "base/rng.h"
 #include "gpu/brdf_gpu.h"
 #include "gpu/gpu.h"
 

@@ -1,6 +1,6 @@
 #include "phys/rigid.h"
 
-#include "core/rng.h"
+#include "base/rng.h"
 
 #include <stdio.h>
 #include <stdlib.h>

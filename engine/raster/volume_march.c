@@ -1,12 +1,12 @@
 #include "raster/volume_march.h"
-#include "core/clock.h"
+#include "base/clock.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/volume.h"
+#include "scene/volume.h"
 
 // Multiple-scattering octaves (Wrenninge, "Art-Directable Multiple Volumetric Scattering",
 // 2015): octave i adds the lamp light again with weight OCT_WEIGHT^i, optical depth

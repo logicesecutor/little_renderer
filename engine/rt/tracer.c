@@ -2,12 +2,12 @@
 
 #include <stdlib.h>
 
-#include "core/brdf.h"
-#include "core/env.h"
-#include "core/volume.h"
+#include "scene/brdf.h"
+#include "scene/env.h"
+#include "scene/volume.h"
 #include "rt/accel.h"
 #include "rt/medium.h"
-#include "core/sampler.h"
+#include "base/sampler.h"
 
 // Ray offsets that keep a new ray from re-hitting the surface it starts on ("acne").
 // float has ~7 significant digits: at 555 units one step of float is ~6e-5, so the float
@@ -41,7 +41,7 @@ static inline real light_pdf(const Primitive *light, real dist2, real cos_light)
 
 // Next event estimation (direct light sampling) at a surface.
 // Pick one random point on the light, check it is visible, and return the light it sends
-// towards the viewer, already multiplied by the BSDF (core/brdf.h) and the cosines:
+// towards the viewer, already multiplied by the BSDF (scene/brdf.h) and the cosines:
 //
 //   L_direct = f(v, wi) * Le * |cos(theta_surface)| * cos(theta_light) * area / dist^2
 //
@@ -301,7 +301,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         if (material_glows(m)) radiance = v_add(radiance, v_mul(throughput, m->emission));
         if (depth >= max_depth) break;
 
-        // the surface's BSDF (core/brdf.h), seen from v (back along the ray)
+        // the surface's BSDF (scene/brdf.h), seen from v (back along the ray)
         Vec3 v = v_neg(v_norm(ray.d));
         Bsdf b = bsdf_make(m, h.front_face);
         // 1. light arriving straight from the lamp and the sky (the BSDF's rough part)

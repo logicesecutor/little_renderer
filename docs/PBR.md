@@ -9,7 +9,7 @@ done. Status: all six phases done (PBR1-PBR4 2026-11-14, PBR5 and PBR6 2026-11-1
   metallic, roughness, emission, plus transmission and index of refraction
   (KHR_materials_transmission, KHR_materials_ior) for glass.
 - **One shading code** for all four pipelines: the CPU rasterizer, the CPU path tracer, the
-  GPU rasterizer and the GPU path tracer. The BRDF is written once in C (`core/brdf.h`,
+  GPU rasterizer and the GPU path tracer. The BRDF is written once in C (`scene/brdf.h`,
   inline functions on `real`) and once in WGSL (one string in `gpu/`, used by both GPU
   pipelines), and a test evaluates both on the same inputs and compares.
 - **Today's materials become presets** of it: diffuse = a rough dielectric, mirror = a smooth
@@ -78,12 +78,12 @@ against texture arrays (sizes must match per layer) is made in PBR5 after a meas
 
 ## glTF
 
-`core/gltf.{c,h}`: `.gltf` (JSON + `.bin` + image files, or data URIs in base64) and `.glb`
+`scene/gltf.{c,h}`: `.gltf` (JSON + `.bin` + image files, or data URIs in base64) and `.glb`
 (one binary file). A small JSON parser of our own; meshes (positions, normals, texture
 coordinates 0, tangents, indices; triangles only), the node tree with its transforms (each
 node with a mesh becomes an instance), the materials above with their textures. Images: PNG
 (the decoder of ROADMAP step 1) and JPEG: baseline and progressive JPEG (Huffman, IDCT,
-4:2:0 / 4:2:2 / 4:4:4 chroma, restart markers) in `core/jpeg.{c,h}`. Programs take
+4:2:0 / 4:2:2 / 4:4:4 chroma, restart markers) in `formats/jpeg.{c,h}`. Programs take
 `-gltf file` to load one into the room (or, with an HDR sky, into an open scene).
 
 ## Phases
@@ -102,13 +102,13 @@ Every phase: CPU and GPU together, Windows and Linux (float and double) builds a
 
 ### PBR1, done (2026-11-14)
 
-- `core/scene.h`: `Material` gains `metallic`, `roughness`, `transmission`; `MAT_PBR` takes
+- `scene/scene.h`: `Material` gains `metallic`, `roughness`, `transmission`; `MAT_PBR` takes
   them as given, `MAT_DIFFUSE` / `MAT_MIRROR` / `MAT_GLASS` / `MAT_LIGHT` are presets
   (`material_resolved`), so old code (`{MAT_GLASS, tint, emission, ior}`) keeps working;
   constructors `material_diffuse`, `material_mirror`, `material_glass`, `material_light`,
   `material_pbr`.
-- `core/brdf.h`: the BSDF in C (`bsdf_make`, `bsdf_eval`, `bsdf_sample`); its tables in
-  `core/brdf_tables.h`, made by `tools/gen_brdf_tables.py`. RAYTRACER.md 5.15 explains it.
+- `scene/brdf.h`: the BSDF in C (`bsdf_make`, `bsdf_eval`, `bsdf_sample`); its tables in
+  `scene/brdf_tables.h`, made by `tools/gen_brdf_tables.py`. RAYTRACER.md 5.15 explains it.
 - `rt/tracer.c`: the path tracer and the light tracer shade with it (NEE and MIS over the
   BSDF's rough part, perfect lobes as S vertices of the caustics partition).
 - `-base`, `-metal`, `-rough`, `-ior`, `-transmission` change the model's material (`bin/render`,
@@ -134,7 +134,7 @@ Decided on the way (the open questions):
 
 ### PBR2, done (2026-11-14)
 
-- `gpu/brdf_gpu.c`: `GPU_WGSL_BSDF`, the C of `core/brdf.h` function by function in WGSL
+- `gpu/brdf_gpu.c`: `GPU_WGSL_BSDF`, the C of `scene/brdf.h` function by function in WGSL
   (`smooth` is a WGSL keyword: the flag is `perfect` there). A module that includes it
   defines `bsdf_tab(k)`; the path tracer keeps the tables after the blue-noise mask in its
   binding 10 (no new binding: its 8 storage buffers are all used).
@@ -163,7 +163,7 @@ Decided on the way (the open questions):
   how the lobe's solid angle compares with the lamp's; an ambient light through the BSDF's
   albedo for a uniform environment. Flat and Gouraud shade with it at the triangle's point
   and at the vertices (the varying is now a colour).
-- `core/brdf.h`: `bsdf_spec_lobe`, `bsdf_diffuse_lobes`, `bsdf_albedo_uniform` (the lobes
+- `scene/brdf.h`: `bsdf_spec_lobe`, `bsdf_diffuse_lobes`, `bsdf_albedo_uniform` (the lobes
   one at a time; the last one PBR4's environment uses too), and their WGSL copies in
   `GPU_WGSL_BSDF`.
 - `gpu/raster_gpu.c`: the same in WGSL (the lamp and the resolved materials in its
@@ -182,8 +182,8 @@ Decided on the way (the open questions):
 
 ### PBR4, done (2026-11-14)
 
-- `core/hdr.{c,h}`: Radiance `.hdr` files read (flat, old and new run-length encoding) and
-  written. `core/env.{c,h}`: the environment map: lookups, sampling by luminance, the
+- `formats/hdr.{c,h}`: Radiance `.hdr` files read (flat, old and new run-length encoding) and
+  written. `scene/env.{c,h}`: the environment map: lookups, sampling by luminance, the
   levels prefiltered with GGX (filtered importance sampling, 128 samples per texel), the
   irradiance's 9 harmonics, a procedural sky, a probe's box (parallax).
 - The path tracers (CPU, GPU single kernel and wavefront) see the sky where rays leave the
@@ -230,7 +230,7 @@ Decided on the way:
 
 ### PBR5, done (2026-11-15)
 
-- `core/texture.{c,h}`: `TexMap`, an RGBA8 image with its mip levels (2 x 2 averages, in
+- `scene/texture.{c,h}`: `TexMap`, an RGBA8 image with its mip levels (2 x 2 averages, in
   linear light for colour: a black and white checker averages to half the light, sRGB 188),
   read from PNG files or made here (`checker`, `bricks` with its `bricks_normal` and
   `bricks_mr`, `plate_mr`); bilinear and trilinear lookups, repeating, and the level for a
@@ -238,7 +238,7 @@ Decided on the way:
   load).
 - Materials take glTF's three textures: base colour (times the factor), metallic and
   roughness (blue and green, times the factors) and a normal map (tangent space, green up
-  the image), and `uv_scale`. `material_at` and `material_normal` (core/scene.h) are the one
+  the image), and `uv_scale`. `material_at` and `material_normal` (scene/scene.h) are the one
   place that reads them; every pipeline calls them (the GPU's copy is WGSL).
 - Meshes keep their `vt` and get a tangent per texture coordinate, from the triangles'
   texture directions (MikkTSpace's idea: summed per vertex, the handedness from dP/dv, so
@@ -256,7 +256,7 @@ Decided on the way:
   brick paving.
 - **The irradiance grid.** One probe gave the whole room its light: a ceiling far from the
   lamp's bright floor got the same as one close to it, and the mesh scene's probe ended up
-  inside the model. Now each scene with a probe gets a grid too (`IrrGrid`, core/env.h):
+  inside the model. Now each scene with a probe gets a grid too (`IrrGrid`, scene/env.h):
   5 x 5 x 5 probes over the room (5 x 3 x 5 in the open), each 9 harmonics of the light
   arriving there, path traced (2048 paths), blended trilinearly by the rasterizers for the
   diffuse light. Probes inside something (a back face of a closed shape seen first, or no
@@ -295,16 +295,16 @@ Decided on the way:
 
 ### PBR6, done (2026-11-15)
 
-- `core/jpeg.{c,h}`: JPEG read by our own code: baseline, extended (SOF1, 16-bit tables) and
+- `formats/jpeg.{c,h}`: JPEG read by our own code: baseline, extended (SOF1, 16-bit tables) and
   progressive (spectral selection, successive approximation), Huffman, restart markers, grey
   and 3 components (YCbCr, or RGB by Adobe's marker), any sampling factors. The IDCT is
   libjpeg's accurate integer one, the chroma upsampling its "fancy" triangle filter, the
   colour conversion its fixed point: the pixels are **exactly libjpeg's** on all 14 test
   files. A 2048 x 2048 progressive JPEG decodes in 120 ms (the Linux VM; libjpeg-turbo with
   SIMD: 73).
-- `core/json.{c,h}`: a small JSON reader into a tree (UTF-8, \uXXXX escapes and surrogate
+- `formats/json.{c,h}`: a small JSON reader into a tree (UTF-8, \uXXXX escapes and surrogate
   pairs; errors with their line).
-- `core/gltf.{c,h}`: `.gltf` (buffers and images in files beside it or in data: URIs) and
+- `scene/gltf.{c,h}`: `.gltf` (buffers and images in files beside it or in data: URIs) and
   `.glb`; accessors of every component type (normalized or not, strided), triangles, strips
   and fans, indexed or not; the default scene's node tree (matrix or translation / rotation /
   scale): each node with a mesh becomes an instance of a scene mesh (one per glTF mesh, all

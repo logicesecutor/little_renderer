@@ -1,15 +1,15 @@
-// brdf_gpu.c - the BSDF of core/brdf.h in WGSL (GPU_WGSL_BSDF), for the GPU's path tracer
+// brdf_gpu.c - the BSDF of scene/brdf.h in WGSL (GPU_WGSL_BSDF), for the GPU's path tracer
 // (and rasterizer), and a check of it against the C (gpu_bsdf_run, tests/test_gpu_brdf.c).
 //
-// The WGSL is the C function by function, in f32; core/brdf.h explains the model. A module
+// The WGSL is the C function by function, in f32; scene/brdf.h explains the model. A module
 // that includes it defines bsdf_tab(k): float k of the tables gpu_bsdf_tables packs
-// (core/brdf_tables.h: BRDF_E, BRDF_B, BRDF_E_AVG, BRDF_B_AVG, one after the other).
+// (scene/brdf_tables.h: BRDF_E, BRDF_B, BRDF_E_AVG, BRDF_B_AVG, one after the other).
 #include "gpu/brdf_gpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/brdf.h"
+#include "scene/brdf.h"
 #include "gpu/gpu_internal.h"
 
 #ifdef LR_GPU

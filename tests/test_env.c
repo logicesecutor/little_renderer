@@ -1,4 +1,4 @@
-// test_env.c - the environment (core/env.h, core/hdr.h; docs/PBR.md, PBR4) checked on its own.
+// test_env.c - the environment (scene/env.h, formats/hdr.h; docs/PBR.md, PBR4) checked on its own.
 //
 //   make bin/test_env && bin/test_env      (part of make test)
 //
@@ -19,10 +19,10 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "core/env.h"
-#include "core/hdr.h"
-#include "core/rng.h"
-#include "core/scene.h"
+#include "scene/env.h"
+#include "formats/hdr.h"
+#include "base/rng.h"
+#include "scene/scene.h"
 #include "rt/tracer.h"
 
 static int failures;

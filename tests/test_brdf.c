@@ -1,4 +1,4 @@
-// test_brdf.c - the BSDF of core/brdf.h (docs/PBR.md, PBR1) checked on its own.
+// test_brdf.c - the BSDF of scene/brdf.h (docs/PBR.md, PBR1) checked on its own.
 //
 //   make bin/test_brdf && bin/test_brdf      (part of make test)
 //
@@ -14,8 +14,8 @@
 //    less, but for rough glass, whose light bouncing between its microfacets is lost.
 #include <stdio.h>
 #include <math.h>
-#include "core/brdf.h"
-#include "core/rng.h"
+#include "scene/brdf.h"
+#include "base/rng.h"
 
 static int failures;
 
@@ -81,7 +81,7 @@ static void sampled(Bsdf *b, Vec3 n, Vec3 v, int count, double *energy, double *
 
 int main(void){
     const Vec3 n = vec3(0, 0, 1);
-    printf("test_brdf: the BSDF (core/brdf.h)\n");
+    printf("test_brdf: the BSDF (scene/brdf.h)\n");
 
     // ---- 1. reciprocity
     printf("reciprocity\n");

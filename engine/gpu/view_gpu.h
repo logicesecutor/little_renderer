@@ -9,9 +9,9 @@
 #ifndef LR_VIEW_GPU_H
 #define LR_VIEW_GPU_H
 
-#include "core/camera.h"
-#include "core/image.h"
-#include "core/scene.h"
+#include "scene/camera.h"
+#include "scene/image.h"
+#include "scene/scene.h"
 #include "gpu/gpu.h"
 #include "raster/render.h"
 #include "raster/volume_march.h"
@@ -41,7 +41,7 @@ typedef struct {
     int max_depth;     // bounces per path
     int mis;           // multiple importance sampling
     real clamp;        // largest sample value, 0 = no limit
-    int random;        // 1 = plain random numbers, 0 (default) = Sobol + blue noise (core/sampler.h)
+    int random;        // 1 = plain random numbers, 0 (default) = Sobol + blue noise (base/sampler.h)
     real photons;      // > 0: caustics by light tracing, this many light paths per pixel and pass
                        // (as -photons; the path tracer then leaves those paths out)
     int photon_cache;  // 1 = also a world-space photon cache, for real time (blurred a little;

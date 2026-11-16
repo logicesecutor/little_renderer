@@ -1,7 +1,7 @@
 # little_renderer - one Makefile for the whole engine. Run everything from this folder.
 # Every target, option and key is documented in docs/USAGE.md; the library API in docs/SDK.md.
 #
-#   engine/{core,raster,rt,phys,platform,app}/*.c  -> build/float/liblr.a   (the engine)
+#   engine/{base,formats,scene,raster,rt,phys,platform,gpu,app}/*.c -> build/float/liblr.a (the engine)
 #   webgpu/{vk,wgsl}/*.c                      -> into the same library with VK=1 (our WebGPU)
 #   apps/*.c                                  -> bin/render, bin/view, bin/sim
 #   examples/*.c                              -> bin/hello_raster, bin/hello_rt, ...
@@ -24,7 +24,7 @@ CFLAGS += $(if $(SAN),$(SANFLAGS))
 # OpenMP spreads the path tracer over the CPU cores; "make SINGLE=1" builds without it
 OMP = $(if $(SINGLE),,-fopenmp)
 
-# Precision of `real` (engine/core/lrmath.h). float is the default: half the memory and
+# Precision of `real` (engine/base/lrmath.h). float is the default: half the memory and
 # faster math. In float mode, constants like 0.5 are made float too
 # (-fsingle-precision-constant), otherwise every `x * 0.5` would silently compute in double.
 # Library and apps must agree, so the two builds live in separate folders.
@@ -147,16 +147,19 @@ $(BIN)/%$(EXE): tests/%.c $(LIB) $(HDR) tests/png_tests.h tests/jpeg_tests.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 
-# Layering rule: core uses nothing else; raster, rt, phys and platform use only core (and
-# themselves); gpu (the GPU backend) uses core and the data types of raster, rt and phys (and our
+# Layering rule: base uses nothing else; formats only base; scene only base and formats; raster,
+# rt, phys and platform only those three (and themselves); gpu (the GPU backend) uses them and the
+# data types of raster, rt and phys (and our
 # Vulkan layer's ray tracing header, vk/webgpu_rt.h); app may use everything. webgpu/ (vk, wgsl)
 # includes nothing of the engine. Fails if a file includes a layer it should not.
 check-layers:
 	@ok=1; \
-	for f in engine/core/*; do grep -Hn '#include "' $$f | grep -v '"core/' && ok=0; done; \
+	for f in engine/base/*; do grep -Hn '#include "' $$f | grep -v '"base/' && ok=0; done; \
+	for f in engine/formats/*; do grep -Hn '#include "' $$f | grep -v -e '"base/' -e '"formats/' && ok=0; done; \
+	for f in engine/scene/*; do grep -Hn '#include "' $$f | grep -v -e '"base/' -e '"formats/' -e '"scene/' && ok=0; done; \
 	for l in raster rt phys platform; do for f in engine/$$l/*; do \
-	  grep -Hn '#include "' $$f | grep -v -e '"core/' -e "\"$$l/" && ok=0; done; done; \
-	for f in engine/gpu/*.[ch]; do grep -Hn '#include "' $$f | grep -v -e '"core/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' -e '"vk/webgpu_rt.h"' && ok=0; done; \
+	  grep -Hn '#include "' $$f | grep -v -e '"base/' -e '"formats/' -e '"scene/' -e "\"$$l/" && ok=0; done; done; \
+	for f in engine/gpu/*.[ch]; do grep -Hn '#include "' $$f | grep -v -e '"base/' -e '"formats/' -e '"scene/' -e '"raster/' -e '"rt/' -e '"phys/' -e '"gpu/' -e '"vk/webgpu_rt.h"' && ok=0; done; \
 	for f in webgpu/*/*; do grep -Hn '#include "' $$f | grep -v -e '"vk/' -e '"wgsl/' && ok=0; done; \
 	if [ $$ok = 1 ]; then echo "layers ok"; else echo "layer violations above"; exit 1; fi
 

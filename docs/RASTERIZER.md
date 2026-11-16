@@ -17,10 +17,10 @@ bin/view -backend raster                 # fly through it in real time (V cycles
 
 | file | job |
 |---|---|
-| `engine/core/lrmath.h` | `real`, Vec2/3/4, Mat4 (rotate, look-at, perspective). Header only, shared with the path tracer. |
-| `engine/core/image.c` (+ `.h`) | `Framebuffer`: the pixel array + z-buffer, `fb_set_pixel`, PNG output, sRGB packing |
-| `engine/core/mesh.c` (+ `.h`) | `.obj` / ASCII `.ply` loader (v / vt / vn / polygons / negative indices), normalize, vertex normals |
-| `engine/core/texture.c` (+ `.h`) | PNG texture loader (`core/png.c`), procedural checkerboard, nearest sampling |
+| `engine/base/lrmath.h` | `real`, Vec2/3/4, Mat4 (rotate, look-at, perspective). Header only, shared with the path tracer. |
+| `engine/scene/image.c` (+ `.h`) | `Framebuffer`: the pixel array + z-buffer, `fb_set_pixel`, PNG output, sRGB packing |
+| `engine/scene/mesh.c` (+ `.h`) | `.obj` / ASCII `.ply` loader (v / vt / vn / polygons / negative indices), normalize, vertex normals |
+| `engine/scene/texture.c` (+ `.h`) | PNG texture loader (`formats/png.c`), procedural checkerboard, nearest sampling |
 | `engine/raster/raster.c` (+ `.h`) | Bresenham line, barycentric triangle, z-test, perspective-correct interpolation |
 | `engine/raster/render.c` (+ `.h`) | the pipeline: model -> world -> view -> projection -> near clip -> viewport -> shaders. `render_mesh` draws one mesh, `render_scene` a whole `Scene` |
 | `engine/raster/volume_march.c` (+ `.h`) | clouds and fog: raymarched over the finished frame, stopped by its z-buffer (VOLUMES.md 7.1) |
@@ -32,13 +32,13 @@ bin/view -backend raster                 # fly through it in real time (V cycles
 
 | # | what | output / code |
 |---|---|---|
-| 0 | hello pixels | `out/0_gradient.png`, `core/image.c` |
+| 0 | hello pixels | `out/0_gradient.png`, `scene/image.c` |
 | 1 | Bresenham lines | `out/1_lines.png`, `draw_line` in `raster.c` |
-| 2 | wireframe OBJ | `out/2_wireframe.png`, `core/mesh.c` |
+| 2 | wireframe OBJ | `out/2_wireframe.png`, `scene/mesh.c` |
 | 3 | filled triangles (edge functions) | `out/3_triangles_zbuffer.png`, `draw_triangle` |
 | 4 | flat shading + back-face culling | `out/4_flat.png`, `out/4_flat_no_culling.png` |
 | 5 | z-buffer | `out/3_triangles_zbuffer.png`, `out/5_depth.png` |
-| 6 | real camera (model/view/projection) | `core/lrmath.h`, `render_mesh` in `render.c` |
+| 6 | real camera (model/view/projection) | `base/lrmath.h`, `render_mesh` in `render.c` |
 | 7 | real time | `bin/view -backend raster` |
 | 8 | Gouraud, Phong, textures, perspective-correct UVs | `out/8_*.png` |
 | 9 | near-plane clipping, shaders as function pointers | `out/9_near_clipping.png`, `FragShader` |
@@ -65,7 +65,7 @@ holes along its far edge.
 a point and the lamp (shadows), or what light bounces off the walls (color bleeding).
 Those are exactly what the path tracer computes. `render_scene` uses *local* lighting:
 
-- every surface is its material's **BSDF** (`core/brdf.h`, the path tracer's: GGX,
+- every surface is its material's **BSDF** (`scene/brdf.h`, the path tracer's: GGX,
   diffuse, multiple scattering; docs/PBR.md), lit by the scene's **quad lamp** itself
   (`render_shade`, PBR3):
   - the diffuse-like lobes by the lamp's exact **form factor** (Lambert's formula for a

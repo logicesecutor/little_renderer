@@ -3,8 +3,8 @@
 # requires-python = ">=3.9"
 # dependencies = ["numpy"]
 # ///
-"""gen_brdf_tables.py - writes engine/core/brdf_tables.h: how much light the GGX microfacet
-lobe of core/brdf.h keeps after one bounce, for the multiple-scattering compensation
+"""gen_brdf_tables.py - writes engine/scene/brdf_tables.h: how much light the GGX microfacet
+lobe of scene/brdf.h keeps after one bounce, for the multiple-scattering compensation
 (Kulla & Conty 2017) and the diffuse layer under a dielectric's specular one.
 
     uv run tools/gen_brdf_tables.py
@@ -67,7 +67,7 @@ def main():
     Bavg = np.array([2 * np.trapezoid(np.interp(fine, mu, B[j]) * fine, fine) for j in range(N)])
     out = ["// brdf_tables.h - made by tools/gen_brdf_tables.py (do not edit): the share of the light a",
            "// white GGX lobe keeps after one bounce, for the multiple-scattering compensation of",
-           "// core/brdf.h. BRDF_E[r][mu]: roughness r and cosine mu, both 0..1 in %d steps;" % N,
+           "// scene/brdf.h. BRDF_E[r][mu]: roughness r and cosine mu, both 0..1 in %d steps;" % N,
            "// BRDF_E_AVG[r]: its cosine-weighted mean over the hemisphere. BRDF_B, BRDF_B_AVG: the",
            "// same with Schlick's (1 - v.h)^5 inside: a lobe of Fresnel F0 keeps F0 (E - B) + B.",
            "#ifndef LR_BRDF_TABLES_H", "#define LR_BRDF_TABLES_H", "",
@@ -91,7 +91,7 @@ def main():
     out.append("};")
     out.append("")
     out.append("#endif")
-    with open("engine/core/brdf_tables.h", "w") as f:
+    with open("engine/scene/brdf_tables.h", "w") as f:
         f.write("\n".join(out) + "\n")
     print("E(1, r):", np.round(E[:, -1][::4], 3))
     print("E_avg:", np.round(Eavg[::4], 3))

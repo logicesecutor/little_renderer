@@ -4,9 +4,9 @@
 #define LR_FRAME_H
 
 #include <stdint.h>
-#include "core/camera.h"
-#include "core/image.h"
-#include "core/scene.h"
+#include "scene/camera.h"
+#include "scene/image.h"
+#include "scene/scene.h"
 #include "rt/tracer.h"
 
 // spp paths per pixel into img (already created at the size wanted), in parallel over

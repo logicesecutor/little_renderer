@@ -125,20 +125,22 @@ is why the image starts out grainy and gets cleaner with more samples.
 
 ## 3. Code structure
 
-The path tracer is the `rt/` layer of the engine. It builds on `core/`, which it shares
-with the rasterizer (the whole layout is in README.md and SDK.md):
+The path tracer is the `rt/` layer of the engine. It builds on `base/`, `formats/` and
+`scene/`, which it shares with the rasterizer (the whole layout is in README.md and SDK.md):
 
 ```
 engine/
-├── core/                shared by both backends
+├── base/                what everything uses
 │   ├── lrmath.h         `real` (float or double), Vec3 (points, directions, RGB), Mat4, v_* functions
-│   ├── rng.h            PCG32 random numbers, orthonormal basis, cosine-weighted hemisphere sampling
+│   └── rng.h            PCG32 random numbers, orthonormal basis, cosine-weighted hemisphere sampling
+├── formats/             files, by our own code
+│   ├── png.h/c          PNG writer and reader, with deflate / inflate (no library)
+│   └── hdr.h/c          Radiance .hdr (RGBE) reader and writer: the skies
+├── scene/               shared by both backends
 │   ├── camera.h         Ray, pinhole camera: pixel coordinates -> primary ray (header only)
 │   ├── mesh.h/c         .obj and ASCII .ply readers, vertex normals, placing a model
 │   ├── scene.h/c        materials, primitives (sphere | quad | triangle), Scene, the Cornell box
 │   ├── image.h/c        Image (linear float pixels) -> sRGB -> PNG; also the rasterizer's Framebuffer
-│   ├── png.h/c          PNG writer and reader, with deflate / inflate (no library)
-│   ├── hdr.h/c          Radiance .hdr (RGBE) reader and writer: the skies
 │   └── env.h/c          the environment map: lookups, sampling by luminance, prefiltered levels, harmonics
 ├── rt/                  the path tracer
 │   ├── intersect.h/c    Hit, ray-box slab test, sphere / quad / triangle intersection
@@ -167,11 +169,11 @@ Dependencies only point downward, so each layer can be understood on its own
    rt/tracer.c ──► rt/accel.c ──┬──► rt/bvh.c ────┐
                                 └──► rt/octree.c ─┴──► rt/intersect.c
                  ▼                                         ▼
-   core/scene.c ──► core/mesh.c       core/camera.h      core/rng.h      core/image.c
-                         └──────────────► core/lrmath.h ◄───────────────┘
+   scene/scene.c ──► scene/mesh.c      scene/camera.h      base/rng.h      scene/image.c
+                           └──────────────────► base/lrmath.h ◄──────────────────┘
 ```
 
-`rt/` never includes `raster/` or the reverse: the two backends only meet in `core/`
+`rt/` never includes `raster/` or the reverse: the two backends only meet in `scene/`
 (the scene they both draw) and in the apps.
 
 ### What happens for one pixel
@@ -179,7 +181,7 @@ Dependencies only point downward, so each layer can be understood on its own
 ```
 apps/render.c   for each of the spp samples:
                   pick a random point inside the pixel            (anti-aliasing)
-core/camera.h     build the ray from the camera through that point
+scene/camera.h     build the ray from the camera through that point
 rt/tracer.c       trace_path(): loop over bounces
 rt/accel.c          closest hit: walk the BVH or the octree (or test every primitive)
 rt/bvh.c, octree.c    visit only the boxes / cells the ray passes through, near to far
@@ -191,12 +193,12 @@ rt/tracer.c         material: diffuse -> sample the lamp + bounce randomly
                     Russian roulette may stop the path
 apps/render.c   average the samples -> linear RGB pixel
 rt/tracer.c     light_trace_caustics adds the caustics, traced from the lamp (section 5.14)
-core/image.c    clamp, sRGB encode, write 3 bytes
+scene/image.c    clamp, sRGB encode, write 3 bytes
 ```
 
 ### File by file
 
-**`core/lrmath.h`**: `Vec3 {real x, y, z}` is used for positions, directions *and*
+**`base/lrmath.h`**: `Vec3 {real x, y, z}` is used for positions, directions *and*
 colors. `v_mul` multiplies component-wise, which is how colors are filtered
 ("red wall × white light = red light"). `v_reflect` and `v_refract` implement the mirror
 and Snell laws (section 5.6). The same header has the matrices the rasterizer needs.
@@ -217,7 +219,7 @@ and brute force test them in different orders. So in float a handful of pixels c
 between `-accel` choices (`make bench`: 4 pixels out of 40,000); in double they are
 identical.
 
-**`core/rng.h`**: the random number generator and the sampling routines built on it:
+**`base/rng.h`**: the random number generator and the sampling routines built on it:
 - `rng_u32` / `rng_real`: PCG32, a small, fast, statistically good generator. `rng_real`
   gives a number in `[0, 1)`: 32 random bits in double, 24 in float (more would round up
   to 1.0).
@@ -225,11 +227,11 @@ identical.
   direction generated "around +z" can be rotated to "around the surface normal".
 - `sample_cosine_hemisphere`: random bounce directions for diffuse surfaces (section 5.4).
 
-**`core/camera.h`**: `Ray {o, d}` and a pinhole camera. A virtual screen 1 unit in front
+**`scene/camera.h`**: `Ray {o, d}` and a pinhole camera. A virtual screen 1 unit in front
 of the eye, with its size set by the vertical field of view. `camera_ray(s, t)` returns
 the unit ray through the screen point `(s, t)`.
 
-**`core/scene.h/c`**:
+**`scene/scene.h/c`**:
 - `Material`: type (`DIFFUSE`, `MIRROR`, `GLASS`, `LIGHT`), `albedo` (the fraction of
   light reflected, per channel), `emission`, `ior` (index of refraction).
 - Two kinds of geometry. A `Primitive` is a sphere (`center`, `radius`) or a **quad** (a
@@ -255,7 +257,7 @@ the unit ray through the screen point `(s, t)`.
 The scene is a description only: it does not know rays or pixels. That is why the
 rasterizer can draw it too (`render_scene` in `raster/render.c`).
 
-**`core/mesh.h/c`**: `mesh_load` picks the reader from the file extension.
+**`scene/mesh.h/c`**: `mesh_load` picks the reader from the file extension.
 - **OBJ** (`read_obj`): `v` (positions), `vt` (texture coordinates, for the rasterizer),
   `vn` (normals) and `f` (faces) lines. Negative (relative) indices work.
 - **PLY** (`read_ply`), ASCII only, which is what the Stanford scans use. The header says
@@ -302,11 +304,11 @@ sections 5.11 and 5.12.
 
 **`rt/medium.h/c`**: participating media (clouds, fog), see VOLUMES.md.
 
-**`core/image.h/c`**: the image is stored in **linear** radiance (`Vec3` per pixel). Only on
+**`scene/image.h/c`**: the image is stored in **linear** radiance (`Vec3` per pixel). Only on
 output is each value clamped to `[0, 1]` and converted with the sRGB transfer curve
-(section 5.9). The output is a PNG, written by `core/png.c` (below).
+(section 5.9). The output is a PNG, written by `formats/png.c` (below).
 
-**`core/png.h/c`**: PNG files without a library. Writing: each row gets the PNG filter that
+**`formats/png.h/c`**: PNG files without a library. Writing: each row gets the PNG filter that
 leaves the smallest bytes (none, sub, up, average or Paeth: each predicts a byte from its
 neighbours and stores the difference), then deflate compresses the rows: LZ77 (a repeated
 run of bytes becomes a back reference, found through hash chains of 3-byte prefixes) and
@@ -354,7 +356,7 @@ with random `ξ₁, ξ₂ ∈ [0, 1)`. Averaging rays spread uniformly over the 
 filter, so edges come out smooth without any extra code. This is the same Monte Carlo
 averaging that removes the lighting noise.
 
-Camera basis (`core/camera.h`):
+Camera basis (`scene/camera.h`):
 
 ```
 w = normalize(from − at)      (backwards)
@@ -577,7 +579,7 @@ roulette ends almost all paths long before that.
 
 The tracer computes **linear** radiance: twice the number means twice the light. Monitors
 expect **sRGB**-encoded values, which are roughly `value^(1/2.2)`. Writing linear values
-directly makes the image look much too dark and contrasty. `core/image.c` therefore:
+directly makes the image look much too dark and contrasty. `scene/image.c` therefore:
 
 1. clamps to `[0, 1]` (the lamp, with radiance 15, simply becomes white),
 2. applies the exact sRGB curve: `12.92·c` below 0.0031308, else `1.055·c^(1/2.4) − 0.055`,
@@ -588,7 +590,7 @@ NaNs are dropped in `apps/render.c` (a single NaN sample would poison the pixel 
 
 ### 5.10 Random numbers
 
-`core/rng.h` uses **PCG32** (O'Neill 2014): a 64-bit linear congruential step, whose output
+`base/rng.h` uses **PCG32** (O'Neill 2014): a 64-bit linear congruential step, whose output
 is scrambled by a xorshift and a data-dependent rotation. It is tiny and fast, and far better than
 `rand()`, which is also not thread-safe. Each pixel seeds its own generator from its index
 (`seed` and `stream` both derived from the pixel number). That gives:
@@ -597,7 +599,7 @@ is scrambled by a xorshift and a data-dependent rotation. It is tiny and fast, a
 - **thread independence**: no shared state, no locks, and the result does not depend on
   which thread rendered which row.
 
-**The sampler** (`core/sampler.h`, `-sampler sobol`, the default): the numbers a path uses
+**The sampler** (`base/sampler.h`, `-sampler sobol`, the default): the numbers a path uses
 most come from a low-discrepancy sequence instead, the same on the CPU and the GPU
 (`gpu/trace_gpu.c` has the functions in WGSL, with the same results):
 
@@ -997,7 +999,7 @@ tracing). The glass dragon: −22% RMSE. `-photons x` changes the number of ligh
 its own progressive buffer); `-caustics pt -mis off -sampler random` reproduces the old images bit for bit.
 The GPU has the same light tracer (and, for real time, a photon cache): WEB.md 2.6.
 
-### 5.15 Physically based materials (PBR1, `core/brdf.h`)
+### 5.15 Physically based materials (PBR1, `scene/brdf.h`)
 
 Every material is now one model, glTF 2.0's **metallic-roughness** with transmission
 (docs/PBR.md): a base colour, `metallic` (0 a dielectric like plastic or stone, 1 a metal),
@@ -1017,7 +1019,7 @@ mirror's colour, glass = a smooth clear dielectric. `-metal`, `-rough`, `-ior`,
   $$f_s = rac{F\,D\,G_2}{4\,|n·v|\,|n·l|}$$
 - **Diffuse**: Lambert with the base colour, for the light the specular layer lets in and
   out again: `(1 − Es(v)) (1 − Es(l)) / (1 − Es_avg)`, where `Es` is how much the specular
-  lobe reflects at that angle (tabulated, `core/brdf_tables.h`). glTF's reference writes
+  lobe reflects at that angle (tabulated, `scene/brdf_tables.h`). glTF's reference writes
   `1 − F(v·h)`, which at grazing angles returns up to 30% more light than arrives; this
   form keeps exactly what arrives and is reciprocal.
 - **Transmission**: refraction through the microfacets (Walter et al. 2007), tinted by the
@@ -1053,10 +1055,10 @@ without agree to 0.1 of 255. The GPU path tracer has the same BSDF in WGSL
 (`gpu/brdf_gpu.c`): `bin/test_gpu_brdf` runs both on 65536 cases and finds the same
 values, and GPU and CPU images agree within 0.25% (PBR.md, PBR2).
 
-### 5.16 The sky (PBR4, `core/env.h`)
+### 5.16 The sky (PBR4, `scene/env.h`)
 
 A scene can have a **sky**: light arriving from infinitely far away, an equirectangular
-map (longitude across, latitude down; a Radiance `.hdr` file read by `core/hdr.c`, or a
+map (longitude across, latitude down; a Radiance `.hdr` file read by `formats/hdr.c`, or a
 procedural clear sky with a sun). A ray that leaves the scene sees it: `env_eval`,
 bilinear in the map. It is a light like the lamp, and found the same two ways:
 
@@ -1079,7 +1081,7 @@ quadrature's; the white furnace under a uniform white sky (diffuse, plastic, a r
 metal, glass, a mirror all as bright as the sky, MIS on and off). GPU, wavefront and CPU
 images agree within 0.4% (PBR.md, PBR4).
 
-### 5.17 Textures (PBR5, `core/texture.h`)
+### 5.17 Textures (PBR5, `scene/texture.h`)
 
 A hit knows where on its shape it is (`Hit.uv`: a sphere's longitude and latitude, a quad's
 two edge fractions, a triangle's barycentrics); `hit_texcoords` turns that into texture
@@ -1096,7 +1098,7 @@ A **glowing** surface (glTF's emission, its factor times its texture, PBR6) is n
 next event estimation does not sample it; a path that hits it adds its emission, at any
 depth (the light reaching other surfaces from it is found by their bounces alone, so a small
 bright glow is noisy, as it is in any path tracer without many-light sampling). The models
-come from glTF files (`core/gltf.c`): each node with a mesh is an instance (section 6).
+come from glTF files (`scene/gltf.c`): each node with a mesh is an instance (section 6).
 
 ---
 

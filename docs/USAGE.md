@@ -63,7 +63,7 @@ The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.
 | `make lib` | only `build/float/liblr.a` |
 | `make apps` / `make examples` / `make tests` | only the three programs / only the examples / only the tests |
 | `make bin/render` (or any `bin/...`) | just that one program (and the library); on Windows `make bin/render.exe` |
-| `make check-layers` | checks that `core` includes nothing else and `raster`, `rt`, `phys`, `platform` only `core` |
+| `make check-layers` | checks the layers: `base` includes nothing else, `formats` only `base`, `scene` only those two, `raster`, `rt`, `phys`, `platform` only those three, and `webgpu/` nothing of the engine |
 | `make models` | runs `tools/gen_models.py` (cube, sphere, torus), then `make skies-download gltf-download` (only the files not there yet) |
 | `make skies-download` | downloads Poly Haven's HDR skies `kloofendal_48d_partly_cloudy` and `studio_small_09` (2k, CC0, 13 MB) into `models/skies/` |
 | `make dragon-download` | downloads the Stanford dragon into `models/dragon_recon/` |
@@ -534,17 +534,17 @@ These have no command-line option. Change them and run `make` again.
 
 | what | where | value |
 |---|---|---|
-| wall colors, light color/strength (15), camera default | `engine/core/scene.c`, `scene_cornell_box` | Cornell / Shirley values |
-| box sizes and angles, sphere positions | `engine/core/scene.c` | see the comments |
-| model size (330) and position, model color | `engine/core/scene.c`, `SCENE_MESH` branch | |
+| wall colors, light color/strength (15), camera default | `engine/scene/scene.c`, `scene_cornell_box` | Cornell / Shirley values |
+| box sizes and angles, sphere positions | `engine/scene/scene.c` | see the comments |
+| model size (330) and position, model color | `engine/scene/scene.c`, `SCENE_MESH` branch | |
 | ray offsets against self-hits (`RT_EPS`, `RT_SHADOW_MARGIN`) | `engine/rt/tracer.c` (or `-DRT_EPS=`) | float 2e-3 / 2e-2, double 1e-4 / 1e-3 |
 | BVH: subtrees bigger than this are built in parallel (`BVH_PAR_MIN`) | `engine/rt/bvh.c` | 32768 |
 | octree mailbox size (`OCT_MAILBOX`), or `-DOCT_NO_MAILBOX` to turn it off | `engine/rt/octree.c` | 64 |
-| majorant grid brick size (`VOLUME_BRICK`, or `-DVOLUME_BRICK=n`), `-DMEDIUM_NO_BRICKS` to turn it off | `engine/core/volume.h`, `engine/rt/medium.c` | 8 |
-| fog material (albedo, g) and extent | `engine/core/scene.c`, `scene_cornell_box` | 0.95, 0.4 |
+| majorant grid brick size (`VOLUME_BRICK`, or `-DVOLUME_BRICK=n`), `-DMEDIUM_NO_BRICKS` to turn it off | `engine/scene/volume.h`, `engine/rt/medium.c` | 8 |
+| fog material (albedo, g) and extent | `engine/scene/scene.c`, `scene_cornell_box` | 0.95, 0.4 |
 | light paths per random-number stream (`LT_BATCH`) | `engine/rt/tracer.c` | 4096 |
-| cloud position in the box | `engine/core/scene.c`, `scene_cornell_box` | (70,150,110) .. (485,440,450) |
-| cloud shape: puff sizes, base height, warp, erosion, contrast, wind | `engine/core/volume.c`, `cloud_init`, `cloud_density`, `cloud_default_params` | |
+| cloud position in the box | `engine/scene/scene.c`, `scene_cornell_box` | (70,150,110) .. (485,440,450) |
+| cloud shape: puff sizes, base height, warp, erosion, contrast, wind | `engine/scene/volume.c`, `cloud_init`, `cloud_density`, `cloud_default_params` | |
 | bounces before Russian roulette (`RR_START`) | `engine/rt/tracer.c` | 3 |
 | octree leaf size (`OCT_LEAF_SIZE`) | `engine/rt/octree.h` (or `-DOCT_LEAF_SIZE=`) | 16 |
 | octree depth limit / node limit | `engine/rt/octree.h` | 14 / 8,000,000 |

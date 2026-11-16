@@ -311,7 +311,7 @@ fn bsdf_sample(b: ptr<function, Bsdf>, n: vec3f, v: vec3f, ul: f32, u: vec2f) ->
     return bsdf_sample_lobe(b, bsdf_pick(b, ul), n, v, u);
 }
 
-/* for the rasterizers (PBR3): the lobes one at a time (core/brdf.h) */
+/* for the rasterizers (PBR3): the lobes one at a time (scene/brdf.h) */
 fn bsdf_spec_lobe(b: ptr<function, Bsdf>, n: vec3f, v: vec3f, l: vec3f, alpha: f32) -> vec3f {
     let cv = dot(v, n);
     let cl = dot(l, n);

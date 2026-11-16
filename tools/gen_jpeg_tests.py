@@ -4,7 +4,7 @@
 # dependencies = ["pillow"]
 # ///
 """gen_jpeg_tests.py - writes tests/jpeg_tests.h: JPEG files written by libjpeg (through
-Pillow) and the pixels libjpeg decodes from them, for tests/test_jpeg.c (core/jpeg.c must
+Pillow) and the pixels libjpeg decodes from them, for tests/test_jpeg.c (formats/jpeg.c must
 decode them to within a step of libjpeg's own pixels).
 
     uv run tools/gen_jpeg_tests.py

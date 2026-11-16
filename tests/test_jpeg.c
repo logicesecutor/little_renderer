@@ -1,4 +1,4 @@
-// test_jpeg.c - core/jpeg.c against libjpeg.
+// test_jpeg.c - formats/jpeg.c against libjpeg.
 //
 //   make bin/test_jpeg && bin/test_jpeg      (part of make test)
 //
@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/jpeg.h"
+#include "formats/jpeg.h"
 #include "jpeg_tests.h"
 
 static int failures;

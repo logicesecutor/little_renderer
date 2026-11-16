@@ -2,7 +2,7 @@
 #ifndef LR_RASTER_H
 #define LR_RASTER_H
 
-#include "core/image.h"
+#include "scene/image.h"
 
 // A vertex that has already been through the whole transform pipeline.
 // "vary" holds the per-vertex values (position, normal, uv, light...) that get

@@ -4,8 +4,8 @@
 #ifndef LR_GPU_FRAME_H
 #define LR_GPU_FRAME_H
 
-#include "core/image.h"
-#include "core/scene.h"
+#include "scene/image.h"
+#include "scene/scene.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
 
@@ -16,7 +16,7 @@ void gpu_frame_close(Gpu *gpu, GpuView *view);
 
 // spp samples per pixel of the scene, path traced on the GPU, into img (linear RGB, the
 // average). The scene must have its BVH up to date (scene_set_accel), or none (one is built).
-// sampler: 1 = Sobol + blue noise, 0 = plain random numbers (core/sampler.h). photons > 0:
+// sampler: 1 = Sobol + blue noise, 0 = plain random numbers (base/sampler.h). photons > 0:
 // caustics by light tracing, this many light paths per pixel and sample (0: path traced).
 // progress = 1 prints a percentage. 0 on success, 1 if this GPU cannot hold the scene, was
 // lost, or the image could not be read back (it never waits for an image that will not come).

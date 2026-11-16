@@ -2,8 +2,8 @@
 #ifndef LR_INTERSECT_H
 #define LR_INTERSECT_H
 
-#include "core/camera.h"   // Ray
-#include "core/scene.h"    // Primitive, Triangle, Aabb
+#include "scene/camera.h"   // Ray
+#include "scene/scene.h"    // Primitive, Triangle, Aabb
 
 typedef struct {
     real t;          // distance along the ray: hit point = o + t * d
@@ -11,7 +11,7 @@ typedef struct {
     Vec3 n;          // unit shading normal, flipped so it always faces the incoming ray
     Vec3 ng;         // unit geometric normal, on the same side as n (smooth meshes: n != ng)
     int front_face;  // 1 if the ray hit the side the geometric normal points to
-    int prim;        // shape id of what was hit (core/scene.h: primitives, then triangles);
+    int prim;        // shape id of what was hit (scene/scene.h: primitives, then triangles);
                      // for an instance: the triangle's index in its mesh
     int inst;        // the instance hit, or -1 (scene_intersect sets it)
     Vec2 uv;         // where on the shape: a sphere's longitude / latitude (0..1), a quad's
@@ -52,7 +52,7 @@ static inline int aabb_hit(const Aabb *b, const Ray *r, Vec3 inv_d, real tmin, r
 
 // Closest hit with t in (tmin, tmax). Returns 1 and fills *h on a hit (h->prim is NOT set).
 int intersect_primitive(const Primitive *prim, const Ray *ray, real tmin, real tmax, Hit *h);
-// the same for shape `id` of the scene (a primitive or a triangle, see core/scene.h)
+// the same for shape `id` of the scene (a primitive or a triangle, see scene/scene.h)
 int intersect_shape(const Scene *s, int id, const Ray *ray, real tmin, real tmax, Hit *h);
 
 #endif

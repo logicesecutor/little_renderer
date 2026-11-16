@@ -1,4 +1,4 @@
-// test_tex.c - the materials' textures (core/texture.h, core/scene.h; docs/PBR.md, PBR5)
+// test_tex.c - the materials' textures (scene/texture.h, scene/scene.h; docs/PBR.md, PBR5)
 // checked on their own.
 //
 //   make bin/test_tex && bin/test_tex      (part of make test)
@@ -20,9 +20,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "core/texture.h"
-#include "core/scene.h"
-#include "core/rng.h"
+#include "scene/texture.h"
+#include "scene/scene.h"
+#include "base/rng.h"
 
 static int failures;
 

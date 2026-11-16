@@ -3,11 +3,11 @@
 #ifndef LR_TRACER_H
 #define LR_TRACER_H
 
-#include "core/camera.h"
-#include "core/image.h"
-#include "core/rng.h"
-#include "core/sampler.h"
-#include "core/scene.h"
+#include "scene/camera.h"
+#include "scene/image.h"
+#include "base/rng.h"
+#include "base/sampler.h"
+#include "scene/scene.h"
 
 typedef struct {
     int max_depth;   // maximum number of bounces before a path is cut
@@ -19,7 +19,7 @@ typedef struct {
     // light_trace_caustics adds them (much less noisily). Only set it if you run it.
     int skip_caustics;
     // For the pixel loops (and the GPU): 1 = the numbers of each path from the Sobol sequence
-    // with blue noise (core/sampler.h), 0 = from the pixel's Rng (the images of before).
+    // with blue noise (base/sampler.h), 0 = from the pixel's Rng (the images of before).
     int sampler;
     // 1 = the lamp is not counted where the ray itself (before any bounce) meets it: the
     // light probes (rt/probe.h), whose users light with the lamp themselves
@@ -37,7 +37,7 @@ TraceParams trace_default_params(void);   // max_depth 50, mis on, skip_caustics
 Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *p);
 // the same with trace_default_params() and this max_depth
 Vec3 trace_path(const Scene *s, Ray ray, Rng *rng, int max_depth);
-// The same, the path's numbers from a Sampler (core/sampler.h): make one per pixel and
+// The same, the path's numbers from a Sampler (base/sampler.h): make one per pixel and
 // sample, with sampler_make(&rng, x, y, sample_index, image_seed, on), and take the camera
 // ray's jitter from it too: sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy).
 Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *p);

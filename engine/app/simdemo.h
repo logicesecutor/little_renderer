@@ -6,8 +6,8 @@
 #define LR_SIMDEMO_H
 
 #include "app/options.h"
-#include "core/rng.h"
-#include "core/scene.h"
+#include "base/rng.h"
+#include "scene/scene.h"
 #include "phys/world.h"
 
 #define SIM_MAX_SPAWNS 4096

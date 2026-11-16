@@ -18,7 +18,7 @@
 #define LR_POISSON_H
 
 #include <stdint.h>
-#include "core/lrmath.h"
+#include "base/lrmath.h"
 
 #define POISSON_MAX_LEVELS 8
 

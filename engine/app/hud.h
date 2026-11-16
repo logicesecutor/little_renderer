@@ -4,7 +4,7 @@
 #define LR_HUD_H
 
 #include <stdint.h>
-#include "core/image.h"
+#include "scene/image.h"
 
 // The text as a bitmap of w x h pixels, 0xAARRGGBB: white glyphs (each pixel of the font
 // `scale` x `scale`) on a dark translucent box with a margin. Returns the pixels (malloc'ed,

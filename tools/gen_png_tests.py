@@ -4,14 +4,14 @@
 # dependencies = ["pillow"]
 # ///
 """gen_png_tests.py - writes tests/png_tests.h: PNG files made by other encoders, and the
-pixels they hold, for tests/test_png.c (core/png.c must decode them exactly).
+pixels they hold, for tests/test_png.c (formats/png.c must decode them exactly).
 
     uv run tools/gen_png_tests.py
 
 Two kinds: files written by Pillow (libpng-like output, the common colour types), and files
 written here with Python's zlib (its dynamic Huffman codes, and stored blocks at level 0)
 covering what Pillow does not write: interlacing, 16 bits, 2- and 4-bit samples, every
-filter type, transparency keys. The expected pixels follow core/png.h's rules: RGBA 8 bits,
+filter type, transparency keys. The expected pixels follow formats/png.h's rules: RGBA 8 bits,
 16-bit samples keep their high byte, fewer bits are scaled to 0..255.
 """
 import io

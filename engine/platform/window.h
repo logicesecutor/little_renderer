@@ -7,7 +7,7 @@
 #define LR_WINDOW_H
 
 #include <stdint.h>
-#include "core/image.h"
+#include "scene/image.h"
 
 typedef struct LrWindow LrWindow;   // opaque
 

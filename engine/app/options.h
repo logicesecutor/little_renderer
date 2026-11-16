@@ -7,8 +7,8 @@
 #define LR_OPTIONS_H
 
 #include <stdio.h>
-#include "core/scene.h"
-#include "core/volume.h"
+#include "scene/scene.h"
+#include "scene/volume.h"
 #include "raster/render.h"
 #include "raster/volume_march.h"
 #include "rt/accel.h"
@@ -61,7 +61,7 @@ typedef struct {
 
     // path tracer estimators
     int mis;               // multiple importance sampling (NEE vs bounce), default on
-    int sampler;           // 1 = Sobol + blue noise (core/sampler.h), 0 = plain random numbers
+    int sampler;           // 1 = Sobol + blue noise (base/sampler.h), 0 = plain random numbers
     int caustics_lt;       // caustics by light tracing (render only), default on
     double photons;        // light paths per camera path for -caustics lt
 

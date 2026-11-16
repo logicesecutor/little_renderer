@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/env.h"
+#include "scene/env.h"
 
 GPU_WGSL(SHADER, raster_shader);
 
@@ -56,7 +56,7 @@ struct GpuRaster {
     WGPUTexture color_tex, depth_tex;
     WGPUTextureView color, depth;
     WGPUBuffer uni, tab;                   // the uniforms; the BSDF's tables
-    WGPUBuffer lv, bg;                     // the environment's levels, the sky behind (core/env.h)
+    WGPUBuffer lv, bg;                     // the environment's levels, the sky behind (scene/env.h)
     size_t lv_cap, bg_cap;
     unsigned lv_id, bg_id;                 // the Env ids they hold (0: none)
     WGPUBuffer ig, txt;                    // the irradiance grid; the textures' table (uniform)
@@ -445,7 +445,7 @@ static int upload_env(GpuRaster *r, const Env *env, const Env *sky){
     return 1;
 }
 
-// the irradiance grid, when it changes (core/env.h IrrGrid: per probe 28 floats = 7 vec4)
+// the irradiance grid, when it changes (scene/env.h IrrGrid: per probe 28 floats = 7 vec4)
 static int upload_irr(GpuRaster *r, const IrrGrid *ig){
     if (!ig || ig->id == r->ig_id) return 1;
     size_t bytes = (size_t)ig->n[0] * ig->n[1] * ig->n[2] * IRR_FLOATS * 4;

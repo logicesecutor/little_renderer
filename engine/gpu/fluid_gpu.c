@@ -14,7 +14,7 @@ void gpu_fluid_destroy(GpuFluid *gf){ (void)gf; }
 
 #include <stdio.h>
 #include <string.h>
-#include "core/volume.h"
+#include "scene/volume.h"
 #include "gpu/gpu_internal.h"
 #include "phys/fluid.h"
 #include "phys/rigid.h"

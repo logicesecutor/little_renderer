@@ -46,7 +46,7 @@ fn bsdf_tab(k: u32) -> f32 { return TB.tab[k >> 2u][k & 3u]; }
 /* the light tracer's caustics (ltrace; bound instead of accum): per pixel and channel, a 64-bit
    32.32 fixed-point sum as two u32 (low, high) */
 @group(0) @binding(11) var<storage, read_write> caus: array<atomic<u32>>;
-/* the sky (core/env.h): SKY rgb = the radiance (times T.sky.x), a = the pixel's probability;
+/* the sky (scene/env.h): SKY rgb = the radiance (times T.sky.x), a = the pixel's probability;
    SKYC the cumulative distributions, rows 0..h-1 each row's (entry x: up to pixel x, with it),
    row h the rows' (entry y: up to row y) */
 @group(0) @binding(16) var SKY: texture_2d<f32>;
@@ -77,13 +77,13 @@ fn hash32(x0: u32) -> u32 {
     return x;
 }
 
-/* ---- the sampler (core/sampler.c): Owen-scrambled Sobol, shifted per pixel by blue noise ---- */
+/* ---- the sampler (base/sampler.c): Owen-scrambled Sobol, shifted per pixel by blue noise ---- */
 fn bn_value(x: u32, y: u32) -> f32 {
     let i = (y & 63u) * 64u + (x & 63u);
     let w = TB.bn[i >> 3u][(i >> 1u) & 3u];
     return (f32((w >> ((i & 1u) * 16u)) & 0xffffu) + 0.5) / 4096.0;
 }
-/* owen_r: x's bits already reversed (core/sampler.c, owen_reversed) */
+/* owen_r: x's bits already reversed (base/sampler.c, owen_reversed) */
 fn owen(x0: u32, seed: u32) -> u32 { return owen_r(reverseBits(x0), seed); }
 fn owen_r(x0: u32, seed: u32) -> u32 {
     var x = x0;
@@ -94,7 +94,7 @@ fn owen_r(x0: u32, seed: u32) -> u32 {
     x ^= x * 0x53a22864u;
     return reverseBits(x);
 }
-fn sobol1_r(i0: u32) -> u32 {   /* the second Sobol dimension, bits reversed (core/sampler.c) */
+fn sobol1_r(i0: u32) -> u32 {   /* the second Sobol dimension, bits reversed (base/sampler.c) */
     var i = i0;
     i ^= (i >> 1u) & 0x55555555u;
     i ^= (i >> 2u) & 0x33333333u;
@@ -103,7 +103,7 @@ fn sobol1_r(i0: u32) -> u32 {   /* the second Sobol dimension, bits reversed (co
     return i ^ (i >> 16u);
 }
 struct Smp { x: u32, y: u32, idx: u32, on: u32 };
-const SMP_PAIRS = 13u;   /* SAMPLER_PAIRS of core/sampler.h */
+const SMP_PAIRS = 13u;   /* SAMPLER_PAIRS of base/sampler.h */
 fn s2(s: Smp, dim: u32, rng: ptr<function, u32>) -> vec2f {
     if (s.on == 0u || dim >= SMP_PAIRS) {
         let a = rnd(rng);
@@ -689,7 +689,7 @@ fn power_heuristic(pa: f32, pb: f32) -> f32 {
 }
 fn light_pdf(area: f32, dist2: f32, cos_light: f32) -> f32 { return dist2 / (cos_light * area); }
 
-/* ---- the sky (core/env.c): lookups, its pdf, directions drawn by its luminance ---- */
+/* ---- the sky (scene/env.c): lookups, its pdf, directions drawn by its luminance ---- */
 /* SKY_ON: a constant the module is compiled with (two variants: the sky's code costs
    registers, so the kernels of scenes without one leave it out) */
 fn sky_on() -> bool { return SKY_ON && T.sky.w > 0.5; }

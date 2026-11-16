@@ -1,5 +1,5 @@
 #include "rt/accel.h"
-#include "core/clock.h"
+#include "base/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -5,8 +5,10 @@
 //   cc -Iengine my_app.c build/float/liblr.a -lm -lgdi32 -fopenmp    (Windows, MSYS2)
 //
 // Layers (each one only uses the layers above it):
-//   core/      math, random numbers, images, camera, meshes, scenes,
-//              noise and volumes (clouds)                             <- shared by everything
+//   base/      math (`real`, vectors), random numbers, the clock, noise, the sampler
+//   formats/   PNG, JPEG, Radiance .hdr and JSON, read and written by our own code
+//   scene/     images, textures, camera, meshes, materials and the BRDF, the environment,
+//              volumes (clouds), glTF models, the Scene         <- shared by every backend
 //   raster/    the rasterizer: triangles -> pixels with a z-buffer, clouds by raymarching
 //   rt/        the path tracer: rays, intersections, octree / BVH, light transport,
 //              participating media
@@ -20,21 +22,23 @@
 #ifndef LR_H
 #define LR_H
 
-#include "core/lrmath.h"
-#include "core/clock.h"
-#include "core/rng.h"
-#include "core/image.h"
-#include "core/png.h"
-#include "core/jpeg.h"
-#include "core/json.h"
-#include "core/texture.h"
-#include "core/camera.h"
-#include "core/mesh.h"
-#include "core/scene.h"
-#include "core/gltf.h"
-#include "core/brdf.h"
-#include "core/noise.h"
-#include "core/volume.h"
+#include "base/lrmath.h"
+#include "base/clock.h"
+#include "base/rng.h"
+#include "base/noise.h"
+
+#include "formats/png.h"
+#include "formats/jpeg.h"
+#include "formats/json.h"
+
+#include "scene/image.h"
+#include "scene/texture.h"
+#include "scene/camera.h"
+#include "scene/mesh.h"
+#include "scene/scene.h"
+#include "scene/gltf.h"
+#include "scene/brdf.h"
+#include "scene/volume.h"
 
 #include "raster/raster.h"
 #include "raster/render.h"

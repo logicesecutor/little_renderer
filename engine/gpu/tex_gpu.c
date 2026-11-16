@@ -2,7 +2,7 @@
 //
 // Every TexMap's mip levels go into one RGBA8 texture, the atlas: each level a rectangle,
 // the rectangles placed in rows (the tallest first). A table says where they are. The WGSL
-// (GPU_WGSL_TEX) reads texels with textureLoad and filters by hand as core/texture.c does:
+// (GPU_WGSL_TEX) reads texels with textureLoad and filters by hand as scene/texture.c does:
 // bilinear inside a level's rectangle (wrapping around inside it, so nothing bleeds in from
 // a neighbour), trilinear between levels, sRGB decoded per texel. One texture binding, so the
 // path tracer (whose 8 storage buffers are taken) can read it as the rasterizer does.

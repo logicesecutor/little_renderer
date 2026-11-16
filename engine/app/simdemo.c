@@ -7,7 +7,7 @@
 #include <omp.h>
 #endif
 
-#include "core/volume.h"
+#include "scene/volume.h"
 
 #define ROOM 555.0
 #define MAX_PHYS_DT (1.0 / 60.0)

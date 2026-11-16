@@ -1,11 +1,11 @@
 # The physics engine: rigid bodies, air, and a cloud that reacts
 
 `engine/phys/` is a small physics engine written from scratch on the engine's own math
-(`core/lrmath.h`). It moves two kinds of things and couples them both ways:
+(`base/lrmath.h`). It moves two kinds of things and couples them both ways:
 
 - **rigid bodies**: spheres and boxes that fall, bounce, slide, spin and stack;
 - **the air** of the room, an incompressible fluid on a grid, which **carries the cloud**:
-  the cloud's density is the same `Volume` the path tracer renders (`core/volume.h`).
+  the cloud's density is the same `Volume` the path tracer renders (`scene/volume.h`).
 
 A ball falling through the cloud pushes the air aside, the air drags the cloud along, and a
 hole and a wake open behind the ball. A balloon, nearly as light as the air, is carried by
@@ -20,7 +20,7 @@ bin/test_physics                      # the checks against known answers (also `
 
 | file | what it does |
 |---|---|
-| `core/lrmath.h` | (added) `Mat3`, `Quat` and their operations: the rotation math of the bodies |
+| `base/lrmath.h` | (added) `Mat3`, `Quat` and their operations: the rotation math of the bodies |
 | `phys/rigid.h/.c` | rigid bodies: integration, collision detection, the contact solver |
 | `phys/fluid.h/.c` | the air: Stable Fluids on a MAC grid, the cloud's advection |
 | `phys/poisson.h/.c` | the pressure equation, solved by multigrid |
@@ -31,7 +31,7 @@ bin/test_physics                      # the checks against known answers (also `
 | `tests/test_physics.c` | the tests |
 | `tools/frames_to_gif.py` | frames → animated GIF (Pillow; `uv run` installs it by itself) |
 
-`phys/` only includes `core/` (`make check-layers` checks it): the physics knows nothing
+`phys/` only includes `base/`, `formats/` and `scene/` (`make check-layers` checks it): the physics knows nothing
 about the renderers. The renderers know nothing about the physics either; the only meeting
 points are the `Volume` (the fluid writes it, the path tracer reads it) and the `Scene`'s
 primitives (`phys_sync_scene` moves them).

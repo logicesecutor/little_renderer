@@ -10,7 +10,7 @@
 #ifdef LR_VK
 #include "vk/webgpu_rt.h"     // hardware ray tracing: our Vulkan layer's extension
 #endif
-#include "core/scene.h"
+#include "scene/scene.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
 #include "raster/render.h"
@@ -141,7 +141,7 @@ void gpu_raster_destroy(GpuRaster *r);
 // frame's types and of the media's densities, and the buffers passed to gpu_trace_encode.
 typedef struct GpuTrace GpuTrace;
 extern const char *const GPU_WGSL_TYPES, *const GPU_WGSL_MEDIA;
-// the BSDF of core/brdf.h in WGSL (gpu/brdf_gpu.c): a module that includes it defines
+// the BSDF of scene/brdf.h in WGSL (gpu/brdf_gpu.c): a module that includes it defines
 // fn bsdf_tab(k: u32) -> f32, float k of the tables gpu_bsdf_tables packs
 extern const char *const GPU_WGSL_BSDF;
 #define GPU_BSDF_TABLE_FLOATS 2112
@@ -188,7 +188,7 @@ int gpu_trace_sync(GpuTrace *t, const Scene *s);
 int gpu_trace_reads_tlas(const GpuTrace *t);   // 1 = gpu_trace_sync copies the CPU's top level (scene_tlas)
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
 // `repeats` more samples for every pixel of rows [y0, y0 + rows), samples number index,
-// index + 1, ... of the sequence (core/sampler.h)
+// index + 1, ... of the sequence (base/sampler.h)
 void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                       int y0, int rows, int repeats, int nvolumes, uint32_t index,
                       WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);

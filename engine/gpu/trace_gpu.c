@@ -10,7 +10,7 @@
 // The scene is the CPU's, flattened into buffers:
 //   nodes   the BVH (rt/bvh.h), 32 bytes per node: box, and children or a range of `aux`
 //   aux     the BVH's shape ids (leaves are ranges of it), then the vertex normals
-//   prims   spheres and quads, with the precomputed data of core/scene.h
+//   prims   spheres and quads, with the precomputed data of scene/scene.h
 //   tris    mesh triangles, 48 bytes: corner, two edges, 3 normal indices, material
 // What differs from the CPU: 32-bit floats whatever the build, and another random number
 // generator (PCG with a 32-bit state: WGSL has no 64-bit integers). So the two images are
@@ -23,10 +23,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/brdf.h"
-#include "core/env.h"
-#include "core/sampler.h"
-#include "core/volume.h"
+#include "scene/brdf.h"
+#include "scene/env.h"
+#include "base/sampler.h"
+#include "scene/volume.h"
 #include "rt/accel.h"
 #include "rt/bvh.h"
 
@@ -432,7 +432,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     free(src);
     t->params = gpu_buffer(g, "path tracer parameters", GTP_STRIDE * MAX_REPS, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     {
-        // the blue-noise mask (core/sampler.c), 2 ranks per 32 bits, then the BSDF's tables
+        // the blue-noise mask (base/sampler.c), 2 ranks per 32 bits, then the BSDF's tables
         const uint16_t *m = blue_noise_mask();
         uint32_t packed[BLUE_NOISE_SIZE * BLUE_NOISE_SIZE / 2];
         for (int i = 0; i < BLUE_NOISE_SIZE * BLUE_NOISE_SIZE / 2; i++) packed[i] = (uint32_t)m[2 * i] | ((uint32_t)m[2 * i + 1] << 16);

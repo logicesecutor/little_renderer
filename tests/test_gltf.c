@@ -1,4 +1,4 @@
-// test_gltf.c - core/gltf.c (and core/json.c) on models made here.
+// test_gltf.c - scene/gltf.c (and formats/json.c) on models made here.
 //
 //   make bin/test_gltf && bin/test_gltf      (part of make test)
 //
@@ -16,9 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include "core/json.h"
-#include "core/gltf.h"
-#include "core/png.h"
+#include "formats/json.h"
+#include "scene/gltf.h"
+#include "formats/png.h"
 
 static int failures;
 

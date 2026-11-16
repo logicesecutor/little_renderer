@@ -20,7 +20,7 @@ struct RU {
     vp: mat4x4f,     /* world -> clip, z in -w..w as on the CPU */
     eye: vec4f,      /* w = mode: 0 wireframe, 1 flat, 2 gouraud, 3 phong */
     lamp: RLamp,
-    /* the environment it lights with (RenderLamp.env; core/env.h): its levels in LV */
+    /* the environment it lights with (RenderLamp.env; scene/env.h): its levels in LV */
     envp: vec4f,     /* scale, cos and sin of its turn, 1 = there is one */
     envc: vec4f,     /* a probe's centre, w = 1: lookups corrected by its box */
     envlo: vec4f,
@@ -62,7 +62,7 @@ struct TT { e: array<vec4u, 512> };
 @group(0) @binding(10) var<uniform> TXT: TT;
 fn tex_entry(k: u32) -> vec4u { return TXT.e[k]; }
 
-/* ---- the environment (core/env.c) ---- */
+/* ---- the environment (scene/env.c) ---- */
 fn env_uv(d: vec3f, c: f32, s: f32) -> vec2f {
     let x = d.x * c - d.z * s;
     let z = d.x * s + d.z * c;

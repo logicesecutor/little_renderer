@@ -3,7 +3,7 @@
 #ifndef LR_ACCEL_H
 #define LR_ACCEL_H
 
-#include "core/scene.h"
+#include "scene/scene.h"
 #include "rt/bvh.h"
 #include "rt/intersect.h"
 #include "rt/octree.h"

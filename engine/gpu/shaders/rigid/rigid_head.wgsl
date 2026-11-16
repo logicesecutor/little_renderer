@@ -45,7 +45,7 @@ fn inv_inertia(b: Body) -> mat3x3f {
     let r = qmat(b.rot);
     return r * mat3x3f(vec3f(b.iner.x, 0.0, 0.0), vec3f(0.0, b.iner.y, 0.0), vec3f(0.0, 0.0, b.iner.z)) * transpose(r);
 }
-/* two tangents of a unit normal (core/rng.h onb_from_normal, Duff et al. 2017) */
+/* two tangents of a unit normal (base/rng.h onb_from_normal, Duff et al. 2017) */
 fn onb(n: vec3f) -> mat2x3f {
     let s = select(-1.0, 1.0, n.z >= 0.0);
     let a = -1.0 / (s + n.z);

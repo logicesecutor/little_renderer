@@ -1,4 +1,4 @@
-// test_png.c - core/png.c against files from other encoders, and against itself.
+// test_png.c - formats/png.c against files from other encoders, and against itself.
 //
 //   make bin/test_png && bin/test_png      (part of make test)
 //
@@ -12,8 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/png.h"
-#include "core/clock.h"
+#include "formats/png.h"
+#include "base/clock.h"
 #include "png_tests.h"
 
 static int failures;

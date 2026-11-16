@@ -1,4 +1,4 @@
-// volume_march.h - the rasterizer's clouds: participating media (core/volume.h) drawn in
+// volume_march.h - the rasterizer's clouds: participating media (scene/volume.h) drawn in
 // real time by raymarching, over a frame render_scene has already drawn.
 //
 // The path tracer follows random paths through a cloud, which takes seconds per clean
@@ -21,8 +21,8 @@
 #ifndef LR_VOLUME_MARCH_H
 #define LR_VOLUME_MARCH_H
 
-#include "core/image.h"
-#include "core/scene.h"
+#include "scene/image.h"
+#include "scene/scene.h"
 #include "raster/render.h"
 
 typedef struct {

@@ -33,8 +33,8 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 
 #include <stdio.h>
 #include <string.h>
-#include "core/clock.h"
-#include "core/volume.h"
+#include "base/clock.h"
+#include "scene/volume.h"
 #include "gpu/gpu_internal.h"
 
 // ---- the shaders -----------------------------------------------------------------------------
@@ -122,7 +122,7 @@ struct GpuView {
     int t_done, t_done_next;    // finished; and what that becomes when the running band ends
     int t_inflight;             // a band is running
     int t_bands;                // bands finished since the image started
-    uint32_t t_index;           // the sample (of the sequence: core/sampler.h) the next pass takes
+    uint32_t t_index;           // the sample (of the sequence: base/sampler.h) the next pass takes
     // the denoiser (created when first used), and the band count of the image it holds
     GpuDenoise *den;
     int den_failed, denoise, den_bands;

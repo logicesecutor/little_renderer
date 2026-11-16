@@ -3,7 +3,7 @@
 A cloud is not a surface. It is a region full of tiny water droplets, and light travelling
 through it is scattered, again and again, until it leaves the cloud or is absorbed. The
 engine models this as a **participating medium**: a voxel grid of density in the shared
-core (`core/volume.h`), filled with a procedural cumulus made from noise (`core/noise.c`),
+core (`scene/volume.h`), filled with a procedural cumulus made from noise (`base/noise.c`),
 rendered physically by the path tracer (`rt/medium.c`, `rt/tracer.c`), and in real time
 by the rasterizer's raymarcher (`raster/volume_march.c`, section 7.1).
 
@@ -25,16 +25,16 @@ Every option is in USAGE.md; this file explains how it works and where it can go
 
 | file | layer | job |
 |---|---|---|
-| `core/noise.h/c` | core | Perlin gradient noise, Worley cellular noise, their fractal sums (fBm, billows). Seeded, thread-safe. |
-| `core/volume.h/c` | core | `Volume`: the density grid, its bounds and optical properties (`sigma_t`, `albedo`, `g`); trilinear `volume_density`; `volume_update` (majorant, active box, majorant grid of 8³-voxel bricks, `version`); the Henyey-Greenstein phase function; the procedural cumulus (`Cloud`, `cloud_density`, `volume_make_cloud`, `volume_new_cloud`, `volume_add_cloud`). |
-| `core/scene.h/c` | core | `Scene.volumes` (up to 8 media, owned, freed by `scene_free`), `scene_add_volume`, `SceneOptions.cloud`, `SceneOptions.fog`, `SCENE_CLOUD`. |
+| `base/noise.h/c` | core | Perlin gradient noise, Worley cellular noise, their fractal sums (fBm, billows). Seeded, thread-safe. |
+| `scene/volume.h/c` | core | `Volume`: the density grid, its bounds and optical properties (`sigma_t`, `albedo`, `g`); trilinear `volume_density`; `volume_update` (majorant, active box, majorant grid of 8³-voxel bricks, `version`); the Henyey-Greenstein phase function; the procedural cumulus (`Cloud`, `cloud_density`, `volume_make_cloud`, `volume_new_cloud`, `volume_add_cloud`). |
+| `scene/scene.h/c` | core | `Scene.volumes` (up to 8 media, owned, freed by `scene_free`), `scene_add_volume`, `SceneOptions.cloud`, `SceneOptions.fog`, `SCENE_CLOUD`. |
 | `rt/medium.h/c` | rt | delta tracking (where a ray scatters), ratio tracking (how much light gets through), both walking the majorant grid; the same for all media of a scene at once; Henyey-Greenstein sampling. |
 | `rt/tracer.c` | rt | the path loop with a medium: scattering events, light sampling inside the cloud, shadows of the cloud on surfaces. |
 | `raster/volume_march.h/c` | raster | real time: raymarching over the rasterized frame, with a light grid (section 7.1). |
 | `app/options.c` | app | `-scene cloud`, `-cloud on`, `-density`, `-albedo`, `-g`, `-detail`, `-seed`, `-time`, `-cloudres`, `-fog`. |
 | `tests/test_medium.c` | | unit test of the sampling against exact answers (`make test`). |
 
-The grid lives in `core/` on purpose. The path tracer is only its first user. A real-time
+The grid lives in `scene/` on purpose. The path tracer is only its first user. A real-time
 raymarcher (the viewer), an animation and a fluid simulation (forces) all read or write the
 same `Volume`. Section 7 shows how each of these plugs in.
 
@@ -209,7 +209,7 @@ transmittance of the shadow ray, so the floor under the cloud is darker, with a 
 
 ---
 
-## 4. Modelling the cloud (`core/volume.c`)
+## 4. Modelling the cloud (`scene/volume.c`)
 
 A cumulus forms when warm air rises, cools, and its water condenses. It condenses at about
 the same height everywhere (the base is flat), and the rising bubbles pile up into round

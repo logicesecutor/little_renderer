@@ -19,8 +19,8 @@
 #define LR_FLUID_H
 
 #include <stdint.h>
-#include "core/lrmath.h"
-#include "core/volume.h"
+#include "base/lrmath.h"
+#include "scene/volume.h"
 #include "phys/poisson.h"
 
 // a region where the air expands (an explosion, a burst of hot gas): see fluid_add_expansion

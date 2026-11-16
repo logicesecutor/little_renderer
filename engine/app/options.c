@@ -1,8 +1,8 @@
 #include "app/options.h"
-#include "core/clock.h"
+#include "base/clock.h"
 #include "gpu/gpu.h"
 #include "rt/probe.h"
-#include "core/env.h"
+#include "scene/env.h"
 
 #include <stdlib.h>
 #include <string.h>

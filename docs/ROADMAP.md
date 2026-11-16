@@ -36,7 +36,7 @@ PNG replaces PPM completely (the user's choice: the engine writes PNG itself, in
 goes away), reading and writing, so that every image the engine makes or reads is one any
 program opens.
 
-- `core/png.{c,h}`, from scratch, no library: CRC-32 and Adler-32; a deflate encoder (LZ77
+- `formats/png.{c,h}`, from scratch, no library: CRC-32 and Adler-32; a deflate encoder (LZ77
   with hash chains and fixed Huffman codes: a good part of zlib's ratio in a few hundred
   lines); the PNG filters chosen per row (the smallest sum of absolute differences, as libpng
   does). A decoder too, needed by the PBR textures (PBR5, glTF): inflate (stored, fixed and

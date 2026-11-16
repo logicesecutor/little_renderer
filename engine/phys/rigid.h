@@ -15,8 +15,8 @@
 #ifndef LR_RIGID_H
 #define LR_RIGID_H
 
-#include "core/lrmath.h"
-#include "core/scene.h"   // Aabb, Triangle, Xform
+#include "base/lrmath.h"
+#include "scene/scene.h"   // Aabb, Triangle, Xform
 #include "phys/convex.h"
 
 // BODY_HULL: a mesh's convex hull, moving; BODY_MESH: a mesh's triangles, fixed (a static

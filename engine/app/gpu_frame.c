@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L   // nanosleep
 #include "app/gpu_frame.h"
-#include "core/clock.h"
+#include "base/clock.h"
 
 #include <stdio.h>
 #include <string.h>

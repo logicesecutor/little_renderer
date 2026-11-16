@@ -15,7 +15,7 @@
 #ifndef LR_PHYS_WORLD_H
 #define LR_PHYS_WORLD_H
 
-#include "core/scene.h"
+#include "scene/scene.h"
 #include "phys/fluid.h"
 #include "phys/rigid.h"
 

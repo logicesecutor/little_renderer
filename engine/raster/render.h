@@ -4,11 +4,11 @@
 #ifndef LR_RENDER_H
 #define LR_RENDER_H
 
-#include "core/image.h"
-#include "core/lrmath.h"
-#include "core/mesh.h"
-#include "core/scene.h"
-#include "core/texture.h"
+#include "scene/image.h"
+#include "base/lrmath.h"
+#include "scene/mesh.h"
+#include "scene/scene.h"
+#include "scene/texture.h"
 
 typedef enum {
     MODE_WIREFRAME,   // only the triangle edges (Bresenham lines)
@@ -32,7 +32,7 @@ typedef struct {
 // Camera 3.2 units away on +Z looking at the origin, 45 degree lens, light up-right-front.
 RenderParams render_default_params(int width, int height);
 
-// A camera like core/camera.h's (vertical field of view in degrees), phong, no culling.
+// A camera like scene/camera.h's (vertical field of view in degrees), phong, no culling.
 RenderParams render_params_camera(Vec3 from, Vec3 at, Vec3 up, real vfov_deg, int width, int height);
 
 // Draws the mesh into fb. Does NOT clear it: call fb_clear first.
@@ -40,7 +40,7 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p);
 
 // Draws every primitive of the scene (spheres are tessellated, quads become 2 triangles),
 // and the sky (Scene.env) where nothing was drawn.
-// The materials' BSDF (core/brdf.h) lit by the scene's lamp and an ambient light
+// The materials' BSDF (scene/brdf.h) lit by the scene's lamp and an ambient light
 // (render_shade); output is sRGB-encoded like the path tracer's. Uses p->view, p->proj,
 // p->eye, p->mode (TEXTURED acts as PHONG) and p->cull_backfaces. Does NOT clear fb.
 void render_scene(Framebuffer *fb, const Scene *s, const RenderParams *p);

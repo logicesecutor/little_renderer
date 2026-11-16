@@ -3,8 +3,8 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "core/rng.h"
-#include "core/sampler.h"
+#include "base/rng.h"
+#include "base/sampler.h"
 #include "rt/tracer.h"
 #include "rt/accel.h"
 

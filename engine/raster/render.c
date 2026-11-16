@@ -1,8 +1,8 @@
 #include "raster/render.h"
 
 #include "raster/raster.h"
-#include "core/brdf.h"
-#include "core/env.h"
+#include "scene/brdf.h"
+#include "scene/env.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -471,7 +471,7 @@ void render_mesh(Framebuffer *fb, const Mesh *mesh, const RenderParams *p){
 // ---- whole scenes (the same Scene the path tracer renders) ----------------------------
 //
 // A rasterizer has no global light transport: no shadows, no bounced light, no refraction.
-// What it can do fast is local lighting: every surface is the material's BSDF (core/brdf.h)
+// What it can do fast is local lighting: every surface is the material's BSDF (scene/brdf.h)
 // lit by the scene's lamp (render_shade: the lamp's area, not a point), plus an ambient
 // light standing in for the light that bounces around. Good enough to frame a shot before
 // path tracing it; mirrors and glass reflect the lamp and the ambient light (the room

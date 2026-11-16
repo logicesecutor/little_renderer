@@ -1,4 +1,4 @@
-// medium.h - path tracer: light travelling through a participating medium (core/volume.h).
+// medium.h - path tracer: light travelling through a participating medium (scene/volume.h).
 //
 // Inside a cloud a ray does not go straight to the next surface: at every point it may be
 // scattered (sent in a new direction) or absorbed, with a probability that depends on the
@@ -12,10 +12,10 @@
 #ifndef LR_MEDIUM_H
 #define LR_MEDIUM_H
 
-#include "core/camera.h"
-#include "core/rng.h"
-#include "core/scene.h"
-#include "core/volume.h"
+#include "scene/camera.h"
+#include "base/rng.h"
+#include "scene/scene.h"
+#include "scene/volume.h"
 
 // Follows the ray (its direction must have unit length) from tmin to tmax. Returns 1 and
 // the distance t of a scattering-or-absorption event ("real collision") if one happens

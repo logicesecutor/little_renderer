@@ -19,8 +19,8 @@
 
 #include <stdint.h>
 
-#include "core/lrmath.h"
-#include "core/scene.h"   // Aabb, Triangle
+#include "base/lrmath.h"
+#include "scene/scene.h"   // Aabb, Triangle
 
 typedef struct { Vec3 n; real d; int first, count; } ConvexFace;   // n . x = d (n outward); loop in fv
 typedef struct { int a, b, fa, fb; } ConvexEdge;                   // its vertices, the faces it joins

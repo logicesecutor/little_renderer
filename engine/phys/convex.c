@@ -1,6 +1,6 @@
 #include "phys/convex.h"
 
-#include "core/rng.h"   // onb_from_normal
+#include "base/rng.h"   // onb_from_normal
 
 #include <stdlib.h>
 #include <string.h>
