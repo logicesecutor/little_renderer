@@ -342,7 +342,12 @@ int texmap_procedural(TexMap *t, const char *name){
     const int N = 512;
     unsigned char *px = malloc((size_t)N * N * 4);
     if (!px) return 1;
-    int srgb = 1, known = 1;
+    // colour (sRGB) or data; the rows in parallel (each pixel its own)
+    int srgb = strcmp(name, "bricks_normal") && strcmp(name, "bricks_mr") && strcmp(name, "plate_mr");
+    int known = !srgb || !strcmp(name, "checker") || !strcmp(name, "bricks");
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 16)
+#endif
     for (int y = 0; y < N; y++)
         for (int x = 0; x < N; x++){
             double u = (x + 0.5) / N, v = (y + 0.5) / N;
@@ -360,7 +365,6 @@ int texmap_procedural(TexMap *t, const char *name){
                 double k = h > 0 ? 1 : 0;
                 r = k * br + (1 - k) * mo; g = k * bg + (1 - k) * mo; b = k * bb + (1 - k) * mo * 0.95;
             } else if (!strcmp(name, "bricks_normal")){
-                srgb = 0;
                 // the slope of the height (bricks 6 units above the mortar's floor, a little rough),
                 // by central differences; x along u, y up (towards -v), z out of the surface
                 double eps = 1.0 / N, scale = 0.012;
@@ -371,17 +375,15 @@ int texmap_procedural(TexMap *t, const char *name){
                 double nx = -hx * scale, ny = -hy * scale, nz = 1, l = sqrt(nx * nx + ny * ny + nz * nz);
                 r = 0.5 + 0.5 * nx / l; g = 0.5 + 0.5 * ny / l; b = 0.5 + 0.5 * nz / l;
             } else if (!strcmp(name, "bricks_mr")){
-                srgb = 0;
                 double h = brick_height(u, v, &bx, &by);
                 g = h > 0 ? 0.55 + 0.25 * fbm(u * 32, v * 32, 32) : 0.95;    // roughness
                 b = 0;                                                     // metallic
             } else if (!strcmp(name, "plate_mr")){
-                srgb = 0;
                 double wear = fbm(u * 8, v * 8, 8);
                 double scratch = fbm(u * 64, v * 4, 64);
                 g = 0.15 + 0.5 * wear * wear + 0.15 * scratch;               // roughness
                 b = wear > 0.55 ? 0.15 : 1.0;                                 // metal, but where it wore off
-            } else known = 0;
+            }
             if (srgb){ o[0] = to_srgb8(r); o[1] = to_srgb8(g); o[2] = to_srgb8(b); }
             else { o[0] = (unsigned char)(r * 255 + 0.5); o[1] = (unsigned char)(g * 255 + 0.5); o[2] = (unsigned char)(b * 255 + 0.5); }
             o[3] = 255;
