@@ -84,10 +84,10 @@ static VkFlags stages(WGPUShaderStage s){
 WGPUBindGroupLayout wgpuDeviceCreateBindGroupLayout(WGPUDevice device, WGPUBindGroupLayoutDescriptor const *d){
     WGPUBindGroupLayout l = calloc(1, sizeof(*l));
     VkDescriptorSetLayoutBinding *b = calloc(d->entryCount ? d->entryCount : 1, sizeof(*b));
-    if (!l || !b){ free(l); free(b); return NULL; }
+    if (l) l->e = calloc(d->entryCount ? d->entryCount : 1, sizeof(*l->e));
+    if (!l || !b || !l->e){ if (l) free(l->e); free(l); free(b); return NULL; }
     obj_init(&l->o, bgl_free);
     l->dev = device;
-    l->e = calloc(d->entryCount ? d->entryCount : 1, sizeof(*l->e));
     l->n = (int)d->entryCount;
     for (size_t i = 0; i < d->entryCount; i++){
         const WGPUBindGroupLayoutEntry *e = &d->entries[i];

@@ -197,6 +197,7 @@ Mesh *mesh_load(const char *path){
     if (!fp) return NULL;
 
     Mesh *m = calloc(1, sizeof(*m));
+    if (!m){ fclose(fp); return NULL; }
     Caps cap = {0, 0, 0, 0};
     int err = ends_with(path, ".ply") ? read_ply(fp, m, &cap) : read_obj(fp, m, &cap);
     fclose(fp);

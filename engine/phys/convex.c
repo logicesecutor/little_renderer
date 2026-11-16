@@ -165,6 +165,7 @@ int convex_hull(const Vec3 *pts, int n, int max_verts, Convex *out){
     }
     // only the corners the faces use
     out->v = malloc((size_t)np * sizeof(Vec3));
+    if (!out->v){ free(group); free(used); free(remap); free(p); free(t); free(nt); free(hz); free(vis); convex_free(out); return 0; }
     for (int i = 0; i < np; i++) if (used[i]){ remap[i] = out->nv; out->v[out->nv++] = p[i]; } else remap[i] = -1;
     for (int k = 0; k < nfv; k++) out->fv[k] = remap[out->fv[k]];
     // the edges: each directed edge of a face, and the face of its reverse

@@ -43,7 +43,8 @@ static void fail(Gpu *g, const char *what, WGPUStringView msg){
 
 static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView msg, void *u1, void *u2){
     (void)device; (void)u1; (void)u2;
-    fprintf(stderr, "GPU error %d: %.*s\n", (int)type, (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length), msg.data);
+    fprintf(stderr, "GPU error %d: %.*s\n", (int)type,
+            msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
 }
 
 // the GPUs alive: a device-lost callback can arrive after gpu_destroy, and must not touch it

@@ -24,8 +24,9 @@ Texture *texture_load_png(const char *path){
 
 Texture *texture_checker(int size, int cells){
     Texture *t = malloc(sizeof(*t));
+    if (t) t->px = malloc((size_t)size * size * sizeof(uint32_t));
+    if (!t || !t->px){ free(t); return NULL; }
     t->w = t->h = size;
-    t->px = malloc((size_t)size * size * sizeof(uint32_t));
     for (int y = 0; y < size; y++){
         for (int x = 0; x < size; x++){
             int on = ((x * cells / size) + (y * cells / size)) & 1;

@@ -370,6 +370,7 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     }
     free(gr->staging);
     gr->staging = malloc(cap * BODY_BYTES);
+    if (!gr->staging){ perror("malloc"); exit(1); }
     make_groups(gr);
     gr->prev_nb = 0;          // no lists of the last substep: no warm start this time
     return 1;
