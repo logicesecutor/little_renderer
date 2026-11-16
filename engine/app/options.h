@@ -24,7 +24,8 @@ typedef enum {
 // the physics demos (app/simdemo.h): what is in the room and what happens
 typedef enum {
     SIM_DROP,    // balls and boxes fall through the cloud, balloons rise slowly through it
-    SIM_BLAST    // things rest on the floor under the cloud; an explosion at 1 s
+    SIM_BLAST,   // things rest on the floor under the cloud; an explosion at 1 s
+    SIM_SKY      // no room, no air: bodies rain onto a floor under the sky, among still props
 } SimDemo;
 
 typedef struct {
@@ -34,6 +35,7 @@ typedef struct {
     double fps;            // sim: frames per second (the physics runs at the same rate, substepped)
     int balls, boxes, balloons;
     int meshes;            // copies of -obj as moving bodies (their convex hulls)
+    int bodies, props;     // SIM_SKY: the bodies that fall, the still things standing about
     int collider;          // -obj also stands in the room, fixed: its triangles collide
     Vec3 wind;             // the breeze the air drifts towards, units / s
     int fluid_res;         // air cells along the room's side

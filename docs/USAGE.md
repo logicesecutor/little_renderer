@@ -315,7 +315,8 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 
 ### 3.1 Physics (`sim`, and `view -sim on`)
 
-How it works: `PHYSICS.md`. The demos always use the empty room (`-scene` is ignored);
+How it works: `PHYSICS.md`. The demos use the empty room (`-scene` is ignored; `-demo sky`
+the open floor under the sky);
 the cloud options (`-density`, `-detail`, `-seed`, `-cloudres` ...) shape the cloud the air
 carries, `-fog` adds haze, the camera options work as usual.
 
@@ -324,6 +325,8 @@ carries, `-fog` adds haze, the camera options work as usual.
 | `-sim on\|off` | `view` only: run the physics demo live | off |
 | `-demo drop` | balls and boxes fall through the cloud one after another, balloons rise through it | ✓ |
 | `-demo blast` | everything rests on the floor under the cloud; an explosion at t = 1 s | |
+| `-demo sky` | no room and no air: bodies rain onto a floor under the sky (`-sky`), among still props (PHYSICS.md 5) | |
+| `-bodies n`, `-props n` | `-demo sky`: the bodies that fall (at most 4096), the still instances standing in a ring around them | 2000, 3000 |
 | `-balls n`, `-boxes n`, `-balloons n` | how many of each (4096 bodies in all at most); in the drop demo one appears every 0.4 s, or, with more than 50, all of them within 20 s | 5, 3, 3 |
 | `-meshes n` | n copies of the model (`-obj`, 120 units) fall too (`-demo blast`: rest on the floor), as their convex hulls (PHYSICS.md 1.2b); `-mat` their material | 0 |
 | `-collider on\|off` | the model (`-obj`, 260 units, turned by `-rot`) stands in the middle of the room, fixed: things bounce off and rest on its triangles, the air flows around it | off |

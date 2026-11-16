@@ -668,6 +668,21 @@ falling through the cloud and landing around a big one, the air flowing around a
 Rigid bodies take 0.2 ms per 1/60 s step on average for that (2 ms at most, when hulls
 land on the 200k-triangle dragon), the GPU air 0.6 ms.
 
+**`-demo sky`**: no room and no air. The open scene's paving under the sky (`-sky file.hdr`,
+a procedural one without it), and 5000 instances: `-bodies` (2000) fall within 15 s from
+700-1400 units onto a disc of radius 380 in the middle and pile up (spheres, boxes, and
+convex-hull dragons and tori at two sizes each, of 14 PBR materials: gold, copper, chrome,
+brushed aluminium, anodized purple, clear and frosted glass, plastics, a green ceramic,
+black gloss, rubber; denser for the metals), between invisible walls 900 units away;
+`-props` (3000) still things (spheres, boxes, dragons and tori at any size, a few big
+chrome balls) stand in a ring around them, from 1050 to 6000 units, not overlapping and out
+of the camera's way. The props are instances only: nothing collides with them, and they
+cost the physics nothing. K blasts the pile. Live on an RTX 3070,
+`bin/view -sim on -demo sky -backend rt -sky models/skies/kloofendal_48d_partly_cloudy_2k.hdr
+-width 1280 -height 720`: 31 frames/s path traced and denoised with all 2000 bodies down,
+the bodies 1.3 ms per step on the GPU, the path tracer 10.9 ms per pass; with our Vulkan
+layer (`bin/vk/view`, hardware ray tracing) 53 frames/s, the path tracer 3.3 ms per pass.
+
 `bin/sim` writes each frame to `out/sim/frame_NNNN.png` (`-o folder`) and then
 `out/sim.gif` (`-gif off` to skip). Each frame: physics for 1/fps seconds (steps of at most
 1/60 s), sync, rebuild, path trace. With `-backend raster` the frames are rasterized and

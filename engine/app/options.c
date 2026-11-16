@@ -20,8 +20,9 @@ void options_usage(Program prog, FILE *f){
     if (sim) fprintf(f,
         "physics simulation: renders every frame with the path tracer into <-o>/frame_NNNN.png\n\n"
         "demo\n"
-        "  -demo drop|blast           drop: balls and boxes fall through the cloud, balloons rise\n"
-        "                             blast: an explosion in the cloud at 1 s     (drop)\n"
+        "  -demo drop|blast|sky       drop: balls and boxes fall through the cloud, balloons rise\n"
+        "                             blast: an explosion in the cloud at 1 s\n"
+        "                             sky: bodies rain onto a floor under the sky (-sky) (drop)\n"
         "  -frames n                  frames to render                          (120)\n"
         "  -fps n                     frames per second                         (30)\n"
         "  -gif on|off                also write <-o>.gif (uv, or python3 + Pillow) (on)\n");
@@ -35,10 +36,11 @@ void options_usage(Program prog, FILE *f){
         "  -fluidres n                air cells along the room's side           (48; view: 32)\n"
         "  -buoyancy a                the cloud rises: acceleration per density (0)\n"
         "  -vorticity e               keeps the swirls alive, 0 = off           (0.25)\n"
-        "  -physseed n                where things start                        (1)\n\n",
+        "  -physseed n                where things start                        (1)\n"
+        "  -bodies n / -props n       -demo sky: bodies falling / still things about (2000 / 3000)\n\n",
         view ? "physics (a live simulation in the window)\n"
                "  -sim on|off                run the physics demo                       (off)\n"
-               "  -demo drop|blast           which one                                  (drop)\n"
+               "  -demo drop|blast|sky       which one                                  (drop)\n"
              : "");
     fprintf(f,
         "backend\n"
@@ -229,6 +231,8 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->sim.balls = 5;
     o->sim.boxes = 3;
     o->sim.balloons = 3;
+    o->sim.bodies = 2000;
+    o->sim.props = 3000;
     o->sim.fluid_res = 48;
     o->sim.vorticity = 0.25;
     o->sim.seed = 1;
@@ -319,6 +323,8 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-vorticity")) o->sim.vorticity = atof(v);
         else if (!strcmp(a, "-physseed")) o->sim.seed = atoi(v);
         else if (!strcmp(a, "-meshes"))  o->sim.meshes = atoi(v);
+        else if (!strcmp(a, "-bodies"))  o->sim.bodies = atoi(v);
+        else if (!strcmp(a, "-props"))   o->sim.props = atoi(v);
         else if (!strcmp(a, "-collider")){
             if (!strcmp(v, "on")) o->sim.collider = 1;
             else if (!strcmp(v, "off")) o->sim.collider = 0;
@@ -327,7 +333,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-sim") && prog == PROG_VIEW) o->sim.on = on_off(prog, a, v);
         else if (!strcmp(a, "-gif") && prog == PROG_SIM) o->sim.gif = on_off(prog, a, v);
         else if (!strcmp(a, "-demo") && prog != PROG_RENDER)
-            o->sim.demo = (SimDemo)pick(prog, v, (const char *const[]){"drop", "blast", NULL}, "unknown demo");
+            o->sim.demo = (SimDemo)pick(prog, v, (const char *const[]){"drop", "blast", "sky", NULL}, "unknown demo");
         else if (!strcmp(a, "-sampler")){
             if (!strcmp(v, "sobol")) o->sampler = 1;
             else if (!strcmp(v, "random")) o->sampler = 0;
@@ -380,8 +386,9 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->sim.on){
         if (o->sim.frames < 1 || o->sim.fps <= 0) fail(prog, "need -frames >= 1 and -fps > 0", "");
         if (o->sim.fluid_res < 8 || o->sim.fluid_res > 256) fail(prog, "fluid resolution must be 8..256", "-fluidres");
-        if (o->sim.balls < 0 || o->sim.boxes < 0 || o->sim.balloons < 0 || o->sim.meshes < 0)
-            fail(prog, "counts must be >= 0", "-balls/-boxes/-balloons/-meshes");
+        if (o->sim.balls < 0 || o->sim.boxes < 0 || o->sim.balloons < 0 || o->sim.meshes < 0 || o->sim.props < 0)
+            fail(prog, "counts must be >= 0", "-balls/-boxes/-balloons/-meshes/-props");
+        if (o->sim.bodies < 0 || o->sim.bodies > 4096) fail(prog, "-bodies must be 0..4096 (SIM_MAX_SPAWNS)", "-bodies");
         (void)backend_set;   // view -sim: hybrid (raster + raymarched cloud while it runs)
         // live: coarser air and cloud, so that a physics step fits in a frame
         if (prog == PROG_VIEW && !fluidres_set) o->sim.fluid_res = 32;

@@ -244,6 +244,7 @@ typedef struct {
     // it (0 = 1), sky_rot turns it about the vertical axis (degrees)
     const char *sky;
     real sky_scale, sky_rot;
+    int bare;               // SCENE_SKY: the floor alone (no spheres): for a program to fill
 } SceneOptions;
 
 typedef struct Scene {

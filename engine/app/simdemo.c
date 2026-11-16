@@ -1,6 +1,7 @@
 #include "app/simdemo.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef _OPENMP
 #include <omp.h>
@@ -46,6 +47,153 @@ static Quat random_rot(Sim *sim){
     return quat_axis_angle(axis, rnd(sim, 0, (real)PI));
 }
 
+// ---- SIM_SKY: a floor under the sky, a rain of bodies onto its middle among still props ----
+
+#define FIELD_X 278.0
+#define FIELD_Z 300.0
+#define FIELD_RAIN 380.0        // the bodies appear over a disc of this radius ...
+#define FIELD_WALLS 900.0       // ... inside invisible walls this far from its centre
+#define FIELD_PROPS_IN 1050.0   // the props stand in a ring around them
+#define FIELD_PROPS_OUT 6000.0
+
+// a material of every kind: metals polished and rough, glass clear and frosted, plastics,
+// a ceramic, rubber; and how dense a body of it is
+static const struct { float r, g, b, metal, rough, trans, dens; } FIELD_MATS[] = {
+    {1.00f, 0.78f, 0.34f, 1, 0.15f, 0, 7.8f},    // gold
+    {0.95f, 0.64f, 0.54f, 1, 0.35f, 0, 7.8f},    // copper
+    {0.95f, 0.95f, 0.95f, 1, 0.02f, 0, 7.8f},    // chrome
+    {0.91f, 0.92f, 0.92f, 1, 0.45f, 0, 2.7f},    // brushed aluminium
+    {0.55f, 0.25f, 0.80f, 1, 0.30f, 0, 2.7f},    // anodized purple
+    {1.00f, 1.00f, 1.00f, 0, 0.00f, 1, 2.5f},    // clear glass
+    {0.70f, 0.90f, 1.00f, 0, 0.30f, 1, 2.5f},    // frosted blue glass
+    {0.80f, 0.08f, 0.06f, 0, 0.30f, 0, 1.0f},    // red plastic
+    {0.08f, 0.22f, 0.75f, 0, 0.25f, 0, 1.0f},    // blue plastic
+    {0.15f, 0.55f, 0.25f, 0, 0.10f, 0, 2.3f},    // green ceramic
+    {0.90f, 0.70f, 0.10f, 0, 0.50f, 0, 1.0f},    // yellow plastic
+    {0.85f, 0.85f, 0.85f, 0, 0.90f, 0, 1.5f},    // white matte
+    {0.03f, 0.03f, 0.03f, 0, 0.08f, 0, 1.2f},    // black gloss
+    {0.95f, 0.40f, 0.08f, 0, 0.70f, 0, 1.1f},    // orange rubber
+};
+#define FIELD_NMATS ((int)(sizeof(FIELD_MATS) / sizeof(FIELD_MATS[0])))
+
+static int field_setup(Sim *sim, const Options *o, Scene *s){
+    SceneOptions so = o->scene;
+    so.kind = SCENE_SKY;
+    so.gltf_path = NULL;
+    so.bare = 1;
+    so.cloud = NULL;
+    so.instances = 0;
+    if (scene_cornell_box(s, &so) != 0) return 1;
+    s->cam_from = vec3(FIELD_X + 760, 560, FIELD_Z - 1550);
+    s->cam_at = vec3(FIELD_X - 60, 90, FIELD_Z + 120);
+    s->cam_vfov_deg = 42;
+    options_bake_probe(o, s);                  // the floor and the sky: the rest comes after
+    if (o->set_cam) s->cam_from = o->cam;
+    if (o->set_look) s->cam_at = o->look;
+    if (o->set_fov) s->cam_vfov_deg = o->fov;
+    int mats[FIELD_NMATS];
+    for (int i = 0; i < FIELD_NMATS; i++)
+        mats[i] = scene_add_material(s, material_pbr(vec3(FIELD_MATS[i].r, FIELD_MATS[i].g, FIELD_MATS[i].b),
+                                                     FIELD_MATS[i].metal, FIELD_MATS[i].rough, 1.5, FIELD_MATS[i].trans));
+
+    // physics: no air, the floor and walls far enough not to be seen
+    PhysWorld *pw = &sim->pw;
+    phys_init(pw);
+    rigid_set_room(&pw->rigid, (Aabb){vec3(FIELD_X - FIELD_WALLS, 0, FIELD_Z - FIELD_WALLS),
+                                      vec3(FIELD_X + FIELD_WALLS, 8000, FIELD_Z + FIELD_WALLS)});
+    // the models: dragons and tori at two sizes each, as convex hulls for the bodies (their
+    // meshes drawn), any size for the props
+    static const struct { const char *path; real size; } M[4] = {
+        {"models/dragon_recon/dragon_vrip_res4.ply", 95}, {"models/torus.obj", 70},
+        {"models/dragon_recon/dragon_vrip_res4.ply", 55}, {"models/torus.obj", 42}};
+    int mesh[4], geom[4], nm = 0;
+    for (int k = 0; k < 4; k++){
+        int m = scene_load_mesh_object(s, M[k].path, mats[0], M[k].size);
+        int g = m >= 0 ? rigid_geom_hull(&pw->rigid, s->meshes[m].tris, s->meshes[m].ntris, 0) : -1;
+        if (g < 0){ fprintf(stderr, "(%s: not found or no hull, skipped: make models)\n", M[k].path); continue; }
+        mesh[nm] = m; geom[nm] = g; nm++;
+    }
+
+    // the bodies: spheres, boxes and hulls, from over the disc, within 15 s
+    int nb = o->sim.bodies;
+    double span = nb > 100 ? 15.0 : 0.15 * nb;
+    for (int k = 0; k < nb; k++){
+        double t = 0.1 + span * k / (nb > 0 ? nb : 1);
+        real a = rnd(sim, 0, 2 * (real)PI), r = FIELD_RAIN * r_sqrt(rnd(sim, 0, 1));
+        Vec3 at = vec3(FIELD_X + r * r_cos(a), rnd(sim, 700, 1400), FIELD_Z + r * r_sin(a));
+        int mi = (int)rnd(sim, 0, FIELD_NMATS) % FIELD_NMATS;
+        real kind = rnd(sim, 0, 1), dens = FIELD_MATS[mi].dens;
+        Spawn *p;
+        if (kind < 0.35f || (kind >= 0.65f && nm == 0)){
+            real rr = rnd(sim, 12, 32);
+            p = new_spawn(sim, t, BODY_SPHERE, at, vec3(rr, rr, rr), dens, mats[mi]);
+        } else if (kind < 0.65f){
+            p = new_spawn(sim, t, BODY_BOX, at, vec3(rnd(sim, 10, 26), rnd(sim, 10, 26), rnd(sim, 10, 26)), dens, mats[mi]);
+        } else {
+            int j = (int)rnd(sim, 0, nm) % nm;
+            p = new_spawn(sim, t, BODY_HULL, at, pw->rigid.geoms[geom[j]]->half, dens, mats[mi]);
+            if (p){ p->geom = geom[j]; p->mesh = mesh[j]; }
+        }
+        if (!p) break;
+        p->rot = random_rot(sim);
+        p->vel = vec3(rnd(sim, -40, 40), rnd(sim, -200, 0), rnd(sim, -40, 40));
+        p->restitution = FIELD_MATS[mi].trans > 0 ? 0.5f : 0.3f;
+    }
+
+    // the props: instances only (nothing collides with them), on the floor in the ring, not
+    // overlapping and out of the camera's way (each tried at up to 60 spots), a few big chrome balls among them
+    int np = o->sim.props, placed = 0;
+    Vec3 *at = malloc((size_t)(np > 0 ? np : 1) * sizeof(Vec3));
+    real *rad = malloc((size_t)(np > 0 ? np : 1) * sizeof(real));
+    if (!at || !rad){ free(at); free(rad); fprintf(stderr, "out of memory for the props\n"); return 1; }
+    real ex = s->cam_from.x - (real)FIELD_X, ez = s->cam_from.z - (real)FIELD_Z;
+    for (int k = 0; k < np; k++){
+        real kind = rnd(sim, 0, 1), big = rnd(sim, 0, 1);
+        int mi = big < 0.01f ? 2 : (int)rnd(sim, 0, FIELD_NMATS) % FIELD_NMATS;
+        Vec3 half = vec3(rnd(sim, 12, 40), rnd(sim, 12, 60), rnd(sim, 12, 40));
+        real sr = big < 0.01f ? rnd(sim, 120, 200) : rnd(sim, 12, 50);
+        int j = nm ? (int)rnd(sim, 0, nm) % nm : 0;
+        real sc = rnd(sim, 0.5f, 1.8f);
+        int shape = big < 0.01f || kind < 0.3f || nm == 0 ? 0 : kind < 0.6f ? 1 : 2;
+        real R = shape == 0 ? sr : shape == 1 ? v_len(half) : M[0].size * 0.6f * sc;
+        Vec3 pos = vec3(0, 0, 0);
+        int ok = 0;
+        for (int tries = 0; tries < 60 && !ok; tries++){
+            real a = rnd(sim, 0, 2 * (real)PI);
+            real r = r_sqrt(rnd(sim, (real)(FIELD_PROPS_IN * FIELD_PROPS_IN), (real)(FIELD_PROPS_OUT * FIELD_PROPS_OUT)));
+            pos = vec3(FIELD_X + r * r_cos(a), 0, FIELD_Z + r * r_sin(a));
+            // (and not between the camera and the rain)
+            real u = ((pos.x - (real)FIELD_X) * ex + (pos.z - (real)FIELD_Z) * ez) / (ex * ex + ez * ez + 1e-6f);
+            u = u < 0 ? 0 : u > 1.2f ? 1.2f : u;
+            real cx = pos.x - (real)FIELD_X - u * ex, cz = pos.z - (real)FIELD_Z - u * ez;
+            ok = cx * cx + cz * cz >= (R + 200) * (R + 200);
+            for (int q = 0; q < placed && ok; q++){
+                real dx = pos.x - at[q].x, dz = pos.z - at[q].z, d = R + rad[q] + 5;
+                ok = dx * dx + dz * dz >= d * d;
+            }
+        }
+        if (!ok) continue;
+        at[placed] = pos;
+        rad[placed++] = R;
+        Mat3 yaw = quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), rnd(sim, 0, 2 * (real)PI)));
+        if (shape == 0) scene_add_instance(s, INST_SPHERE, xform_axes(mat3_identity(), vec3(sr, sr, sr), vec3(pos.x, sr, pos.z)), mats[mi]);
+        else if (shape == 1) scene_add_instance(s, INST_BOX, xform_axes(yaw, half, vec3(pos.x, half.y, pos.z)), mats[mi]);
+        else scene_add_instance(s, mesh[j], xform_make(pos, yaw.m, sc), mats[mi]);
+    }
+    free(at);
+    free(rad);
+
+    // the viewer's K: a blast in the middle of the pile
+    sim->blast_at = vec3(FIELD_X, 20, FIELD_Z);
+    sim->blast_radius = 600;
+    sim->blast_speed = 1500;
+    sim->blast_impulse = 60000;
+    sort_spawns(sim);
+    printf("physics: %d bodies falling within %.0f s onto the floor under the sky, among %d props (%d instances)\n",
+           sim->nspawns, span, placed, s->ninsts);
+    return 0;
+}
+
 int sim_setup(Sim *sim, const Options *o, Scene *s){
     memset(sim, 0, sizeof(*sim));
 #ifdef _OPENMP
@@ -54,6 +202,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
     rng_seed(&sim->rng, 0x51AB1E5EEDULL + (uint64_t)o->sim.seed * 0x9E3779B97F4A7C15ULL, 7);
     sim->blast_t = -1;
     sim->max_dt = MAX_PHYS_DT;
+    if (o->sim.demo == SIM_SKY) return field_setup(sim, o, s);
 
     // the room, nothing in it (the fog, if asked, stays a separate uniform medium)
     SceneOptions so = o->scene;

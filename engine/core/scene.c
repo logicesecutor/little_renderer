@@ -391,7 +391,7 @@ static int scene_sky(Scene *s, const SceneOptions *opt){
 
 int scene_cornell_box(Scene *s, const SceneOptions *opt){
     if (opt->kind == SCENE_SKY){
-        if (open_scene(s, !opt->gltf_path) || scene_sky(s, opt)) return 1;
+        if (open_scene(s, !opt->gltf_path && !opt->bare) || scene_sky(s, opt)) return 1;
         if (opt->gltf_path && scene_load_gltf(s, opt->gltf_path, 330, vec3(278, 0, 300), 180 + opt->rot_deg) < 0) return 1;
         return 0;
     }
