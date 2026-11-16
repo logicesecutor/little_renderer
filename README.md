@@ -112,6 +112,18 @@ Each layer only includes the ones before it (`make check-layers` checks), so the
 backends and the physics never depend on each other, and the CPU versions always stay
 next to the GPU ones.
 
+| folder | what is in it |
+|---|---|
+| `engine/` | the library, `liblr.a`: one folder per layer above (`base/`, `formats/`, `scene/`, `raster/`, `rt/`, `phys/`, `platform/`, `gpu/`, `app/`); include `engine/lr.h` |
+| `engine/gpu/shaders/` | the WGSL, by what it serves: `common/`, `view/`, `raster/`, `trace/`, `rigid/`, `fluid/` |
+| `webgpu/` | our WebGPU on Vulkan (`vk/`) and its WGSL → SPIR-V compiler (`wgsl/`), built in with `make VK=1`; they use nothing of the engine |
+| `apps/` | the programs `render`, `view`, `sim` |
+| `examples/` | small programs on the library, to start from |
+| `tests/` | the unit tests, `make test` |
+| `tools/` | Python and C helpers: models, test data, GIFs, the shader embedding, the Vulkan header check |
+| `web/` | the page around the WebAssembly build |
+| `docs/` | how everything works and how fast it is |
+
 ## Performance
 
 Measured on an RTX 3070 and an 8-core CPU ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)
