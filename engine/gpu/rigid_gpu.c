@@ -799,7 +799,13 @@ void gpu_rigid_destroy(GpuRigid *gr){
         gpu_timer_destroy(gr->timer);
     }
     for (int i = 0; i < MAX_LIVE_RIGID; i++) if (live[i] == gr) live[i] = NULL;
-    if (gr->pw && gr->pw->rigid_user == gr){ gr->pw->rigid_step = NULL; gr->pw->rigid_user = NULL; }
+    if (gr->pw && gr->pw->rigid_user == gr){
+        gr->pw->rigid_step = NULL;
+        gr->pw->rigid_user = NULL;
+        // back to the CPU's solver: the count shown was the GPU's, the CPU's list holds none of
+        // those contacts (it read that many of last step's to warm start from: past its end)
+        gr->pw->rigid.ncontacts = 0;
+    }
     release_groups(gr);
     release_sized(gr);
     WGPUBuffer *own[] = {&gr->par, &gr->par_all, &gr->shapes, &gr->rb};
