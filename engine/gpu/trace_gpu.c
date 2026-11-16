@@ -1220,9 +1220,11 @@ static int upload_instances(GpuTrace *t, const Scene *s){
     t->ninst = s->ninsts;
     t->nbuild = 0;
     if (s->ninsts > 0){
+        // with ray queries the top level is the hardware's (hw_records): no BVH of the instances
+        const int bvh = !hw_on(t);
         float *rec = malloc((size_t)s->ninsts * 192);
-        float *box = malloc((size_t)s->ninsts * 32);
-        if (!rec || !box){ free(rec); free(box); return 0; }
+        float *box = bvh ? malloc((size_t)s->ninsts * 32) : NULL;
+        if (!rec || (bvh && !box)){ free(rec); free(box); return 0; }
         Aabb all = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
         for (int i = 0; i < s->ninsts; i++){
             const Instance *in = &s->insts[i];
@@ -1236,6 +1238,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             put(o + 28, in->box.lo, 0);
             put(o + 32, in->box.hi, 0);
             memset(o + 36, 0, 48);
+            if (!bvh) continue;
             put(box + 8 * (size_t)i, in->box.lo, 0);
             put(box + 8 * (size_t)i + 4, in->box.hi, 0);
             all.lo = vec3(r_fmin(all.lo.x, in->box.lo.x), r_fmin(all.lo.y, in->box.lo.y), r_fmin(all.lo.z, in->box.lo.z));
@@ -1243,7 +1246,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         }
         wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96, rec, (size_t)s->ninsts * 192);
         free(rec);
-        const Bvh *tl = t->tlas_mode == 1 ? scene_tlas(s) : NULL;
+        const Bvh *tl = bvh && t->tlas_mode == 1 ? scene_tlas(s) : NULL;
         if (tl && (uint32_t)tl->nnodes <= (uint32_t)(2 * t->inst_cap - 1) && tl->nrefs <= t->inst_cap){
             // the CPU's (SAH) top level, as it is
             uint32_t *nd = malloc((size_t)tl->nnodes * 32), *ax = malloc((size_t)tl->nrefs * 4);
@@ -1256,7 +1259,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             free(nd);
             free(ax);
         } else tl = NULL;
-        if (!tl && !hw_on(t)) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
+        if (!tl && bvh) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
         free(box);
     }
     // dynamic meshes: their new triangles, and a BVH of them built on the GPU in their place
