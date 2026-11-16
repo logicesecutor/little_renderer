@@ -95,7 +95,8 @@ void gpu_dispatch(WGPUComputePassEncoder pass, size_t threads);
 // Each timed compute pass gets the timestamps gpu_timer_next gives for its descriptor
 // (NULL: not timed, run it as usual), counted under `stage`; gpu_timer_finish resolves those
 // used since the last call and reads them back (asynchronously; a round is skipped while the
-// last one is still on its way); gpu_timer_print shows the mean GPU time per stage and round.
+// last one is still on its way); gpu_timer_print shows the mean GPU time per stage and round,
+// and from the round's first pass's start to its last one's end (copies between them included).
 typedef struct GpuTimer GpuTimer;
 GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages);   // NULL when timing is off
 const WGPUPassTimestampWrites *gpu_timer_next(GpuTimer *t, int stage);

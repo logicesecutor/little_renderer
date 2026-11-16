@@ -181,7 +181,12 @@ struct GpuFluid {
     int inflight;
     real dt_owed;
     int wait;                     // offline: wait for the GPU instead of skipping
+    GpuTimer *timer;              // LR_GPU_TIMING=1: the GPU time of the step's passes
 };
+// the step's passes, as the timer counts them
+enum { FT_AIR, FT_PRESSURE, FT_CLOUD, FT_AROUND, NFT };
+static const char *const FT_NAMES[NFT] = {"obstacles, forces, advection", "pressure (multigrid)", "the cloud's advection",
+                                          "the air around the bodies"};
 
 #define MAX_INFLIGHT 2
 #define MAX_OWED 0.1f
@@ -413,6 +418,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     }
     make_bind_groups(gf);
     reserve_bodies(gf, &pw->rigid);
+    gf->timer = gpu_timer_create(g, 8, NFT);
     live[live_slot()] = gf;
     pw->air_step = air_step;
     pw->air_user = gf;
@@ -490,6 +496,14 @@ void gpu_fluid_sync_cloud(GpuFluid *gf){
 }
 
 // ---- the step -----------------------------------------------------------------------------------
+
+// a compute pass of the step, timed under `stage` when timing is on
+static WGPUComputePassEncoder step_pass(GpuFluid *gf, WGPUCommandEncoder enc, int stage){
+    WGPUComputePassDescriptor pd;
+    memset(&pd, 0, sizeof(pd));
+    pd.timestampWrites = gpu_timer_next(gf->timer, stage);
+    return wgpuCommandEncoderBeginComputePass(enc, &pd);
+}
 
 static void run(WGPUComputePassEncoder pass, GpuFluid *gf, int k, WGPUBindGroup bg, size_t threads){
     wgpuComputePassEncoderSetPipeline(pass, gf->pipe[k]);
@@ -592,7 +606,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     // 1. obstacles, forces, vorticity, advection (into the other set, the velocity from then on)
     int a = gf->cur;
-    WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+    WGPUComputePassEncoder pass = step_pass(gf, enc, FT_AIR);
     run(pass, gf, K_MARK_, gf->bg[a][K_MARK_], nc);
     run(pass, gf, K_BOUND_, gf->bg[a][K_BOUND_], np);
     run(pass, gf, K_FORCES_, gf->bg[a][K_FORCES_], np);
@@ -608,7 +622,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     wgpuComputePassEncoderRelease(pass);
     a = gf->cur = 1 - a;
     // 2. projection: divergence, multigrid (the levels' obstacles and links first), gradient
-    pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+    pass = step_pass(gf, enc, FT_PRESSURE);
     run(pass, gf, K_BOUND_, gf->bg[a][K_BOUND_], np);
     run(pass, gf, K_DIV_, gf->bg[a][K_DIV_], nc);
     for (int k = 0; k < gf->nlevels; k++){
@@ -623,7 +637,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     if (cv){
         size_t nd = (size_t)cv->nx * cv->ny * cv->nz;
         wgpuCommandEncoderCopyBufferToBuffer(enc, gf->dens, 0, gf->d0, 0, nd * 4);
-        pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+        pass = step_pass(gf, enc, FT_CLOUD);
         run(pass, gf, K_D1_, gf->bg[a][K_D1_], nd);
         run(pass, gf, K_D2_, gf->bg[a][K_D2_], nd);
         wgpuComputePassEncoderEnd(pass);
@@ -632,7 +646,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     // 4. the air around the bodies, for the drag of the next step
     int sample = nb > 0 && !gf->around_pending;
     if (sample){
-        pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+        pass = step_pass(gf, enc, FT_AROUND);
         run(pass, gf, K_SAMP_, gf->bg[a][K_SAMP_], (size_t)nb);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
@@ -640,8 +654,10 @@ static void air_step(void *user, PhysWorld *pw, real dt){
                            WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, "air around readback");
         wgpuCommandEncoderCopyBufferToBuffer(enc, gf->around, 0, gf->around_rb, 0, (size_t)nb * 16);
     }
+    gpu_timer_finish(gf->timer, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
+    gpu_timer_submitted(gf->timer);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     WGPUQueueWorkDoneCallbackInfo wd;
@@ -685,6 +701,14 @@ void gpu_fluid_destroy(GpuFluid *gf){
         pw->air_user = NULL;
         pw->air_around = NULL;
         pw->nair_around = 0;
+    }
+    if (gf->timer){
+        char title[160];
+        const Volume *cv = gf->cloud;
+        snprintf(title, sizeof(title), "the air, per step (%dx%dx%d cells, a cloud of %dx%dx%d voxels)", gf->f->nx, gf->f->ny, gf->f->nz,
+                 cv ? cv->nx : 0, cv ? cv->ny : 0, cv ? cv->nz : 0);
+        gpu_timer_print(gf->timer, title, FT_NAMES);
+        gpu_timer_destroy(gf->timer);
     }
     for (int i = 0; i < MAX_LIVE_FLUID; i++) if (live[i] == gf) live[i] = NULL;
     free_all(gf);

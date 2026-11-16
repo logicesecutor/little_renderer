@@ -468,6 +468,7 @@ struct GpuTimer {
     int pending, npending;
     WGPUPassTimestampWrites tw;
     double *ns;                  // per stage: the GPU time summed
+    double span_ns;              // from a round's first pass's start to its last one's end, summed
     long *calls;
     long rounds;
 };
@@ -531,13 +532,17 @@ static void on_times(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, vo
     if (status != WGPUMapAsyncStatus_Success){ t->pending = 0; return; }   // nothing is mapped; the next round is timed
     const uint64_t *ts = wgpuBufferGetConstMappedRange(t->readback, 0, (size_t)t->npending * 16);
     if (ts){
+        uint64_t first = UINT64_MAX, last = 0;
         for (int i = 0; i < t->npending; i++){
             int s = t->pending_stage[i];
             if (s < 0 || s >= t->stages || ts[2 * i + 1] < ts[2 * i]) continue;
             t->ns[s] += (double)(ts[2 * i + 1] - ts[2 * i]);      // nanoseconds
             t->units[s] += t->pending_units[i];
             t->calls[s]++;
+            if (ts[2 * i] < first) first = ts[2 * i];
+            if (ts[2 * i + 1] > last) last = ts[2 * i + 1];
         }
+        if (last > first) t->span_ns += (double)(last - first);
         t->rounds++;
     }
     wgpuBufferUnmap(t->readback);
@@ -588,6 +593,8 @@ void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
     printf("GPU time per round, %s (%ld rounds): %.3f ms\n", title, t->rounds, total / t->rounds / 1e6);
     for (int s = 0; s < t->stages; s++)
         if (t->calls[s]) printf("  %-34s %8.3f ms  (%ld passes per round)\n", names[s], t->ns[s] / t->rounds / 1e6, t->calls[s] / t->rounds);
+    // with what runs between the passes: copies, clears, the passes that are not timed
+    printf("  %-34s %8.3f ms\n", "(first pass's start to last's end)", t->span_ns / t->rounds / 1e6);
 }
 
 void gpu_timer_destroy(GpuTimer *t){
