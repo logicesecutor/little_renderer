@@ -30,7 +30,7 @@
 
 #define ROOM 555.0
 #define MAX_MODELS 8
-#define STEP (1.0 / 60.0)        // physics steps of at most 1/60 s (4 substeps each)
+#define STEP (1.0 / 60.0)        // physics steps of exactly 1/60 s (4 substeps each)
 
 typedef struct { int mesh, geom; const char *name; } Model;
 
@@ -167,7 +167,7 @@ int main(int argc, char **argv){
     printf("\nkeys: Space pause the rain, + / - faster / slower, Esc quit\n"
            "raining %.0f meshes per second, at most %d in the room (then the oldest is dropped again)\n\n", rate, max_bodies);
 
-    double t_start = clock_s(), t_last = t_start, t_title = t_start, spawn_debt = 0;
+    double t_start = clock_s(), t_last = t_start, t_title = t_start, spawn_debt = 0, owed = 0;
     double phys_ms = 0, draw_ms = 0, last_phys = 0, last_draw = 0;
     long frames = 0, title_frames = 0, total_frames = 0;
     int paused = 0, running = 1;
@@ -219,11 +219,15 @@ int main(int argc, char **argv){
             }
         }
 
-        // ---- physics (steps of at most 1/60 s), then the instances follow the bodies
+        // ---- physics, then the instances follow the bodies. Fixed steps of 1/60 s, as many as
+        // the time owed holds (the rest carried to the next frame): a frame a little over
+        // 1/60 s used to make two half steps, which at 1500 hulls kept every frame over 1/60 s
+        // (55 frames/s; 60 with one step a frame). dt is at most 2 steps: no backlog either.
         double p0 = clock_s();
-        int n = (int)(dt / STEP + 0.999);
-        if (n < 1) n = 1;
-        for (int k = 0; k < n; k++) phys_step(&pw, (real)(dt / n));
+        owed += dt;
+        int n = (int)(owed / STEP);
+        owed -= n * STEP;
+        for (int k = 0; k < n; k++) phys_step(&pw, (real)STEP);
         phys_sync_scene(&pw, &scene);
         double p1 = clock_s();
 
