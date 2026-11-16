@@ -1020,12 +1020,13 @@ static int upload_world(GpuTrace *t, const Scene *s){
     size_t bytes_aux = ((size_t)t->layout_aux + (size_t)b->nrefs + 1) * 4;
     size_t bytes_prims = ((size_t)s->nprims + 2 * (size_t)t->inst_cap + 1) * 96;
     if (too_big(g, bytes_nodes) || too_big(g, bytes_aux)) return 0;
-    WGPUBuffer old_nodes = t->nodes, old_aux = t->aux;
-    gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, bytes_nodes, st | WGPUBufferUsage_CopySrc, "BVH nodes");
-    gpu_buffer_reserve(g, &t->aux, &t->aux_cap, bytes_aux, st, "BVH shapes and normals");
+    int grew = gpu_buffer_reserve(g, &t->nodes, &t->nodes_cap, bytes_nodes, st | WGPUBufferUsage_CopySrc, "BVH nodes");
+    grew |= gpu_buffer_reserve(g, &t->aux, &t->aux_cap, bytes_aux, st, "BVH shapes and normals");
     gpu_buffer_reserve(g, &t->prims, &t->prims_cap, bytes_prims, st, "primitives and instances");
-    if (t->nodes != old_nodes || t->aux != old_aux){
-        // they grew (a new buffer, empty): everything again
+    if (grew){
+        // they grew (a new buffer, empty): everything again. (Told by gpu_buffer_reserve, not
+        // by the handle: a new buffer can get the address of the one just released, and the
+        // layout, the normals among it, was then never written to it.)
         if (!upload_layout(t, s)) return 0;
     }
     uint32_t *nd = malloc((size_t)(slots ? slots : 1) * 32);
