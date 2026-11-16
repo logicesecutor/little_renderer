@@ -384,3 +384,48 @@ fn mesh_tri(i: u32, im: u32, q: u32) {
         convex_triangle(shape_of(i), t0, t1, t2);
     }
 }
+
+/* the axis of a's edge i and b's edge j, from a to b (0 if they are parallel) */
+fn edge_axis(ha: Shape, hb: Shape, i: u32, j: u32) -> vec3f {
+    let E = bitcast<vec4u>(G[ha.e0 + i]);
+    let F = bitcast<vec4u>(G[hb.e0 + j]);
+    let pa = sv(ha, E.x);
+    let da = sv(ha, E.y) - pa;
+    let db = sv(hb, F.y) - sv(hb, F.x);
+    var L = cross(da, db);
+    let ll = length(L);
+    if (ll < 1e-6 * length(da) * length(db)) { return vec3f(0.0); }
+    L = L / ll;
+    return select(L, -L, dot(L, pa - ha.pos) < 0.0);
+}
+
+/* the contacts of the feature of least overlap (as convex.c's feature_contacts); one thread, K_HULLC */
+fn feature_contacts(ia: u32, ib: u32, ha: Shape, hb: Shape, ft: vec3u) {
+    nc = 0u;
+    if (ft.x == 6u) {                       /* a pair of edges */
+        let E = bitcast<vec4u>(G[ha.e0 + ft.y]);
+        let F = bitcast<vec4u>(G[hb.e0 + ft.z]);
+        let L = edge_axis(ha, hb, ft.y, ft.z);
+        if (dot(L, L) == 0.0) { return; }
+        let s = dot(L, sv(hb, F.x) - sv(ha, E.x));
+        if (s > MG) { return; }
+        add_contact(ia, ib, closest_seg(sv(ha, E.x), sv(ha, E.y), sv(hb, F.x), sv(hb, F.y)), -L, -s);
+        return;
+    }
+    var rf: array<vec3f, 32>;
+    var inc: array<vec3f, 32>;
+    if (ft.x == 5u) {                       /* b's face */
+        let fb = ft.y;
+        let fi = incident_face(ha, sn(hb, fb));
+        let nr = face_loop(hb, fb, &rf);
+        let ni = face_loop(ha, fi, &inc);
+        face_contacts(&rf, nr, sn(hb, fb), sd(hb, fb), &inc, ni, sn(hb, fb));
+    } else {                                /* a's face */
+        let fa = ft.y;
+        let fi = incident_face(hb, sn(ha, fa));
+        let nr = face_loop(ha, fa, &rf);
+        let ni = face_loop(hb, fi, &inc);
+        face_contacts(&rf, nr, sn(ha, fa), sd(ha, fa), &inc, ni, -sn(ha, fa));
+    }
+    flush(ia, ib);
+}

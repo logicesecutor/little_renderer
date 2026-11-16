@@ -66,9 +66,13 @@ GPU_WGSL(K_ARGS2, rigid_args2);
 GPU_WGSL(K_SIMPLE, rigid_simple);
 
 /* the hulls' list: one workgroup per pair, its 64 threads sharing the separating axis
-   test (the faces of each, the pairs of edges), the best axis found by a reduction; then the
-   first thread makes the contacts (convex.c's order of preference, so the same choices) */
+   test (the faces of each, the pairs of edges), the best axis found by a reduction, and the
+   feature to make contacts from (convex.c's order of preference, so the same choices) */
 GPU_WGSL(K_HEAVY, rigid_heavy);
+
+/* then the hull pairs' contacts from the features chosen: one thread per pair (the clipping
+   is one thread's work) */
+GPU_WGSL(K_HULLC, rigid_hullc);
 
 /* hulls and fixed meshes (phys/convex.c, the same tests): G holds, per shape, two header
    rows (h0: corners, faces, edges, kind 2; or tree nodes, triangles, 0, kind 3. h1: where
@@ -136,14 +140,15 @@ typedef struct {
     uint32_t m[4];
 } GRP;
 
-enum { R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HEAVY, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
+enum { R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HEAVY, R_HULLC, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
        R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, NR };
 static const struct { const char *name, *types; const char **body, **more, **more2; } RK[NR] = {
     {"bodies: forces",   "UWWRWW",   &K_VEL, NULL, NULL},
     {"bodies: pairs",    "URWW",     &K_BROAD, NULL, NULL},
     {"bodies: pair counts", "UWW",   &K_ARGS, NULL, NULL},
     {"bodies: contacts", "URWWRW",   &K_NARROW, &K_SIMPLE, NULL},
-    {"bodies: contacts (hulls)", "URWWRWRW", &K_NARROW, &K_CONVEX, &K_HEAVY},
+    {"bodies: contacts (hulls)", "URWWRWRWW", &K_NARROW, &K_CONVEX, &K_HEAVY},
+    {"bodies: contacts (hulls' faces)", "URWWRWRWW", &K_NARROW, &K_CONVEX, &K_HULLC},
     {"bodies: near triangles", "UR--RWRW", &K_NARROW, &K_CONVEX, &K_MESHQ},
     {"bodies: triangle counts", "UWW", &K_ARGS2, NULL, NULL},
     {"bodies: triangles", "UR--RWRRWW", &K_NARROW, &K_CONVEX, &K_MESHTRI},
@@ -170,6 +175,7 @@ struct GpuRigid {
     WGPUBuffer par, bodies, forces, cnt, cursor, wake;
     WGPUBuffer pairs, pc, args;                  // the candidate pairs' lists, their counts, dispatch sizes
     WGPUBuffer memo;                             // hull pairs: what decided them last step (K_HEAVY, P3)
+    WGPUBuffer feat;                             // hull pairs: the feature to make contacts from (K_HULLC)
     int memo_rd;                                 // its table read this step (the other is written)
     WGPUBuffer tris, store, scount;              // body - mesh: the triangles to test, their contacts per pair
     size_t cap_pairs;                            // per list
@@ -208,7 +214,7 @@ struct GpuRigid {
 };
 
 static const char *const RK_NAMES[NR] = {"forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
-    "contacts: hulls", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
+    "contacts: hulls", "contacts: hulls' faces", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
     "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep"};
 
 // the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
@@ -252,7 +258,8 @@ static void make_groups(GpuRigid *gr){
         BG(R_BROAD, gr->par, gr->bodies, gr->pairs, gr->pc);
         BG(R_ARGS, gr->par, gr->pc, gr->args);
         BG(R_SIMPLE, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc);
-        BG(R_HEAVY, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc, gr->shapes, gr->memo);
+        BG(R_HEAVY, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc, gr->shapes, gr->memo, gr->feat);
+        BG(R_HULLC, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc, gr->shapes, gr->memo, gr->feat);
         { WGPUBuffer b_[] = {gr->par, gr->bodies, NULL, NULL, gr->pairs, gr->pc, gr->shapes, gr->tris};
           gr->bg[R_MESHQ][p] = gpu_bind(g, gr->bgl[R_MESHQ], b_, 8); }
         BG(R_ARGS2, gr->par, gr->pc, gr->args);
@@ -280,7 +287,7 @@ static void make_groups(GpuRigid *gr){
 static void release_sized(GpuRigid *gr){
     WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
-                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1]};
+                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->feat, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1]};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
 }
 
@@ -303,12 +310,13 @@ static int reserve(GpuRigid *gr, int nb){
     gr->cap_pairs = 32 * cap;
     gr->pairs = storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
     gr->pc = storage(g, "bodies: pair counts", 16);
-    gr->args = gpu_buffer(g, "bodies: pair dispatches", 80, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst);
+    gr->args = gpu_buffer(g, "bodies: pair dispatches", 96, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst);
     gr->tris = storage(g, "bodies: triangles to test", 64 * gr->cap_pairs * 8);
     gr->store = storage(g, "bodies: mesh contacts", 64 * gr->cap_pairs * 32);
     gr->scount = storage(g, "bodies: mesh contact counts", gr->cap_pairs * 4);
     gr->memo = storage(g, "bodies: hull pairs remembered", 2 * 13 * (2 * gr->cap_pairs) * 4);   // (zeroed: empty)
     gr->memo_rd = 0;
+    gr->feat = storage(g, "bodies: hull pairs' features", gr->cap_pairs * 16);
     for (int p = 0; p < 2; p++){
         gr->contacts[p] = storage(g, "contacts", gr->cap_contacts * CONTACT_BYTES);
         gr->lists[p] = storage(g, "contact lists", gr->cap_contacts * 2 * 4);
@@ -474,6 +482,7 @@ static void dispatch1(WGPUComputePassEncoder pass, GpuRigid *gr, int k, size_t t
     if (k == R_SCAN || k == R_ARGS || k == R_ARGS2) wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
     else if (k == R_SIMPLE) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 0);
     else if (k == R_HEAVY) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 16);
+    else if (k == R_HULLC) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 80);
     else if (k == R_MESHQ) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 64);
     else if (k == R_MESHFLUSH) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 32);
     else if (k == R_MESHTRI) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 48);
@@ -615,6 +624,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_ARGS, 1);
             dispatch(enc, &pass, gr, R_SIMPLE, 0);
             dispatch(enc, &pass, gr, R_HEAVY, 0);
+            dispatch(enc, &pass, gr, R_HULLC, 0);
             dispatch(enc, &pass, gr, R_MESHQ, 0);
             dispatch(enc, &pass, gr, R_ARGS2, 1);
             dispatch(enc, &pass, gr, R_MESHTRI, 0);

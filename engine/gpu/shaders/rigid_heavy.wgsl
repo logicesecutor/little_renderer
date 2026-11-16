@@ -4,6 +4,8 @@
    this step's (written, cleared before), each `cap` keys then `cap` entries of 12 words: the
    feature (type, i, j), the pose of b in a's frame at the full test (t; q as x, y, z, w) */
 @group(0) @binding(7) var<storage, read_write> memo: array<atomic<u32>>;
+/* the feature whose contacts K_HULLC makes for pair k: type, i, j; w = 1 (0: none) */
+@group(0) @binding(8) var<storage, read_write> feat: array<vec4u>;
 var<workgroup> ws: array<f32, 64>;
 var<workgroup> wi: array<u32, 64>;
 var<workgroup> wj: array<u32, 64>;
@@ -17,8 +19,10 @@ var<workgroup> wft: vec4u;                 /* the feature remembered: type, i, j
    both hulls fit: a's at [0, HC) and [0, HF), b's at [HC, 2 HC) and [HF, 2 HF) */
 const HC = 64u;
 const HF = 128u;
+const HE = 192u;
 var<workgroup> hv: array<vec3f, 128>;
 var<workgroup> hn: array<vec3f, 256>;
+var<workgroup> he: array<vec2u, 192>;      /* b's edges (G's a, b, fa, fb), 16 bits each: fa | fb, a | b */
 var<workgroup> wcached: u32;
 var<private> cached: bool;
 /* corner k / face f's normal of a (side 0) or b (side 1) */
@@ -90,51 +94,6 @@ fn memo_put(t: u32, key: u32, ft: vec3u, tr: vec3f, q: vec4f) {
     }
 }
 
-/* the axis of a's edge i and b's edge j, from a to b (0 if they are parallel) */
-fn edge_axis(A: Shape, S: Shape, i: u32, j: u32) -> vec3f {
-    let E = bitcast<vec4u>(G[A.e0 + i]);
-    let F = bitcast<vec4u>(G[S.e0 + j]);
-    let pa = sv(A, E.x);
-    let da = sv(A, E.y) - pa;
-    let db = sv(S, F.y) - sv(S, F.x);
-    var L = cross(da, db);
-    let ll = length(L);
-    if (ll < 1e-6 * length(da) * length(db)) { return vec3f(0.0); }
-    L = L / ll;
-    return select(L, -L, dot(L, pa - A.pos) < 0.0);
-}
-
-/* the contacts of the feature of least overlap (as convex.c's feature_contacts); one thread */
-fn feature_contacts(ia: u32, ib: u32, A: Shape, S: Shape, ft: vec3u) {
-    nc = 0u;
-    if (ft.x == 6u) {                       /* a pair of edges */
-        let E = bitcast<vec4u>(G[A.e0 + ft.y]);
-        let F = bitcast<vec4u>(G[S.e0 + ft.z]);
-        let L = edge_axis(A, S, ft.y, ft.z);
-        if (dot(L, L) == 0.0) { return; }
-        let s = dot(L, sv(S, F.x) - sv(A, E.x));
-        if (s > MG) { return; }
-        add_contact(ia, ib, closest_seg(sv(A, E.x), sv(A, E.y), sv(S, F.x), sv(S, F.y)), -L, -s);
-        return;
-    }
-    var rf: array<vec3f, 32>;
-    var inc: array<vec3f, 32>;
-    if (ft.x == 5u) {                       /* b's face */
-        let fb = ft.y;
-        let fi = incident_face(A, sn(S, fb));
-        let nr = face_loop(S, fb, &rf);
-        let ni = face_loop(A, fi, &inc);
-        face_contacts(&rf, nr, sn(S, fb), sd(S, fb), &inc, ni, sn(S, fb));
-    } else {                                /* a's face */
-        let fa = ft.y;
-        let fi = incident_face(S, sn(A, fa));
-        let nr = face_loop(A, fa, &rf);
-        let ni = face_loop(S, fi, &inc);
-        face_contacts(&rf, nr, sn(A, fa), sd(A, fa), &inc, ni, -sn(A, fa));
-    }
-    flush(ia, ib);
-}
-
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let lid = lv.x;
@@ -145,6 +104,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let pr = pairs[P.m.z + k];
     let ia = pr.x;
     let ib = pr.y;
+    if (lid == 0u) { feat[k] = vec4u(0u); }
     MG = margin_of(ia, ib);
     if (ib == NONE) { if (lid == 0u) { hull_walls(ia); } return; }
     let ka = u32(B[ia].pos.w + 0.5);
@@ -153,13 +113,17 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     if (kb == 0u) { if (lid == 0u) { sphere_convex(ib, ia); } return; }
     let A = shape_of(ia);
     let S = shape_of(ib);
-    if (lid == 0u) { wcached = select(0u, 1u, A.nv <= HC && S.nv <= HC && A.nf <= HF && S.nf <= HF); }
+    if (lid == 0u) { wcached = select(0u, 1u, A.nv <= HC && S.nv <= HC && A.nf <= HF && S.nf <= HF && S.ne <= HE); }
     cached = workgroupUniformLoad(&wcached) != 0u;
     if (cached) {
         for (var v = lid; v < A.nv; v += 64u) { hv[v] = sv(A, v); }
         for (var v = lid; v < S.nv; v += 64u) { hv[HC + v] = sv(S, v); }
         for (var f = lid; f < A.nf; f += 64u) { hn[f] = sn(A, f); }
         for (var f = lid; f < S.nf; f += 64u) { hn[HF + f] = sn(S, f); }
+        for (var e = lid; e < S.ne; e += 64u) {
+            let F = bitcast<vec4u>(G[S.e0 + e]);
+            he[e] = vec2u(F.z | F.w << 16u, F.x | F.y << 16u);
+        }
     }
     workgroupBarrier();
     /* b in a's frame, and what decided the pair last step */
@@ -216,7 +180,7 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     /* touching last step and barely moved since the full test: the same feature */
     if (ft.x >= 4u && ft.w == 1u) {
         if (lid == 0u) {
-            feature_contacts(ia, ib, A, S, ft.xyz);
+            feat[k] = vec4u(ft.xyz, 1u);
             memo_put(1u - rd, key, ft.xyz, mt, mq);
         }
         return;
@@ -269,7 +233,9 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
         let da = hcv(0u, A, E.y) - pa;
         let bxa = cross(b, a);
         for (var j = 0u; j < S.ne; j++) {
-            let F = bitcast<vec4u>(G[S.e0 + j]);
+            var F: vec4u;
+            if (cached) { let w = he[j]; F = vec4u(w.y & 0xFFFFu, w.y >> 16u, w.x & 0xFFFFu, w.x >> 16u); }
+            else { F = bitcast<vec4u>(G[S.e0 + j]); }
             let c = -hcn(1u, S, F.z);
             let d = -hcn(1u, S, F.w);
             let cba = dot(c, bxa);
@@ -303,12 +269,12 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
     let se = ws[0];
     let ea = wi[0];
     let eb = wj[0];
-    /* the feature of least overlap (convex.c's preferences), its contacts, remembered */
+    /* the feature of least overlap (convex.c's preferences), remembered; its contacts: K_HULLC */
     let use_b = sa < 1.02 * sb - 0.01;
     let sf = select(sa, sb, use_b);
     var f = vec3u(4u, fa, 0u);
     if (ea != NONE && sf < 1.1 * se - 0.1) { f = vec3u(6u, ea, eb); }
     else if (use_b) { f = vec3u(5u, fb, 0u); }
-    feature_contacts(ia, ib, A, S, f);
+    feat[k] = vec4u(f, 1u);
     memo_put(1u - rd, key, f, trel, qrel);
 }
