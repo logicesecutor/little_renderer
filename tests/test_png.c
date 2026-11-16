@@ -2,7 +2,7 @@
 //
 //   make bin/test_png && bin/test_png      (part of make test)
 //
-// 1. PNG files written by Pillow and by Python's zlib (examples/png_tests.h, made by
+// 1. PNG files written by Pillow and by Python's zlib (tests/png_tests.h, made by
 //    tools/gen_png_tests.py): every colour type, bit depths 1-16, palettes, transparency,
 //    interlacing, every filter, stored / fixed / dynamic deflate blocks. Each must decode
 //    to exactly the pixels it holds.

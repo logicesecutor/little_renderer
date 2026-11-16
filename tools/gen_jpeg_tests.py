@@ -3,8 +3,8 @@
 # requires-python = ">=3.9"
 # dependencies = ["pillow"]
 # ///
-"""gen_jpeg_tests.py - writes examples/jpeg_tests.h: JPEG files written by libjpeg (through
-Pillow) and the pixels libjpeg decodes from them, for examples/test_jpeg.c (core/jpeg.c must
+"""gen_jpeg_tests.py - writes tests/jpeg_tests.h: JPEG files written by libjpeg (through
+Pillow) and the pixels libjpeg decodes from them, for tests/test_jpeg.c (core/jpeg.c must
 decode them to within a step of libjpeg's own pixels).
 
     uv run tools/gen_jpeg_tests.py
@@ -73,7 +73,7 @@ def main():
     for name, i, n in names:
         out.append(f'    {{"{name}", jpg_{i}, {n}, rgb_{i}}},')
     out.append("};")
-    open("examples/jpeg_tests.h", "w", newline="\n").write("\n".join(out) + "\n")
+    open("tests/jpeg_tests.h", "w", newline="\n").write("\n".join(out) + "\n")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ Every option is in USAGE.md; this file explains how it works and where it can go
 | `rt/tracer.c` | rt | the path loop with a medium: scattering events, light sampling inside the cloud, shadows of the cloud on surfaces. |
 | `raster/volume_march.h/c` | raster | real time: raymarching over the rasterized frame, with a light grid (section 7.1). |
 | `app/options.c` | app | `-scene cloud`, `-cloud on`, `-density`, `-albedo`, `-g`, `-detail`, `-seed`, `-time`, `-cloudres`, `-fog`. |
-| `examples/test_medium.c` | | unit test of the sampling against exact answers (`make test`). |
+| `tests/test_medium.c` | | unit test of the sampling against exact answers (`make test`). |
 
 The grid lives in `core/` on purpose. The path tracer is only its first user. A real-time
 raymarcher (the viewer), an animation and a fluid simulation (forces) all read or write the
@@ -277,7 +277,7 @@ paths/s; the boxes scene without a cloud runs at about 2.4 M). The viewer in `rt
 
 ## 6. How it was checked
 
-- **Exact answers** (`make test`, `examples/test_medium.c`): in a uniform medium of optical
+- **Exact answers** (`make test`, `tests/test_medium.c`): in a uniform medium of optical
   depth 1 and in a medium whose density rises along the ray (exact `τ` by numerical
   integration), ratio tracking and delta tracking both converge to `exp(−τ)` (within 1
   standard error with 400,000 samples); Henyey-Greenstein sampling gives mean cosine `g`

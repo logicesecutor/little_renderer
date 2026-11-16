@@ -3,8 +3,8 @@
 # requires-python = ">=3.9"
 # dependencies = ["pillow"]
 # ///
-"""gen_png_tests.py - writes examples/png_tests.h: PNG files made by other encoders, and the
-pixels they hold, for examples/test_png.c (core/png.c must decode them exactly).
+"""gen_png_tests.py - writes tests/png_tests.h: PNG files made by other encoders, and the
+pixels they hold, for tests/test_png.c (core/png.c must decode them exactly).
 
     uv run tools/gen_png_tests.py
 
@@ -182,7 +182,7 @@ own_case("grey 4-bit", 0, 4, 1, 0, 9, 1)
 plte = bytes(c for i in range(16) for c in (i * 15, 255 - i * 15, (i * 97) % 256))
 own_case("palette 4-bit interlaced", 3, 4, 1, 1, 9, 3, plte=plte)
 
-with open("examples/png_tests.h", "w") as f:
+with open("tests/png_tests.h", "w") as f:
     f.write("// png_tests.h - written by tools/gen_png_tests.py (do not edit): PNG files from other\n"
             "// encoders and the RGBA pixels they hold, for test_png.c\n")
     f.write("#define PNG_TEST_W %d\n#define PNG_TEST_H %d\n" % (W, H))
@@ -197,4 +197,4 @@ with open("examples/png_tests.h", "w") as f:
     for i, (name, data, ch, exp) in enumerate(cases):
         f.write('    {"%s", png_%d, %d, %d, rgba_%d},\n' % (name, i, len(data), ch, i))
     f.write("};\n")
-print("wrote examples/png_tests.h: %d files" % len(cases))
+print("wrote tests/png_tests.h: %d files" % len(cases))

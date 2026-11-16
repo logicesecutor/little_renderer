@@ -17,8 +17,7 @@ for `models/` and write into `out/` relative to it.
 | `bin/raster_milestones` | `examples/raster_milestones.c` | the rasterizer step by step: one image per milestone into `out/*.png` |
 | `bin/hello_rt`, `bin/hello_raster`, `bin/custom_scene` | `examples/` | small programs using the library (see `SDK.md`); write into `out/` |
 | `bin/mesh_rain` | `examples/mesh_rain.c` | random meshes rain into the room as convex hulls, without end (the oldest are reused past `-max`); the frame rate and the bodies asleep in the window's title. Options: `-rate meshes/s` (8), `-max bodies`, `-size units` (70), `-obj model`, `-gpu on\|off`, `-sleep on\|off` (on: bodies at rest fall asleep, PHYSICS.md 1.5), `-endless on\|off` (off: the rain stops at `-max` and the pile settles), `-seed n`, `-autoquit seconds`, `-n`/`-h` the window |
-| `bin/test_medium` | `examples/test_medium.c` | unit test of the volume sampling (`make test`) |
-| `bin/test_physics` | `examples/test_physics.c` | the physics against known answers (`make test`) |
+| `bin/test_*` | `tests/test_*.c` | the unit tests (`make test` runs them all): volume sampling, PNG, JPEG, BSDF, environment, textures, glTF, physics, and the GPU's basics, BSDF, rigid bodies, air, ray queries and path tracer (these skip without a GPU) |
 | `tools/frames_to_gif.py` | `tools/` | a folder of `frame_NNNN.png` into an animated GIF (Pillow: `uv run` brings it, see 2.1) |
 | `tools/gen_models.py` | `tools/` | writes the test models (cube, sphere, torus, dense torus) |
 
@@ -60,9 +59,9 @@ The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.
 
 | command | what it does |
 |---|---|
-| `make` or `make all` | the library, the three apps, all examples |
+| `make` or `make all` | the library, the three apps, all examples and tests |
 | `make lib` | only `build/float/liblr.a` |
-| `make apps` / `make examples` | only the three programs / only the examples |
+| `make apps` / `make examples` / `make tests` | only the three programs / only the examples / only the tests |
 | `make bin/render` (or any `bin/...`) | just that one program (and the library); on Windows `make bin/render.exe` |
 | `make check-layers` | checks that `core` includes nothing else and `raster`, `rt`, `phys`, `platform` only `core` |
 | `make models` | runs `tools/gen_models.py` (cube, sphere, torus), then `make skies-download gltf-download` (only the files not there yet) |
@@ -83,7 +82,7 @@ Shortcuts that build and run:
 | `make dragon` | renders the dragon (orange and glass) into `out/` |
 | `make bench` | none vs octree vs BVH on the torus; compares the 3 images |
 | `make bench-dragon` | octree vs BVH on the Stanford dragon; compares the images |
-| `make test` | `bin/test_medium` and `bin/test_physics`: the cloud's sampling and the physics against exact answers |
+| `make test` | builds and runs every `tests/test_*.c` in turn, stopping at the first that fails |
 | `make sim` | the drop demo: 120 frames, 320×320, 64 spp → `out/sim/` and `out/sim.gif` (~20 min) |
 | `make sim-blast` | the explosion demo: 90 frames → `out/sim_blast/` and `out/sim_blast.gif` |
 | `make cloud` | the cloud, 600×600, 1024 spp → `out/cornell_cloud_final.png` |
@@ -112,7 +111,8 @@ What gets built:
 |---|---|
 | `build/float/liblr.a` | `engine/*/*.c` (headers next to them; include `engine/lr.h`) |
 | `bin/render`, `bin/view`, `bin/sim` | `apps/*.c` + the library |
-| `bin/hello_raster`, `bin/hello_rt`, `bin/custom_scene`, `bin/raster_milestones`, `bin/test_medium`, `bin/test_physics`, `bin/hello_physics` | `examples/*.c` + the library |
+| `bin/hello_raster`, `bin/hello_rt`, `bin/custom_scene`, `bin/raster_milestones`, `bin/hello_physics`, `bin/mesh_rain` | `examples/*.c` + the library |
+| `bin/test_*` | `tests/*.c` + the library |
 
 ---
 

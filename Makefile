@@ -4,6 +4,7 @@
 #   engine/{core,raster,rt,phys,platform,app}/*.c  -> build/float/liblr.a   (the engine)
 #   apps/*.c                                  -> bin/render, bin/view, bin/sim
 #   examples/*.c                              -> bin/hello_raster, bin/hello_rt, ...
+#   tests/*.c                                 -> bin/test_png, bin/test_physics, ... (make test runs them)
 #
 #   make            float build (fast)       make DOUBLE=1   double build into bin/double/
 #   make SAN=1      sanitizers               make SINGLE=1   no OpenMP (one thread)
@@ -93,13 +94,17 @@ endif
 
 APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
-                              $(BIN)/test_medium $(BIN)/test_physics $(BIN)/test_gpu_rigid $(BIN)/test_gpu_fluid $(BIN)/test_png $(BIN)/test_brdf $(BIN)/test_env $(BIN)/test_tex $(BIN)/test_jpeg $(BIN)/test_gltf $(BIN)/test_gpu_brdf $(BIN)/test_gpu_basic $(BIN)/test_gpu_rt $(BIN)/test_gpu_trace $(BIN)/hello_physics \
-                              $(BIN)/mesh_rain)
+                              $(BIN)/hello_physics $(BIN)/mesh_rain)
+# the unit tests, in the order make test runs them
+TEST_NAMES = test_medium test_png test_jpeg test_brdf test_env test_tex test_gltf test_gpu_basic test_gpu_brdf \
+             test_physics test_gpu_rigid test_gpu_fluid test_gpu_rt test_gpu_trace
+TESTS = $(addsuffix $(EXE),$(addprefix $(BIN)/,$(TEST_NAMES)))
 
-all: lib apps examples
+all: lib apps examples tests
 lib: $(LIB)
 apps: $(APPS)
 examples: $(EXAMPLES)
+tests: $(TESTS)
 
 # ---- the library ------------------------------------------------------------------------
 
@@ -123,13 +128,17 @@ $(LIB): $(OBJ)
 	rm -f $@
 	ar rcs $@ $^
 
-# ---- apps and examples (one .c file each, linked with the library) -----------------------
+# ---- apps, examples and tests (one .c file each, linked with the library) ----------------
 
 $(BIN)/%$(EXE): apps/%.c $(LIB) $(HDR)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 
 $(BIN)/%$(EXE): examples/%.c $(LIB) $(HDR)
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
+
+$(BIN)/%$(EXE): tests/%.c $(LIB) $(HDR) tests/png_tests.h tests/jpeg_tests.h
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 
@@ -225,22 +234,9 @@ view-dragon: $(BIN)/view$(EXE)
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
 # the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the physics (CPU and GPU)
-test: $(BIN)/test_medium$(EXE) $(BIN)/test_png$(EXE) $(BIN)/test_jpeg$(EXE) $(BIN)/test_brdf$(EXE) $(BIN)/test_env$(EXE) $(BIN)/test_tex$(EXE) $(BIN)/test_gltf$(EXE) $(BIN)/test_gpu_brdf$(EXE) $(BIN)/test_physics$(EXE) $(BIN)/test_gpu_rigid$(EXE) $(BIN)/test_gpu_fluid$(EXE) $(BIN)/test_gpu_basic$(EXE) $(BIN)/test_gpu_rt$(EXE) $(BIN)/test_gpu_trace$(EXE)
+test: $(TESTS)
 	mkdir -p out
-	$(BIN)/test_medium
-	$(BIN)/test_png
-	$(BIN)/test_jpeg
-	$(BIN)/test_brdf
-	$(BIN)/test_env
-	$(BIN)/test_tex
-	$(BIN)/test_gltf
-	$(BIN)/test_gpu_basic
-	$(BIN)/test_gpu_brdf
-	$(BIN)/test_physics
-	$(BIN)/test_gpu_rigid
-	$(BIN)/test_gpu_fluid
-	$(BIN)/test_gpu_rt
-	$(BIN)/test_gpu_trace
+	@for t in $(TEST_NAMES); do echo "$(BIN)/$$t"; $(BIN)/$$t || exit 1; done
 
 # volumetric cloud in the box (docs/VOLUMES.md): a clean image, and an animation as frames
 cloud: $(BIN)/render$(EXE)
@@ -327,9 +323,9 @@ $(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
 # the GPU air against the CPU air in a browser (open web/build/test_gpu_fluid.html, or see
 # docs/WEB.md; natively it is part of make test)
 webtest: $(WEB)/test_gpu_fluid.html
-$(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) examples/test_gpu_fluid.c
+$(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) tests/test_gpu_fluid.c
 	@mkdir -p $(WEB)
-	$(EMCC) $(WEBBASE) $(SRC) $(WGSL_C) examples/test_gpu_fluid.c -o $@
+	$(EMCC) $(WEBBASE) $(SRC) $(WGSL_C) tests/test_gpu_fluid.c -o $@
 
 serve:
 	cd $(WEB) && (python3 -m http.server 8000 || uv run python -m http.server 8000)
@@ -355,4 +351,4 @@ deps-clean:
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean

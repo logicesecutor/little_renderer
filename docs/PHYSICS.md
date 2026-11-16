@@ -28,7 +28,7 @@ bin/test_physics                      # the checks against known answers (also `
 | `app/simdemo.h/.c` | the demos of `bin/sim` and `bin/view -sim on` (apps layer) |
 | `app/frame.h/.c` | one path traced frame (apps layer) |
 | `apps/sim.c` | the offline simulation + rendering program |
-| `examples/test_physics.c` | the tests |
+| `tests/test_physics.c` | the tests |
 | `tools/frames_to_gif.py` | frames → animated GIF (Pillow; `uv run` installs it by itself) |
 
 `phys/` only includes `core/` (`make check-layers` checks it): the physics knows nothing
@@ -700,7 +700,7 @@ an explosion, N drops a steel ball, T restarts.
 
 ---
 
-## 6. Tests (`examples/test_physics.c`, `make test`)
+## 6. Tests (`tests/test_physics.c`, `make test`)
 
 Each test compares with an answer known in advance:
 
@@ -725,7 +725,7 @@ Each test compares with an answer known in advance:
 The cloud moves 91 and not 100 cm in the wind test because the air needs a moment to reach
 the wind's speed through the projection at the walls; the 10% tolerance covers it.
 
-`examples/test_gpu_rigid.c` (in `make test`; skipped by a build without the GPU) runs the
+`tests/test_gpu_rigid.c` (in `make test`; skipped by a build without the GPU) runs the
 same kind of checks on the GPU's bodies: free fall, the bounce, momentum, the stack of 3
 boxes and a ball, the tilted box, a hull landing on a face and a second one stacked on it,
 the torus puck, a ball, a hull and a box resting on a fixed mesh, and a pile of 60 bodies

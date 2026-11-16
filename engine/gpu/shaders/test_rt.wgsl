@@ -1,4 +1,4 @@
-// test_rt.wgsl - used by examples/test_gpu_rt.c (KERNEL)
+// test_rt.wgsl - used by tests/test_gpu_rt.c (KERNEL)
 @group(0) @binding(0) var acc: acceleration_structure;
 @group(0) @binding(1) var<storage, read_write> o: array<vec4f>;
 const NX = 32u;

@@ -1,6 +1,6 @@
 // brdf_gpu.h - the BSDF of core/brdf.h on the GPU (gpu/brdf_gpu.c): the same functions in
 // WGSL, used by the GPU path tracer (and by the rasterizer from PBR3). This header is for
-// checking the two against each other (examples/test_gpu_brdf.c).
+// checking the two against each other (tests/test_gpu_brdf.c).
 #ifndef LR_BRDF_GPU_H
 #define LR_BRDF_GPU_H
 

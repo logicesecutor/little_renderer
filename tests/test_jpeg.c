@@ -2,7 +2,7 @@
 //
 //   make bin/test_jpeg && bin/test_jpeg      (part of make test)
 //
-// 1. JPEG files written by libjpeg through Pillow (examples/jpeg_tests.h, made by
+// 1. JPEG files written by libjpeg through Pillow (tests/jpeg_tests.h, made by
 //    tools/gen_jpeg_tests.py): baseline and progressive, 4:4:4 / 4:2:2 / 4:2:0 / grey,
 //    optimized Huffman tables, restart markers, 16-bit quantization tables (SOF1), RGB
 //    without the colour transform, a size that is not a whole number of MCUs. Each must

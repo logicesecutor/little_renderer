@@ -133,7 +133,7 @@ fog + glass, dragon), the remaining differences being noise; the rasterized ones
 within 2/255 except on the pixels whose center lies exactly on an edge (the two break that
 tie differently).
 
-`examples/test_gpu_fluid.c` steps two identical worlds (a cloud, wind, buoyancy,
+`tests/test_gpu_fluid.c` steps two identical worlds (a cloud, wind, buoyancy,
 vorticity, a moving obstacle, an explosion) for 40 steps, one on the CPU and one on the
 GPU, and compares the clouds voxel by voxel: they agree to about 1e-4 of the largest
 density (the GPU and the CPU do not round alike, so not to the last bit). Natively it then
