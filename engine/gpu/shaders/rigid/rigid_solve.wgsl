@@ -41,15 +41,17 @@ fn main(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lv: vec
             let krb = C[c].rb;
             let kt1 = C[c].t1;
             let kt2 = C[c].t2;
-            let mu = C[c].imp.w;
+            let mu = abs(C[c].imp.w);          /* (its sign: a bounce, for K_RELAX) */
             let kj = Ji[c];
             let ia = bitcast<u32>(kn.w);
             let ib = bitcast<u32>(kra.w);
             var d = Vi[2u * ia].xyz + cross(Vi[2u * ia + 1u].xyz, kra.xyz);
             if (ib != NONE) { d = d - (Vi[2u * ib].xyz + cross(Vi[2u * ib + 1u].xyz, krb.xyz)); }
             let n = kn.xyz;
-            var sh = off[ia + 1u] - off[ia];
-            if (ib != NONE) { sh = max(sh, off[ib + 1u] - off[ib]); }
+            /* (the shares of the bodies that move: a fixed or sleeping body's many contacts
+               over-relaxed the one contact of a body resting on it, which then never rested) */
+            var sh = select(0u, off[ia + 1u] - off[ia], B[ia].vel.w != 0.0);
+            if (ib != NONE && B[ib].vel.w != 0.0) { sh = max(sh, off[ib + 1u] - off[ib]); }
             let om = 1.0 + (OMEGA - 1.0) * (1.0 - 1.0 / f32(max(sh, 1u)));
             let jn = max(kj.x + om * kt1.w * (krb.w - dot(d, n)), 0.0);
             let lim = mu * jn;

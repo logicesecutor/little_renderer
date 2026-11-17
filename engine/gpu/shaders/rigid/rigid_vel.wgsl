@@ -4,13 +4,14 @@
 @group(0) @binding(3) var<storage, read> F: array<vec4f>;
 @group(0) @binding(4) var<storage, read_write> pc: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> wake: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> S: array<vec4f>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
     let first = P.m.w == 0u;
     if (i == 0u && first) { atomicStore(&cnt[0], 0u); for (var l = 0u; l < 5u; l++) { atomicStore(&pc[l], 0u); } }
     if (i >= P.n.x) { return; }
-    if (first) { atomicStore(&cnt[1u + i], 0u); }
+    if (first) { atomicStore(&cnt[1u + i], 0u); S[i] = B[i].pos; }
     var b = B[i];
     if (first && b.f.y > 0.5 && atomicLoad(&wake[i]) != 0u) {
         /* woken (K_BROAD, WAKE): its mass back, still at rest */

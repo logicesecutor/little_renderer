@@ -81,7 +81,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     k.t1 = vec4f(t[0], eff(ma, mb, Ia, Ib, ra, rb, n));
     k.t2 = vec4f(t[1], eff(ma, mb, Ia, Ib, ra, rb, t[0]));
     k.j = vec4f(j, eff(ma, mb, Ia, Ib, ra, rb, t[1]));
-    k.imp = vec4f(n * j.x + t[0] * j.y + t[1] * j.z, mu);
+    /* (a bounce: mu with its sign bit set, for K_RELAX, which keeps its speed; K_SOLVE takes abs) */
+    k.imp = vec4f(n * j.x + t[0] * j.y + t[1] * j.z, select(mu, -mu, bounce > 0.0));
+    if (bounce > 0.0 && mu == 0.0) { k.imp.w = bitcast<f32>(0x80000000u); }
     C[c] = k;
     J0[c] = k.j;                /* the impulses the iterations start from (K_SOLVE) */
 }

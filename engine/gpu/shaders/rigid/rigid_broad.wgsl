@@ -11,8 +11,9 @@ fn push(l: u32, i: u32, j: u32) {
     if (k < P.m.z) { pairs[l * P.m.z + k] = vec2u(i, j); }
 }
 fn asleep(b: Body) -> bool { return b.f.y > 0.5; }
+/* (a body jittering in place, quiet after the last step (K_SLEEP, f.w), wakes nobody) */
 fn moving(b: Body) -> bool {
-    return b.vel.w > 0.0 && (length(b.vel.xyz) >= P.h2.z || length(b.ang.xyz) * body_radius(b) >= P.h2.z);
+    return b.vel.w > 0.0 && b.f.w < 0.5 && (length(b.vel.xyz) >= P.h2.z || length(b.ang.xyz) * body_radius(b) >= P.h2.z);
 }
 /* bodies i and j (i < j) close enough: WAKE, which sleeping one wakes (a moving body near it,
    rigid.c's wake_bodies); else the pair, into its list */

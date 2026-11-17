@@ -25,7 +25,7 @@ int gpu_rigid_skipped(const GpuRigid *gr){ (void)gr; return 0; }
 // mesh's shape, its index in G; yzw: the air's force on it when it fell asleep). Contacts (struct Contact, 10 vec4), as rigid.c's: the
 // point (w: depth), the normal from b to a (w: a), ra (w: b, NONE = a wall), rb (w: bias), the
 // tangents (w: the normal's and the first tangent's effective mass), j = the accumulated
-// impulses (w: the second tangent's mass), imp = this iteration's impulse (w: friction), la =
+// impulses (w: the second tangent's mass), imp = this iteration's impulse (w: friction; its sign bit set: a bounce, K_RELAX), la =
 // the point in a's frame (w: the depth when found), lb = in b's (a wall: the world point;
 // w: the approach speed it is to bounce from, 0 once it has: rigid.c's vn0).
 // Contacts are found once per physics step, with a margin (speculative contacts, as rigid.c),
@@ -48,9 +48,21 @@ GPU_WGSL(K_NARROW, rigid_narrow);
 GPU_WGSL(K_GRID, rigid_grid);
 static const char *K_GCOUNT = "const GRID_STEP = 0u;", *K_GSCAN = "const GRID_STEP = 1u;", *K_GPLACE = "const GRID_STEP = 2u;";
 
-/* the end of a step: how long each body has been still; those still long enough fall asleep:
-   velocity 0, and vel.w = 0 (to the others a fixed body) with the mass kept in f.z */
+/* the end of a step: how long each body has been still, or slow and going nowhere; those
+   still or going nowhere long enough fall asleep (unless a body they touch is still moving):
+   velocity 0, and vel.w = 0 (to the others a fixed body) with the mass kept in f.z. Two
+   passes: each body's state, then the decisions (which read their neighbours') */
 GPU_WGSL(K_SLEEP, rigid_sleep);
+static const char *K_SLEEP0 = "const SLEEP_STEP = 0u;", *K_SLEEP1 = "const SLEEP_STEP = 1u;";
+
+/* the end of a step: the fast bodies swept along their paths (continuous collision); two
+   passes, where each goes, then there */
+GPU_WGSL(K_CCD, rigid_ccd);
+static const char *K_CCD0 = "const CCD_STEP = 0u;", *K_CCD1 = "const CCD_STEP = 1u;";
+
+/* after the bodies moved in a substep: one more solver pass, the push out of overlaps taken
+   back (each contact's target, then K_SOLVE, then the velocities alone back: K_VELS) */
+GPU_WGSL(K_RELAX, rigid_relax);
 
 /* the pairs whose bounding spheres meet (and the walls), sorted into the three lists; or
    (WAKE, sleeping, rigid.c's) which sleeping bodies wake up this step: a body faster than the
@@ -139,8 +151,10 @@ GPU_WGSL(K_APPLY, rigid_apply);
    velocities; the fixed mesh, never a first body, nothing. 8 threads per body (K_LANES). */
 GPU_WGSL(K_SOLVE, rigid_solve);
 
-/* velocities -> positions, orientations */
+/* velocities -> positions, orientations (the slow bodies resting on something damped first);
+   or (K_VELS) the velocities alone */
 GPU_WGSL(K_POS, rigid_pos);
+static const char *K_MOVE = "const MOVE = true;", *K_VELS = "const MOVE = false;";
 
 // ---- the C side ----------------------------------------------------------------------------
 
@@ -148,16 +162,16 @@ typedef struct {
     uint32_t n[4];
     float h[4], g[4], lo[4], hi[4], d[4], h2[4];
     uint32_t m[4];
-    float q[4];
+    float q[4], s[4], c[4];
 } GRP;
 
 enum { R_GCOUNT, R_GSCAN, R_GPLACE, R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HULLPRE, R_ARGS3, R_HEAVY, R_HULLC, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
-       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, NR };
+       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, R_RELAX, R_VELS, R_SLEEP0, R_CCD0, R_CCD1, NR };
 static const struct { const char *name, *types; const char **part[4]; } RK[NR] = {
     {"bodies: grid (count)", "URW",  {&K_GCOUNT, &K_GRID}},
     {"bodies: grid (scan)", "URW",   {&K_GSCAN, &K_GRID}},
     {"bodies: grid (place)", "URW",  {&K_GPLACE, &K_GRID}},
-    {"bodies: forces",   "UWWRWW",   {&K_VEL}},
+    {"bodies: forces",   "UWWRWWW",  {&K_VEL}},
     {"bodies: pairs",    "URWWWRR",  {&K_PAIRS, &K_BROAD}},
     {"bodies: pair counts", "UWW",   {&K_ARGS}},
     {"bodies: contacts", "URWWRW",   {&K_NARROW, &K_SIMPLE}},
@@ -174,9 +188,14 @@ static const struct { const char *name, *types; const char **part[4]; } RK[NR] =
     {"bodies: prepare",  "URWWRRRRW", {&K_PREP}},
     {"bodies: solve",    "URWRRRWRW", {&K_LANES, &K_SOLVE}},
     {"bodies: warm start", "URRRRW", {&K_LANES, &K_APPLY}},
-    {"bodies: move",     "UWR",      {&K_POS}},
+    {"bodies: move",     "UWRRRR",   {&K_MOVE, &K_POS}},
     {"bodies: wake",     "URWWWRR",  {&K_WAKES, &K_BROAD}},
-    {"bodies: sleep",    "UWR",      {&K_SLEEP}},
+    {"bodies: sleep",    "UWRWRRR",  {&K_SLEEP1, &K_SLEEP}},
+    {"bodies: relax",    "URWR",     {&K_RELAX}},
+    {"bodies: velocities", "UWRRRR", {&K_VELS, &K_POS}},
+    {"bodies: quiet",    "UWRWRRR",  {&K_SLEEP0, &K_SLEEP}},
+    {"bodies: swept",    "UWRWR",    {&K_CCD0, &K_CCD}},
+    {"bodies: swept (moved)", "UWRWR", {&K_CCD1, &K_CCD}},
 };
 
 #define BODY_BYTES 128
@@ -209,7 +228,11 @@ struct GpuRigid {
     int prev_nb;                                 // bodies in the last substep (its lists)
     int parity;
     WGPUBindGroup bg[NR][2];
-    WGPUBindGroup bg_solve[2][2], bg_pos[2];     // by the contacts' parity, and the iteration's turn
+    WGPUBindGroup bg_solve[2][2], bg_pos[2][2];  // by the contacts' parity, and the iteration's turn
+    WGPUBindGroup bg_vels[2][2];
+    WGPUBuffer start, ccd, anchor;               // where the bodies began the step, where K_CCD puts
+                                                 // them; the anchors (K_SLEEP)
+    void *zeros;                                 // (an anchor's for bodies sent again)
     int turn;                                    // the iterations' buffers read next (vel[turn], imps[turn])
     float *staging;
     unsigned char *par_cpu;                      // the substeps' parameters of a step, packed (kept)
@@ -236,7 +259,8 @@ struct GpuRigid {
 
 static const char *const RK_NAMES[NR] = {"grid: count", "grid: scan", "grid: place", "forces", "pairs (bounding spheres)", "pair counts", "contacts: balls, boxes",
     "contacts: hulls, the memo", "hulls to test", "contacts: hulls", "contacts: hulls' faces", "mesh: near triangles", "mesh: triangle counts", "mesh: triangles", "mesh: 4 contacts per pair",
-    "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep"};
+    "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep",
+    "relax: targets", "relax: velocities", "sleep: quiet", "swept", "swept: moved"};
 
 // the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
 // out of the list would have its callbacks ignored (its bodies never back): creation is
@@ -264,7 +288,10 @@ static void release_groups(GpuRigid *gr){
         for (int p = 0; p < 2; p++) if (gr->bg[k][p]){ wgpuBindGroupRelease(gr->bg[k][p]); gr->bg[k][p] = NULL; }
     for (int p = 0; p < 2; p++){
         for (int t = 0; t < 2; t++) if (gr->bg_solve[p][t]){ wgpuBindGroupRelease(gr->bg_solve[p][t]); gr->bg_solve[p][t] = NULL; }
-        if (gr->bg_pos[p]){ wgpuBindGroupRelease(gr->bg_pos[p]); gr->bg_pos[p] = NULL; }
+        for (int t = 0; t < 2; t++){
+            if (gr->bg_pos[p][t]){ wgpuBindGroupRelease(gr->bg_pos[p][t]); gr->bg_pos[p][t] = NULL; }
+            if (gr->bg_vels[p][t]){ wgpuBindGroupRelease(gr->bg_vels[p][t]); gr->bg_vels[p][t] = NULL; }
+        }
     }
 }
 
@@ -278,7 +305,7 @@ static void make_groups(GpuRigid *gr){
         BG(R_GCOUNT, gr->par, gr->bodies, gr->grid);
         BG(R_GSCAN, gr->par, gr->bodies, gr->grid);
         BG(R_GPLACE, gr->par, gr->bodies, gr->grid);
-        BG(R_VEL, gr->par, gr->bodies, gr->cnt, gr->forces, gr->pc, gr->wake);
+        BG(R_VEL, gr->par, gr->bodies, gr->cnt, gr->forces, gr->pc, gr->wake, gr->start);
         BG(R_BROAD, gr->par, gr->bodies, gr->pairs, gr->pc, gr->wake, gr->forces, gr->grid);
         BG(R_ARGS, gr->par, gr->pc, gr->args);
         BG(R_SIMPLE, gr->par, gr->bodies, C, gr->cnt, gr->pairs, gr->pc);
@@ -301,9 +328,17 @@ static void make_groups(GpuRigid *gr){
             WGPUBuffer b_[] = {gr->par, gr->bodies, C, O, L, gr->vel[t], gr->vel[!t], gr->imps[t], gr->imps[!t]};
             gr->bg_solve[p][t] = gpu_bind(g, gr->bgl[R_SOLVE], b_, 9);
         }
-        { WGPUBuffer b_[] = {gr->par, gr->bodies, gr->vel[p]}; gr->bg_pos[p] = gpu_bind(g, gr->bgl[R_POS], b_, 3); }
+        for (int t = 0; t < 2; t++){
+            WGPUBuffer b_[] = {gr->par, gr->bodies, gr->vel[t], O, L, C};
+            gr->bg_pos[p][t] = gpu_bind(g, gr->bgl[R_POS], b_, 6);
+            gr->bg_vels[p][t] = gpu_bind(g, gr->bgl[R_VELS], b_, 6);
+        }
         BG(R_WAKE, gr->par, gr->bodies, gr->pairs, gr->pc, gr->wake, gr->forces, gr->grid);
-        BG(R_SLEEP, gr->par, gr->bodies, gr->forces);
+        BG(R_SLEEP, gr->par, gr->bodies, gr->forces, gr->anchor, C, O, L);
+        BG(R_SLEEP0, gr->par, gr->bodies, gr->forces, gr->anchor, C, O, L);
+        BG(R_RELAX, gr->par, gr->bodies, C, gr->cnt);
+        BG(R_CCD0, gr->par, gr->bodies, gr->start, gr->ccd, gr->shapes);
+        BG(R_CCD1, gr->par, gr->bodies, gr->start, gr->ccd, gr->shapes);
 #undef BG
     }
 }
@@ -313,7 +348,8 @@ static void make_groups(GpuRigid *gr){
 static void release_sized(GpuRigid *gr){
     WGPUBuffer *all[] = {&gr->bodies, &gr->forces, &gr->cnt, &gr->cursor, &gr->wake, &gr->contacts[0], &gr->contacts[1],
                          &gr->lists[0], &gr->lists[1], &gr->offs[0], &gr->offs[1], &gr->pairs, &gr->pc, &gr->args,
-                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->feat, &gr->grid, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1]};
+                         &gr->tris, &gr->store, &gr->scount, &gr->memo, &gr->feat, &gr->grid, &gr->vel[0], &gr->vel[1], &gr->imps[0], &gr->imps[1],
+                         &gr->start, &gr->ccd, &gr->anchor};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) release(all[i]);
 }
 
@@ -351,6 +387,12 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     gr->cnt = storage(g, "bodies: contact counts", (cap + 1) * 4);
     gr->cursor = storage(g, "bodies: list cursors", cap * 4);
     gr->wake = storage(g, "bodies: to wake", cap * 4);
+    gr->start = storage(g, "bodies: where the step began", cap * 16);
+    gr->ccd = storage(g, "bodies: where the sweep puts them", cap * 16);
+    gr->anchor = storage(g, "bodies: anchors", cap * 32);       // (zeroed: none)
+    free(gr->zeros);
+    gr->zeros = calloc(cap, 32);
+    if (!gr->zeros){ perror("calloc"); exit(1); }
     { uint32_t *z = calloc(cap, 4); if (z){ wgpuQueueWriteBuffer(g->compute, gr->wake, 0, z, cap * 4); free(z); } }
     gr->cap_pairs = 32 * cap;
     gr->grid_h = 64;
@@ -525,7 +567,8 @@ static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1
 
 static void dispatch1(WGPUComputePassEncoder pass, GpuRigid *gr, int k, size_t threads){
     wgpuComputePassEncoderSetPipeline(pass, gr->pipe[k]);
-    WGPUBindGroup bg = k == R_SOLVE ? gr->bg_solve[gr->parity][gr->turn] : k == R_POS ? gr->bg_pos[gr->turn] : gr->bg[k][gr->parity];
+    WGPUBindGroup bg = k == R_SOLVE ? gr->bg_solve[gr->parity][gr->turn] : k == R_POS ? gr->bg_pos[gr->parity][gr->turn]
+                     : k == R_VELS ? gr->bg_vels[gr->parity][gr->turn] : gr->bg[k][gr->parity];
     wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
     if (k == R_SCAN || k == R_ARGS || k == R_ARGS2 || k == R_ARGS3 || k == R_GSCAN) wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
     else if (k == R_SIMPLE) wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, gr->args, 0);
@@ -614,6 +657,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             bi->force = bi->torque = vec3(0, 0, 0);
         }
         wgpuQueueWriteBuffer(g->compute, gr->bodies, (uint64_t)first * BODY_BYTES, gr->staging, (size_t)(i - first) * BODY_BYTES);
+        wgpuQueueWriteBuffer(g->compute, gr->anchor, (uint64_t)first * 32, gr->zeros, (size_t)(i - first) * 32);   // (no anchor yet)
     }
     gr->nb = nb;
     if (nb == 0) return 1;
@@ -675,6 +719,9 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         P.m[2] = (uint32_t)gr->cap_pairs;
         P.m[3] = (uint32_t)s;
         P.q[0] = (float)(3 * (rmax > 0 ? rmax : 1)); P.q[1] = (float)rbig; P.q[2] = (float)gr->grid_h;
+        P.s[0] = 60.0f; P.s[1] = 2.5f; P.s[2] = 1.5f; P.s[3] = 2.0f;   // rigid.c's SLOW_SPEED, ANCHOR_MOVE, ANCHOR_TIME, SETTLE_DAMPING
+        P.c[0] = 0.5f;                           // rigid.c's CCD_FRACTION
+        P.c[1] = s == steps - 1 ? 1.0f : 0.0f;
         memcpy(par_cpu + (size_t)s * 256, &P, sizeof(P));
     }
     wgpuQueueWriteBuffer(g->compute, gr->par_all, 0, par_cpu, (size_t)steps * 256);
@@ -711,10 +758,20 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_SOLVE, 8 * (size_t)nb);          // vel, imps [turn] -> [!turn]; 8 threads a body
             gr->turn ^= 1;
         }
-        dispatch(enc, &pass, gr, R_POS, (size_t)nb);                    // vel[turn] back into the bodies
-        if (s == steps - 1 && w->sleep){
-            // the end of the step: who falls asleep
-            dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
+        dispatch(enc, &pass, gr, R_POS, (size_t)nb);                    // vel[turn] back into the bodies, moved
+        // relax: the push out of overlaps taken back (rigid.c, step 5)
+        dispatch(enc, &pass, gr, R_RELAX, gr->cap_contacts);
+        dispatch(enc, &pass, gr, R_SOLVE, 8 * (size_t)nb);
+        gr->turn ^= 1;
+        dispatch(enc, &pass, gr, R_VELS, (size_t)nb);                   // vel[turn] back, not moved
+        if (s == steps - 1){
+            // the end of the step: the fast bodies swept, then who falls asleep
+            dispatch(enc, &pass, gr, R_CCD0, (size_t)nb);
+            dispatch(enc, &pass, gr, R_CCD1, (size_t)nb);
+            if (w->sleep){
+                dispatch(enc, &pass, gr, R_SLEEP0, (size_t)nb);
+                dispatch(enc, &pass, gr, R_SLEEP, (size_t)nb);
+            }
         }
         if (pass){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); }
     }
@@ -822,6 +879,7 @@ void gpu_rigid_destroy(GpuRigid *gr){
         if (gr->bgl[k]) wgpuBindGroupLayoutRelease(gr->bgl[k]);
     }
     free(gr->staging);
+    free(gr->zeros);
     free(gr->par_cpu);
     free(gr->last_f);
     free(gr);
