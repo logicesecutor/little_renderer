@@ -1,7 +1,7 @@
 # Our own Vulkan backend: the plan (after PBR)
 
 The plan agreed on 2026-11-14 for the engine's GPU layer natively, step 6 of
-[ROADMAP.md](ROADMAP.md). Work happens on the `vulkan` branch (merged only when agreed).
+[STATUS.md](STATUS.md). Work happens on the `vulkan` branch (merged only when agreed).
 Decided on 2026-11-15: `webgpu.h` on Vulkan first, natively only (the browser build is not
 kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web comes after.
 
@@ -46,7 +46,7 @@ the world's triangles, its spheres and quads (boxes the kernel hits with the CPU
 each mesh, and the unit box (balls and boxes); the top level is built every frame from
 records written by the CPU with the instances. Kernel ms per pass, 640×640, RTX 3070 (the
 BVH on our layer → ray queries): boxes 2.08 → 1.35, a sphere mesh 3.36 → 1.25, the helmet
-4.82 → 1.80, the showcase 12.17 → 7.40 (PERFORMANCE.md).
+4.82 → 1.80, the showcase 12.17 → 7.40 (STATUS.md).
 
 Next: the WGSL out of the C files into files of their own (asked for 2026-11-15); then the
 native extensions (below) where measurements show a gain.

@@ -1,5 +1,5 @@
 // trace_wave.wgsl - used by engine/gpu/trace_gpu.c (WAVE)
-/* ---- the wavefront path tracer (-wavefront on; docs/PERFORMANCE.md R1) ----
+/* ---- the wavefront path tracer (-wavefront on; docs/STATUS.md R1) ----
    The same light transport as trace() above, cut into small kernels that each do one step
    for every path of the band at once, the paths' state kept in WF between them:
      wf_gen      a camera ray per pixel of the band (the paths, in queue 0)

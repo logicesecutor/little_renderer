@@ -1286,7 +1286,7 @@ static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
 }
 #endif
 
-// Whether the top level is the CPU's: its SAH tree traces faster (docs/PERFORMANCE.md,
+// Whether the top level is the CPU's: its SAH tree traces faster (docs/STATUS.md,
 // 2026-11-13; 12.5 against 15.6 ms a pass with 48k instances), but it is built on the CPU
 // each frame the instances moved (4.9 ms for 18k, 12 for 48k), the GPU's LBVH in under
 // half a ms; so the CPU's up to TLAS_GPU_FROM instances (18k: as fast either way; 48k: 23 ->

@@ -217,7 +217,7 @@ next to the GPU ones.
 
 ## ⚡ Performance
 
-Measured on an RTX 3070 and an 8-core CPU ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+Measured on an RTX 3070 and an 8-core CPU ([docs/STATUS.md](docs/STATUS.md)
 keeps every measurement, and the ideas still to try):
 
 | | |
@@ -258,8 +258,7 @@ keeps every measurement, and the ideas still to try):
 | [PHYSICS](docs/PHYSICS.md) | rigid bodies, the air, the coupling |
 | [WEB](docs/WEB.md) | the GPU backend and the browser build |
 | [VULKAN](docs/VULKAN.md) | our own `webgpu.h` on Vulkan, the WGSL compiler, hardware ray tracing |
-| [PERFORMANCE](docs/PERFORMANCE.md) | how to measure, what was measured, what is next |
-| [ROADMAP](docs/ROADMAP.md) | the order of the next steps and where each stands |
+| [STATUS](docs/STATUS.md) | what comes next and how fast it runs now: the next steps, the latest measurements, the ideas, the backlog and the history |
 | [PBR](docs/PBR.md) | physically based materials in every pipeline |
 
 ## 📄 Licence

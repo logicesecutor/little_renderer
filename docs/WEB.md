@@ -287,7 +287,7 @@ spheres). Moving one changes only its transform, never its triangles.
   rebuilt on the GPU after its triangles changed (`scene_mesh_changed`), in place of the
   CPU's, by PLOC (Meister & Bittner 2018, `PLOC` in `trace_gpu.c`): from the same sorted
   leaves, clusters merge with their nearest of 16 neighbours on each side, round after
-  round (PERFORMANCE.md R4b). Either way the image is the same (only how fast rays find
+  round (STATUS.md R4b). Either way the image is the same (only how fast rays find
   the triangles changes).
 - **One traversal loop** walks all of it: a stack entry is a node and the instance whose
   space it is in, the ray is moved into an instance's space when its entries come up. So the
@@ -373,7 +373,7 @@ local arrays) decides how many threads the GPU can run at once. The BVH walk's s
 three arrays of 64 entries (node, instance, distance); it is now one array of 40 node
 entries (entering an instance pushes an EXIT mark and the mesh's root, since instances are
 never nested; no distance is kept, the children's boxes are tested against the closest hit
-anyway). That alone made every scene 2-5x faster on an RTX 3070 (docs/PERFORMANCE.md).
+anyway). That alone made every scene 2-5x faster on an RTX 3070 (docs/STATUS.md).
 `-wavefront on` splits the tracer into small kernels per bounce (extend, shade, shadow
 rays); it gives the same image but is slower here, and it is not yet tried in browsers.
 

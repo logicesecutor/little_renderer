@@ -247,7 +247,7 @@ fn normal_to_world(i: u32, n: vec3f) -> vec3f {
      the world's space: instances are never inside instances).
    Entries are not culled by distance when they come off the stack (no distance is kept):
    their children's boxes are tested against the closest hit so far anyway. Measured on an
-   RTX 3070 (docs/PERFORMANCE.md): 24 to 64 entries cost about the same, 40 leaves room for
+   RTX 3070 (docs/STATUS.md): 24 to 64 entries cost about the same, 40 leaves room for
    a mesh's tree under the top level's; a full stack drops what does not fit. */
 const STACK = 40;
 const INST: u32 = 0x40000000u;

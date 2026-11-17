@@ -820,7 +820,7 @@ so one step of a ray tests 4 boxes in a loop the compiler turns into SIMD, and t
 is half as deep. The hit children go on the stack farthest first, leaves included, so the
 nearest is always next. The dragon (table below, 320x320, 8 threads): 1.87 → 3.38 M paths
 per second, the same image. The GPU keeps the binary tree: in its kernel the 4-wide one
-measured 5-10% slower (docs/PERFORMANCE.md).
+measured 5-10% slower (docs/STATUS.md).
 
 **Octree vs. BVH on the dragon** (871,420 primitives, 300x300, 32 spp):
 

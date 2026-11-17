@@ -1,15 +1,110 @@
-# Performance: ideas, plans and measurements
+# Status: what comes next, and how fast it runs
 
-The single place where ideas for making the engine faster are kept, with what each one is
-expected to give, what has been measured, and what was decided. **Keep it up to date as the
-engine develops:** add new ideas when they come up (from profiling, a paper, a benchmark),
-move an idea to *Done* with its measured result when it is implemented, and write down when
-an idea was tried and rejected (and why), so it is not tried again blindly.
+The one file that says **what to do next** and **how the engine performs now**, kept up to
+date as the work goes (it joins the former ROADMAP.md and PERFORMANCE.md, 2026-11-17).
+How each part works is in the other docs (RAYTRACER.md, RASTERIZER.md, PHYSICS.md,
+VOLUMES.md, PBR.md, WEB.md, VULKAN.md); this file is about order and speed.
 
-How each part works is in the other docs (RAYTRACER.md, PHYSICS.md, WEB.md); this file is
-only about speed.
+**Keep it up to date:** after every change, update section 2's numbers (from the
+performance suite, once it exists) and section 1's steps; add an idea to section 4 when it
+comes up, move it to the history (section 6) with its measurement when it lands, and write
+down in section 7 what was tried and rejected, and why, so it is not tried again blindly.
+The IDs (P*, R*, A*, W*, X*, M*) are used across the docs and the commits.
 
-## How to measure
+Status words: `next` · `planned` · `proposed` · `assess` (only if a benchmark shows it
+pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` · `rejected`.
+
+## 1. Next steps
+
+### 1.1 The order (decided 2026-11-17)
+
+| # | step | status | what it is |
+|---|---|---|---|
+| 7 | **Physics robustness**: continuous collision checks for very fast bodies, tall piles that come to rest, the CPU solver on all cores | done (f9ca27f … 8b3a18f) | PHYSICS.md 1.3b, 1.3c, 1.5; P6, P11 |
+| 8 | **Bigger scenes** (20–50k instances): culling and simpler distant copies of meshes in the rasterizer, the top level built on the GPU, instances updated in place | done (4f0edd0 … 824333e) | R8 |
+| 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | next: branch `web`, plan below (proposed 2026-11-17) | WEB.md |
+
+`next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
+from the repository; the dragon stays on disk, untracked: `make dragon-download`).
+
+### 1.2 The viewer's frame rate (found 2026-11-17, to fix before the suite)
+
+The viewer shows a frame only when something changed: with a still camera the rasterizer
+draws nothing (`idle(5)`), the GPU path tracer waits for bands of 12-45 ms and shows at most
+~30 images a second, and once its samples are done it idles; the frames/s it prints counts
+only the images shown, so it falls to 2 (raster) or 26 (path traced) and freezes while
+moving gives 165 (the display's rate, vsync). Measured (wgpu and our layer alike), still /
+moving: raster 2 / 165, rt 26 / 110, hybrid 26 / 165. The proposed fix (tried on a copy):
+render and show every frame (`-maxfps`, on by default; off: today's behaviour, for
+batteries), bands sized to a share of the display's period while still too (rt still 26 ->
+162 frames/s with 4 ms bands, at the price of 2.5x slower convergence; 10 ms bands: 117
+frames/s, 1735 samples in 5 s against 2000), a `-vsync off` option (Immediate or Mailbox
+present mode) to go past the display's rate, and samples/s next to frames/s in the readout.
+In a browser `requestAnimationFrame` caps at the display's rate whatever we do.
+
+### 1.3 The performance suite (proposed 2026-11-17, being chosen)
+
+One program, `bin/bench` (`make perf`), every number from timers in the code (the CPU's
+clock and GPU timestamps), none read from the viewer's title or images: offscreen, no vsync,
+a fixed camera, seed, time step and count of frames or steps, warm-up rounds dropped, the
+median and spread of a few repeats, written to `out/perf/<commit>.csv` with a before/after
+comparison. Groups proposed: A the GPU path tracer (ms a pass), B the CPU path tracer
+(paths/s), C the rasterizers (ms a frame), D the denoiser, E the trees and scene updates, F
+the rigid bodies (ms a step, CPU 1 and 16 threads, GPU), G the air and cloud, H the start
+(probe, pipelines, loading), I the viewer uncapped (frames/s still and moving, after 1.2), J
+the same in a browser; a quick set (~1 min) and a full one (~10 min). Section 2 is then
+filled from it.
+
+### 1.4 Step 9: the browser (branch `web`)
+
+**Where it stands** (Chrome 1280x800, RTX 3070, the page measured by a headless Chrome of
+its own on the GPU, `out_next/cdp.mjs`): the web build is up to date and loads; one kernel
+was refused by Chrome's WGSL compiler (the bodies' sweep: a barrier after a return that
+depends on the thread; fixed, 24ed363), so until then the GPU bodies did not step in the
+page. Measured since:
+
+| page | browser | natively (wgpu, same GPU) |
+|---|---|---|
+| sky demo rasterized, GPU bodies | 125 frames/s (the display's rate) | 126+ |
+| sky demo path traced, denoised | 30-33 frames/s, 22-24 ms a pass | 10 ms a pass |
+| the first ~20 s of the path traced page | ~10 frames/s (light probe baked on the CPU, 3.2 s; pipelines compiled when first used) | the probe in 0.37 s |
+| sky demo, bodies on the CPU (`?gpurigid=off`) | 97-127 ms a physics step at 800-900 bodies (1-2 frames/s) | 45 ms on one core, 30 on 16 |
+| blast: air and cloud on the GPU | 125 frames/s | |
+
+The steps, in order (each its own commits; measured before and after with W2's tool):
+
+| # | step | what |
+|---|---|---|
+| W2 | **Measure and check in a real browser, automatically** | `tools/webbench.mjs` (Node 22+, no packages): the page in a headless Chrome of its own (a temporary profile) on this machine's GPU: console, frame rate, the viewer's line, `Module._lr_prof()`, in a log; `make web-bench`. `make web-check`: every pipeline the page makes compiled by Chrome, failing on any GPU error (the check that caught the sweep kernel) |
+| W3 | **Every pipeline right in the browser** | the image set rendered in Chrome (GPU raster, GPU path traced, denoised) against the native wgpu images; `test_gpu_rigid` and `test_gpu_fluid` as pages; the wavefront kernels (their first compile in Chrome took over a minute, W1): one module per kernel, or kept off in browsers |
+| W4 | **The path tracer as fast as natively** | find the 2.3x: Chrome's own timestamps (`timestamp-query`), the kernel's code from Chrome's compiler (the traversal stack in private memory, bounds checks), workgroup sizes. The start: pipelines made asynchronously (`createComputePipelineAsync`) instead of on first use; the light probe baked on the GPU (it already path traces) or made once and kept |
+| W5 | **The denoiser in the page** | on by default with the path tracer: its cost per frame there, its look while the camera and the bodies move, its options in the page |
+| W6 | **The bodies on the CPU in a browser** (no WebGPU, or `?gpurigid=off`) | 2.5x slower than natively on one core: WASM SIMD (`-msimd128`) for the contacts' math; threads (Emscripten pthreads, which need a cross-origin isolated page: `make serve` can send the headers, a static host cannot, so optional); fewer substeps when a step falls behind; P4 (CPU or GPU chosen by the number of bodies) |
+| W7 | **The page** | the sky scene a link with its sky (today 20 MB of data to load: a 1k sky for the web, or fetched when that link is opened), a bigger-scene link (`props`), loading progress, the frame-rate HUD |
+| W8 | **Docs and publishing** | WEB.md, README, W1; optionally the page on GitHub Pages (with the GitHub Actions item below) |
+
+## 2. Performance now
+
+The latest number of each benchmark, with when it was measured (reference machine:
+Windows, RTX 3070, 8-core / 16-thread CPU; wgpu unless written otherwise). Until the suite
+(1.3) exists these come from the history below; it will replace them with its own table.
+
+| what | now | measured |
+|---|---|---|
+| GPU path tracer, 640x640, ms a pass (boxes / spheres / dragon 871k / cloud / 40 dragons) | 1.91 / 1.73 / 8.09 / 7.60 / 2.92 | 2026-11-13 (R3) |
+| GPU path tracer with hardware ray queries (our layer) | 1.4-2.7x faster than the compute BVH | 2026-11-15 (R6) |
+| CPU path tracer, 320x320, 8 threads, M paths/s (boxes / spheres / dragon / cloud) | 3.12 / 4.53 / 3.38 / 1.98 | 2026-11-13 (R3) |
+| sky demo rasterized, 1280x720, 18k / 48k props, frames/s (wgpu / our layer) | 136 / 150; 121 / 132 | 2026-11-17 (R8) |
+| sky demo path traced, 48k props, frames/s (wgpu / our layer) | 30 / 65-69 | 2026-11-17 (R8) |
+| rigid bodies on the CPU, 1000 falling, ms a step (1 / 16 threads) | 59.7 / 29.5 | 2026-11-17 (P6) |
+| rigid bodies on the GPU, 1024, ms a step | 0.40 (settled pile 88% asleep: 0.80) | 2026-11-15 (P10) |
+| `mesh_rain`, 1500 hulls, ms a step (wgpu / our layer) | 5.3 / 5.1 | 2026-11-17 |
+| tall pile, 400 bodies, all asleep | CPU 11 s; GPU 2 of 3 runs within 60 s | 2026-11-17 (P11) |
+| the air on the GPU, 32^3, cloud 96^3 / 192^3, ms a step | 0.81 / 1.51 | 2026-11-16 |
+| browser (Chrome), sky demo rasterized / path traced | 125 frames/s / 22-24 ms a pass | 2026-11-17 (1.4) |
+| browser, bodies on the CPU, 800-900 bodies, ms a step | 97-127 | 2026-11-17 (1.4) |
+
+## 3. How to measure
 
 Measure before and after every change, on the same machine, with the same command:
 
@@ -35,11 +130,7 @@ high, sometimes absurdly ("318998 frames/s"); the per-stage CPU times were right
 recorded that way above should be measured again; from then on only frames shown count
 (the helmet rasterized, orbiting: 63 frames/s; 1000 bodies in the viewer: 65).
 
-## Status of the ideas
-
-`next` = chosen as the next step · `planned` = agreed, waiting its turn · `assess` = do it
-only if a benchmark shows it pays · `later` / `last` = agreed to wait · `idea` = not yet
-discussed · `done` · `rejected`.
+## 4. Ideas and their status
 
 ### Rendering (the path tracer, mostly on the GPU)
 
@@ -85,19 +176,175 @@ phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 118
 | A1 | Sparse bricks for the cloud's MacCormack pass instead of its bounding box | idea | the pass touches only voxels with cloud |
 | A2 | Run the air and the cloud at a lower rate than the bodies when nothing violent happens | idea | the air is the most expensive part of a CPU physics step (VOLUMES.md, PHYSICS.md 7) |
 
-### Web (to do once the native optimizations are settled)
+### Web
 
 | ID | idea | status | expected gain / why |
 |---|---|---|---|
-| W1 | Bring this round's GPU changes to the browser: the new traversal stack is in the web build (a GPU path traced image checked in Chrome, 5 ms per pass on the spheres); the wavefront kernels (`?wavefront=on`) were not checked: their first compile in Chrome had not finished after more than a minute (stopped there) | stopped (ROADMAP.md: no web work for now) | the same speedups in browsers; the wavefront needs one shader module per kernel (or smaller ones) before it can be used there |
+| W1 | Bring this round's GPU changes to the browser: the new traversal stack is in the web build (a GPU path traced image checked in Chrome, 5 ms per pass on the spheres); the wavefront kernels (`?wavefront=on`) were not checked: their first compile in Chrome had not finished after more than a minute (stopped there) | stopped (no web work for now then) | the same speedups in browsers; the wavefront needs one shader module per kernel (or smaller ones) before it can be used there |
 
 ### Platform
 
 | ID | idea | status | expected gain / why |
 |---|---|---|---|
-| X1 | Own Vulkan backend behind the same `webgpu.h` (drop wgpu-native), with our own WGSL → SPIR-V compiler | planned (ROADMAP.md step 6, after PBR; the plan: VULKAN.md) | no per-call validation or conservative barriers (P10), the hardware's features (subgroups, 64-bit atomics, bindless, more bindings, a second queue), hardware ray tracing (R6); less foreign code |
+| X1 | Own Vulkan backend behind the same `webgpu.h` (drop wgpu-native), with our own WGSL → SPIR-V compiler | planned (step 6, after PBR; the plan: VULKAN.md) | no per-call validation or conservative barriers (P10), the hardware's features (subgroups, 64-bit atomics, bindless, more bindings, a second queue), hardware ray tracing (R6); less foreign code |
 
-## Done
+## 5. Backlog (everything else to do, gathered 2026-11-17)
+
+Not scheduled; the IDs point to section 4 (the ideas, with their measurements).
+
+Agreed for later (2026-11-17):
+
+- **A Linux window for our Vulkan layer.** Today it shows a window only on Windows (Win32
+  surface); an X11 or Wayland surface would let the Linux laptop's integrated GPU run the
+  live viewer through our own layer.
+- **Automated builds and tests**: GitHub Actions building and running `make test` on Linux
+  and Windows (float and double, wgpu and our layer where a runner can) for every push.
+
+Physics:
+
+- **P5, AVBD solver** ("very good to have"; started on the branch `physics-avbd`, which the user rebases).
+- **P11, the rest**: tall piles on the GPU fall fully asleep in 2 of 3 runs; the rest needs a
+  Gauss-Seidel GPU solver by colours (P5's colouring).
+- **P6, the rest**: SIMD in the CPU solver (AVX2 natively, WASM SIMD: W6).
+- **P4**: CPU or GPU chosen by the number of bodies. **P9**: fewer speculative contacts on
+  the CPU. **P3b**: GJK/MPR for hulls if the full test costs again. **P7**: a broad-phase tree
+  past ~10k bodies (the CPU's is sort and sweep now).
+- **P10, the rest**: a world partly asleep still pays all the GPU dispatches.
+
+Rendering:
+
+- **R7, anti-aliasing**: MSAA in the GPU rasterizer, FXAA/SMAA, coverage MSAA in the CPU
+  rasterizer, TAA in the viewer, the path tracer's denoiser guide jittered and a better pixel
+  filter.
+- **R2**: upscaler / temporal SVGF.
+- **R1 in browsers**: the wavefront kernels (W3).
+- **R8, the rest**: the wgpu path tracer's GPU top level traces 10-25% slower than the CPU's
+  SAH tree (PLOC or a refit could close it); simpler copies of the unit sphere for the
+  physics' balls; levels of detail for the path tracer's preview.
+- **M1**: surface depth from textures (height maps and parallax, detail maps; below).
+- Mixed materials for the falling meshes (`-meshmat mirror,diffuse`).
+
+Air and cloud: **A1** (sparse bricks for the cloud's advection), **A2** (the air at a lower
+rate when nothing violent happens).
+
+Our Vulkan layer (VULKAN.md "Order"): **remote rendering** to browsers (native rendering
+streamed where the browser lacks a technology, e.g. hardware ray tracing); the browsers'
+new features (subgroups, ray tracing) as they ship.
+
+Tests and tools: the web checks of W2 in the GitHub Actions; the GPU physics tests are
+timing-sensitive on piles (fixed with tolerances; a seeded, waited mode would make them
+exact).
+
+### M1: surface depth from textures (an idea, agreed 2026-11-15)
+
+Make surfaces look deep and detailed without more triangles: the model stays simple and
+textures carry the relief. Normal maps (PBR5) already bend the light; what they cannot do is
+move what is seen (a brick's edge does not hide the mortar behind it), cast the relief's own
+shadows or change the silhouette. The textures to add, each with a fallback when a model
+lacks it:
+
+- **height maps and parallax**: a height (depth) texture; the rasterizers march the view ray
+  through it (parallax occlusion mapping, Tatarchuk 2006; relief mapping) so the texture
+  coordinates shift where the surface would really be, with the relief's self-shadowing
+  towards the lamp from the same march. The path tracers the same at each hit (the ray
+  marched in the height field, then the shading point and normal there), so all four
+  pipelines still agree. The procedural bricks get their height map (it is already their
+  normal map's source);
+- **detail maps**: a second, finer normal and colour texture repeated many times over the
+  first, so close-ups stay sharp without huge textures;
+- the textures glTF already brings in, used further: the occlusion texture also on the
+  lamp's light where the relief hides it (only the light from around today); and a
+  displacement map as the step after, where the triangles are subdivided only near the camera
+  (tessellation) for real silhouettes, if parallax is not enough.
+
+glTF has no height map in its core material: an option to give one (`-heightmap`, as
+`-normalmap`), and the extensions that carry one read when models use them.
+
+## 6. History
+
+### 6.1 The order of 2026-11-14
+
+| # | step | status | what it is |
+|---|---|---|---|
+| 1 | **PNG, and the FPS counter on the image** | done (050baf2, 97091cd) | below |
+| 2 | **P3: a cheaper hull–hull test** | done | below; P3 |
+| 3 | **P8: a parallel prefix sum for the contact lists** | done | below; P8 |
+| 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | done | below; R4b |
+| 5 | **PBR: one physically based material model for all four pipelines** | done: PBR1–PBR6 (2026-11-14/15) | [PBR.md](PBR.md), phases PBR1–PBR6 |
+| 6 | **Our own Vulkan backend**: a WGSL → SPIR-V compiler and `webgpu.h` on Vulkan in place of wgpu-native, then native extensions, hardware ray tracing (R6) and remote rendering to browsers | done (merged into `main`, 2026-11-16; remote rendering not yet) | [VULKAN.md](VULKAN.md); X1, R6, P10 |
+
+#### PNG, and the FPS counter on the image
+
+PNG replaces PPM completely (the user's choice: the engine writes PNG itself, in C, and PPM
+goes away), reading and writing, so that every image the engine makes or reads is one any
+program opens.
+
+- `formats/png.{c,h}`, from scratch, no library: CRC-32 and Adler-32; a deflate encoder (LZ77
+  with hash chains and fixed Huffman codes: a good part of zlib's ratio in a few hundred
+  lines); the PNG filters chosen per row (the smallest sum of absolute differences, as libpng
+  does). A decoder too, needed by the PBR textures (PBR5, glTF): inflate (stored, fixed and
+  dynamic Huffman blocks), all five filters, colour types grey, grey + alpha, RGB, RGBA and
+  palette, bit depths 1–16 (to 8 bits), Adam7 interlacing.
+- Everything that wrote `.ppm` writes `.png`: `render` and `sim` (`frame_NNNN.png`), the
+  viewer's screenshots, the examples and `make` targets; `tools/frames_to_gif.py` reads PNG;
+  `texture_load_ppm` becomes `texture_load_png`; the tests and `make bench` compare PNGs.
+  The default output names change (`out/cornell_boxes.png` ...), the docs with them.
+- A test: write and read back random images of every colour type and size (round trip
+  exact), and decode reference files written by another encoder (Pillow, via uv, once, kept
+  in the repo).
+- **FPS on the image**: a small readout (frames per second and ms per frame) in a corner of
+  the frame, drawn with a built-in 5×7 pixel font, on the CPU framebuffer and in the GPU's
+  compositing pass; on by default, a key toggles it. The title keeps it too.
+
+#### P3: a cheaper hull–hull test
+
+The hulls' contacts are the biggest cost of a pile (2.6 of 4.7 ms per step with 1500 hulls
+on the GPU). The separating-axis test tries every pair of edges (48 corners per hull: about
+19k pairs per pair of hulls).
+
+- Fewer corners where they do not show: measure the hull's error against the mesh for
+  24, 32 and 48 corners.
+- GJK for the distance (and EPA or the SAT on the touching faces only for the depth) instead
+  of all edge pairs; the contact points from clipping the two touching faces, as now.
+- Kept contacts (PhysX's persistent contact manifold): each pair remembers its separating
+  axis or touching faces from the last step; a pair that barely moved starts there and most
+  of the time needs one test.
+- CPU and GPU together; measured with `mesh_rain` and the tall piles of P11.
+
+Done (2026-11-14): the remembered pairs (the third point), CPU and GPU; the corners measured
+and kept at 48 (32 would be 1.6x faster but leave up to 7% of a round shape out); GJK not
+needed for now (P3b). Results in 6.2.
+
+#### P8: a parallel prefix sum for the contact lists
+
+"Contact lists 1" is one GPU thread adding up the contacts of every body (0.1–0.4 ms).
+A work-efficient scan (Blelloch; or decoupled look-back, Merrill & Garland 2016) over
+workgroups, with a fallback when subgroup operations are missing.
+
+Done (2026-11-14): a single workgroup of 256 threads is enough for the bodies there are
+(each sums a run of them, the 256 sums are scanned together): 0.10–0.14 ms → 0.004 ms.
+
+#### R4b: PLOC
+
+Meister & Bittner, "Parallel Locally-Ordered Clustering for Bounding Volume Hierarchy
+Construction" (2018): a GPU builder close to SAH quality, for when the CPU has no top-level
+tree and for meshes that change. Compared with today's LBVH and the CPU's SAH tree on build
+time, tree cost (bvh_cost) and ray speed.
+
+Done (2026-11-14): meshes' trees 8-9% cheaper than the LBVH's and rays 3-4% faster, built
+1.3-1.8x slower (the 871k-triangle dragon: 10.5 ms instead of 8.4); the top level as good
+either way. So PLOC builds meshes' trees and the LBVH the top level (`LR_GPU_BVH`); the
+CPU's SAH trees are still the fastest to trace, and are used whenever they are current.
+
+#### PBR
+
+The design and its six phases are in [PBR.md](PBR.md): the glTF metallic-roughness model
+with transmission, one shading code for the CPU and GPU rasterizers and path tracers, an
+environment for the rasterizer (light probes from the scene and HDR skies), textures, and
+glTF files with PNG and JPEG textures. All six phases are done (`-gltf`, `make
+gltf-download` for Khronos's sample models).
+
+### 6.2 What was done, and what it measured
 
 Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel, kernel time; CPU: 320x320, 8 threads):
 
@@ -150,7 +397,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 | 2026-11-12 | Denoiser passes read packed data | ~3 → ~2 ms at 640x640 |
 | 2026-11-12 | Owen-scrambled Sobol + blue noise sampler | same error with up to 1.35x fewer samples (Cornell box, 64 spp) |
 
-## Tried and rejected
+## 7. Tried and rejected
 
 | when | what | why |
 |---|---|---|
@@ -169,7 +416,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 | 2026-11-13 | P1 variants: mass splitting counting only the "active" contacts of a body on the GPU | no gain and more contacts per step: all of a body's contacts count |
 | 2026-11-13 | P2 variants: a body sleeps only with all it touches (islands, as Box2D and PhysX) | in a pile of 250 hulls some body always jitters: about 10% asleep after 40 s; each body alone: all asleep after 35 s |
 
-## Sources
+## 8. Sources
 
 - C. Yuksel et al., "Augmented Vertex Block Descent", SIGGRAPH 2025:
   https://graphics.cs.utah.edu/research/projects/avbd/

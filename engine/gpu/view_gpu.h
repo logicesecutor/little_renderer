@@ -84,7 +84,7 @@ typedef void (*GpuTraceReadFn)(void *user, const float *sum_count, int w, int h)
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user);
 double gpu_view_trace_pass_ms(const GpuView *v);    // how long the last one took
 // 1 = the path tracer runs as small kernels, one step of every path at a time (wavefront;
-// docs/PERFORMANCE.md R1), 0 = as one kernel per path (the default)
+// docs/STATUS.md R1), 0 = as one kernel per path (the default)
 void gpu_view_trace_wavefront(GpuView *v, int on);
 // The denoiser (gpu/denoise_gpu.c): on = 1 shows and reads back the image denoised (the
 // count of each pixel is then 1), 0 the samples as they are. Off by default. Returns 1 if it

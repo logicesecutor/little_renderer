@@ -163,7 +163,7 @@ that full test ran. Next step:
 Two tables, last step's (read) and this step's (written), so that pairs no longer near
 drop out by themselves. 250 hulls settling in a room, one CPU thread: 30.5 → 9.4 ms per
 step; on the GPU, 1000 hulls raining: the hulls' contacts 2.3 → 1.4 ms per step
-(PERFORMANCE.md P3).
+(STATUS.md P3).
 
 Fewer corners per hull would be the other way: the test's cost goes with them (250 hulls:
 48 corners 31.8 ms per step, 32 corners 20.2, 24 corners 15.4), but the hull also leaves
@@ -838,7 +838,7 @@ the solver more contacts. With hulls the gain is larger: 1500 hulls in `mesh_rai
 rest, 22.7 → 3.5 ms per step (907 asleep). On the GPU it removes the hulls' contacts (600
 hulls in `mesh_rain`: 2.5 → 0.9 ms per step on average), but not the fixed cost of the
 passes, which are launched for the room for contacts: the settled 1024 balls and boxes take
-1.07 ms either way (PERFORMANCE.md P10).
+1.07 ms either way (STATUS.md P10).
 
 Below about 64 bodies the GPU's fixed cost (some 10 dispatches per substep) is larger than
 the work; it still takes the bodies off the CPU, which the live viewer needs: with 600

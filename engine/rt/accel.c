@@ -152,7 +152,7 @@ static int intersect_instances(const Scene *s, const Ray *ray, real tmin, real t
 // LR_TLAS_REFIT=1 refits it instead while the same instances only moved (their boxes made
 // again from the leaves up, O(n)) until its cost has grown by a tenth: measured on a pile of
 // 700 falling bodies, the GPU then traced 5% slower than with a new tree each step, so the
-// rebuild is the default (docs/PERFORMANCE.md).
+// rebuild is the default (docs/STATUS.md).
 #define TLAS_REFIT_GROWTH 1.1
 static void build_tlas(RtAccel *a, const Scene *s, const AccelParams *p){
     static int refit_env = -1;

@@ -199,7 +199,7 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-s samples` | render: light paths per pixel. view: stop refining after this many | 128 (view: 4096) | noise falls like 1/√s: 4× the samples = half the grain |
 | `-d bounces` | maximum bounces per path | 50 | 3–5 is fast but darker (less indirect light); Russian roulette ends most paths early anyway |
 | `-clamp max` | caps the brightness of a single sample | 0 (off) | `-clamp 4` removes fireflies (glass, mirrors) but darkens caustics: biased |
-| `-wavefront on\|off` | path tracing on the GPU: small kernels, each doing one step (extend, shade, shadow rays) of all paths at once, instead of one kernel per path. The same image; slower on today's scenes (docs/PERFORMANCE.md R1), kept for heavier shading. Native builds only for now | off |
+| `-wavefront on\|off` | path tracing on the GPU: small kernels, each doing one step (extend, shade, shadow rays) of all paths at once, instead of one kernel per path. The same image; slower on today's scenes (docs/STATUS.md R1), kept for heavier shading. Native builds only for now | off |
 | `-denoise on\|off` | path tracing on the GPU: the image is denoised (an edge-avoiding filter guided by each pixel's noise, normal, distance and albedo: WEB.md 2.4) | `view`, `sim`: on; `render`: off | at 4–16 samples it looks like 256–1024; it blurs a little and is slightly biased (±1%), so a final `render` stays unbiased unless asked; the CPU path tracer does not denoise |
 | `-threads n` | CPU threads, for both backends | 0 = all cores | same as the `OMP_NUM_THREADS` environment variable; the image is the same for any value |
 | `-sampler sobol\|random` | where a path's random numbers come from: the Sobol sequence, Owen-scrambled, shifted per pixel by blue noise; or plain PCG32 (RAYTRACER.md 5.10) | sobol | sobol: less noise for the same samples (up to 1.35×, more while moving in the viewer), and finer-grained noise |
@@ -352,7 +352,7 @@ CPU nothing: `bin/view -sim on -backend raster -balls 400 -boxes 200 -balloons 0
 screen's frame rate (164 frames/s on an RTX 3070; 142 with `-gpurigid off`). Set
 `LR_GPU_TIMING=1` to have the GPU passes timed (WEB.md 3).
 
-Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed):
+Environment variables for measuring (docs/STATUS.md keeps what they showed):
 
 | variable | effect |
 |---|---|

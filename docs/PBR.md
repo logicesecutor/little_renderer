@@ -1,6 +1,6 @@
 # PBR: one physically based material model for every pipeline
 
-The plan for physically based materials (step 5 of [ROADMAP.md](ROADMAP.md)), and what was
+The plan for physically based materials (step 5 of [STATUS.md](STATUS.md)), and what was
 done. Status: all six phases done (PBR1-PBR4 2026-11-14, PBR5 and PBR6 2026-11-15, below).
 
 ## Goals (decided 2026-11-14)
@@ -98,7 +98,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers. **Done** (below) |
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
-`make test`; the measurements in [PERFORMANCE.md](PERFORMANCE.md); one commit per phase.
+`make test`; the measurements in [STATUS.md](STATUS.md); one commit per phase.
 
 ### PBR1, done (2026-11-14)
 
@@ -153,7 +153,7 @@ Decided on the way (the open questions):
   the spheres, gold, a rough white metal, frosted glass, blue plastic, smooth red plastic,
   a half-metal half-clear material, a copper dragon, a metal torus in fog: all within
   0.25% (the CPU's noise).
-- Cost on the GPU: PERFORMANCE.md (+2% to +28%).
+- Cost on the GPU: STATUS.md (+2% to +28%).
 
 ### PBR3, done (2026-11-14)
 
@@ -178,7 +178,7 @@ Decided on the way (the open questions):
   against 0.0947, linear); the boxes' floor is brighter (no shadows), the ceiling and the
   back wall within 10%.
 - CPU against GPU rasterizer: within 1/255 but for a few pixels on triangle edges, float
-  and double. Cost: PERFORMANCE.md.
+  and double. Cost: STATUS.md.
 
 ### PBR4, done (2026-11-14)
 
@@ -212,7 +212,7 @@ Decided on the way (the open questions):
   with a sky through its front, the open scene in fog: all within 0.4% (the CPU's noise),
   the wavefront the same. GPU against CPU rasterizer: a mean difference of 0.05-0.2 of
   255.
-- Cost: PERFORMANCE.md.
+- Cost: STATUS.md.
 
 Decided on the way:
 
@@ -279,7 +279,7 @@ Decided on the way:
   0.07-0.12 of 255. GPU, wavefront and CPU path tracing of textured models, instances
   included: within 0.3%. The CPU rasterizer against the path tracer: the rooms within about
   5%, the textured floor under the sky alike.
-- Cost: PERFORMANCE.md.
+- Cost: STATUS.md.
 
 Decided on the way:
 
@@ -335,7 +335,7 @@ Decided on the way:
   look as in other viewers: the helmet's visor, glow and worn metal, the spheres' metallic /
   roughness sweep, the orientation test's arrows, the mirrored normal maps (rasterizer and
   path tracer alike).
-- Cost: PERFORMANCE.md.
+- Cost: STATUS.md.
 
 Decided and found on the way:
 

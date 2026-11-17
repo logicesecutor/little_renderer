@@ -509,7 +509,7 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
     want.features.vertexPipelineStoresAndAtomics = have.features.vertexPipelineStoresAndAtomics;
     // The main queue, and when asked for (LR_VK_QUEUES=2) a second: of a compute-only family
     // if there is one, else of the main family if it has two (=same: of the main family).
-    // Not by default: it made mesh_rain slower (docs/PERFORMANCE.md).
+    // Not by default: it made mesh_rain slower (docs/STATUS.md).
     const char *nq = getenv("LR_VK_QUEUES");
     int same = nq && !strcmp(nq, "same"), one = !same && !(nq && !strcmp(nq, "2"));
     uint32_t fam[2] = {adapter->family, adapter->family};
