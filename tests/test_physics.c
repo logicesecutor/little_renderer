@@ -1,11 +1,13 @@
 // test_physics.c - checks the physics engine against answers known in advance:
 //   free fall (y = y0 - g t^2 / 2), bounce height (h' = e^2 h), momentum conservation in
-//   collisions, a resting stack that stays put, a box landing flat, a divergence-free flow
+//   collisions, a resting stack that stays put, a box landing flat, fast bodies that do not
+//   pass through thin ones, a tall pile that comes fully to rest, a divergence-free flow
 //   after the projection, and a cloud that is carried by the wind without losing mass.
 //
 //   make test_physics && ./bin/test_physics
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "lr.h"
 
 static int failures = 0;
@@ -54,11 +56,13 @@ static void test_bounce(void){
     w.bodies[i].restitution = 0.5;
     const real dt = 1.0 / 1000;
     real top = 0;
-    int bounced = 0;
+    int bounced = 0, fell = 0;
     for (int k = 0; k < 3000; k++){
-        real vy = w.bodies[i].vel.y;
         rigid_step(&w, dt);
-        if (vy < 0 && w.bodies[i].vel.y > 0) bounced = 1;
+        // (stopped at the floor by a speculative contact, it may rest one step at speed 0
+        // before the bounce)
+        if (w.bodies[i].vel.y < 0) fell = 1;
+        if (fell && w.bodies[i].vel.y > 0) bounced = 1;
         if (bounced && w.bodies[i].pos.y > top) top = w.bodies[i].pos.y;
         if (bounced && w.bodies[i].vel.y < 0) break;
     }
@@ -149,6 +153,61 @@ static void test_sleep(void){
     rigid_steps(&w, 1.0 / 240, 4, NULL);
     check("an impulse wakes a body", w.bodies[0].sleeping, 0, 0);
     rigid_free(&w);
+}
+
+// Continuous collision (rigid.c, rigid_ccd): a ball and a box much faster than their size
+// per step at a slab 4 units thick, and two small balls head on; none may pass through
+static void test_fast(void){
+    printf("fast bodies (a ball and a box at a 4-unit slab, two balls head on, 500 to 50000 units / s)\n");
+    real speeds[] = {500, 5000, 50000};
+    int through = 0, missed = 0;
+    for (int k = 0; k < 3; k++){
+        RigidWorld w;
+        rigid_init(&w);
+        w.gravity = vec3(0, 0, 0);
+        int slab = rigid_add_box(&w, vec3(0, 0, 0), vec3(2, 200, 200), quat_identity(), 1);
+        w.bodies[slab].inv_mass = 0;
+        w.bodies[slab].inv_inertia = vec3(0, 0, 0);
+        int ball = rigid_add_sphere(&w, vec3(-400, 0, 0), 3, 1);
+        int box = rigid_add_box(&w, vec3(-400, 50, 0), vec3(3, 3, 3), quat_identity(), 1);   // (off the slab's centre)
+        int d = rigid_add_sphere(&w, vec3(-400, 120, 0), 4, 1), e = rigid_add_sphere(&w, vec3(400, 120, 0), 4, 1);
+        w.bodies[ball].vel = w.bodies[box].vel = w.bodies[d].vel = vec3(speeds[k], 0, 0);
+        w.bodies[e].vel = vec3(-speeds[k], 0, 0);
+        for (int s = 0; s < 120; s++) rigid_steps(&w, 1.0 / 60, 4, NULL);
+        through += (w.bodies[ball].pos.x > 0) + (w.bodies[box].pos.x > 0);
+        missed += w.bodies[d].pos.x > w.bodies[e].pos.x;
+        rigid_free(&w);
+    }
+    check("bodies through the slab (of 6)", through, 0, 0);
+    check("head-on pairs that passed each other (of 3)", missed, 0, 0);
+}
+
+// A pile three times as tall as it is wide (400 balls, boxes and tori dropped into a room
+// 180 wide): every body asleep within 30 s (16 s in float, 22 in double)
+static void test_tall_pile(void){
+    printf("a tall pile comes to rest (400 bodies in a room 180 wide)\n");
+    RigidWorld w;
+    rigid_init(&w);
+    real half = 90;
+    rigid_set_room(&w, (Aabb){vec3(-half, 0, -half), vec3(half, 40000, half)});
+    Scene sc;
+    memset(&sc, 0, sizeof(sc));
+    int geom = -1, mesh = scene_load_mesh_object(&sc, "models/torus.obj", scene_add_material(&sc, (Material){0}), 40);
+    if (mesh >= 0) geom = rigid_geom_hull(&w, sc.meshes[mesh].tris, sc.meshes[mesh].ntris, 0);
+    Rng r;
+    rng_seed(&r, 7, 1);
+    for (int i = 0; i < 400; i++){
+        Vec3 p = vec3((half - 30) * (2 * rng_real(&r) - 1), 30 + i * 6.0f * (300 / half) * (300 / half),
+                      (half - 30) * (2 * rng_real(&r) - 1));
+        if (i % 3 == 0) rigid_add_sphere(&w, p, 12 + 6 * rng_real(&r), 1);
+        else if (i % 3 == 1 || geom < 0)
+            rigid_add_box(&w, p, vec3(10 + 6 * rng_real(&r), 10, 12), quat_axis_angle(vec3(0, 1, 0), rng_real(&r) * 3), 1);
+        else rigid_add_hull_body(&w, geom, xform_make(p, quat_to_mat3(quat_axis_angle(vec3(1, 0, 0), rng_real(&r) * 3)).m, 1), 1);
+    }
+    for (int s = 0; s < 30 * 60; s++) rigid_steps(&w, 1.0 / 60, 4, NULL);
+    check("asleep after 30 s (of 400)", rigid_sleeping(&w), 400, 0);
+    rigid_free(&w);
+    scene_free(&sc);
 }
 
 static void test_fluid(void){
@@ -375,6 +434,8 @@ int main(void){
     test_stack();
     test_box_lands_flat();
     test_sleep();
+    test_fast();
+    test_tall_pile();
     test_hulls();
     test_fluid();
     if (failures){ printf("%d FAILED\n", failures); return 1; }

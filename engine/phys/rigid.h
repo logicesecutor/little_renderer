@@ -59,6 +59,9 @@ typedef struct {
     int sleeping;            // 1: at rest, not moved until something wakes it (rigid_steps)
     real sleep_time;         // how long it has been still (s)
     Vec3 sleep_force;        // the external force on it when it fell asleep
+    Vec3 anchor_pos;         // slow, but not still: where it was when it became slow,
+    Quat anchor_rot;         // and its turn then (rigid.c, fall_asleep)
+    real anchor_time;        // how long it has stayed slow and near them (s)
 } Body;
 
 typedef struct {

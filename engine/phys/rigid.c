@@ -14,6 +14,11 @@
 #define SLEEP_SPEED 5.0f         // slower than this (units / s, the outermost point too) is still
 #define SLEEP_TIME 0.5f          // still this long (s): asleep
 #define WAKE_SPEED 20.0f         // a body faster than this wakes the sleeping ones it comes near
+#define CCD_FRACTION 0.5f        // moving more than this times its inner radius in a step: swept (rigid_ccd)
+#define SLOW_SPEED 60.0f         // slower than this, and staying near one place and turn...
+#define ANCHOR_MOVE 2.5f         // ... no farther than this (units, the outermost point too) ...
+#define ANCHOR_TIME 1.5f         // ... this long (s): asleep too (a rocking body in a pile)
+#define SETTLE_DAMPING 2.0f      // a slow body (SLOW_SPEED) resting on something: speed lost per second
 #define MAX_HULL_VERTS 64        // corners of a hull (rigid_geom_hull)
 #define MAX_HULL_FACES 128
 
@@ -807,15 +812,14 @@ static real body_radius(const Body *b){ return b->shape == BODY_SPHERE ? b->half
 // At most half their sizes: a body that moves farther than that in a step would need
 // continuous collision detection anyway, and the cap keeps a burst of fast bodies from
 // pairing everything with everything.
+// The closing speed is the whole relative speed, not only its part along the line between
+// the centres: a box flying past a wall's middle at 500 units/s closes on its face at that
+// speed, though the line to the wall's centre is almost square to its path (the part along
+// it let the box through a 4-unit slab). Faster than the cap allows, rigid_ccd takes over.
 static real pair_margin(const Body *a, const Body *b, real dt){
     real ra = body_radius(a), rb = b ? body_radius(b) : 0;
     real spin = v_len(a->angvel) * ra + (b ? v_len(b->angvel) * rb : 0);
-    real closing = v_len(a->vel);
-    if (b){
-        Vec3 dv = v_sub(a->vel, b->vel), d = v_sub(a->pos, b->pos);
-        real l = v_len(d);
-        closing = l > 0 ? r_fmax(-v_dot(dv, d) / l, 0) : v_len(dv);
-    }
+    real closing = b ? v_len(v_sub(a->vel, b->vel)) : v_len(a->vel);
     return r_fmin(SPECULATIVE_MIN + dt * (closing + spin), SPECULATIVE_MIN + 0.5f * (ra + rb));
 }
 
@@ -860,7 +864,7 @@ static int broad_phase(const RigidWorld *w, real dt, BodyPair **out){
     for (int i = 0; i < n; i++){
         const Body *b = &w->bodies[i];
         real r = body_radius(b);
-        // >= half of any pair margin of this body (pair_margin: closing <= |va| + |vb|)
+        // >= half of any pair margin of this body (pair_margin: |va - vb| <= |va| + |vb|)
         real grow = 0.5f * SPECULATIVE_MIN + dt * (v_len(b->vel) + v_len(b->angvel) * r);
         real c = comp(b->pos, axis);
         e[i] = (SweepEnd){c - r - grow, c + r + grow, i};
@@ -939,7 +943,7 @@ static void find_contacts(RigidWorld *w, real dt){
 static int body_still(const Body *b){
     return v_len(b->vel) < SLEEP_SPEED && v_len(b->angvel) * body_radius(b) < SLEEP_SPEED;
 }
-static void wake(Body *b){ b->sleeping = 0; b->sleep_time = 0; }
+static void wake(Body *b){ b->sleeping = 0; b->sleep_time = 0; b->anchor_time = 0; }
 
 // at the start of a step: wake the sleeping bodies that must move; returns how many still sleep
 static int wake_bodies(RigidWorld *w, real dt, const Vec3 *forces){
@@ -971,17 +975,51 @@ static int wake_bodies(RigidWorld *w, real dt, const Vec3 *forces){
     return asleep;
 }
 
-// at the end of a step: the bodies still long enough fall asleep
+// At the end of a step: the bodies still long enough fall asleep. So do those that, slow,
+// stay where they are: a body rocking in a pile, or creeping a hair's breadth back and forth,
+// is never still at any moment, but it goes nowhere. While it is slower than SLOW_SPEED, its
+// place and turn are kept (the anchor); if it stays within ANCHOR_MOVE of them for
+// ANCHOR_TIME, it sleeps. A slow body that does get somewhere (a ball rolling across the
+// floor) moves its anchor along and stays awake.
+static int body_slow(const Body *b){
+    return v_len(b->vel) < SLOW_SPEED && v_len(b->angvel) * body_radius(b) < SLOW_SPEED;
+}
+// still, or going nowhere for a while (half the time that puts it to sleep)
+static int body_quiet(const Body *b){ return body_still(b) || b->anchor_time >= 0.5f * ANCHOR_TIME; }
+static int near_anchor(const Body *b){
+    Quat q = b->anchor_rot;
+    real c = r_fabs(q.w * b->rot.w + q.x * b->rot.x + q.y * b->rot.y + q.z * b->rot.z);
+    real turn = 2 * r_acos(r_fmin(c, 1.0f));                // the angle between the two turns
+    return v_len(v_sub(b->pos, b->anchor_pos)) < ANCHOR_MOVE && turn * body_radius(b) < ANCHOR_MOVE;
+}
+// A body does not fall asleep while one it touches is awake and not quiet (not still, nor
+// going nowhere): asleep it would be a fixed body under it, and a pile that is still
+// settling, held up by some bodies asleep and pressing on others awake, slid off them in
+// avalanches that woke it all again. (The pile still falls asleep from the bottom up: the
+// bodies at its bottom, quiet first, hold the others still.)
 static void fall_asleep(RigidWorld *w, real dt, const Vec3 *forces){
+    char *busy = calloc((size_t)(w->nbodies > 0 ? w->nbodies : 1), 1);   // touches a moving body
+    if (busy) for (int k = 0; k < w->ncontacts; k++){
+        const Contact *c = &w->contacts[k];
+        if (c->b < 0 || (c->jn <= 0 && c->depth0 <= 0)) continue;   // a wall, or not touching
+        const Body *a = &w->bodies[c->a], *b = &w->bodies[c->b];
+        if (!a->sleeping && a->inv_mass > 0 && !body_quiet(a)) busy[c->b] = 1;
+        if (!b->sleeping && b->inv_mass > 0 && !body_quiet(b)) busy[c->a] = 1;
+    }
     for (int i = 0; i < w->nbodies; i++){
         Body *b = &w->bodies[i];
         if (b->inv_mass == 0 || b->sleeping) continue;
         b->sleep_time = body_still(b) ? b->sleep_time + dt : 0;
-        if (b->sleep_time < SLEEP_TIME) continue;
+        if (body_slow(b) && b->anchor_time > 0 && near_anchor(b)) b->anchor_time += dt;
+        else if (body_slow(b)){ b->anchor_pos = b->pos; b->anchor_rot = b->rot; b->anchor_time = dt; }
+        else b->anchor_time = 0;
+        if ((b->sleep_time < SLEEP_TIME && b->anchor_time < ANCHOR_TIME) || (busy && busy[i])) continue;
+        b->anchor_time = 0;
         b->sleeping = 1;
         b->vel = b->angvel = vec3(0, 0, 0);
         b->sleep_force = forces ? v_add(b->force, forces[i]) : b->force;
     }
+    free(busy);
 }
 
 int rigid_sleeping(const RigidWorld *w){
@@ -1020,6 +1058,184 @@ static void apply(Body *a, Body *b, Mat3 ia, Mat3 ib, Vec3 ra, Vec3 rb, Vec3 j){
     if (b){
         b->vel = v_sub(b->vel, v_scale(j, b->inv_mass));
         b->angvel = v_sub(b->angvel, mat3_mul_vec(ib, v_cross(rb, j)));
+    }
+}
+
+// One pass of sequential impulses over the active contacts, each towards its target speed
+// along the normal (bias[q], or c->bias without one), friction after it
+static void solve_pass(RigidWorld *w, const Mat3 *iw, const int *act, int nact, const real *bias){
+    Mat3 zero = {{{0}}};
+    for (int q = 0; q < nact; q++){
+        Contact *c = &w->contacts[act[q]];
+        Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+        Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
+
+        Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
+        real dj = c->mass_n * ((bias ? bias[q] : c->bias) - v_dot(dv, c->n));
+        real jn = r_fmax(c->jn + dj, 0);
+        dj = jn - c->jn;
+        c->jn = jn;
+        if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
+        // no push, no friction: nothing more to do (a gap, most of the time)
+        if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) continue;
+
+        dv = rel_velocity(a, b, c->ra, c->rb);
+        real lim = c->mu * c->jn;
+        real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
+        apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
+        c->jt1 = jt;
+        dv = rel_velocity(a, b, c->ra, c->rb);
+        jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
+        apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
+        c->jt2 = jt;
+    }
+}
+
+// ---- continuous collision: fast bodies swept ---------------------------------------------
+//
+// The speculative contacts stop a pair that can close within a step, up to half their sizes
+// (pair_margin): a body faster than that could step over a thin wall or a small body between
+// two steps. After the step, each body that moved more than CCD_FRACTION of its inner radius
+// (the largest sphere inside it) is swept: that sphere along its path, from where it was to
+// where it is, against the room's walls and every other body (at its place now, grown by the
+// sphere's radius: a sphere, a box or a hull grown, a fixed mesh's triangles). At the first
+// hit it is moved back to just before it, keeping its velocity: the next step's speculative
+// contact then stops or bounces it at the surface (motion clamping, as Bullet does). What it
+// misses: the turn within a step, and a fast body that only grazes a corner with its edge.
+
+// the radius of the largest sphere about the centre of mass inside the body
+static real body_inner_radius(const Body *b){
+    if (b->shape == BODY_SPHERE) return b->half.x;
+    if (b->shape == BODY_BOX) return r_fmin(b->half.x, r_fmin(b->half.y, b->half.z));
+    if (b->shape == BODY_HULL && b->g){
+        real r = 1e30f;
+        for (int k = 0; k < b->g->hull.nf; k++) r = r_fmin(r, b->g->hull.f[k].d);
+        return r > 0 && r < 1e30f ? r : r_fmin(b->half.x, r_fmin(b->half.y, b->half.z));
+    }
+    return 0;
+}
+
+// p + t d, t in [0, *t): where it enters the sphere (c, rad); 1 and *t = that t if it does
+// (a start inside is no hit: the contacts have it)
+static int sweep_sphere(Vec3 p, Vec3 d, Vec3 c, real rad, real *t){
+    Vec3 m = v_sub(p, c);
+    real a = v_dot(d, d), b = v_dot(m, d), cc = v_dot(m, m) - rad * rad;
+    if (cc <= 0 || a <= 0 || b >= 0) return 0;
+    real disc = b * b - a * cc;
+    if (disc < 0) return 0;
+    real tt = (-b - r_sqrt(disc)) / a;
+    if (tt < 0 || tt >= *t) return 0;
+    *t = tt;
+    return 1;
+}
+
+// the same against the convex solid n_k . x <= off_k + grow (k < nf)
+static int sweep_planes(Vec3 p, Vec3 d, const Vec3 *n, const real *off, int nf, real grow, real *t){
+    real tin = 0, tout = 1;
+    int outside = 0;
+    for (int k = 0; k < nf; k++){
+        real dist = v_dot(n[k], p) - off[k] - grow, den = v_dot(n[k], d);
+        if (dist > 0) outside = 1;
+        if (den == 0){ if (dist > 0) return 0; continue; }
+        real tk = -dist / den;
+        if (den < 0) tin = r_fmax(tin, tk); else tout = r_fmin(tout, tk);
+        if (tin > tout) return 0;
+    }
+    if (!outside || tin >= *t) return 0;
+    *t = tin;
+    return 1;
+}
+
+// the swept sphere (p + t d, radius rad) against body o, at opos with its turn now
+static int sweep_body(const Body *o, Vec3 opos, Vec3 p, Vec3 d, real rad, real *t){
+    if (o->shape == BODY_SPHERE) return sweep_sphere(p, d, opos, o->half.x + rad, t);
+    Mat3 rt = mat3_transpose(quat_to_mat3(o->rot));
+    Vec3 lp = mat3_mul_vec(rt, v_sub(p, opos)), ld = mat3_mul_vec(rt, d);    // its frame
+    if (o->shape == BODY_BOX){
+        Vec3 n[6] = {vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1)};
+        real off[6] = {o->half.x, o->half.x, o->half.y, o->half.y, o->half.z, o->half.z};
+        return sweep_planes(lp, ld, n, off, 6, rad, t);
+    }
+    if (o->shape == BODY_HULL){
+        const Convex *c = &o->g->hull;
+        Vec3 n[MAX_HULL_FACES];
+        real off[MAX_HULL_FACES];
+        int nf = c->nf < MAX_HULL_FACES ? c->nf : MAX_HULL_FACES;
+        for (int k = 0; k < nf; k++){ n[k] = c->f[k].n; off[k] = c->f[k].d; }
+        return sweep_planes(lp, ld, n, off, nf, rad, t);
+    }
+    // a fixed mesh: its triangles near the path, each as a plane grown by rad, hit inside it
+    TriList list = {NULL, 0, 0};
+    Vec3 e = v_add(lp, ld);
+    Aabb q = {vec3(r_fmin(lp.x, e.x) - rad, r_fmin(lp.y, e.y) - rad, r_fmin(lp.z, e.z) - rad),
+              vec3(r_fmax(lp.x, e.x) + rad, r_fmax(lp.y, e.y) + rad, r_fmax(lp.z, e.z) + rad)};
+    mesh_tree_query(&o->g->tree, q, tri_list_add, &list);
+    int hit = 0;
+    for (int k = 0; k < list.n; k++){
+        const Vec3 *v = o->g->tree.tri + 3 * (size_t)list.tri[k];
+        Vec3 nn = v_cross(v_sub(v[1], v[0]), v_sub(v[2], v[0]));
+        real l = v_len(nn);
+        if (l <= 0) continue;
+        nn = v_scale(nn, 1.0f / l);
+        real s = v_dot(nn, v_sub(lp, v[0]));
+        if (r_fabs(s) <= rad) continue;                  // touching it already: the contacts' job
+        if (s < 0){ nn = v_neg(nn); s = -s; }            // the side it comes from
+        real dn = v_dot(nn, ld);
+        if (dn >= 0) continue;                           // moving away
+        real tt = (s - rad) / -dn;
+        if (tt < 0 || tt >= *t) continue;
+        Vec3 h = v_sub(v_add(lp, v_scale(ld, tt)), v_scale(nn, rad));   // on the triangle's plane
+        Vec3 c0 = v_cross(v_sub(v[1], v[0]), v_sub(h, v[0])), c1 = v_cross(v_sub(v[2], v[1]), v_sub(h, v[1]));
+        Vec3 c2 = v_cross(v_sub(v[0], v[2]), v_sub(h, v[2]));
+        if (v_dot(c0, nn) < 0 || v_dot(c1, nn) < 0 || v_dot(c2, nn) < 0) continue;
+        *t = tt;
+        hit = 1;
+    }
+    free(list.tri);
+    return hit;
+}
+
+// after a step: the bodies that moved fast since `start` (their positions then) swept, each
+// against the others as they moved too: from where both were, along the difference of
+// their paths (two bodies falling side by side do not meet)
+static void rigid_ccd(RigidWorld *w, const Vec3 *start){
+    for (int i = 0; i < w->nbodies; i++){
+        Body *b = &w->bodies[i];
+        if (b->inv_mass == 0) continue;
+        real rad = body_inner_radius(b);
+        Vec3 p = start[i], d = v_sub(b->pos, p);
+        real len = v_len(d);
+        if (rad <= 0 || len <= CCD_FRACTION * rad) continue;
+        real t = 1;
+        int hit = 0;
+        if (w->has_room){                                // the walls: n . x >= off + rad inside
+            Vec3 n[6] = {vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, -1, 0), vec3(0, 1, 0), vec3(0, 0, -1), vec3(0, 0, 1)};
+            real off[6] = {-w->room.lo.x, w->room.hi.x, -w->room.lo.y, w->room.hi.y, -w->room.lo.z, w->room.hi.z};
+            for (int k = 0; k < 6; k++){                 // (each wall alone: the room is not a solid)
+                real d0 = off[k] - rad - v_dot(n[k], p), dn = v_dot(n[k], d);
+                if (d0 <= 0 || dn <= 0) continue;        // already at it, or moving away
+                real tt = d0 / dn;
+                if (tt < t){ t = tt; hit = 1; }
+            }
+        }
+        for (int j = 0; j < w->nbodies; j++){
+            if (j == i) continue;
+            const Body *o = &w->bodies[j];
+            Vec3 dr = v_sub(d, v_sub(o->pos, start[j]));   // the path relative to o's
+            real l2 = v_dot(dr, dr);
+            if (l2 <= 0) continue;
+            // the path near its bounding sphere?
+            Vec3 m = v_sub(start[j], p);
+            real s = r_fmax(0, r_fmin(1, v_dot(m, dr) / l2));
+            Vec3 q = v_sub(m, v_scale(dr, s));
+            real reach = body_radius(o) + rad;
+            if (v_dot(q, q) > reach * reach) continue;
+            hit |= sweep_body(o, start[j], p, dr, rad, &t);
+        }
+        if (!hit) continue;
+        // just before the hit: a little short of it, never behind the start
+        real back = r_fmin(t, (SPECULATIVE_MIN + 0.05f * rad) / len);
+        b->pos = v_add(p, v_scale(d, t - back));
     }
 }
 
@@ -1077,9 +1293,21 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         }
     }
     free(prev_first);
+    Vec3 *start = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Vec3));   // for rigid_ccd
+    if (start) for (int i = 0; i < w->nbodies; i++) start[i] = w->bodies[i].pos;
+    // the bodies touching something (to settle them: step 1)
+    char *resting = calloc((size_t)(w->nbodies > 0 ? w->nbodies : 1), 1);
+    if (resting) for (int k = 0; k < w->ncontacts; k++){
+        const Contact *c = &w->contacts[k];
+        if (c->depth0 <= -SPECULATIVE_MIN) continue;
+        resting[c->a] = 1;
+        if (c->b >= 0) resting[c->b] = 1;
+    }
     Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
     int *act = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(int));
-    if (!iw || !act){ perror("malloc"); exit(1); }
+    char *bouncing = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1));
+    real *relax = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(real));   // step 5
+    if (!iw || !act || !bouncing || !relax){ perror("malloc"); exit(1); }
     Mat3 zero = {{{0}}};
 
     for (int s = 0; s < substeps; s++){
@@ -1090,8 +1318,12 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             Vec3 f = forces ? v_add(b->force, forces[i]) : b->force;
             b->vel = v_add(b->vel, v_scale(v_add(w->gravity, v_scale(f, b->inv_mass)), h));
             b->angvel = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_scale(b->torque, h)));
-            b->vel = v_scale(b->vel, 1.0f / (1.0f + w->linear_damping * h));
-            b->angvel = v_scale(b->angvel, 1.0f / (1.0f + w->angular_damping * h));
+            // A slow body resting on something loses its speed a little faster: the jitter of a
+            // pile, a hull rocking on its rim for ever, die out instead of keeping it awake
+            // (as Bullet's "additional damping")
+            real settle = resting && resting[i] && body_slow(b) ? SETTLE_DAMPING : 0;
+            b->vel = v_scale(b->vel, 1.0f / (1.0f + (w->linear_damping + settle) * h));
+            b->angvel = v_scale(b->angvel, 1.0f / (1.0f + (w->angular_damping + settle) * h));
         }
         for (int i = 0; i < w->nbodies; i++) iw[i] = w->bodies[i].inv_mass > 0 ? body_inv_inertia_world(&w->bodies[i]) : zero;
 
@@ -1121,6 +1353,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             real e = b ? r_fmax(a->restitution, b->restitution) : r_fmax(a->restitution, w->wall_restitution);
             c->mu = b ? r_sqrt(a->friction * b->friction) : r_sqrt(a->friction * w->wall_friction);
             real bounce = c->depth > -SPECULATIVE_MIN && c->vn0 < -BOUNCE_THRESHOLD ? -e * c->vn0 : 0;
+            bouncing[k] = bounce > 0;
             c->bias = bounce > 0 ? bounce
                     : (c->depth < 0 ? c->depth / h : r_fmin(BAUMGARTE / h * r_fmax(c->depth - CONTACT_SLOP, 0), MAX_PUSH));
             // the impulse it had (last step's, or this step's last substep's), applied first
@@ -1136,32 +1369,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         }
 
         // 3. iterate
-        for (int it = 0; it < w->iterations; it++){
-            for (int q = 0; q < nact; q++){
-                Contact *c = &w->contacts[act[q]];
-                Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
-                Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
-
-                Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
-                real dj = c->mass_n * (c->bias - v_dot(dv, c->n));
-                real jn = r_fmax(c->jn + dj, 0);
-                dj = jn - c->jn;
-                c->jn = jn;
-                if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
-                // no push, no friction: nothing more to do (a gap, most of the time)
-                if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) continue;
-
-                dv = rel_velocity(a, b, c->ra, c->rb);
-                real lim = c->mu * c->jn;
-                real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
-                apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
-                c->jt1 = jt;
-                dv = rel_velocity(a, b, c->ra, c->rb);
-                jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
-                apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
-                c->jt2 = jt;
-            }
-        }
+        for (int it = 0; it < w->iterations; it++) solve_pass(w, iw, act, nact, NULL);
 
         // 4. velocities -> positions
         for (int i = 0; i < w->nbodies; i++){
@@ -1170,8 +1378,29 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             b->pos = v_add(b->pos, v_scale(b->vel, h));
             b->rot = quat_integrate(b->rot, b->angvel, h);
         }
+
+        // 5. relax (Box2D v3's "soft step"): the push out of an overlap was a velocity that
+        // has now moved the bodies; it is taken back, so that it does not stay in them as
+        // motion (in a pile it kept bodies rocking and never asleep). One pass towards the
+        // speeds the contacts allow without a push: a gap may still close, a bounce keeps
+        // its speed, a touching contact stops approaching and no more.
+        if (relax){
+            for (int q = 0; q < nact; q++){
+                const Contact *c = &w->contacts[act[q]];
+                const Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+                Vec3 pa = v_add(a->pos, c->ra), pb = b ? v_add(b->pos, c->rb) : c->lb;
+                real depth = c->depth0 - v_dot(v_sub(pa, pb), c->n);   // now
+                relax[q] = bouncing[act[q]] ? c->bias : (depth < 0 ? depth / h : 0);
+            }
+            solve_pass(w, iw, act, nact, relax);
+        }
     }
 
+    if (start) rigid_ccd(w, start);       // (the sleeping still fixed: inv_mass 0)
+    free(start);
+    free(relax);
+    free(bouncing);
+    free(resting);
     if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
     if (w->sleep) fall_asleep(w, dt, forces);
     free(iw);
