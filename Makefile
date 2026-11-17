@@ -175,12 +175,12 @@ UV_WIN = $(shell cygpath -u "$$USERPROFILE" 2>/dev/null)/.local/bin/uv.exe
 endif
 PYTHON = $(if $(shell command -v uv 2>/dev/null),uv run,$(if $(wildcard $(UV_WIN)),$(UV_WIN) run,python3))
 
-# cube, sphere, torus, dense torus into models/ (made here), then the HDR skies and the glTF
-# sample models (downloaded, about 30 MB, only those not there yet; without a network they
-# are skipped with a message and the rest still works)
+# cube, sphere, torus, dense torus into models/ (made here), then the HDR skies, the glTF
+# sample models and the Stanford dragon (downloaded, about 41 MB, only those not there yet;
+# without a network they are skipped with a message and the rest still works)
 models:
 	$(PYTHON) tools/gen_models.py
-	$(MAKE) --no-print-directory skies-download gltf-download
+	$(MAKE) --no-print-directory skies-download gltf-download dragon-download
 
 # (re)make a GIF from frames: make gif FRAMES_DIR=out/sim FPS=30
 FRAMES_DIR = out/sim
@@ -188,13 +188,16 @@ FPS = 30
 gif:
 	$(PYTHON) tools/frames_to_gif.py $(FRAMES_DIR) $(FRAMES_DIR).gif $(FPS)
 
-# The Stanford dragon (871,414 triangles), once.
+# The Stanford dragon (871,414 triangles, plus three decimated versions), once, into
+# models/dragon_recon/ (11 MB download, 45 MB unpacked); skipped if it is already there.
 # Credit: Stanford University Computer Graphics Laboratory, 3D Scanning Repository.
+DRAGON_URL = http://graphics.stanford.edu/pub/3Dscanrep/dragon/dragon_recon.tar.gz
 dragon-download:
-	mkdir -p models
-	curl -L -o models/dragon_recon.tar.gz http://graphics.stanford.edu/pub/3Dscanrep/dragon/dragon_recon.tar.gz
-	tar xzf models/dragon_recon.tar.gz -C models
-	rm models/dragon_recon.tar.gz
+	@if [ -s $(DRAGON) ]; then echo "have $(DRAGON)"; else echo "downloading $(DRAGON)"; \
+	  mkdir -p models && curl -fsSL -o models/dragon_recon.tar.gz $(DRAGON_URL) \
+	  && tar xzf models/dragon_recon.tar.gz -C models \
+	  || echo "could not download $(DRAGON_URL) (no network?)"; \
+	  rm -f models/dragon_recon.tar.gz; fi
 
 # a file downloaded unless it is already there: $(call fetch,file,url)
 fetch = if [ -s $(1) ]; then echo "have $(1)"; else echo "downloading $(1)"; \

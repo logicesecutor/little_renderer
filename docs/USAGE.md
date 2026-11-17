@@ -31,7 +31,7 @@ over the CPU cores.
 
 ```sh
 cd ~/Projects/little_renderer
-make models                      # test models, HDR skies and glTF samples into models/ (once)
+make models                      # test models, HDR skies, glTF samples and the dragon into models/ (once)
 make                             # library, apps and examples into build/ and bin/
 bin/view                         # fly around the Cornell box (window)
 bin/render                       # path trace it to out/cornell_boxes.png (~7 s)
@@ -40,7 +40,7 @@ bin/render -backend raster       # rasterize it to out/cornell_boxes_raster.png 
 bin/sim                          # physics: things fall through the cloud -> out/sim.gif (~10 min)
 bin/view -sim on                 # the same, live in the window
 
-make dragon-download             # Stanford dragon, 11 MB (once; already in the repo)
+make dragon-download             # Stanford dragon, 11 MB (make models does it too)
 bin/view -scene mesh -obj models/dragon_recon/dragon_vrip.ply -rot -35
 
 make gltf-download               # Khronos glTF sample models, 17 MB (make models does it too)
@@ -64,9 +64,9 @@ The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.
 | `make apps` / `make examples` / `make tests` | only the three programs / only the examples / only the tests |
 | `make bin/render` (or any `bin/...`) | just that one program (and the library); on Windows `make bin/render.exe` |
 | `make check-layers` | checks the layers: `base` includes nothing else, `formats` only `base`, `scene` only those two, `raster`, `rt`, `phys`, `platform` only those three, and `webgpu/` nothing of the engine |
-| `make models` | runs `tools/gen_models.py` (cube, sphere, torus), then `make skies-download gltf-download` (only the files not there yet) |
+| `make models` | runs `tools/gen_models.py` (cube, sphere, torus), then `make skies-download gltf-download dragon-download` (only the files not there yet) |
 | `make skies-download` | downloads Poly Haven's HDR skies `kloofendal_48d_partly_cloudy` and `studio_small_09` (2k, CC0, 13 MB) into `models/skies/` |
-| `make dragon-download` | downloads the Stanford dragon into `models/dragon_recon/` |
+| `make dragon-download` | downloads the Stanford dragon into `models/dragon_recon/` (skipped if it is there) |
 | `make gltf-download` | downloads (the ones not there yet) Khronos's glTF sample models (DamagedHelmet, MetalRoughSpheres, NormalTangentMirrorTest, OrientationTest, BoxTextured; CC BY 4.0) into `models/gltf/` |
 | `make clean` | deletes `build/` and `bin/` |
 

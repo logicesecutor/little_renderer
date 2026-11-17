@@ -104,7 +104,7 @@ JSON and glTF.
 You need `gcc` and `make` (on Windows, an MSYS2 UCRT64 shell), and libX11 on Linux.
 
 ```sh
-make models          # the test models, HDR skies and glTF samples (uv or python3; ~30 MB, once)
+make models          # the test models, HDR skies, glTF samples and the dragon (uv or python3; ~41 MB, once)
 make                 # the library, the programs, the examples and the tests
 make test            # 14 unit tests (the GPU ones skip without a GPU)
 
