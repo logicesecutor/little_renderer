@@ -570,14 +570,18 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
         callbackInfo.callback(WGPURequestDeviceStatus_Error, NULL, sv("vkCreateDevice failed"), callbackInfo.userdata1, callbackInfo.userdata2);
         return fut;
     }
-#define X(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f); \
+    // The device's functions, into the one table (vk) every device uses: taken from the
+    // first device that has them, and never cleared by a later one (a second device without
+    // ray queries, or without a window, used to set them to NULL under the first: a crash
+    // at its next acceleration-structure build). The devices of one driver share them.
+#define X(f) if (!vk.f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f); \
              if (!vk.f){ fprintf(stderr, "Vulkan layer: no %s\n", #f); }
     VK_DEVICE_FNS(X)
 #undef X
-#define X(f) vk.f = has_swapchain ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
+#define X(f) if (has_swapchain && !vk.f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f);
     VK_SWAPCHAIN_FNS(X)
 #undef X
-#define X(f) vk.f = d->rt ? (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f) : NULL;
+#define X(f) if (d->rt && !vk.f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(d->vk, #f);
     VK_RT_FNS(X)
 #undef X
     for (int k = 0; k < d->nqueues; k++){
