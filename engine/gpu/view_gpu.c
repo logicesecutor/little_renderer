@@ -117,6 +117,8 @@ struct GpuView {
     GpuTraceParams tparams;
     int t_prep;                 // the image is still to begin: 1 from nothing, 2 from the previous one (reprojected)
     int t_history;              // with 2: samples kept per pixel at most
+    int t_hist;                 // a whole pass done since the image started: every later one
+                                // begins from it (reprojected), the raster under it not needed
     int t_moved, t_live;        // moved since the last band / the band running follows a move
     int t_sub_rows, t_sub_reps; // the band running
     int t_sub_prep;             // and it begins an image (its time includes the whole image's guide)
@@ -539,7 +541,7 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
 
     GFrame F;
     memset(&F, 0, sizeof(F));
-    v4(F.right, vec3(p->view.m[0][0], p->view.m[0][1], p->view.m[0][2]), v->show_traced ? 1.0f : 0.0f);
+    v4(F.right, vec3(p->view.m[0][0], p->view.m[0][1], p->view.m[0][2]), (float)v->show_traced);
     v4(F.up, vec3(p->view.m[1][0], p->view.m[1][1], p->view.m[1][2]), 0);
     v4(F.back, vec3(p->view.m[2][0], p->view.m[2][1], p->view.m[2][2]), 0);
     v4(F.eye, p->eye, 0);
@@ -740,7 +742,7 @@ static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, 
         return 0;
     }
     if (traced && v->t_prep == 1) gpu_trace_clear(v->trace, enc);   // nothing to show yet
-    v->show_traced = traced;
+    v->show_traced = traced ? (draw_scene ? 1 : 2) : 0;   // (2: holes filled from neighbours)
     frame_begin(v, enc, s, p, mp, volumes);
     v->show_traced = 0;
     WGPUBindGroupEntry e[8] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks), entry(3, v->light),
@@ -769,6 +771,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
     v->t_prep = 1;
+    v->t_hist = 0;
     v->t_y = 0;
     // a new image starts its samples at a multiple of 2^16: the first n of them are then as
     // evenly spread as the sequence allows (while things move, the count just goes on, so
@@ -808,6 +811,7 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     if (!view_is_live(v)) return;
     v->t_inflight = 0;
     v->t_done = v->t_done_next;
+    if (v->t_done > 0) v->t_hist = 1;
     v->t_bands++;
     if (v->t_sub_rows > 0 && v->t_sub_reps > 0) v->t_work += (double)v->t_sub_rows * v->t_sub_reps / v->h;
     double ms = clock_ms() - v->t_submit_ms;
@@ -1017,8 +1021,13 @@ int gpu_view_trace_denoise(GpuView *v, int on){
 
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     if (!v || !v->trace) return 0;
-    // the rasterized scene shows through where there is no sample yet: only during the first pass
-    return present_gpu_frame(v, s, p, mp, volumes, 1, v->t_done == 0);
+    // the rasterized scene shows through where there is no sample yet: only during the first
+    // pass of an image begun from nothing. An image carried over (reprojected) has samples
+    // wherever the last one had; the few pixels it lacks (uncovered by what moved, in rows not
+    // yet traced) the composite fills from their traced neighbours. (Drawn under every image
+    // until its first pass, the raster was ~3 ms of each frame while the bodies moved: with
+    // a band of less than a pass per frame, that pass never came.)
+    return present_gpu_frame(v, s, p, mp, volumes, 1, v->t_done == 0 && !v->t_hist);
 }
 
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){

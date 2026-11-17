@@ -132,12 +132,37 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
     return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
 }
 
+/* The path traced image shown without the raster under it (F.right.w = 2: an image carried
+   over from the last one): a pixel with no sample yet (uncovered by what moved, in rows not
+   yet traced) takes the mean of the traced pixels nearest to it, on rings 1, 2, 4 ... 32
+   pixels away in 8 directions. w = 0: none found. */
+fn hole_fill(x: u32, y: u32) -> vec4f {
+    var dirs = array<vec2i, 8>(vec2i(1, 0), vec2i(-1, 0), vec2i(0, 1), vec2i(0, -1),
+                               vec2i(1, 1), vec2i(-1, 1), vec2i(1, -1), vec2i(-1, -1));
+    let lim = vec2i(i32(F.size.x) - 1, i32(F.size.y) - 1);
+    for (var r = 1; r <= 32; r *= 2) {
+        var sum = vec3f(0.0);
+        var n = 0.0;
+        for (var k = 0; k < 8; k++) {
+            let q = clamp(vec2i(i32(x), i32(y)) + dirs[k] * r, vec2i(0), lim);
+            let s = traced(u32(q.x), u32(q.y));
+            if (s.w > 0.0) { sum += s.rgb / s.w; n += 1.0; }
+        }
+        if (n > 0.0) { return vec4f(sum, n); }
+    }
+    return vec4f(0.0);
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let x = u32(pos.x);
     let y = u32(pos.y);
     let pt = traced(x, y);
     if (pt.w > 0.0) { return vec4f(linear_to_srgb(pt.rgb / pt.w), 1.0); }
+    if (F.right.w > 1.5) {
+        let f = hole_fill(x, y);
+        if (f.w > 0.0) { return vec4f(linear_to_srgb(f.rgb / f.w), 1.0); }
+    }
     var rgb = frame_rgb(x, y);
     if (F.size.w > 0.5) {
         /* the ray through the pixel center; at view depth D it is at eye + D * du */
