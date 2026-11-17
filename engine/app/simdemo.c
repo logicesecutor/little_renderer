@@ -142,10 +142,20 @@ static int field_setup(Sim *sim, const Options *o, Scene *s){
 
     // the props: instances only (nothing collides with them), on the floor in the ring, not
     // overlapping and out of the camera's way (each tried at up to 60 spots), a few big chrome balls among them
+    // The ring grows with the props asked for (about 11000 units² each: the 3000 of the
+    // picture fill 6000 units); a prop is checked against those near it only (a grid of
+    // cells as wide as the biggest prop, the cells hashed), not against all placed so far
     int np = o->sim.props, placed = 0;
+    real ring_out = r_fmax((real)FIELD_PROPS_OUT, r_sqrt((real)(FIELD_PROPS_IN * FIELD_PROPS_IN) + (real)np * 11000));
+    const real cell = 2 * 200 + 5;                       // (the biggest: a chrome ball of radius 200)
+    int nh = 1;
+    while (nh < 2 * (np > 0 ? np : 1)) nh *= 2;
     Vec3 *at = malloc((size_t)(np > 0 ? np : 1) * sizeof(Vec3));
     real *rad = malloc((size_t)(np > 0 ? np : 1) * sizeof(real));
-    if (!at || !rad){ free(at); free(rad); fprintf(stderr, "out of memory for the props\n"); return 1; }
+    int *head = malloc((size_t)nh * sizeof(int)), *next = malloc((size_t)(np > 0 ? np : 1) * sizeof(int));
+    if (!at || !rad || !head || !next){ free(at); free(rad); free(head); free(next); fprintf(stderr, "out of memory for the props\n"); return 1; }
+    for (int k = 0; k < nh; k++) head[k] = -1;
+#define PROP_CELL(cx, cz) ((unsigned)((cx) * 73856093 ^ (cz) * 19349663) & (unsigned)(nh - 1))
     real ex = s->cam_from.x - (real)FIELD_X, ez = s->cam_from.z - (real)FIELD_Z;
     for (int k = 0; k < np; k++){
         real kind = rnd(sim, 0, 1), big = rnd(sim, 0, 1);
@@ -160,21 +170,27 @@ static int field_setup(Sim *sim, const Options *o, Scene *s){
         int ok = 0;
         for (int tries = 0; tries < 60 && !ok; tries++){
             real a = rnd(sim, 0, 2 * (real)PI);
-            real r = r_sqrt(rnd(sim, (real)(FIELD_PROPS_IN * FIELD_PROPS_IN), (real)(FIELD_PROPS_OUT * FIELD_PROPS_OUT)));
+            real r = r_sqrt(rnd(sim, (real)(FIELD_PROPS_IN * FIELD_PROPS_IN), ring_out * ring_out));
             pos = vec3(FIELD_X + r * r_cos(a), 0, FIELD_Z + r * r_sin(a));
             // (and not between the camera and the rain)
             real u = ((pos.x - (real)FIELD_X) * ex + (pos.z - (real)FIELD_Z) * ez) / (ex * ex + ez * ez + 1e-6f);
             u = u < 0 ? 0 : u > 1.2f ? 1.2f : u;
             real cx = pos.x - (real)FIELD_X - u * ex, cz = pos.z - (real)FIELD_Z - u * ez;
             ok = cx * cx + cz * cz >= (R + 200) * (R + 200);
-            for (int q = 0; q < placed && ok; q++){
-                real dx = pos.x - at[q].x, dz = pos.z - at[q].z, d = R + rad[q] + 5;
-                ok = dx * dx + dz * dz >= d * d;
-            }
+            int px = (int)r_floor(pos.x / cell), pz = (int)r_floor(pos.z / cell);
+            for (int gx = px - 1; gx <= px + 1 && ok; gx++)
+                for (int gz = pz - 1; gz <= pz + 1 && ok; gz++)
+                    for (int q = head[PROP_CELL(gx, gz)]; q >= 0 && ok; q = next[q]){
+                        real dx = pos.x - at[q].x, dz = pos.z - at[q].z, d = R + rad[q] + 5;
+                        ok = dx * dx + dz * dz >= d * d;
+                    }
         }
         if (!ok) continue;
         at[placed] = pos;
-        rad[placed++] = R;
+        rad[placed] = R;
+        {   unsigned hc = PROP_CELL((int)r_floor(pos.x / cell), (int)r_floor(pos.z / cell));
+            next[placed] = head[hc];
+            head[hc] = placed++; }
         Mat3 yaw = quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), rnd(sim, 0, 2 * (real)PI)));
         if (shape == 0) scene_add_instance(s, INST_SPHERE, xform_axes(mat3_identity(), vec3(sr, sr, sr), vec3(pos.x, sr, pos.z)), mats[mi]);
         else if (shape == 1) scene_add_instance(s, INST_BOX, xform_axes(yaw, half, vec3(pos.x, half.y, pos.z)), mats[mi]);
@@ -182,6 +198,9 @@ static int field_setup(Sim *sim, const Options *o, Scene *s){
     }
     free(at);
     free(rad);
+    free(head);
+    free(next);
+#undef PROP_CELL
 
     // the viewer's K: a blast in the middle of the pile
     sim->blast_at = vec3(FIELD_X, 20, FIELD_Z);
