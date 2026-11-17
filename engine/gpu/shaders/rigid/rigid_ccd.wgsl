@@ -83,10 +83,13 @@ var<workgroup> wg_any: u32;
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lv: vec3u, @builtin(num_workgroups) nw: vec3u) {
     let i = tid(gid, nw);
     let n = P.n.x;
+    /* (no return under i < n here: the barriers below must stay in uniform control flow
+       for the browsers' compiler, which does not drop this branch for CCD_STEP 0) */
     if (CCD_STEP == 1u) {
-        if (i >= n) { return; }
-        let t = T[i];
-        if (t.w > 0.5) { B[i].pos = vec4f(t.xyz, B[i].pos.w); }
+        if (i < n) {
+            let t = T[i];
+            if (t.w > 0.5) { B[i].pos = vec4f(t.xyz, B[i].pos.w); }
+        }
         return;
     }
     /* (every thread goes through the tiles, for the barriers; only the fast bodies sweep) */
