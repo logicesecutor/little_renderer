@@ -61,6 +61,9 @@ fn bsdf_tab(k: u32) -> f32 { return TB.t[k >> 2u][k & 3u]; }
 struct TT { e: array<vec4u, 512> };
 @group(0) @binding(10) var<uniform> TXT: TT;
 fn tex_entry(k: u32) -> vec4u { return TXT.e[k]; }
+/* the draws' order: draw instance -> record (raster_gpu.c order_instances: bucketed by mesh
+   and level of detail, those out of view left out) */
+@group(0) @binding(11) var<storage, read> ORD: array<u32>;
 
 /* ---- the environment (scene/env.c) ---- */
 fn env_uv(d: vec3f, c: f32, s: f32) -> vec2f {
@@ -367,7 +370,8 @@ fn to_srgb(c0: vec3f) -> vec3f {
 }
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> VO {
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> VO {
+    let k = ORD[di];
     let t = (vi / 3u) * 3u;
     let p0 = to_world(k, vpos[t].xyz);
     let p1 = to_world(k, vpos[t + 1u].xyz);
@@ -442,7 +446,8 @@ struct WO {
     @location(0) @interpolate(flat) mat: u32,
 };
 @vertex
-fn vs_wire(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> WO {
+fn vs_wire(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> WO {
+    let k = ORD[di];
     let tri = vi / 6u;
     let e = (vi % 6u) / 2u;
     let corner = (e + (vi & 1u)) % 3u;

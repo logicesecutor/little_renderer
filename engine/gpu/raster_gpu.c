@@ -38,6 +38,16 @@ typedef struct {
     float mats[MAX_MATS][16];          // base, pbr, tex (uint32 bits), emission
 } GRU;
 
+// Levels of detail: from this many instances on, a mesh instance small on the screen is
+// drawn with a simpler copy of its mesh (scene_mesh_simplify, a grid of LOD_GRID cells over
+// it), level k while its projected radius is under LOD_PIXELS[k - 1] pixels. Fewer
+// instances: always the mesh itself (so small scenes look exactly as before). LR_GPU_LOD=0
+// turns them off, =1 on for any count.
+#define LODS 3
+#define LOD_MIN_INSTANCES 4096
+static const int LOD_GRID[LODS] = {0, 16, 6};
+static const float LOD_PIXELS[LODS - 1] = {40.0f, 12.0f};
+
 // one set of triangles on the GPU
 typedef struct {
     WGPUBuffer pos, nrm, tex;
@@ -69,9 +79,16 @@ struct GpuRaster {
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
     WGPUBuffer ix;                         // the draws' transforms: the world, the instances
     size_t ix_cap;
-    struct { Geo geo; unsigned id; int ntris; unsigned version; } *mg;   // the scene's meshes (SceneMesh.id, version)
+    // the scene's meshes (SceneMesh.id, version), each with simpler copies for far away
+    // (lod[k].nverts 0: none, the one before is used)
+    struct { Geo geo, lod[LODS - 1]; unsigned id; int ntris; unsigned version; } *mg;
     int nmg;
     Geo unit[2];                           // the unit sphere and box (shape instances: the physics' bodies)
+    WGPUBuffer ord;                        // the draws' order: draw instance -> record (ORD)
+    size_t ord_cap;
+    uint32_t *ordv;                        // ... packed here: the records by mesh and level
+    int *bucket;                           // (per mesh and level: its count, then where it starts)
+    size_t ordv_cap, bucket_cap;
     // what is on the GPU now
     Primitive *prim_copy;
     int nprim_copy;
@@ -164,8 +181,10 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->lv = gpu_buffer(g, "scene: no environment", 16, st);
     r->bg = gpu_buffer(g, "scene: no sky", 16, st);
     r->ig = gpu_buffer(g, "scene: no irradiance grid", 112, st);
+    r->ord_cap = 16;
+    r->ord = gpu_buffer(g, "raster: the draws' order", r->ord_cap, st);
     r->txt = gpu_buffer(g, "scene: the textures' table", sizeof(r->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURRRRTU");
+    r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURRRRTUR");
     char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(GPU_WGSL_TEX) + strlen(SHADER) + 3);
     if (!src){ gpu_raster_destroy(r); return NULL; }
     strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, GPU_WGSL_TEX); strcat(src, "\n"); strcat(src, SHADER);
@@ -198,11 +217,11 @@ static int tmp_reserve(GpuRaster *r, size_t verts){
 static void geo_bind(GpuRaster *r, Geo *geo){
     if (geo->bg) wgpuBindGroupRelease(geo->bg);
     geo->bg = NULL;
-    if (!geo->pos || !r->ix || !r->gt.view) return;
-    WGPUBuffer b[11] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab, r->lv, r->bg, geo->tex, r->ig, NULL, r->txt};
-    WGPUBindGroupEntry e[11];
+    if (!geo->pos || !r->ix || !r->ord || !r->gt.view) return;
+    WGPUBuffer b[12] = {r->uni, geo->pos, geo->nrm, r->ix, r->tab, r->lv, r->bg, geo->tex, r->ig, NULL, r->txt, r->ord};
+    WGPUBindGroupEntry e[12];
     memset(e, 0, sizeof(e));
-    for (int i = 0; i < 11; i++){
+    for (int i = 0; i < 12; i++){
         e[i].binding = (uint32_t)i;
         if (i == 9) e[i].textureView = r->gt.view;
         else { e[i].buffer = b[i]; e[i].size = WGPU_WHOLE_SIZE; }
@@ -210,7 +229,7 @@ static void geo_bind(GpuRaster *r, Geo *geo){
     WGPUBindGroupDescriptor d;
     memset(&d, 0, sizeof(d));
     d.layout = r->bgl;
-    d.entryCount = 11;
+    d.entryCount = 12;
     d.entries = e;
     geo->bg = wgpuDeviceCreateBindGroup(r->g->device, &d);
 }
@@ -352,7 +371,10 @@ static int upload_mesh(GpuRaster *r, const Scene *s){
 static void rebind_all(GpuRaster *r){
     geo_bind(r, &r->prims);
     geo_bind(r, &r->mesh);
-    for (int m = 0; m < r->nmg; m++) geo_bind(r, &r->mg[m].geo);
+    for (int m = 0; m < r->nmg; m++){
+        geo_bind(r, &r->mg[m].geo);
+        for (int l = 0; l < LODS - 1; l++) geo_bind(r, &r->mg[m].lod[l]);
+    }
     geo_bind(r, &r->unit[0]);
     geo_bind(r, &r->unit[1]);
 }
@@ -401,10 +423,98 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         if (r->mg[m].geo.nverts && r->mg[m].id == sm->id && r->mg[m].ntris == sm->ntris && r->mg[m].version == sm->version)
             continue;
         if (!upload_tris(r, &r->mg[m].geo, sm->tris, sm->ntris, sm->normals, sm->uvs, sm->tangents, sm->nuvs, "instanced mesh")) return 0;
+        // its simpler copies (not of a mesh that changes: they would be made again each time),
+        // kept only when much simpler than the level before
+        int before = sm->ntris;
+        for (int l = 0; l < LODS - 1; l++){
+            r->mg[m].lod[l].nverts = 0;
+            Triangle *lt = NULL;
+            Vec3 *ln = NULL;
+            int nlt = 0, nln = 0;
+            if (sm->dynamic || sm->ntris < 64 || scene_mesh_simplify(sm, LOD_GRID[l + 1], &lt, &nlt, &ln, &nln) != 0) continue;
+            if (nlt > 0 && nlt < before * 7 / 10){
+                if (upload_tris(r, &r->mg[m].lod[l], lt, nlt, ln, NULL, NULL, 0, "instanced mesh, far")) before = nlt;
+                else r->mg[m].lod[l].nverts = 0;
+            }
+            free(lt);
+            free(ln);
+        }
         r->mg[m].id = sm->id;
         r->mg[m].ntris = sm->ntris;
         r->mg[m].version = sm->version;
     }
+    return 1;
+}
+
+// The instances' draw order (ORD: draw instance -> record; ORD[0] = 0, the world): those in
+// view only (their world box against the frustum's sides and the eye's plane), bucketed by
+// mesh and level of detail, so each bucket is one draw. Returns 0 when out of memory.
+static int order_instances(GpuRaster *r, const Scene *s, const RenderParams *p, Mat4 vp){
+    const int nk = (s->nmeshes + 2) * LODS;
+    const size_t n = 1 + (size_t)s->ninsts;
+    if (r->ordv_cap < n){
+        uint32_t *o = realloc(r->ordv, 2 * n * sizeof(uint32_t));   // (then the instances' buckets)
+        if (!o) return 0;
+        r->ordv = o;
+        r->ordv_cap = n;
+    }
+    if (r->bucket_cap < (size_t)nk + 1){
+        int *b = realloc(r->bucket, ((size_t)nk + 1) * sizeof(int));
+        if (!b) return 0;
+        r->bucket = b;
+        r->bucket_cap = (size_t)nk + 1;
+    }
+    // the frustum's planes (rows of vp: w + x, w - x, w + y, w - y; and w itself)
+    real pl[5][4];
+    for (int k = 0; k < 4; k++){
+        pl[0][k] = vp.m[3][k] + vp.m[0][k];
+        pl[1][k] = vp.m[3][k] - vp.m[0][k];
+        pl[2][k] = vp.m[3][k] + vp.m[1][k];
+        pl[3][k] = vp.m[3][k] - vp.m[1][k];
+        pl[4][k] = vp.m[3][k];
+    }
+    static int lod_env = -2;               // LR_GPU_LOD=0: never, =1: whatever the count
+    if (lod_env == -2){ const char *e = getenv("LR_GPU_LOD"); lod_env = e ? atoi(e) != 0 : -1; }
+    const int lod = lod_env >= 0 ? lod_env : s->ninsts >= LOD_MIN_INSTANCES;
+    const real px_per = r_fabs(p->proj.m[1][1]) * (real)r->h * (real)0.5;   // pixels per unit at depth 1
+    int *cnt = r->bucket;
+    memset(cnt, 0, ((size_t)nk + 1) * sizeof(int));
+    // first pass: each instance's bucket (or none: out of view)
+    uint32_t *keys = r->ordv + r->ordv_cap;
+    for (int i = 0; i < s->ninsts; i++){
+        const Instance *in = &s->insts[i];
+        const Aabb b = in->box;
+        int seen = 1;
+        for (int q = 0; q < 5 && seen; q++){
+            Vec3 pv = vec3(pl[q][0] >= 0 ? b.hi.x : b.lo.x, pl[q][1] >= 0 ? b.hi.y : b.lo.y, pl[q][2] >= 0 ? b.hi.z : b.lo.z);
+            if (pl[q][0] * pv.x + pl[q][1] * pv.y + pl[q][2] * pv.z + pl[q][3] < 0) seen = 0;
+        }
+        if (!seen){ keys[i] = 0xffffffffu; continue; }
+        int l = 0;
+        if (lod && in->mesh >= 0 && in->mesh < r->nmg){
+            Vec3 c = v_scale(v_add(b.lo, b.hi), (real)0.5);
+            real rad = (real)0.5 * v_len(v_sub(b.hi, b.lo));
+            real w = pl[4][0] * c.x + pl[4][1] * c.y + pl[4][2] * c.z + pl[4][3];
+            if (w > rad){
+                real px = rad * px_per / w;
+                while (l < LODS - 1 && px < LOD_PIXELS[l]) l++;
+                while (l > 0 && !r->mg[in->mesh].lod[l - 1].nverts) l--;
+            }
+        }
+        int key = (in->mesh + 2) * LODS + l;
+        keys[i] = (uint32_t)key;
+        cnt[key + 1]++;
+    }
+    for (int k = 0; k < nk; k++) cnt[k + 1] += cnt[k];      // where each bucket starts (from 1)
+    // second pass: the records into their buckets, in the instances' order; cnt[k] ends
+    // where bucket k ends, so its start is cnt[k - 1] (0 for the first)
+    const int total = cnt[nk];
+    for (int i = 0; i < s->ninsts; i++)
+        if (keys[i] != 0xffffffffu) r->ordv[1 + cnt[keys[i]]++] = (uint32_t)i + 1;
+    r->ordv[0] = 0;
+    const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    if (gpu_buffer_reserve(r->g, &r->ord, &r->ord_cap, n * sizeof(uint32_t), st, "raster: the draws' order")) rebind_all(r);
+    wgpuQueueWriteBuffer(r->g->queue, r->ord, 0, r->ordv, (1 + (size_t)total) * sizeof(uint32_t));
     return 1;
 }
 
@@ -471,6 +581,7 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     GRU U;
     memset(&U, 0, sizeof(U));
     Mat4 vp = mat4_mul(p->proj, p->view);
+    if (!order_instances(r, s, p, vp)) return 0;
     for (int c = 0; c < 4; c++)
         for (int k = 0; k < 4; k++) U.vp[c * 4 + k] = (float)vp.m[k][c];      // WGSL matrices are stored by columns
     put(U.eye, p->eye, mode == MODE_WIREFRAME ? 0.0f : (mode == MODE_FLAT ? 1.0f : (mode == MODE_GOURAUD ? 2.0f : 3.0f)));
@@ -550,15 +661,16 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         wgpuRenderPassEncoderSetBindGroup(pass, 0, sets[k]->bg, 0, NULL);
         wgpuRenderPassEncoderDraw(pass, wire ? sets[k]->nverts * 2 : sets[k]->nverts, 1, 0, 0);
     }
-    // the instances: their mesh's triangles, moved by their record (the draw's first instance);
-    // neighbours of the same mesh in one draw (the same triangles in the same order)
-    for (int i = 0, run; i < s->ninsts; i += run){
-        int mesh = s->insts[i].mesh;
-        for (run = 1; i + run < s->ninsts && s->insts[i + run].mesh == mesh; run++){}
-        Geo *geo = mesh >= 0 ? &r->mg[mesh].geo : &r->unit[mesh == INST_SPHERE ? 0 : 1];
+    // the instances in view: their mesh's triangles (or a simpler copy's), moved by their
+    // record; one draw per bucket (order_instances: draw instance 1 + j is ORD[1 + j]'s record)
+    for (int k = 0, nk = (s->nmeshes + 2) * LODS; k < nk; k++){
+        int first = k ? r->bucket[k - 1] : 0, count = r->bucket[k] - first;
+        if (count <= 0) continue;
+        int mesh = k / LODS - 2, l = k % LODS;
+        Geo *geo = mesh >= 0 ? (l ? &r->mg[mesh].lod[l - 1] : &r->mg[mesh].geo) : &r->unit[mesh == INST_SPHERE ? 0 : 1];
         if (!geo->nverts || !geo->bg) continue;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
-        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, (uint32_t)run, 0, (uint32_t)i + 1);
+        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, (uint32_t)count, 0, (uint32_t)first + 1);
     }
     // the sky behind (any set's bind group: the uniforms and buffers are the same in all)
     if (sky){
@@ -576,9 +688,11 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
 
 void gpu_raster_destroy(GpuRaster *r){
     if (!r) return;
-    int nsets = 4 + r->nmg;
+    int nsets = 4 + r->nmg * LODS;
     for (int k = 0; k < nsets; k++){
-        Geo *geo = k == 0 ? &r->prims : (k == 1 ? &r->mesh : (k < 4 ? &r->unit[k - 2] : &r->mg[k - 4].geo));
+        int j = k - 4;
+        Geo *geo = k == 0 ? &r->prims : (k == 1 ? &r->mesh : (k < 4 ? &r->unit[k - 2]
+                 : (j % LODS ? &r->mg[j / LODS].lod[j % LODS - 1] : &r->mg[j / LODS].geo)));
         if (geo->bg) wgpuBindGroupRelease(geo->bg);
         if (geo->pos){ wgpuBufferDestroy(geo->pos); wgpuBufferRelease(geo->pos); }
         if (geo->nrm){ wgpuBufferDestroy(geo->nrm); wgpuBufferRelease(geo->nrm); }
@@ -586,6 +700,9 @@ void gpu_raster_destroy(GpuRaster *r){
     }
     free(r->mg);
     free(r->rec);
+    free(r->ordv);
+    free(r->bucket);
+    if (r->ord){ wgpuBufferDestroy(r->ord); wgpuBufferRelease(r->ord); }
     if (r->ix){ wgpuBufferDestroy(r->ix); wgpuBufferRelease(r->ix); }
     if (r->fill[0]) wgpuRenderPipelineRelease(r->fill[0]);
     if (r->fill[1]) wgpuRenderPipelineRelease(r->fill[1]);

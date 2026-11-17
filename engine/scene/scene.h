@@ -386,6 +386,14 @@ static inline real material_uv_lod(real dudx, real dvdx, real dudy, real dvdy){
 // nothing yet (the normal is the shading point's): tangents[base .. base + n)
 void scene_compute_tangents(const Triangle *tris, int ntris, const Vec2 *uvs, Vec4 *tangents, int base, int n);
 
+// A simpler copy of a mesh, for far away copies of it (levels of detail): its corners
+// gathered into the cells of a grid of `grid` cells along its longest side (vertex
+// clustering, Rossignac & Borrel 1993), each cell's corners one at their mean, the
+// triangles that keep three cells kept, smooth normals per cell; no texture coordinates.
+// The triangles (*ntris of them) and normals (*nnormals) are new arrays (free them); 0, or
+// -1 if out of memory.
+int scene_mesh_simplify(const SceneMesh *m, int grid, Triangle **tris, int *ntris, Vec3 **normals, int *nnormals);
+
 // adds a medium and takes ownership of it; returns its index, or -1 if there are already
 // MAX_VOLUMES (then v is freed)
 int scene_add_volume(Scene *s, struct Volume *v);

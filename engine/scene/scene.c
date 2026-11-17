@@ -4,6 +4,7 @@
 #include "scene/env.h"
 
 #include "scene/volume.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -787,4 +788,81 @@ void scene_free(Scene *s){
     free(s->texmaps);
     s->texmaps = NULL;
     s->ntexmaps = s->cap_texmaps = 0;
+}
+
+// ---- levels of detail: vertex clustering --------------------------------------------------
+
+int scene_mesh_simplify(const SceneMesh *m, int grid, Triangle **out_tris, int *out_ntris, Vec3 **out_normals, int *out_nnormals){
+    *out_tris = NULL; *out_normals = NULL; *out_ntris = *out_nnormals = 0;
+    if (!m || m->ntris <= 0 || grid < 2) return 0;
+    Vec3 ext = v_sub(m->box.hi, m->box.lo);
+    real side = r_fmax(ext.x, r_fmax(ext.y, ext.z));
+    if (side <= 0) return 0;
+    real cs = side / (real)grid;
+    // cells hashed into a table twice the corners; each cell a cluster: its corners' sum
+    // and count, their normals' sum
+    int ncorner = 3 * m->ntris, cap = 64;
+    while (cap < 2 * ncorner) cap *= 2;
+    int64_t *key = malloc((size_t)cap * sizeof(int64_t));
+    int *slot = malloc((size_t)cap * sizeof(int));
+    int *cl = malloc((size_t)ncorner * sizeof(int));
+    Vec3 *psum = malloc((size_t)ncorner * sizeof(Vec3)), *nsum = malloc((size_t)ncorner * sizeof(Vec3));
+    int *cnt = malloc((size_t)ncorner * sizeof(int));
+    Triangle *t = malloc((size_t)m->ntris * sizeof(Triangle));
+    if (!key || !slot || !cl || !psum || !nsum || !cnt || !t){
+        free(key); free(slot); free(cl); free(psum); free(nsum); free(cnt); free(t);
+        return -1;
+    }
+    for (int i = 0; i < cap; i++) slot[i] = -1;
+    int nc = 0;
+    for (int i = 0; i < m->ntris; i++){
+        const Triangle *tr = &m->tris[i];
+        Vec3 p[3] = {tr->q, v_add(tr->q, tr->u), v_add(tr->q, tr->v)};
+        Vec3 fn = v_cross(tr->u, tr->v);
+        for (int k = 0; k < 3; k++){
+            Vec3 g = v_scale(v_sub(p[k], m->box.lo), 1 / cs);
+            int64_t gx = (int64_t)r_floor(g.x), gy = (int64_t)r_floor(g.y), gz = (int64_t)r_floor(g.z);
+            int64_t kk = (gx & 0xfffff) | (gy & 0xfffff) << 20 | (gz & 0xfffff) << 40;
+            size_t h = (size_t)(((uint64_t)kk * 0x9E3779B97F4A7C15ull) >> 20) & (size_t)(cap - 1);
+            while (slot[h] >= 0 && key[h] != kk) h = (h + 1) & (size_t)(cap - 1);
+            if (slot[h] < 0){
+                slot[h] = nc; key[h] = kk;
+                psum[nc] = nsum[nc] = vec3(0, 0, 0);
+                cnt[nc++] = 0;
+            }
+            int c = slot[h];
+            cl[3 * i + k] = c;
+            psum[c] = v_add(psum[c], p[k]);
+            Vec3 n = tr->n[k] >= 0 && m->normals ? m->normals[tr->n[k]] : fn;
+            real l = v_len(n);
+            if (l > 0) nsum[c] = v_add(nsum[c], v_scale(n, 1 / l));
+            cnt[c]++;
+        }
+    }
+    for (int c = 0; c < nc; c++){
+        psum[c] = v_scale(psum[c], 1 / (real)cnt[c]);
+        real l = v_len(nsum[c]);
+        nsum[c] = l > 0 ? v_scale(nsum[c], 1 / l) : vec3(0, 1, 0);
+    }
+    int n = 0;
+    for (int i = 0; i < m->ntris; i++){
+        int a = cl[3 * i], b = cl[3 * i + 1], c = cl[3 * i + 2];
+        if (a == b || b == c || a == c) continue;   // collapsed into a line or a point
+        Triangle *o = &t[n++];
+        memset(o, 0, sizeof(*o));
+        o->q = psum[a];
+        o->u = v_sub(psum[b], psum[a]);
+        o->v = v_sub(psum[c], psum[a]);
+        // (smooth where the mesh was: flat triangles stay flat)
+        if (m->tris[i].n[0] >= 0){ o->n[0] = a; o->n[1] = b; o->n[2] = c; }
+        else o->n[0] = o->n[1] = o->n[2] = -1;
+        o->t[0] = o->t[1] = o->t[2] = -1;
+        o->material = m->tris[i].material;
+    }
+    free(key); free(slot); free(cl); free(psum); free(cnt);
+    *out_tris = t;
+    *out_ntris = n;
+    *out_normals = nsum;
+    *out_nnormals = nc;
+    return 0;
 }
