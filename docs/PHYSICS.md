@@ -81,7 +81,13 @@ them is cheap. `Quat` (`w + xi + yj + zk`) has `quat_axis_angle`, `quat_mul`,
 
 Once per physics step (not per substep: 1.3), every pair of bodies whose bounding spheres
 come within a margin of each other is tested, and every body against the six walls of the
-room. Each pair that touches, or is closer than the margin, gives one or more **contacts**:
+room. The pairs come from a **sort and sweep** (the bounding spheres, grown by how far each
+body can move in the step, as intervals on the axis along which the bodies spread most:
+the vertical for a tall pile; sorted, swept, then visited in the order of the pairs `i < j`,
+so the contacts are the same as testing every pair): 1000 falling bodies, 12.9 → 5.3 ms per
+step. The pairs are tested on all the CPU's cores (OpenMP): the bodies in runs of about the
+same number of pairs, each run's contacts into a list of its own, the lists put together in
+the runs' order afterwards: the very contacts, in the very order, of one thread. Each pair that touches, or is closer than the margin, gives one or more **contacts**:
 a point `p`, a normal `n` (from body b towards body a) and a depth (how far they overlap;
 negative: the gap between them, a *speculative* contact, 1.3).
 
@@ -229,11 +235,14 @@ before its end: its contacts must be there from the start. So the pairs are test
 margin, how far they can close in the step:
 
 ```
-margin = 0.1 + dt (closing speed + |ωa| ra + |ωb| rb),   at most 0.1 + (ra + rb) / 2
+margin = 0.1 + dt (|va − vb| + |ωa| ra + |ωb| rb),   at most 0.1 + (ra + rb) / 2
 ```
 
-(the closing speed along the line between their centres, the spin of their outermost
-points; `ra`, `rb` their bounding radii; against a wall the whole speed). A contact with a
+(their whole relative speed, the spin of their outermost points; `ra`, `rb` their bounding
+radii; against a wall the whole speed). Only the part of the relative speed along the line
+between the centres, as it once was, let a box at 500 units/s through a slab 4 units
+thick: passing the slab off its centre, that line was almost square to its path. Faster
+than the cap allows, the bodies are swept (1.3b). A contact with a
 gap (depth < 0) lets the bodies approach by at most the gap in the substep: its target is
 `v_rel · n ≥ depth / h`, which is a pull of nothing until the gap would close, and exactly
 what stops them at the surface when it would. The iterations skip the gaps that cannot
@@ -292,6 +301,31 @@ contacts in its list's order (in another order, the same). Warm starting is the 
 CPU: each new contact looks for the old one of the same pair, within 1 cm, and starts from
 its impulses.
 
+### 1.3b Fast bodies: continuous collision
+
+The cap on the margin (half the two sizes) keeps a burst of fast bodies from pairing
+everything with everything, but a body faster than that per step could step over a thin
+wall or a small body between two steps. So after each step every body that moved more than
+half its **inner radius** (the largest sphere about its centre of mass inside it) is
+**swept**: that sphere along its path, from where it was to where it is, against the walls
+and every other body grown by the sphere's radius (a sphere, a box, a hull as its planes
+pushed out, a fixed mesh's triangles), relative to the other's own path (two bodies
+falling side by side do not meet). At the first hit it is put back just before it, its
+velocity kept: the next step's speculative contact stops or bounces it at the surface
+(motion clamping, as Bullet does). A ball, a box and two balls head on, from 200 to 50000
+units/s, at a slab 4 units thick: all stopped, on the CPU and the GPU (`test_fast`). What it
+misses: the turn within a step, and a fast body that only grazes a corner with its edge.
+On the GPU (`K_CCD`) each fast body goes through the others 64 at a time, read once per
+workgroup into shared memory.
+
+### 1.3c The push out taken back: relax
+
+The push out of an overlap (`BAUMGARTE / h × (depth − slop)`, capped) is a velocity: it
+moves the bodies apart, then stays in them as motion, and in a pile it kept bodies rocking.
+After each substep's positions, one more pass of the solver aims at the speeds the contacts
+allow without a push (a gap may still close, a bounce keeps its speed, a touching contact
+only stops approaching): the push is taken back (Box2D v3's "relax" of its soft step).
+
 ### 1.5 Sleeping
 
 A pile at rest still costs a full step: its contacts are found and solved every step, only
@@ -306,6 +340,30 @@ in a pile of hulls some body always jitters a little, and that kept whole island
 (a test with the island rule, and with "a body and all it touches": 250 hulls, about 10%
 asleep after 40 s). Alone, the still ones fall asleep, hold the others still as fixed
 bodies, and the pile falls asleep from the bottom up (all 250 after 35 s).
+
+But a pile never quite stops: its bodies jitter at a few cm/s, a torus hull can rock on its
+rim for ever, and a ball spins on the spot. Three rules bring it fully to rest:
+
+- **settling**: a slow body (centre and outermost point under 60 cm/s) resting on
+  something loses 2 /s of its speed, linear and angular (as Bullet's "additional damping");
+  the jitter and the rocking die out;
+- **going nowhere**: while a body is slow, its place and turn when it became slow are kept
+  (its anchor); if it stays within 2.5 units of them (the outermost point too) for 1.5 s, it
+  sleeps, still or not. In a settled 400-body pile, over 4.5 s, 98% of the bodies stay within
+  2.5 units while their fastest point often passes 30 cm/s: they jitter in place. A slow body
+  that does get somewhere (a ball rolling across the floor) moves its anchor along;
+- **no sleeping on a moving neighbour**: a body does not fall asleep while one it touches is
+  awake and not quiet (still, or going nowhere for half the time): asleep it would be a
+  fixed body under it, and a pile still settling, held up by some bodies asleep and pressing
+  on others awake, slid off them in avalanches that woke it all again (after three times
+  the time going nowhere, it sleeps anyway). A body jittering in place wakes nobody.
+
+With them, a pile three times as tall as it is wide (400 balls, boxes and tori in a room 180
+wide) is asleep in 11 s on the CPU, every one of 6 seeds in float and double (`test_tall_pile`
+waits 30 s; before, 11–29 s, and one of 6 not after 30 s), and 1000 bodies spread on the
+floor in 7–10 s (before, often a few awake for ever). On the GPU, whose Jacobi iterations
+jitter more (1.4), tall piles are the hard case: of 3 tall piles, 2 asleep within 60 s, the
+third with 80% asleep (before: none fully asleep after 60 s, about 85% asleep).
 
 On the GPU a world whose bodies all sleep is not stepped at all while nothing changes (no
 body new or changed by the program, the same forces): a step would change nothing, since a
@@ -721,6 +779,8 @@ Each test compares with an answer known in advance:
 | a ball, a hull and a box on a fixed mesh (a block, top at 100) | rest on it | 0.03 cm off each |
 | the inside of a torus mesh as the air sees it (48³ cells) | 2π²Rr² | 0.988× |
 | two hulls colliding, no gravity | momentum conserved | change < 10⁻⁵ |
+| a ball, a box and two balls head on, 500 to 50000 cm/s, at a slab 4 cm thick (`test_fast`) | none passes through (1.3b) | none |
+| 400 balls, boxes and tori dropped into a room 180 wide (`test_tall_pile`) | all asleep within 30 s (1.5) | all, at 11 s |
 
 The cloud moves 91 and not 100 cm in the wind test because the air needs a moment to reach
 the wind's speed through the projection at the walls; the 10% tolerance covers it.
@@ -797,11 +857,17 @@ the time of every pass at the end (natively; WEB.md 3).
   several hulls of one body; two fixed meshes never collide with each other.
 - **Mesh contacts**: a body sliding over a mesh can catch on the triangles' inner edges
   (each triangle is tested on its own); "internal edge" filtering would smooth it.
-- **Broad phase**: all pairs (n² / 2), fine for tens of bodies on the CPU; on the GPU one
-  thread per pair is still cheap at 2000 bodies (section 7). A uniform grid or
-  sweep-and-prune for tens of thousands.
-- **Rolling**: a ball rolls on forever on a flat floor (no rolling resistance), as in most
-  game engines; angular damping (0.1 /s) slowly stops it.
+- **Broad phase**: sort and sweep on the CPU (1.2), a hashed grid on the GPU (1.4).
+- **The CPU's solver** runs its iterations on one core: each contact needs the ones before
+  it. Solving contacts of different colours (no shared body) on all cores was tried: on 16
+  threads the colours' barriers (some 60 colours, 44 passes a step) cost more than the work
+  they shared (1000 bodies: 60 → 111 ms a step). The rest of the step is on all cores.
+- **Tall piles on the GPU** settle more slowly than on the CPU (1.5): its iterations are
+  Jacobi's, each body's contacts summed at once. A Gauss-Seidel solver by colours on the GPU
+  (the one of `physics-avbd` has the colouring) would settle them as the CPU does.
+- **Rolling**: a fast ball rolls on along a flat floor (no rolling resistance), as in most
+  game engines; angular damping (0.1 /s) slowly stops it, and below 60 cm/s the settling
+  damping (1.5) does it within a few seconds.
 - **Two-way coupling** is weak (section 4); a monolithic solve (Batty, Bertails & Bridson
   2007, "A Fast Variational Framework for Accurate Solid-Fluid Coupling") would conserve
   momentum between bodies and air.
