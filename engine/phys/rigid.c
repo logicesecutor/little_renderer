@@ -819,22 +819,107 @@ static real pair_margin(const Body *a, const Body *b, real dt){
     return r_fmin(SPECULATIVE_MIN + dt * (closing + spin), SPECULATIVE_MIN + 0.5f * (ra + rb));
 }
 
+// ---- the broad phase: sort and sweep ---------------------------------------------------------
+//
+// Which pairs of bodies can touch within the step: each body's bounding sphere, grown by as
+// far as it can move in the step (its speed and the spin of its outermost point), as an
+// interval on one axis, the one along which the bodies spread most (a tall pile: the
+// vertical). The intervals sorted by their start, a sweep keeps those still open: each
+// body pairs with the open ones its interval meets. The pairs are then visited in the order
+// the brute force of every pair (i < j) had, so the contacts, and the solver's results, are
+// the same as before, only found in O(n log n + pairs) instead of O(n^2).
+
+typedef struct { real lo, hi; int i; } SweepEnd;
+typedef struct { int i, j; } BodyPair;
+
+static int cmp_sweep(const void *pa, const void *pb){
+    const SweepEnd *a = pa, *b = pb;
+    if (a->lo != b->lo) return a->lo < b->lo ? -1 : 1;
+    return a->i - b->i;
+}
+static int cmp_pair(const void *pa, const void *pb){
+    const BodyPair *a = pa, *b = pb;
+    return a->i != b->i ? a->i - b->i : a->j - b->j;
+}
+
+// the pairs (i < j) whose grown bounds meet on the sweep axis, sorted; their number, -1 if
+// out of memory (then the caller tests every pair)
+static int broad_phase(const RigidWorld *w, real dt, BodyPair **out){
+    int n = w->nbodies;
+    *out = NULL;
+    if (n < 2) return 0;
+    SweepEnd *e = malloc((size_t)n * sizeof(SweepEnd));
+    int *open = malloc((size_t)n * sizeof(int));
+    if (!e || !open){ free(e); free(open); return -1; }
+    // the axis along which the centres spread most
+    Vec3 mean = vec3(0, 0, 0), var = vec3(0, 0, 0);
+    for (int i = 0; i < n; i++) mean = v_add(mean, w->bodies[i].pos);
+    mean = v_scale(mean, 1.0f / n);
+    for (int i = 0; i < n; i++){ Vec3 d = v_sub(w->bodies[i].pos, mean); var = v_add(var, v_mul(d, d)); }
+    int axis = var.x >= var.y && var.x >= var.z ? 0 : (var.y >= var.z ? 1 : 2);
+    for (int i = 0; i < n; i++){
+        const Body *b = &w->bodies[i];
+        real r = body_radius(b);
+        // >= half of any pair margin of this body (pair_margin: closing <= |va| + |vb|)
+        real grow = 0.5f * SPECULATIVE_MIN + dt * (v_len(b->vel) + v_len(b->angvel) * r);
+        real c = comp(b->pos, axis);
+        e[i] = (SweepEnd){c - r - grow, c + r + grow, i};
+    }
+    qsort(e, (size_t)n, sizeof(SweepEnd), cmp_sweep);
+    int cap = 4 * n, np = 0, nopen = 0;
+    BodyPair *p = malloc((size_t)cap * sizeof(BodyPair));
+    if (!p){ free(e); free(open); return -1; }
+    for (int k = 0; k < n; k++){
+        int keep = 0;
+        for (int q = 0; q < nopen; q++)                   // close the intervals that ended
+            if (e[open[q]].hi >= e[k].lo) open[keep++] = open[q];
+        nopen = keep;
+        const Body *a = &w->bodies[e[k].i];
+        for (int q = 0; q < nopen; q++){
+            int i = e[k].i, j = e[open[q]].i;
+            if (a->inv_mass == 0 && w->bodies[j].inv_mass == 0) continue;   // two fixed bodies
+            if (np == cap){
+                BodyPair *t = realloc(p, (size_t)cap * 2 * sizeof(BodyPair));
+                if (!t){ free(p); free(e); free(open); return -1; }
+                p = t;
+                cap *= 2;
+            }
+            p[np++] = i < j ? (BodyPair){i, j} : (BodyPair){j, i};
+        }
+        open[nopen++] = k;
+    }
+    free(e);
+    free(open);
+    qsort(p, (size_t)np, sizeof(BodyPair), cmp_pair);
+    *out = p;
+    return np;
+}
+
+// a pair the broad phase gave: its bounding spheres, then its shapes
+static void test_pair(RigidWorld *w, int i, int j, real dt){
+    Body *a = &w->bodies[i], *b = &w->bodies[j];
+    if (a->inv_mass == 0 && b->inv_mass == 0) return;
+    real m = pair_margin(a, b, dt);
+    real r = body_radius(a) + body_radius(b) + m;
+    Vec3 d = v_sub(a->pos, b->pos);
+    if (v_dot(d, d) > r * r) return;
+    collide_pair(w, i, j, m);
+}
+
 static void find_contacts(RigidWorld *w, real dt){
     w->ncontacts = 0;
+    BodyPair *pairs;
+    int np = broad_phase(w, dt, &pairs), q = 0;
     for (int i = 0; i < w->nbodies; i++){
         Body *a = &w->bodies[i];
         if (w->has_room && a->inv_mass > 0) collide_walls(w, i, pair_margin(a, NULL, dt));
-        for (int j = i + 1; j < w->nbodies; j++){
-            Body *b = &w->bodies[j];
-            if (a->inv_mass == 0 && b->inv_mass == 0) continue;
-            // quick reject with bounding spheres
-            real m = pair_margin(a, b, dt);
-            real r = body_radius(a) + body_radius(b) + m;
-            Vec3 d = v_sub(a->pos, b->pos);
-            if (v_dot(d, d) > r * r) continue;
-            collide_pair(w, i, j, m);
+        if (np < 0){                                  // (no memory for the pairs: all of them)
+            for (int j = i + 1; j < w->nbodies; j++) test_pair(w, i, j, dt);
+            continue;
         }
+        for (; q < np && pairs[q].i == i; q++) test_pair(w, i, pairs[q].j, dt);
     }
+    free(pairs);
 }
 
 // ---- sleeping --------------------------------------------------------------------------------
@@ -962,6 +1047,14 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
       w->nprev = w->ncontacts; w->ncontacts = 0; }
     memos_step(w);
     find_contacts(w, dt);
+    // last step's contacts of each body a: they were found body by body (find_contacts), so
+    // those of a are together, from prev_first[a] (-1: none) to the next body's
+    int *prev_first = w->warm_start && w->nprev > 0 ? malloc((size_t)(w->nbodies + 1) * sizeof(int)) : NULL;
+    if (prev_first){
+        for (int i = 0; i <= w->nbodies; i++) prev_first[i] = -1;
+        for (int q = w->nprev - 1; q >= 0; q--)
+            if (w->prev[q].a >= 0 && w->prev[q].a < w->nbodies) prev_first[w->prev[q].a] = q;
+    }
     for (int k = 0; k < w->ncontacts; k++){
         Contact *c = &w->contacts[k];
         onb_from_normal(c->n, &c->t1, &c->t2);
@@ -969,7 +1062,9 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         // impulse to stay put; it starts from that, and the iterations only correct the change.
         // A resting stack then converges in a few steps instead of sinking and jittering.
         if (!w->warm_start) continue;
-        for (int q = 0; q < w->nprev; q++){
+        int q0 = prev_first ? prev_first[c->a] : 0;
+        if (q0 < 0) continue;
+        for (int q = q0; q < w->nprev && (!prev_first || w->prev[q].a == c->a); q++){
             const Contact *o = &w->prev[q];
             if (o->a != c->a || o->b != c->b) continue;
             Vec3 d = v_sub(o->p, c->p);
@@ -981,6 +1076,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             break;
         }
     }
+    free(prev_first);
     Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
     int *act = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(int));
     if (!iw || !act){ perror("malloc"); exit(1); }
