@@ -962,7 +962,7 @@ static int wake_bodies(RigidWorld *w, real dt, const Vec3 *forces){
     if (!asleep) return 0;
     for (int i = 0; i < w->nbodies; i++){
         const Body *a = &w->bodies[i];
-        if (a->inv_mass == 0 || a->sleeping) continue;
+        if (a->inv_mass == 0 || a->sleeping || a->anchor_time >= 0.5f * ANCHOR_TIME) continue;   // (jittering in place)
         if (v_len(a->vel) < WAKE_SPEED && v_len(a->angvel) * body_radius(a) < WAKE_SPEED) continue;
         for (int j = 0; j < w->nbodies; j++){
             Body *b = &w->bodies[j];
@@ -1013,7 +1013,9 @@ static void fall_asleep(RigidWorld *w, real dt, const Vec3 *forces){
         if (body_slow(b) && b->anchor_time > 0 && near_anchor(b)) b->anchor_time += dt;
         else if (body_slow(b)){ b->anchor_pos = b->pos; b->anchor_rot = b->rot; b->anchor_time = dt; }
         else b->anchor_time = 0;
-        if ((b->sleep_time < SLEEP_TIME && b->anchor_time < ANCHOR_TIME) || (busy && busy[i])) continue;
+        // (going nowhere three times as long: asleep whatever its neighbours do)
+        if ((b->sleep_time < SLEEP_TIME && b->anchor_time < ANCHOR_TIME) ||
+            (busy && busy[i] && b->anchor_time < 3 * ANCHOR_TIME)) continue;
         b->anchor_time = 0;
         b->sleeping = 1;
         b->vel = b->angvel = vec3(0, 0, 0);
