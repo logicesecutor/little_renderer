@@ -778,8 +778,13 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     gr->prev_nb = nb;          // (the next step's contacts start from this one's)
     gr->parity ^= 1;
     gr->memo_rd ^= 1;          // (what this step wrote is read by the next)
-    // the bodies back to the CPU (if the last readback has landed)
-    if (!gr->rb_pending){
+    // the bodies back to the CPU (if the last readback has landed). Decided once: the last
+    // one's callback can come in the middle of this (a spontaneous callback, during the
+    // submit), and a map asked for without the copy here would read the copy before, a step
+    // older and without the bodies new since (zeros: the next time the buffers grow they
+    // were sent back as such, and became NaN)
+    const int readback = !gr->rb_pending;
+    if (readback){
         size_t bytes = (size_t)nb * BODY_BYTES + 16;
         gpu_buffer_reserve(g, &gr->rb, &gr->rb_cap, bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, "bodies back");
         wgpuCommandEncoderCopyBufferToBuffer(enc, gr->bodies, 0, gr->rb, 0, (size_t)nb * BODY_BYTES);
@@ -793,7 +798,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     gpu_timer_submitted(gr->timer);
-    if (!gr->rb_pending){
+    if (readback){
         gr->rb_pending = 1;
         gr->rb_n = nb;
         gr->rb_req_step = gr->step_no;
