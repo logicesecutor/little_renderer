@@ -314,7 +314,8 @@ EMCC ?= emcc
 WEB = web/build
 WEB_MODELS = models/cube.obj models/sphere.obj models/torus.obj models/torus_dense.obj \
              models/dragon_recon/dragon_vrip_res2.ply models/dragon_recon/dragon_vrip_res3.ply \
-             models/dragon_recon/dragon_vrip_res4.ply $(if $(WEB_DRAGON),$(DRAGON))
+             models/dragon_recon/dragon_vrip_res4.ply $(if $(WEB_DRAGON),$(DRAGON)) \
+             models/skies/kloofendal_48d_partly_cloudy_2k.hdr
 WEB_SRC = $(SRC) $(WGSL_C) apps/view.c
 # the GPU backend: WebGPU through Dawn's bindings for Emscripten (fetched by emcc once)
 # (WGPU_REFERENCE=1: for a webgpu.h from before wgpu...Reference became wgpu...AddRef)

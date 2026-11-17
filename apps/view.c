@@ -986,6 +986,13 @@ static void do_capture(int download){
     force_present = 1;
 }
 void lr_capture(void){ do_capture(0); }
+// callable from JavaScript: Module._lr_prof() prints where the frames' time went on the CPU
+// since the last call (or the first second), as -autoquit does natively, and starts over
+EMSCRIPTEN_KEEPALIVE void lr_prof(void){
+    prof_print();
+    memset(prof, 0, sizeof(prof));
+    prof_frames = 0;
+}
 #endif
 
 static void shutdown_viewer(void){
