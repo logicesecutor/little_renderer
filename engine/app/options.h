@@ -102,6 +102,12 @@ typedef struct {
     double orbit;          // view: the camera swings by itself (+-25 degrees, this many per second)
     int history;           // view, GPU path tracing while moving: samples kept per pixel (0 = none)
     int photon_cache;      // view, GPU light-traced caustics while moving: from a photon cache
+    int maxfps;            // view: a frame rendered and shown every time round (1, default); 0 = only
+                           // when something changed (and the path tracer stops at -s: less power)
+    int vsync;             // view: frames shown in step with the display (1, default); 0 = at once
+    double band_ms;        // view, GPU path tracer: its GPU time per frame (0 = 60% of the display's
+                           // refresh period with -maxfps on; with it off, bands of 12-45 ms)
+    const char *stats;     // view -autoquit: its frame rate written to this file (bin/bench)
 
     // physics (sim, and view -sim on)
     SimOptions sim;

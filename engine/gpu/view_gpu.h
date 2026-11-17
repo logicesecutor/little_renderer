@@ -73,7 +73,12 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
 // until gpu_view_trace_passes reaches n could end with a few more, a different number from
 // run to run). With the limit, gpu_view_trace_more does nothing once an image has them all.
 void gpu_view_trace_limit(GpuView *v, int spp);
+// The GPU time the path tracer's work may take per frame (bands of rows, or several passes),
+// so that frames keep coming while it refines: ms > 0. 0 (the default): bands of 12-45 ms,
+// the image cleaner sooner but the frames slower (while the camera moves: 10 ms either way).
+void gpu_view_trace_budget(GpuView *v, double ms);
 int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finished
+double gpu_view_trace_work(const GpuView *v);       // passes' worth of work done since the view was made, all images
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU
 // Reads the image back (asynchronously, like gpu_view_capture): fn gets w * h values of
 // 4 floats, the sum of the samples (linear RGB) and their count. 0 if a read is already on

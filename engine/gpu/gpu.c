@@ -27,6 +27,7 @@ int gpu_software(const Gpu *g){ (void)g; return 0; }
 void gpu_destroy(Gpu *g){ free(g); }
 void gpu_set_timing(int on){ (void)on; }
 int gpu_timing(const Gpu *g){ (void)g; return 0; }
+void gpu_set_vsync(int on){ (void)on; }
 
 #else
 #include "gpu/gpu_internal.h"
@@ -52,6 +53,10 @@ void gpu_set_timing(int on){ timing_wanted = on != 0; }
 void gpu_set_timing(int on){ (void)on; }
 #endif
 int gpu_timing(const Gpu *g){ return g && g->timestamps; }
+int gpu_timing_report(const Gpu *g){ return g && g->timing_report; }
+
+static int no_vsync;                   // gpu_set_vsync(0)
+void gpu_set_vsync(int on){ no_vsync = !on; }
 
 static void fail(Gpu *g, const char *what, WGPUStringView msg){
     g->state = GPU_FAILED;
@@ -113,6 +118,13 @@ static void configure_surface(Gpu *g){
     WGPUCompositeAlphaMode alpha = caps.alphaModeCount ? caps.alphaModes[0] : WGPUCompositeAlphaMode_Auto;
     for (size_t i = 0; i < caps.alphaModeCount; i++)
         if (caps.alphaModes[i] == WGPUCompositeAlphaMode_Opaque) alpha = WGPUCompositeAlphaMode_Opaque;
+    // in step with the display (no tearing), or (gpu_set_vsync(0)) at once: Mailbox (the newest
+    // frame replaces the one waiting) where there is one, else Immediate (it may tear)
+    WGPUPresentMode present = WGPUPresentMode_Fifo;
+    for (size_t i = 0; i < caps.presentModeCount && no_vsync; i++){
+        if (caps.presentModes[i] == WGPUPresentMode_Mailbox) present = WGPUPresentMode_Mailbox;
+        else if (caps.presentModes[i] == WGPUPresentMode_Immediate && present == WGPUPresentMode_Fifo) present = WGPUPresentMode_Immediate;
+    }
     wgpuSurfaceCapabilitiesFreeMembers(caps);
     WGPUSurfaceConfiguration cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -122,7 +134,7 @@ static void configure_surface(Gpu *g){
     cfg.width = (uint32_t)g->width;
     cfg.height = (uint32_t)g->height;
     cfg.alphaMode = alpha;
-    cfg.presentMode = WGPUPresentMode_Fifo;      // in step with the display: no tearing
+    cfg.presentMode = present;
     wgpuSurfaceConfigure(g->surface, &cfg);
 }
 
@@ -187,14 +199,18 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     // ask for the largest storage buffers the adapter allows: the cloud's grids are big
     WGPULimits want = lim;
     dd.requiredLimits = &want;
-#ifndef __EMSCRIPTEN__
-    // timed passes (gpu_timer): only when asked, natively
+    // timed passes (gpu_timer) whenever the adapter has them: the path tracer sizes its work per
+    // frame by its GPU time; every part's times printed only when asked (gpu_set_timing,
+    // LR_GPU_TIMING=1)
     static WGPUFeatureName feats[2];
     size_t nfeats = 0;
-    if ((timing_wanted || getenv("LR_GPU_TIMING")) && wgpuAdapterHasFeature(adapter, WGPUFeatureName_TimestampQuery)){
+    if (wgpuAdapterHasFeature(adapter, WGPUFeatureName_TimestampQuery)){
         feats[nfeats++] = WGPUFeatureName_TimestampQuery;
         g->timestamps = 1;
     }
+#ifndef __EMSCRIPTEN__
+    g->timing_report = timing_wanted || getenv("LR_GPU_TIMING");
+#endif
 #ifdef LR_VK
     // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
@@ -206,7 +222,6 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
 #endif
     dd.requiredFeatureCount = nfeats;
     dd.requiredFeatures = feats;
-#endif
     g->max_storage = lim.maxStorageBufferBindingSize < lim.maxBufferSize ? lim.maxStorageBufferBindingSize : lim.maxBufferSize;
     dd.uncapturedErrorCallbackInfo.callback = on_error;
     dd.uncapturedErrorCallbackInfo.userdata1 = g;
@@ -501,6 +516,7 @@ struct GpuTimer {
     int pending, npending;
     WGPUPassTimestampWrites tw;
     double *ns;                  // per stage: the GPU time summed
+    double *ns_seen, *units_seen;  // what gpu_timer_recent_ms_per_unit last saw
     double span_ns;              // from a round's first pass's start to its last one's end, summed
     long *calls;
     long rounds;
@@ -531,6 +547,8 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     t->units = calloc((size_t)stages, sizeof(double));
     t->ns = calloc((size_t)stages, sizeof(double));
     t->calls = calloc((size_t)stages, sizeof(long));
+    t->ns_seen = calloc((size_t)stages, sizeof(double));
+    t->units_seen = calloc((size_t)stages, sizeof(double));
     WGPUQuerySetDescriptor qd;
     memset(&qd, 0, sizeof(qd));
     qd.type = WGPUQueryType_Timestamp;
@@ -539,6 +557,7 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     t->resolve = gpu_buffer(g, "timer: resolve", (size_t)passes * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
     t->readback = gpu_buffer(g, "timer: readback", (size_t)passes * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     if (!t->stage_of || !t->pending_stage || !t->pass_units || !t->pending_units || !t->units || !t->ns || !t->calls ||
+        !t->ns_seen || !t->units_seen ||
         !t->qs || !t->resolve || !t->readback){
         gpu_timer_destroy(t);                           // no memory for it: no timing
         return NULL;
@@ -633,9 +652,18 @@ void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
 void gpu_timer_reset(GpuTimer *t){
     if (!t) return;
     for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
-    for (int s = 0; s < t->stages; s++){ t->ns[s] = 0; t->units[s] = 0; t->calls[s] = 0; }
+    for (int s = 0; s < t->stages; s++){ t->ns[s] = 0; t->units[s] = 0; t->calls[s] = 0; t->ns_seen[s] = 0; t->units_seen[s] = 0; }
     t->span_ns = 0;
     t->rounds = 0;
+}
+
+double gpu_timer_recent_ms_per_unit(GpuTimer *t, int stage){
+    if (!t || stage < 0 || stage >= t->stages) return 0;
+    double du = t->units[stage] - t->units_seen[stage], dn = t->ns[stage] - t->ns_seen[stage];
+    if (du <= 0 || dn <= 0) return 0;
+    t->units_seen[stage] = t->units[stage];
+    t->ns_seen[stage] = t->ns[stage];
+    return dn / du / 1e6;
 }
 
 double gpu_timer_ms_per_round(GpuTimer *t){
@@ -654,7 +682,7 @@ void gpu_timer_destroy(GpuTimer *t){
     if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
     if (t->readback){ wgpuBufferDestroy(t->readback); wgpuBufferRelease(t->readback); }
     free(t->stage_of); free(t->pending_stage); free(t->ns); free(t->calls);
-    free(t->pass_units); free(t->pending_units); free(t->units);
+    free(t->pass_units); free(t->pending_units); free(t->units); free(t->ns_seen); free(t->units_seen);
     free(t);
 }
 

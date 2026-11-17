@@ -53,5 +53,9 @@ void gpu_destroy(Gpu *g);
 // (gpu_view_gpu_ms, gpu_rigid_gpu_ms, gpu_fluid_gpu_ms).
 void gpu_set_timing(int on);
 int gpu_timing(const Gpu *g);
+// A window's frames in step with the display (1, the default: no tearing), or shown as soon
+// as they are ready (0: Mailbox where the window system has it, else Immediate, which may
+// tear). Set before gpu_create_window. In a browser the page is always in step.
+void gpu_set_vsync(int on);
 
 #endif

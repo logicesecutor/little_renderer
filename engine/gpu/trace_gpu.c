@@ -1920,7 +1920,7 @@ void gpu_trace_destroy(GpuTrace *t){
             if (t->ck_builds[i]) printf("GPU BVH check, build %d: %d items, cost %.3f (mean of %ld), depth %d\n", i, t->ck_n[i], t->ck_cost[i] / t->ck_builds[i], t->ck_builds[i], t->ck_depth[i]);
         printf("GPU BVH check: %ld builds were not one tree over their items\n", t->ck_bad);
     }
-    if (t->timer){
+    if (t->timer && gpu_timing_report(t->g)){
         for (int k = 0; k < NTS; k++){
             double ms = gpu_timer_ms_per_unit(t->timer, k);
             if (ms > 0) printf("GPU time, %s: %.3f ms per %s\n", TS_NAMES[k], ms,

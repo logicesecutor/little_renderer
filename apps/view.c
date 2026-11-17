@@ -250,6 +250,11 @@ static int showing_raster = 1;         // what the window shows right now
 static double t_start, t_prev, last_present, last_title, last_change;
 static long frames;          // frames shown (for -autoquit's frame rate)
 static long title_frames;    // frames shown when the title was last written (its frame rate)
+// path tracing passes made (1 sample per pixel of the image, all images: the work done, as
+// frames/s is what is shown), and at the title and the -stats window's start
+static double passes_total, cpu_passes, title_passes, stats_passes;
+static long passes_seen, stats_frames;
+static double stats_t0;      // -stats: frames counted from here (the start left out)
 
 // where a frame's time goes on the CPU (printed by -autoquit), after the first second
 enum { PROF_SIM, PROF_ACCEL, PROF_MOVE, PROF_MORE, PROF_WAIT, PROF_RASTER, PROF_PRESENT, PROF_FRAME, PROF_N };
@@ -457,6 +462,10 @@ static void idle(int ms){
 #endif
 }
 
+// -maxfps on, a window in step with the display: the path tracer's bands run while the frame
+// waits for the display, not before it (gpu_trace_frame)
+static int trace_overlaps(void){ return o.maxfps && o.vsync && gpu && !gpu_offscreen(gpu); }
+
 // A new path traced image on the GPU, for the camera as it is now. 0 = this GPU cannot hold
 // the scene: the CPU path traces from now on.
 static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
@@ -515,12 +524,30 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
     }
     reset = 0;
     if (gpu_view_trace_passes(gview) < o.spp) PROF(PROF_MORE, gpu_view_trace_more(gview, &scene, &last_rp, &o.march));
-    else idle(10);
+    else if (!o.maxfps) idle(10);             // (-maxfps on: the image shown again, as many times as can be)
     // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
-    // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band.
-    if (gpu_view_trace_busy(gview)) PROF(PROF_WAIT, gpu_wait(gpu));
+    // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band. With
+    // -maxfps on in a window in step with the display, not: the band runs while the frame
+    // waits for the display (its image shows what the band added, being after it on the
+    // queue), so the GPU is not idle between the two
+    if (gpu_view_trace_busy(gview) && !trace_overlaps()) PROF(PROF_WAIT, gpu_wait(gpu));
+    else gpu_poll(gpu);                       // (the bands that finished: their callbacks)
     pass_ms = gpu_view_trace_pass_ms(gview);
     return 1;
+}
+
+// -stats file: the frame rate and the path tracer's passes per second since stats_t0, for
+// bin/bench (group I), written once
+static void write_stats(double tn){
+    static int written;
+    if (written || !o.stats || stats_t0 <= 0 || tn <= stats_t0) return;
+    written = 1;
+    FILE *f = fopen(o.stats, "w");
+    if (!f){ fprintf(stderr, "cannot write %s\n", o.stats); return; }
+    double fps = (frames - stats_frames) / (tn - stats_t0);
+    fprintf(f, "fps %.3f\nms_per_frame %.4f\npasses_per_s %.3f\nmode %s\nseconds %.2f\n", fps, fps > 0 ? 1000.0 / fps : 0.0,
+            (passes_total - stats_passes) / (tn - stats_t0), backend_name(mode), tn - stats_t0);
+    fclose(f);
 }
 
 // one iteration: input, camera, physics, render, show. 0 = quit.
@@ -531,6 +558,11 @@ static int frame(void){
         GpuState gs = gpu_state(gpu);
         if (gs == GPU_PENDING) return 1;
         if (gs == GPU_READY) gview = gpu_view_create(gpu, W, H);
+        // -maxfps on: the path tracer's work per frame within 60% of the display's period (or
+        // -band ms), so frames keep coming while it refines; off: the bands of before
+        // (85% when the bands run while the frame waits for the display: trace_overlaps)
+        if (gview) gpu_view_trace_budget(gview, o.band_ms > 0 ? o.band_ms : !o.maxfps ? 0 :
+                                                (trace_overlaps() ? 0.85 : 0.6) * 1000.0 / window_refresh_hz(win));
         if (!gview){
             fprintf(stderr, "GPU not used (%s): the CPU draws everything\n", gpu_message(gpu));
             gpu_destroy(gpu);
@@ -769,7 +801,7 @@ static int frame(void){
     // (the GPU path tracer takes it straight from the GPU)
     if (gfluid && !use_raster && !(gview && o.gpu_trace > 0)) gpu_fluid_sync_cloud(gfluid);
     if (use_raster){
-        if (raster_dirty){
+        if (raster_dirty || o.maxfps){            // (-maxfps on: drawn again, changed or not)
             double r0 = clock_s();
             RenderParams p = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
             p.mode = shading;
@@ -846,7 +878,7 @@ static int frame(void){
             accum_to_fb(&acc, fb);
             force_present = 1;
         }
-    } else {
+    } else if (!o.maxfps){
         idle(10);                                     // done refining
     }
 
@@ -857,7 +889,16 @@ static int frame(void){
     int refining = !use_raster && !sim_moved &&     // bands land on screen ~30x per second
                    (gpu_traced ? gpu_passes < o.spp || gpu_passes != gpu_shown_passes : acc.passes < o.spp);
     double present0 = clock_s();
-    if (force_present || (refining && tn - last_present > 0.033)){
+    // the passes made since the last frame (an image started over: all of its own)
+    if (!gpu_traced && !use_raster){          // (the CPU's: an image started over counts all of its own)
+        long now = acc.passes;
+        cpu_passes += now >= passes_seen ? now - passes_seen : now;
+        passes_seen = now;
+    }
+    passes_total = (gview ? gpu_view_trace_work(gview) : 0) + cpu_passes;
+    // -maxfps on: every time round; off: when something changed, or the path tracer's image
+    // ~30 times a second while it refines
+    if (o.maxfps || force_present || (refining && tn - last_present > 0.033)){
         if (!use_raster && !sim_moved && !gpu_traced) accum_to_fb(&acc, fb);
         if (gview){
             // offscreen the frame must come back to be seen: ask for it. If the previous one
@@ -936,14 +977,23 @@ static int frame(void){
         }
         // the frame rate first, always: frames shown since the last title, every mode
         double fps = (frames - title_frames) / (tn - last_title);
-        char shown[640];
-        snprintf(shown, sizeof(shown), "view | %.0f fps (%.1f ms)%s", fps, fps > 0 ? 1000.0 / fps : 0.0,
+        double pps = (passes_total - title_passes) / (tn - last_title);
+        char shown[700], work[48] = "";
+        if (!use_raster) snprintf(work, sizeof(work), ", %.0f passes/s", pps);   // (the path tracer's work)
+        snprintf(shown, sizeof(shown), "view | %.0f fps (%.1f ms%s)%s", fps, fps > 0 ? 1000.0 / fps : 0.0, work,
                  strncmp(title, "view", 4) == 0 ? title + 4 : title);
         window_set_title(win, shown);
         hud_update(fps);
         title_frames = frames;
+        title_passes = passes_total;
         last_title = tn;
     }
+    if (o.stats && stats_t0 == 0 && tn - t_start > (o.autoquit / 3 < 2 ? o.autoquit / 3 : 2)){
+        stats_t0 = tn;
+        stats_frames = frames;
+        stats_passes = passes_total;
+    }
+    if (o.stats && o.autoquit > 0 && tn - t_start > o.autoquit) write_stats(tn);
 #ifndef __EMSCRIPTEN__
     if (o.autoquit > 0 && tn - t_start > o.autoquit && gview){
         // the GPU's image: ask for it, and quit once it is saved
@@ -1038,6 +1088,7 @@ int main(int argc, char **argv){
         // natively the GPU draws in the window itself (or, -gpu offscreen, hands the frames back)
         void *dpy;
         uintptr_t wh;
+        gpu_set_vsync(o.vsync);
         gpu = o.gpu != 2 && window_native(win, &dpy, &wh) ? gpu_create_window(dpy, wh, W, H) : gpu_create(NULL, W, H);
 #endif
     }

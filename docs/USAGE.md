@@ -306,6 +306,10 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks); prints the frame rate, and with `-orbit` the `render` command of the screenshot's camera | 0 = never |
 | `-photoncache on\|off` | GPU light-traced caustics while moving: from a world-space photon cache (on), or traced exactly every frame (off) | on |
 | `-orbit deg/s` | the camera swings by itself, ±25° around the point it looks at, at this speed: benchmarks and tests of the image while moving | 0 = off |
+| `-maxfps on\|off` | on: a frame rendered and shown every time round, as many as the machine can, still or moving (the path tracer's work per frame kept within the display's period, `-band`); off: a frame only when something changed, and the path tracer stops at `-s` samples (less power, the image clean sooner) | on |
+| `-vsync on\|off` | on: frames in step with the display; off: shown as soon as ready (Mailbox, else Immediate: it may tear), the machine's own rate | on |
+| `-band ms` | GPU path tracer: its GPU time per frame. 0 = 60% of the display's refresh period (85% in a window in step with the display, where it runs while the frame waits); bigger: fewer frames, the image cleaner sooner | 0 |
+| `-stats file` | with `-autoquit`: the frames per second and the path tracer's passes per second (the first 2 s left out) written to `file` (bin/bench's group I) | none |
 | `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); 12 at most while the physics runs; 0 = start over on every move | 32 |
 | `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |

@@ -436,7 +436,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     }
     make_bind_groups(gf);
     reserve_bodies(gf, &pw->rigid);
-    gf->timer = gpu_timer_create(g, 8, NFT);
+    gf->timer = gpu_timing_report(g) ? gpu_timer_create(g, 8, NFT) : NULL;   // (only when its times are asked for)
     live[live_slot()] = gf;
     pw->air_step = air_step;
     pw->air_user = gf;

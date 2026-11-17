@@ -31,7 +31,8 @@ struct Gpu {
     void *native_display;   // natively: the Display * (X11) or HINSTANCE (Win32) of the window
     uint64_t native_window; // the X Window or HWND, 0 = none
     int software;        // the adapter is a CPU emulating a GPU
-    int timestamps;      // passes can be timed (LR_GPU_TIMING=1 natively, and the adapter can)
+    int timestamps;      // passes can be timed (the adapter can: asked for whenever it can)
+    int timing_report;   // the parts' GPU times printed when they end (LR_GPU_TIMING=1, gpu_set_timing)
     int rt;              // hardware ray queries (make VK=1 on a GPU that has them; LR_GPU_HWRT=0: off)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
@@ -125,6 +126,8 @@ void gpu_timer_units(GpuTimer *t, double units);
 double gpu_timer_ms_per_unit(GpuTimer *t, int stage);
 void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names);
 void gpu_timer_reset(GpuTimer *t);              // (waits for the round on its way) all from 0
+double gpu_timer_recent_ms_per_unit(GpuTimer *t, int stage);   // since the last call (0: nothing new; never waits)
+int gpu_timing_report(const Gpu *g);            // the parts' times printed when they end
 double gpu_timer_ms_per_round(GpuTimer *t);     // the timed passes' GPU time per round (0: none)
 void gpu_timer_destroy(GpuTimer *t);
 

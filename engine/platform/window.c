@@ -147,6 +147,8 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     XFlush(w->dpy);
 }
 
+double window_refresh_hz(LrWindow *w){ (void)w; return 60.0; }   // (XRandR would tell)
+
 int window_native(LrWindow *w, void **display, uintptr_t *window){
     if (!w) return 0;
     *display = w->dpy;

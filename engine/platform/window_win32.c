@@ -187,6 +187,13 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     ReleaseDC(w->hwnd, dc);
 }
 
+double window_refresh_hz(LrWindow *w){
+    int hz = 0;
+    HDC dc = GetDC(w ? w->hwnd : NULL);
+    if (dc){ hz = GetDeviceCaps(dc, VREFRESH); ReleaseDC(w ? w->hwnd : NULL, dc); }
+    return hz > 1 ? (double)hz : 60.0;       // (0 or 1: "the hardware's default")
+}
+
 int window_native(LrWindow *w, void **display, uintptr_t *window){
     if (!w) return 0;
     *display = (void *)GetModuleHandleA(NULL);

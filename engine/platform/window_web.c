@@ -145,6 +145,8 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     js_present(w->rgba, w->w, w->h);
 }
 
+double window_refresh_hz(LrWindow *w){ (void)w; return 60.0; }   // (the page is paced by the browser)
+
 int window_native(LrWindow *w, void **display, uintptr_t *window){
     (void)w;
     *display = NULL;

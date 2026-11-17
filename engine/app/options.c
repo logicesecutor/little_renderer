@@ -146,7 +146,15 @@ void options_usage(Program prog, FILE *f){
         "  -history n                 GPU path tracing while moving: samples per pixel carried from\n"
         "                             frame to frame (reprojected), 0 = start over on every move (32)\n"
         "  -orbit deg/s               the camera swings by itself, +-25 degrees around the point it\n"
-        "                             looks at, at this speed (benchmarks of the image while moving) (0)\n");
+        "                             looks at, at this speed (benchmarks of the image while moving) (0)\n"
+        "  -maxfps on|off             a frame every time round, as many as the machine can (on);\n"
+        "                             off: only when something changed, the path tracer stopping at\n"
+        "                             -s samples (saves power)\n"
+        "  -vsync on|off              frames in step with the display (on); off: shown at once, past\n"
+        "                             the display's rate (it may tear)\n"
+        "  -band ms                   GPU path tracer: GPU time per frame (0: 60%% of the display's\n"
+        "                             refresh period; bigger: fewer frames, the image cleaner sooner) (0)\n"
+        "  -stats file                with -autoquit: the frame rate written to file (bin/bench)\n");
     fprintf(f, "\n  -h, --help                 this text\n");
 }
 
@@ -209,6 +217,8 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->gpu_raster = 1;
     o->gpu_trace = -1;                     // decided when the GPU is known
     o->denoise = prog != PROG_RENDER;      // a still image is the unbiased one unless asked
+    o->maxfps = 1;
+    o->vsync = 1;
     o->march = march_default_params();
     o->probe = 1;
     o->probe_res = 0;                      // PROBE_RES in a room, PROBE_RES_OPEN under a sky
@@ -274,6 +284,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-speed"))   o->speed = atof(v);
         else if (!strcmp(a, "-autoquit")) o->autoquit = atof(v);
         else if (!strcmp(a, "-orbit")) o->orbit = atof(v);
+        else if (!strcmp(a, "-maxfps")) o->maxfps = on_off(prog, a, v);
+        else if (!strcmp(a, "-vsync")) o->vsync = on_off(prog, a, v);
+        else if (!strcmp(a, "-band")) o->band_ms = atof(v);
+        else if (!strcmp(a, "-stats")) o->stats = v;
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
         else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);

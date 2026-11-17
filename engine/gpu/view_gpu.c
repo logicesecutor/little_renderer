@@ -19,9 +19,11 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ (void)v; (void)s; return 0; }
 void gpu_view_trace_limit(GpuView *v, int spp){ (void)v; (void)spp; }
+void gpu_view_trace_budget(GpuView *v, double ms){ (void)v; (void)ms; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; }
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
+double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
@@ -121,7 +123,10 @@ struct GpuView {
     double t_gpu_pass_ms;       // a whole pass, as the last band took
     int t_y, t_rows, t_reps;    // next row; rows per band and passes per submit (both adapt to the GPU)
     int t_limit;                // gpu_view_trace_limit: the most passes of an image (0: no limit)
+    double t_budget_ms;         // gpu_view_trace_budget: GPU time per frame (0: bands of 12-45 ms)
+    int t_gpu_timed;            // t_gpu_pass_ms comes from the GPU's timer
     int t_passes;               // samples per pixel submitted
+    double t_work;              // passes' worth of work done, all images (gpu_view_trace_work)
     int t_done, t_done_next;    // finished; and what that becomes when the running band ends
     int t_inflight;             // a band is running
     int t_bands;                // bands finished since the image started
@@ -804,6 +809,7 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     v->t_inflight = 0;
     v->t_done = v->t_done_next;
     v->t_bands++;
+    if (v->t_sub_rows > 0 && v->t_sub_reps > 0) v->t_work += (double)v->t_sub_rows * v->t_sub_reps / v->h;
     double ms = clock_ms() - v->t_submit_ms;
     // the time of a pass: from bands that did not begin an image (their time includes the guide
     // of the whole image), or a smaller one than known (the first includes making the pipelines).
@@ -811,14 +817,33 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     // camera moves every band begins one, and a lucky low value would stay, piling up passes
     // (the helmet orbiting: 4 passes per frame, 19 ms frames, against the 10 ms meant)
     double per_pass = v->t_sub_rows > 0 && v->t_sub_reps > 0 ? ms * v->h / ((double)v->t_sub_rows * v->t_sub_reps) : 0;
+    // the GPU's own time of the passes since (its timer, when the GPU has one): the wall time
+    // above also counts what waited on the queue before the band (a frame waiting for the
+    // display, a readback), which made bands ever smaller once frames came every few ms
+    double gpu_pass = gpu_timer_recent_ms_per_unit(gpu_trace_timer(v->trace), 0);
+    if (gpu_pass > 0){
+        v->t_gpu_timed = 1;
+        v->t_gpu_pass_ms = v->t_gpu_pass_ms > 0 ? v->t_gpu_pass_ms + 0.3 * (gpu_pass - v->t_gpu_pass_ms) : gpu_pass;
+        per_pass = 0;
+    }
+    if (v->t_gpu_timed) per_pass = 0;
     if (per_pass > 0){
         if (!v->t_sub_prep || v->t_gpu_pass_ms <= 0 || per_pass < v->t_gpu_pass_ms) v->t_gpu_pass_ms = per_pass;
         else v->t_gpu_pass_ms += 0.1 * (per_pass - v->t_gpu_pass_ms);
     }
-    if (ms < 12){
+    // a budget per frame and the GPU's own time of a pass: the band that fits it, at once
+    if (v->t_budget_ms > 0 && v->t_gpu_timed && v->t_gpu_pass_ms > 0){
+        double k = v->t_budget_ms / v->t_gpu_pass_ms;
+        if (k >= 1){ v->t_rows = v->h; v->t_reps = k >= 16 ? 16 : (int)(k + 0.25); }   // (a little over: the budget has room)
+        else { v->t_reps = 1; v->t_rows = (int)(v->h * k); if (v->t_rows < 4) v->t_rows = 4; }
+        return;
+    }
+    // (with a budget per frame, without a timer: within 0.6 and 1.5 times it)
+    const double lo = v->t_budget_ms > 0 ? 0.6 * v->t_budget_ms : 12, hi = v->t_budget_ms > 0 ? 1.5 * v->t_budget_ms : 45;
+    if (ms < lo){
         if (v->t_rows < v->h) v->t_rows = v->t_rows * 2 < v->h ? v->t_rows * 2 : v->h;
         else if (v->t_reps < 16) v->t_reps *= 2;
-    } else if (ms > 45){
+    } else if (ms > hi){
         if (v->t_reps > 1) v->t_reps /= 2;
         else if (v->t_rows > 4) v->t_rows /= 2;
     }
@@ -846,11 +871,13 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     int rows = v->t_rows < v->h - v->t_y ? v->t_rows : v->h - v->t_y;
     int reps = whole ? v->t_reps : 1;
     if (v->t_limit > 0 && reps > v->t_limit - v->t_passes) reps = v->t_limit - v->t_passes;   // (>= 1: checked above)
-    // something is moving: a frame each, so no more passes than fit in ~10 ms
+    // something is moving: a frame each, so no more passes than fit in ~10 ms; or the budget
+    // per frame (gpu_view_trace_budget), moving or not
     v->t_live = v->t_moved;
     v->t_moved = 0;
-    if (v->t_live && reps > 1 && v->t_gpu_pass_ms > 0){
-        int fit = (int)(10.0 / v->t_gpu_pass_ms);
+    if ((v->t_live || v->t_budget_ms > 0) && reps > 1 && v->t_gpu_pass_ms > 0){
+        double ms = v->t_budget_ms > 0 && (v->t_budget_ms < 10 || !v->t_live) ? v->t_budget_ms : 10.0;
+        int fit = (int)(ms / v->t_gpu_pass_ms);
         reps = fit < 1 ? 1 : (fit < reps ? fit : reps);
     }
     v->t_sub_rows = rows;
@@ -900,7 +927,9 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
 }
 
 void gpu_view_trace_limit(GpuView *v, int spp){ if (v) v->t_limit = spp > 0 ? spp : 0; }
+void gpu_view_trace_budget(GpuView *v, double ms){ if (v) v->t_budget_ms = ms > 0 ? ms : 0; }
 int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
+double gpu_view_trace_work(const GpuView *v){ return v ? v->t_work : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace, s); }
 

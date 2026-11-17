@@ -847,7 +847,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     live[live_slot()] = gr;
     pw->rigid_step = rigid_step_gpu;
     pw->rigid_user = gr;
-    gr->timer = gpu_timer_create(g, 512, NR);
+    gr->timer = gpu_timing_report(g) ? gpu_timer_create(g, 512, NR) : NULL;   // (only when its times are asked for)
     return gr;
 }
 
