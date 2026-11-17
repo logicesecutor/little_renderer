@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define CONTACT_SLOP 0.5f        // overlap (units) left alone, so resting contacts do not jitter
 #define BAUMGARTE 0.2f           // fraction of the remaining overlap removed per step
@@ -61,6 +64,25 @@ static PairMemo *memo_find(PairMemo *t, size_t cap, uint64_t key){
 static void memo_put(PairMemo *t, size_t cap, const PairMemo *m){
     for (size_t i = memo_slot(m->key, cap);; i = (i + 1) & (cap - 1))
         if (t[i].key == 0 || t[i].key == m->key){ t[i] = *m; return; }
+}
+// While the contacts are found on several threads (find_contacts), each thread's memos go
+// to a list of its own (memo_sink), put into the table afterwards in the order one thread
+// would have put them: the same table, the same contacts next step.
+typedef struct { PairMemo *e; int n, cap; } MemoList;
+static _Thread_local MemoList *memo_sink;
+static void memo_write(struct PairMemos *mm, const PairMemo *m){
+    if (memo_sink){
+        if (memo_sink->n == memo_sink->cap){
+            int cap = memo_sink->cap ? 2 * memo_sink->cap : 64;
+            PairMemo *e = realloc(memo_sink->e, (size_t)cap * sizeof(PairMemo));
+            if (!e) return;
+            memo_sink->e = e;
+            memo_sink->cap = cap;
+        }
+        memo_sink->e[memo_sink->n++] = *m;
+        return;
+    }
+    if (mm->used * 2 < mm->cap){ memo_put(mm->e[mm->cur ^ 1], mm->cap, m); mm->used++; }
 }
 
 // at the start of a step: last step's table becomes the one read, a clear one is written
@@ -531,7 +553,7 @@ static void collide_convex(RigidWorld *w, int ia, int ib, real mg){
     ConvexContact c[CONVEX_MAX_CONTACTS];
     int m = convex_collide_cached(&p[0].wc, &p[1].wc, mg, &memo.ft, reuse, c);
     if (memo.ft.full){ memo.t = t; memo.q = q; }
-    if (mm && mm->used * 2 < mm->cap){ memo_put(mm->e[mm->cur ^ 1], mm->cap, &memo); mm->used++; }
+    if (mm) memo_write(mm, &memo);
     for (int k = 0; k < m; k++) add_contact(w, ia, ib, c[k].p, c[k].n, c[k].depth);
     free(p);
 }
@@ -910,11 +932,9 @@ static void test_pair(RigidWorld *w, int i, int j, real dt){
     collide_pair(w, i, j, m);
 }
 
-static void find_contacts(RigidWorld *w, real dt){
-    w->ncontacts = 0;
-    BodyPair *pairs;
-    int np = broad_phase(w, dt, &pairs), q = 0;
-    for (int i = 0; i < w->nbodies; i++){
+// bodies [i0, i1): their walls and their pairs (from pairs[q]), into w's contacts
+static void contacts_of(RigidWorld *w, int i0, int i1, const BodyPair *pairs, int np, int q, real dt){
+    for (int i = i0; i < i1; i++){
         Body *a = &w->bodies[i];
         if (w->has_room && a->inv_mass > 0) collide_walls(w, i, pair_margin(a, NULL, dt));
         if (np < 0){                                  // (no memory for the pairs: all of them)
@@ -923,6 +943,68 @@ static void find_contacts(RigidWorld *w, real dt){
         }
         for (; q < np && pairs[q].i == i; q++) test_pair(w, i, pairs[q].j, dt);
     }
+}
+
+// The narrow phase on all the CPU's cores (OpenMP): the bodies in runs of about the same
+// number of pairs, each run's contacts into a world of its own (a copy of w with its own
+// contact list; the bodies, the walls and the shapes only read), then the lists put
+// together in the runs' order, and the memos written in it: the very contacts, in the very
+// order, one thread finds. Few bodies: one thread (the runs cost more than they save).
+typedef struct { int i0, i1, q; Contact *c; int n, cap; MemoList memos; } ContactRun;
+
+static void find_contacts(RigidWorld *w, real dt){
+    w->ncontacts = 0;
+    BodyPair *pairs;
+    int np = broad_phase(w, dt, &pairs);
+    int nruns = 1;
+#ifdef _OPENMP
+    if (np > 256 && w->nbodies > 64) nruns = 4 * omp_get_max_threads();
+#endif
+    ContactRun *runs = nruns > 1 ? calloc((size_t)nruns, sizeof(ContactRun)) : NULL;
+    if (!runs){ contacts_of(w, 0, w->nbodies, pairs, np, 0, dt); free(pairs); return; }
+    // runs of bodies with about np / nruns pairs each (and a body each at least)
+    int per = (np + w->nbodies + nruns - 1) / nruns, i = 0, q = 0;
+    for (int r = 0; r < nruns; r++){
+        runs[r].i0 = i;
+        runs[r].q = q;
+        int load = 0;
+        while (i < w->nbodies && (load < per || r == nruns - 1)){
+            int q0 = q;
+            while (q < np && pairs[q].i == i) q++;
+            load += 1 + (q - q0);
+            i++;
+        }
+        runs[r].i1 = i;
+    }
+    (void)unit_box();                 // (made once, before the threads share it)
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int r = 0; r < nruns; r++){
+        RigidWorld tw = *w;
+        tw.contacts = NULL;
+        tw.ncontacts = tw.cap_contacts = 0;
+        memo_sink = &runs[r].memos;
+        contacts_of(&tw, runs[r].i0, runs[r].i1, pairs, np, runs[r].q, dt);
+        memo_sink = NULL;
+        runs[r].c = tw.contacts;
+        runs[r].n = tw.ncontacts;
+        runs[r].cap = tw.cap_contacts;
+    }
+    int total = 0;
+    for (int r = 0; r < nruns; r++) total += runs[r].n;
+    if (total > w->cap_contacts){
+        Contact *c = realloc(w->contacts, (size_t)total * sizeof(Contact));
+        if (!c){ perror("realloc"); exit(1); }
+        w->contacts = c;
+        w->cap_contacts = total;
+    }
+    for (int r = 0; r < nruns; r++){
+        if (runs[r].n) memcpy(w->contacts + w->ncontacts, runs[r].c, (size_t)runs[r].n * sizeof(Contact));
+        w->ncontacts += runs[r].n;
+        for (int k = 0; k < runs[r].memos.n && w->memos; k++) memo_write(w->memos, &runs[r].memos.e[k]);
+        free(runs[r].c);
+        free(runs[r].memos.e);
+    }
+    free(runs);
     free(pairs);
 }
 
@@ -1054,42 +1136,49 @@ static Vec3 rel_velocity(const Body *a, const Body *b, Vec3 ra, Vec3 rb){
     return v_sub(va, vb);
 }
 
+// (a fixed or sleeping body, inv_mass 0, is left alone)
 static void apply(Body *a, Body *b, Mat3 ia, Mat3 ib, Vec3 ra, Vec3 rb, Vec3 j){
-    a->vel = v_add(a->vel, v_scale(j, a->inv_mass));
-    a->angvel = v_add(a->angvel, mat3_mul_vec(ia, v_cross(ra, j)));
-    if (b){
+    if (a->inv_mass > 0){
+        a->vel = v_add(a->vel, v_scale(j, a->inv_mass));
+        a->angvel = v_add(a->angvel, mat3_mul_vec(ia, v_cross(ra, j)));
+    }
+    if (b && b->inv_mass > 0){
         b->vel = v_sub(b->vel, v_scale(j, b->inv_mass));
         b->angvel = v_sub(b->angvel, mat3_mul_vec(ib, v_cross(rb, j)));
     }
 }
 
-// One pass of sequential impulses over the active contacts, each towards its target speed
-// along the normal (bias[q], or c->bias without one), friction after it
-static void solve_pass(RigidWorld *w, const Mat3 *iw, const int *act, int nact, const real *bias){
+// One contact towards its target speed along the normal (bias), friction after it
+static void solve_contact(RigidWorld *w, const Mat3 *iw, Contact *c, real bias){
     Mat3 zero = {{{0}}};
+    Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+    Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
+
+    Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
+    real dj = c->mass_n * (bias - v_dot(dv, c->n));
+    real jn = r_fmax(c->jn + dj, 0);
+    dj = jn - c->jn;
+    c->jn = jn;
+    if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
+    // no push, no friction: nothing more to do (a gap, most of the time)
+    if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) return;
+
+    dv = rel_velocity(a, b, c->ra, c->rb);
+    real lim = c->mu * c->jn;
+    real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
+    apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
+    c->jt1 = jt;
+    dv = rel_velocity(a, b, c->ra, c->rb);
+    jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
+    apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
+    c->jt2 = jt;
+}
+
+// one pass over the active contacts (act), each towards c->bias, or (bias) bias[k]
+static void solve_pass(RigidWorld *w, const Mat3 *iw, const int *act, int nact, const real *bias){
     for (int q = 0; q < nact; q++){
         Contact *c = &w->contacts[act[q]];
-        Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
-        Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
-
-        Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
-        real dj = c->mass_n * ((bias ? bias[q] : c->bias) - v_dot(dv, c->n));
-        real jn = r_fmax(c->jn + dj, 0);
-        dj = jn - c->jn;
-        c->jn = jn;
-        if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
-        // no push, no friction: nothing more to do (a gap, most of the time)
-        if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) continue;
-
-        dv = rel_velocity(a, b, c->ra, c->rb);
-        real lim = c->mu * c->jn;
-        real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
-        apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
-        c->jt1 = jt;
-        dv = rel_velocity(a, b, c->ra, c->rb);
-        jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
-        apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
-        c->jt2 = jt;
+        solve_contact(w, iw, c, bias ? bias[act[q]] : c->bias);
     }
 }
 
@@ -1199,8 +1288,13 @@ static int sweep_body(const Body *o, Vec3 opos, Vec3 p, Vec3 d, real rad, real *
 
 // after a step: the bodies that moved fast since `start` (their positions then) swept, each
 // against the others as they moved too: from where both were, along the difference of
-// their paths (two bodies falling side by side do not meet)
+// their paths (two bodies falling side by side do not meet). Each body against the others
+// where the step left them (on all threads), then the bodies put where they stopped.
 static void rigid_ccd(RigidWorld *w, const Vec3 *start){
+    Vec3 *to = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Vec3));
+    char *moved = calloc((size_t)(w->nbodies > 0 ? w->nbodies : 1), 1);
+    if (!to || !moved){ free(to); free(moved); return; }
+    #pragma omp parallel for schedule(dynamic, 16) if (w->nbodies >= 256)
     for (int i = 0; i < w->nbodies; i++){
         Body *b = &w->bodies[i];
         if (b->inv_mass == 0) continue;
@@ -1237,8 +1331,12 @@ static void rigid_ccd(RigidWorld *w, const Vec3 *start){
         if (!hit) continue;
         // just before the hit: a little short of it, never behind the start
         real back = r_fmin(t, (SPECULATIVE_MIN + 0.05f * rad) / len);
-        b->pos = v_add(p, v_scale(d, t - back));
+        to[i] = v_add(p, v_scale(d, t - back));
+        moved[i] = 1;
     }
+    for (int i = 0; i < w->nbodies; i++) if (moved[i]) w->bodies[i].pos = to[i];
+    free(to);
+    free(moved);
 }
 
 // One step of dt in `substeps` substeps (rigid.h). The contacts are found once, at the start
@@ -1306,14 +1404,21 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         if (c->b >= 0) resting[c->b] = 1;
     }
     Mat3 *iw = malloc((size_t)(w->nbodies > 0 ? w->nbodies : 1) * sizeof(Mat3));
-    int *act = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(int));
-    char *bouncing = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1));
-    real *relax = malloc((size_t)(w->ncontacts > 0 ? w->ncontacts : 1) * sizeof(real));   // step 5
-    if (!iw || !act || !bouncing || !relax){ perror("malloc"); exit(1); }
+    size_t nc = (size_t)(w->ncontacts > 0 ? w->ncontacts : 1);
+    int *act = malloc(nc * sizeof(int));
+    char *bouncing = malloc(nc), *on = malloc(nc);
+    real *relax = malloc(nc * sizeof(real));   // step 5
+    if (!iw || !act || !bouncing || !on || !relax){ perror("malloc"); exit(1); }
     Mat3 zero = {{{0}}};
+    // The bodies' and the contacts' own work on all the CPU's cores (OpenMP), when there is
+    // enough of it; the iterations stay on one: each contact needs the ones before it (a
+    // solver by colours on all cores, tried, lost more to the colours' barriers than it won)
+    const int par_bodies = w->nbodies >= 4096, par_contacts = w->ncontacts >= 1024;
+    (void)par_bodies; (void)par_contacts;
 
     for (int s = 0; s < substeps; s++){
         // 1. forces -> velocities (the external ones act through the whole step)
+        #pragma omp parallel for if (par_bodies)
         for (int i = 0; i < w->nbodies; i++){
             Body *b = &w->bodies[i];
             if (b->inv_mass == 0) continue;
@@ -1327,10 +1432,12 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             b->vel = v_scale(b->vel, 1.0f / (1.0f + (w->linear_damping + settle) * h));
             b->angvel = v_scale(b->angvel, 1.0f / (1.0f + (w->angular_damping + settle) * h));
         }
+        #pragma omp parallel for if (par_bodies)
         for (int i = 0; i < w->nbodies; i++) iw[i] = w->bodies[i].inv_mass > 0 ? body_inv_inertia_world(&w->bodies[i]) : zero;
 
         // 2. each contact where its bodies are now: arms, depth, effective masses, target
-        int nact = 0;
+        // (on all threads: each contact alone); then, on one, the warm start applied
+        #pragma omp parallel for if (par_contacts)
         for (int k = 0; k < w->ncontacts; k++){
             Contact *c = &w->contacts[k];
             Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
@@ -1358,22 +1465,27 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             bouncing[k] = bounce > 0;
             c->bias = bounce > 0 ? bounce
                     : (c->depth < 0 ? c->depth / h : r_fmin(BAUMGARTE / h * r_fmax(c->depth - CONTACT_SLOP, 0), MAX_PUSH));
-            // the impulse it had (last step's, or this step's last substep's), applied first
-            if (bounce > 0){ c->jn = c->jt1 = c->jt2 = 0; c->vn0 = 0; act[nact++] = k; continue; }
-            if (c->jn != 0 || c->jt1 != 0 || c->jt2 != 0)
-                apply(a, b, ia, ib, c->ra, c->rb,
-                      v_add(v_scale(c->n, c->jn), v_add(v_scale(c->t1, c->jt1), v_scale(c->t2, c->jt2))));
+            if (bounce > 0){ c->jn = c->jt1 = c->jt2 = 0; c->vn0 = 0; on[k] = 1; continue; }
             // The iterations skip the gaps that cannot close in this substep, even twice as
             // fast (most of a pile's speculative contacts): should one close all the same
             // (pushed by another), the next substep finds it touching and pushes it out.
-            if (c->depth > -SPECULATIVE_MIN || c->jn > 0 || -c->depth < 2 * h * r_fmax(-vn, 0) + SPECULATIVE_MIN)
-                act[nact++] = k;
+            on[k] = c->depth > -SPECULATIVE_MIN || c->jn > 0 || -c->depth < 2 * h * r_fmax(-vn, 0) + SPECULATIVE_MIN;
         }
-
+        int nact = 0;
+        for (int k = 0; k < w->ncontacts; k++){
+            Contact *c = &w->contacts[k];
+            if (on[k]) act[nact++] = k;
+            // the impulse it had (last step's, or this step's last substep's), applied first
+            if (bouncing[k] || (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0)) continue;
+            Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+            apply(a, b, iw[c->a], b ? iw[c->b] : zero, c->ra, c->rb,
+                  v_add(v_scale(c->n, c->jn), v_add(v_scale(c->t1, c->jt1), v_scale(c->t2, c->jt2))));
+        }
         // 3. iterate
         for (int it = 0; it < w->iterations; it++) solve_pass(w, iw, act, nact, NULL);
 
         // 4. velocities -> positions
+        #pragma omp parallel for if (par_bodies)
         for (int i = 0; i < w->nbodies; i++){
             Body *b = &w->bodies[i];
             if (b->inv_mass == 0) continue;
@@ -1386,22 +1498,23 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         // motion (in a pile it kept bodies rocking and never asleep). One pass towards the
         // speeds the contacts allow without a push: a gap may still close, a bounce keeps
         // its speed, a touching contact stops approaching and no more.
-        if (relax){
-            for (int q = 0; q < nact; q++){
-                const Contact *c = &w->contacts[act[q]];
-                const Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
-                Vec3 pa = v_add(a->pos, c->ra), pb = b ? v_add(b->pos, c->rb) : c->lb;
-                real depth = c->depth0 - v_dot(v_sub(pa, pb), c->n);   // now
-                relax[q] = bouncing[act[q]] ? c->bias : (depth < 0 ? depth / h : 0);
-            }
-            solve_pass(w, iw, act, nact, relax);
+        #pragma omp parallel for if (par_contacts)
+        for (int q = 0; q < nact; q++){
+            int k = act[q];
+            const Contact *c = &w->contacts[k];
+            const Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+            Vec3 pa = v_add(a->pos, c->ra), pb = b ? v_add(b->pos, c->rb) : c->lb;
+            real depth = c->depth0 - v_dot(v_sub(pa, pb), c->n);   // now
+            relax[k] = bouncing[k] ? c->bias : (depth < 0 ? depth / h : 0);
         }
+        solve_pass(w, iw, act, nact, relax);
     }
 
     if (start) rigid_ccd(w, start);       // (the sleeping still fixed: inv_mass 0)
     free(start);
     free(relax);
     free(bouncing);
+    free(on);
     free(resting);
     if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
     if (w->sleep) fall_asleep(w, dt, forces);
