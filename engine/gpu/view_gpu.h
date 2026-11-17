@@ -77,6 +77,10 @@ void gpu_view_trace_limit(GpuView *v, int spp);
 // so that frames keep coming while it refines: ms > 0. 0 (the default): bands of 12-45 ms,
 // the image cleaner sooner but the frames slower (while the camera moves: 10 ms either way).
 void gpu_view_trace_budget(GpuView *v, double ms);
+// With the budget: at least a whole pass per frame (when a pass takes up to max_ms; past it,
+// max_ms), for frames that do not wait for the display: their fixed cost (the denoiser, the
+// composite) beside a short band left the GPU mostly not path tracing. 0 (the default): no.
+void gpu_view_trace_budget_pass(GpuView *v, double max_ms);
 int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finished
 double gpu_view_trace_work(const GpuView *v);       // passes' worth of work done since the view was made, all images
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU

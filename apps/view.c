@@ -563,6 +563,10 @@ static int frame(void){
         // (85% when the bands run while the frame waits for the display: trace_overlaps)
         if (gview) gpu_view_trace_budget(gview, o.band_ms > 0 ? o.band_ms : !o.maxfps ? 0 :
                                                 (trace_overlaps() ? 0.85 : 0.6) * 1000.0 / window_refresh_hz(win));
+        // frames not waiting for the display (-vsync off, offscreen): at least a whole pass
+        // each, up to 33 ms (30 frames/s), so the path tracer is most of the GPU's work, not
+        // the denoiser and the composite every frame carries
+        if (gview) gpu_view_trace_budget_pass(gview, o.maxfps && o.band_ms <= 0 && !trace_overlaps() ? 33.0 : 0);
         if (!gview){
             fprintf(stderr, "GPU not used (%s): the CPU draws everything\n", gpu_message(gpu));
             gpu_destroy(gpu);
