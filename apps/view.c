@@ -500,7 +500,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
         int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
         gpu_scene_moved = 0;
         int moved;
-        if (gpu_view_trace_reads_tlas(gview)) scene_trees();
+        if (gpu_view_trace_reads_tlas(gview, &scene)) scene_trees();
         PROF(PROF_MOVE, moved = gpu_view_trace_move(gview, &scene, &tp, keep));
         if (!moved){
             o.gpu_trace = 0;

@@ -185,7 +185,7 @@ void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);
-int gpu_trace_reads_tlas(const GpuTrace *t);   // 1 = gpu_trace_sync copies the CPU's top level (scene_tlas)
+int gpu_trace_reads_tlas(const GpuTrace *t, const Scene *s);   // 1 = gpu_trace_sync copies the CPU's top level (scene_tlas)
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
 // `repeats` more samples for every pixel of rows [y0, y0 + rows), samples number index,
 // index + 1, ... of the sequence (base/sampler.h)

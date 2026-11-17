@@ -202,8 +202,8 @@ struct GpuTrace {
     uint32_t nnodes, normals_at;   // (nnodes: the world's, in slots)
     int world_wide;
     int wide_ok;             // LR_GPU_WIDE=1: the CPU's 4-wide trees as such (else binary: faster here)
-    int tlas_mode;           // the top level: 1 the CPU's (SAH, refit) when it is current, else
-                             // (or LR_GPU_TLAS=gpu: 0) built here
+    int tlas_mode;           // the top level: the CPU's (SAH) when it is current, or built here
+                             // (LBVH): 2 by the instances' count (tlas_cpu), LR_GPU_TLAS=cpu 1, =gpu 0
     int builder;             // how the GPU builds its BVHs (LR_GPU_BVH=ploc|lbvh): 1 PLOC, 0 LBVH,
                              // -1 PLOC for meshes (better trees), LBVH for the top level (as good there, faster)
     int blas_gpu;            // LR_GPU_BLAS=gpu: every mesh's BVH built on the GPU once (to measure the builders)
@@ -381,7 +381,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     const char *wide_env = getenv("LR_GPU_WIDE");
     t->wide_ok = wide_env && atoi(wide_env) > 0;
     const char *tlas_env = getenv("LR_GPU_TLAS");
-    t->tlas_mode = tlas_env && (!strcmp(tlas_env, "gpu") || !strcmp(tlas_env, "lbvh")) ? 0 : 1;
+    t->tlas_mode = !tlas_env ? 2 : !strcmp(tlas_env, "gpu") || !strcmp(tlas_env, "lbvh") ? 0 : !strcmp(tlas_env, "cpu") ? 1 : 2;
     const char *bvh_env = getenv("LR_GPU_BVH");
     t->builder = !bvh_env ? -1 : !strcmp(bvh_env, "lbvh") ? 0 : !strcmp(bvh_env, "ploc") ? 1 : -1;
     const char *blas_env = getenv("LR_GPU_BLAS");
@@ -1228,13 +1228,23 @@ static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
 }
 #endif
 
+// Whether the top level is the CPU's: its SAH tree traces faster (docs/PERFORMANCE.md,
+// 2026-11-13; 12.5 against 15.6 ms a pass with 48k instances), but it is built on the CPU
+// each frame the instances moved (4.9 ms for 18k, 12 for 48k), the GPU's LBVH in under
+// half a ms; so the CPU's up to TLAS_GPU_FROM instances (18k: as fast either way; 48k: 23 ->
+// 27 frames/s with the GPU's).
+#define TLAS_GPU_FROM 32768
+static int tlas_cpu(const GpuTrace *t, int ninsts){
+    return t->tlas_mode == 1 || (t->tlas_mode == 2 && ninsts < TLAS_GPU_FROM);
+}
+
 // the instances' records, the dynamic meshes' triangles; their BVHs to build (gpu_trace_build)
 static int upload_instances(GpuTrace *t, const Scene *s){
     Gpu *g = t->g;
     t->ninst = s->ninsts;
     // with ray queries the top level is the hardware's (hw_records): no BVH of the instances
     const int bvh = !hw_on(t);
-    const Bvh *tl = bvh && t->tlas_mode == 1 ? scene_tlas(s) : NULL;
+    const Bvh *tl = bvh && tlas_cpu(t, s->ninsts) ? scene_tlas(s) : NULL;
     if (tl && !((uint32_t)tl->nnodes <= (uint32_t)(2 * t->inst_cap - 1) && tl->nrefs <= t->inst_cap)) tl = NULL;
     // the same instances as last time (the camera moved, not they): nothing to send. (Not if
     // a tree asked for then was never built, or the top level would now come from elsewhere.)
@@ -1354,7 +1364,7 @@ static void upload_sky(GpuTrace *t, const Scene *s){
     free(cdf);
 }
 
-int gpu_trace_reads_tlas(const GpuTrace *t){ return t->tlas_mode == 1 && !hw_on(t); }
+int gpu_trace_reads_tlas(const GpuTrace *t, const Scene *s){ return tlas_cpu(t, s->ninsts) && !hw_on(t); }
 
 int gpu_trace_sync(GpuTrace *t, const Scene *s){
     upload_sky(t, s);

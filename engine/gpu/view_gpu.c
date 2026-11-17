@@ -17,7 +17,7 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ (void)v; (void)s; (void)tp; return 0; }
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
-int gpu_view_trace_reads_tlas(const GpuView *v){ (void)v; return 0; }
+int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ (void)v; (void)s; return 0; }
 void gpu_view_trace_limit(GpuView *v, int spp){ (void)v; (void)spp; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; }
@@ -899,7 +899,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
 void gpu_view_trace_limit(GpuView *v, int spp){ if (v) v->t_limit = spp > 0 ? spp : 0; }
 int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
-int gpu_view_trace_reads_tlas(const GpuView *v){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace); }
+int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace, s); }
 
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)u2;
