@@ -279,8 +279,11 @@ struct GpuTrace {
     int hw_updates;          // updates since its last build
 #endif
 };
-enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_WF0, NTS = TS_WF0 + 6 };
-static const char *const TS_NAMES[NTS] = {"path tracer", "light tracer (caustics)", "BVH builds",
+// (the guide: an image's first hits for the denoiser and the reprojection, once per image;
+// timed apart, or every band that begins an image counts it as path tracing: while things
+// move, a pass seemed 2.7x cheaper than it was, and the bands were sized from that)
+enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_WF0, NTS = TS_WF0 + 6 };
+static const char *const TS_NAMES[NTS] = {"path tracer", "light tracer (caustics)", "BVH builds", "guide",
     "  wavefront: camera rays", "  wavefront: extend", "  wavefront: shade", "  wavefront: sizes", "  wavefront: shadow rays",
     "  wavefront: into the image"};
 
@@ -1547,10 +1550,13 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 }
 
 // `repeats` dispatches, the r-th with the r-th copy of the parameters (light = 1: the light
-// tracer, whose binding 11 takes the place of 9): one bind group, the copy chosen by its
-// dynamic offset (it was a bind group per dispatch, each several us of the CPU's time)
+// tracer, whose binding 11 takes the place of 9; 3: the path tracer's bindings, timed as the
+// guide): one bind group, the copy chosen by its dynamic offset (it was a bind group per
+// dispatch, each several us of the CPU's time)
 static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
                         WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
+    const int guide = light == 3;
+    if (guide) light = 0;
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
@@ -1576,8 +1582,10 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
 #endif
     if (repeats < 1) repeats = 1;
     if (repeats > MAX_REPS) repeats = MAX_REPS;
-    // timed: the tracer per full-image pass (1 sample per pixel), the light tracer per pass
+    // timed: the tracer per full-image pass (1 sample per pixel), the light tracer per pass,
+    // the guide per image
     WGPUComputePassEncoder pass = light == 2 ? wgpuCommandEncoderBeginComputePass(enc, NULL)
+                                : guide ? timed_pass(t, enc, TS_GUIDE, 1)
                                 : timed_pass(t, enc, light ? TS_LIGHT : TS_TRACE,
                                              light ? repeats : (double)threads * repeats / ((double)t->w * t->h));
     wgpuComputePassEncoderSetPipeline(pass, pipe);
@@ -1890,7 +1898,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
                                         WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
     if (reproject) t->cur = 1 - t->cur;
     write_params(t, t->params, s, tp, 0, t->h, nvolumes, 0, 1, 0);
-    dispatch(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, frame_u, dens, bricks, vstat);
+    dispatch_ex(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, frame_u, dens, bricks, vstat, 3);
     if (reproject){
         struct { float cams[8][4]; uint32_t dims[4]; } R;
         memset(&R, 0, sizeof(R));
@@ -1924,7 +1932,8 @@ void gpu_trace_destroy(GpuTrace *t){
         for (int k = 0; k < NTS; k++){
             double ms = gpu_timer_ms_per_unit(t->timer, k);
             if (ms > 0) printf("GPU time, %s: %.3f ms per %s\n", TS_NAMES[k], ms,
-                               k == TS_TRACE || k >= TS_WF0 ? "pass (1 sample per pixel, the whole image)" : k == TS_LIGHT ? "pass" : "frame with builds");
+                               k == TS_TRACE || k >= TS_WF0 ? "pass (1 sample per pixel, the whole image)" : k == TS_LIGHT ? "pass" :
+                               k == TS_GUIDE ? "image" : "frame with builds");
         }
         gpu_timer_destroy(t->timer);
     }
