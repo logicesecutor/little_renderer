@@ -82,6 +82,31 @@ window with `-vsync off` (ms a frame, from its own counters: `-stats`; the passe
 in the note; natively only). In a page the full dragon (35 MB) is not loaded, so its cases
 are skipped there.
 
+### 1.5 The GPU's load (branch `gpu-load`, 2026-11-17)
+
+The question: `bin/vk/view -sim on -demo sky -props 48000 ... -width 1920 -height 1080
+-vsync off` never showed the GPU above 80%. The analysis (a parallel agent, its scripts and
+logs in `out/gpuload/`): the GPU was not idle (nvidia-smi 95-96%, its timestamps busy 18.3
+of every 19.1 ms); the 61-80% was Windows' "GPU 3D" counter (Task Manager), which reads low.
+What was wrong is what the busy time went to: path tracing 39%, the denoiser 24%, the scene
+rasterized under the traced image 10%, the bodies 9%, reprojection and guide 11%, the top
+level 3%, idle 4%.
+
+| # | cause | fix | status, measured (1080p, our layer, alternating A/B) |
+|---|---|---|---|
+| G1 | the scene rasterized under every image until its first whole pass, which never came while things moved (each frame carries the image over and restarts the count): ~3 ms a frame, hidden | only under an image begun from nothing; a carried-over image's holes (uncovered, in rows not yet traced) take their traced neighbours' mean in the composite | done (3fb6542): -vsync off 54 -> 58-63 frames/s, 27.8 -> 32.3 passes/s; vsync on 90-93 -> 138, 19 -> 27 |
+| G2 | the guide timed as path tracing: a pass seemed 2.7x cheaper while things moved (5.3 ms against ~14), the bands ran 2-3x over budget | its own timer stage | done (7331657); alone: 60 -> 68 frames/s, 32 -> 19 passes/s (the bands now what the budget says) |
+| G3 | the band 60% of the display's period (3.6 ms) beside ~9 ms of fixed work a frame | frames not waiting for the display (`-vsync off`, offscreen): at least a whole pass, up to 33 ms (`gpu_view_trace_budget_pass`) | done (68f41ab): -vsync off 63 -> 42-44 frames/s, 32 -> 42-44 passes/s; suite I (720p, -vsync off) our layer / wgpu: Cornell box still 339 -> 399 / 178 -> 207 passes/s, sky demo 101 -> 108 / 30 -> 47 |
+| G4 | the denoiser after every band: 4.6 ms at 1080p | cheaper while moving: less often, fewer levels, or half resolution (ceiling, `-denoise off`: +30%) | proposed |
+| G5 | with vsync off the CPU waits for the band, then encodes the frame while the GPU has nothing (0.8 ms, 4%) | submit the frame behind the band, wait once a frame | proposed (up to +4%) |
+| G6 | the bodies step every frame: ~150 small dispatches, 1.7 ms | a fixed step rate | proposed (up to ~9%) |
+
+With vsync on (the default, a 165 Hz display) the frames now come at the display's rate
+(165, before 137) but with fewer passes (16 against 27): with G2 the band is the 85% of the
+period it was meant to be, and at 165 frames/s the fixed work of every frame (the guide, the
+bodies, the composite, the denoiser) takes most of the GPU. G4 and G6 are what would give
+those passes back; `-band 12` trades frames for passes today.
+
 ### 1.4 Step 9: the browser (branch `web`)
 
 **Where it stands** (Chrome 1280x800, RTX 3070, the page measured by a headless Chrome of
