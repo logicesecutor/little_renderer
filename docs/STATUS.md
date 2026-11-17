@@ -27,22 +27,35 @@ pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` �
 `next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
 from the repository; the dragon stays on disk, untracked: `make dragon-download`).
 
-### 1.2 The viewer's frame rate (found 2026-11-17, to fix before the suite)
+### 1.2 The viewer's frame rate (fixed 2026-11-17)
 
-The viewer shows a frame only when something changed: with a still camera the rasterizer
-draws nothing (`idle(5)`), the GPU path tracer waits for bands of 12-45 ms and shows at most
-~30 images a second, and once its samples are done it idles; the frames/s it prints counts
-only the images shown, so it falls to 2 (raster) or 26 (path traced) and freezes while
-moving gives 165 (the display's rate, vsync). Measured (wgpu and our layer alike), still /
-moving: raster 2 / 165, rt 26 / 110, hybrid 26 / 165. The proposed fix (tried on a copy):
-render and show every frame (`-maxfps`, on by default; off: today's behaviour, for
-batteries), bands sized to a share of the display's period while still too (rt still 26 ->
-162 frames/s with 4 ms bands, at the price of 2.5x slower convergence; 10 ms bands: 117
-frames/s, 1735 samples in 5 s against 2000), a `-vsync off` option (Immediate or Mailbox
-present mode) to go past the display's rate, and samples/s next to frames/s in the readout.
-In a browser `requestAnimationFrame` caps at the display's rate whatever we do.
+The viewer showed a frame only when something changed, and its frames/s counted only those:
+with a still camera the rasterizer drew nothing (2 frames/s on the counter), the GPU path
+tracer waited for bands of 12-45 ms and showed at most ~30 images a second (26), and once
+its samples were done it idled (0-3); moving it showed every frame (165, the display's
+rate). Now (`-maxfps on`, the default) a frame is rendered and shown every time round, the
+path tracer's work per frame is kept within the display's period (85% of it in a window in
+step with the display, where its band runs while the frame waits for the display; 60%
+elsewhere; `-band ms` to choose), sized from the GPU's own timer of a pass (the wall time,
+which counts what waited on the queue, made the bands ever smaller once frames came every
+few ms), and the readout gives the passes per second next to the frames. `-maxfps off`
+keeps the old behaviour (less power), `-vsync off` shows frames as soon as they are ready.
+The timestamps are now asked for whenever the GPU has them (Chrome too).
 
-### 1.3 The performance suite (done 2026-11-17; group I waits for 1.2)
+| Cornell box, 1280x720, window in step with the 165 Hz display | before: frames/s | after: frames/s, passes/s |
+|---|---|---|
+| raster, still / moving | 2 / 165 | 165 / 165 |
+| path traced (wgpu), still / moving | 22-26 (288-347 passes/s) / 110 | 165, 165 / 165, 182 |
+| path traced (our layer), still / moving | 21 / 102 | 165, 330 / 165, 338 |
+| hybrid (wgpu), still / moving | 22-26 / 165 | 165, 165 / 165 |
+| `-vsync off` (wgpu): raster / path traced still / moving | | 4016 / 211, 206 passes/s / 138, 228 passes/s |
+| Chrome (headless, its own pace of 125): the sky demo path traced | 30-33 | 126, 30 passes/s |
+
+The cost: with wgpu a still image gets half the passes per second it got before (165
+against 290-350: each frame also pays the denoiser, 1.8 ms, and the composite); our layer
+keeps them (330). `-band 30` or `-maxfps off` give them back at fewer frames.
+
+### 1.3 The performance suite (done 2026-11-17)
 
 `bin/bench` (apps/bench.c) times every case itself: the CPU's clock around work it waited
 for, and the GPU's own timers (timestamp queries) where the GPU has them; nothing is read
@@ -64,9 +77,10 @@ tracer (M paths/s), **C** the rasterizers (ms a frame), **D** the denoiser (ms a
 the trees and the scene's updates (the CPU's top level; a path traced frame where 2000
 instances moved), **F** the rigid bodies (ms a step at 1/60 s, a pile falling or a tall pile
 settled; CPU on all threads and one, GPU), **G** the air and the cloud (ms a step), **H**
-the start (a GPU ready, its first frames, a scene made). **I**, the viewer's frames/s
-uncapped, comes with the frame-rate fix (1.2). In a page the full dragon (35 MB) is not
-loaded, so its cases are skipped there.
+the start (a GPU ready, its first frames, a scene made), **I** the viewer itself in its
+window with `-vsync off` (ms a frame, from its own counters: `-stats`; the passes per second
+in the note; natively only). In a page the full dragon (35 MB) is not loaded, so its cases
+are skipped there.
 
 ### 1.4 Step 9: the browser (branch `web`)
 
@@ -98,65 +112,76 @@ The steps, in order (each its own commits; measured before and after with W2's t
 
 ## 2. Performance now
 
-The full suite (1.3) of 2026-11-17 at 3d17d4f (+ the suite itself): RTX 3070, 12 hardware
-threads, Windows; wgpu and our layer natively, Chrome (headless, its own profile) for the
-page. Times in ms (less is better), the CPU path tracer in M paths/s (more is better); "GPU"
-is the GPU's own timer for the same unit (natively only). **Run the suite after each change
-and replace this table** (`bin/bench -table`); compare with `bin/bench -compare`. The GPU's
-clock varies by 10-20% from one run to the next: a few percent is noise.
+The full suite (1.3) of 2026-11-17 at ef130cf (the viewer's frame-rate fix, 1.2): RTX 3070,
+12 hardware threads, Windows, a 165 Hz display; wgpu and our layer natively, Chrome
+(headless, its own profile) for the page. Times in ms (less is better), the CPU path tracer
+in M paths/s (more is better); "GPU" is the GPU's own timer for the same unit (Chrome has
+them too now). **Run the suite after each change and replace this table** (`bin/bench
+-table`); compare with `bin/bench -compare`. The GPU's clock varies by 10-20% from one run
+to the next, and the cases of whole frames (E3-E5, I) more: in the same hour E3 read 14.5,
+19.4 and 31 ms, with the commit before the change as slow as after it; compare such cases
+within one session, one build after the other.
 
 | case | what | unit | wgpu | vk | web |
 |---|---|---|---|---|---|
-| A1 | GPU path tracer: boxes | ms/pass | 2.04 (GPU 2.03) | 1.32 (GPU 1.31) | 3.97 |
-| A2 | GPU path tracer: spheres (mirror, glass) | ms/pass | 1.95 (GPU 1.94) | 1.47 (GPU 1.46) | 3.7 |
-| A3 | GPU path tracer: dragon (871k triangles) | ms/pass | 8.15 (GPU 8.05) | 1.34 (GPU 1.33) | - |
-| A4 | GPU path tracer: cloud | ms/pass | 10.2 (GPU 10.1) | 7.29 (GPU 7.23) | 16.4 |
-| A5 | GPU path tracer: spheres in cloud and fog | ms/pass | 15.3 (GPU 15.1) | 9.92 (GPU 9.85) | 30.9 |
-| A6 | GPU path tracer: 40 instanced dragons | ms/pass | 3.07 (GPU 3.03) | 1.37 (GPU 1.36) | 5.02 |
-| A7 | GPU path tracer: helmet (glTF, textures) | ms/pass | 4.9 (GPU 4.86) | 1.74 (GPU 1.73) | 9.1 |
-| A8 | GPU path tracer: sky demo, 3k props | ms/pass | 8.24 (GPU 8.17) | 3.17 (GPU 3.15) | 12.4 |
-| A9 | GPU path tracer: sky demo, 48k props | ms/pass | 16.6 (GPU 16.4) | 3.9 (GPU 3.86) | 25.2 |
-| B1 | CPU path tracer: boxes, all threads | M paths/s | 3.86 | 3.86 | 0.445 |
-| B2 | CPU path tracer: boxes, 1 thread | M paths/s | 0.496 | 0.497 | 0.446 |
+| A1 | GPU path tracer: boxes | ms/pass | 2.05 (GPU 2.04) | 1.26 (GPU 1.25) | 3.7 (GPU 3.55) |
+| A2 | GPU path tracer: spheres (mirror, glass) | ms/pass | 1.95 (GPU 1.94) | 1.47 (GPU 1.46) | 3.72 (GPU 3.4) |
+| A3 | GPU path tracer: dragon (871k triangles) | ms/pass | 8.16 (GPU 8.05) | 1.32 (GPU 1.31) | - |
+| A4 | GPU path tracer: cloud | ms/pass | 10.2 (GPU 10.1) | 7.27 (GPU 7.22) | 16.4 (GPU 15.0) |
+| A5 | GPU path tracer: spheres in cloud and fog | ms/pass | 15.4 (GPU 15.2) | 9.91 (GPU 9.83) | 30.7 (GPU 29.4) |
+| A6 | GPU path tracer: 40 instanced dragons | ms/pass | 3.06 (GPU 3.02) | 1.37 (GPU 1.36) | 4.92 (GPU 4.77) |
+| A7 | GPU path tracer: helmet (glTF, textures) | ms/pass | 4.9 (GPU 4.85) | 1.75 (GPU 1.73) | 9.24 (GPU 8.71) |
+| A8 | GPU path tracer: sky demo, 3k props | ms/pass | 8.25 (GPU 8.17) | 3.17 (GPU 3.15) | 12.6 (GPU 11.9) |
+| A9 | GPU path tracer: sky demo, 48k props | ms/pass | 16.6 (GPU 16.4) | 3.93 (GPU 3.88) | 25.3 (GPU 23.8) |
+| B1 | CPU path tracer: boxes, all threads | M paths/s | 3.53 | 3.54 | 0.447 |
+| B2 | CPU path tracer: boxes, 1 thread | M paths/s | 0.496 | 0.502 | 0.448 |
 | B3 | CPU path tracer: dragon, all threads | M paths/s | 3.84 | 3.83 | - |
-| B4 | CPU path tracer: dragon, 1 thread | M paths/s | 0.488 | 0.489 | - |
-| C1 | GPU rasterizer: sky demo, 3k props | ms/frame | 1.12 | 1.15 | 0.943 |
-| C2 | GPU rasterizer: sky demo, 18k props | ms/frame | 1.03 | 1.05 | 1.24 |
-| C3 | GPU rasterizer: sky demo, 48k props | ms/frame | 1.6 | 1.65 | 1.81 |
-| C4 | GPU rasterizer: dragon (871k triangles) | ms/frame | 0.614 | 0.593 | - |
-| C5 | CPU rasterizer: boxes | ms/frame | 22.3 | 22.4 | 173 |
-| C6 | CPU rasterizer: dragon | ms/frame | 38.3 | 38.3 | - |
-| D1 | denoiser: 1280x720 | ms/run | 1.81 | 1.55 | 1.83 |
-| D2 | denoiser: 640x640 | ms/run | 1.34 | 1.05 | 1.14 |
-| E1 | CPU top level (SAH), all moved: 48k | ms/build | 11.3 | 11.6 | 79.7 |
-| E2 | CPU top level (SAH), all moved: 18k | ms/build | 4.03 | 4.48 | 28.5 |
-| E3 | path traced frame, 2000 moving: 48k | ms/frame | 14.5 (GPU 0.409) | 5.75 | 20.5 |
-| E4 | path traced frame, 2000 moving: 18k | ms/frame | 17.5 | 4.87 | 45.9 |
-| E5 | path traced frame, 2000 moving: 3k | ms/frame | 10.8 | 4.23 | 19.0 |
-| F1 | bodies on the CPU: 1000 falling, all threads | ms/step | 21.5 | 21.6 | 70.7 |
-| F2 | bodies on the CPU: 1000 falling, 1 thread | ms/step | 44.2 | 44.2 | 70.7 |
-| F3 | bodies on the GPU: 1000 falling | ms/step | 3.08 (GPU 1.16) | 1.69 (GPU 1.14) | 3.32 |
-| F4 | bodies on the CPU: tall pile of 400 | ms/step | 7.62 | 7.63 | 15.4 |
-| F5 | bodies on the GPU: tall pile of 400 | ms/step | 2.98 (GPU 1.12) | 1.62 (GPU 1.11) | 3.25 |
-| F6 | bodies on the GPU: 2000 falling | ms/step | 3.53 (GPU 1.62) | 2.14 (GPU 1.55) | 3.68 |
-| G1 | air and cloud on the GPU: 32^3, cloud 96^3 | ms/step | 1.04 (GPU 0.752) | 0.952 (GPU 0.738) | 2.01 |
-| G2 | air and cloud on the GPU: 32^3, cloud 192^3 | ms/step | 1.82 (GPU 1.48) | 1.62 (GPU 1.4) | 2.4 |
-| G3 | air and cloud on the CPU: 32^3, cloud 96^3 | ms/step | 15.6 | 15.6 | 32.0 |
-| H1 | start: a GPU ready | ms | 251 | 69.4 | 28.7 |
-| H2 | start: a new GPU to the first frames | ms | 339 | 129 | 202 |
-| H3 | start: the sky demo made (props, light probe) | ms | 730 | 728 | 4071 |
-| H4 | start: the dragon loaded, its tree built | ms | 574 | 576 | - |
-| H5 | start: the helmet loaded (glTF) | ms | 193 | 188 | 476 |
-| A1c | GPU path tracer, no hardware rays: boxes | ms/pass | - | 2.02 (GPU 2.01) | - |
-| A3c | GPU path tracer, no hardware rays: dragon | ms/pass | - | 7.42 (GPU 7.37) | - |
-| A8c | GPU path tracer, no hardware rays: sky 3k | ms/pass | - | 7.91 (GPU 7.85) | - |
+| B4 | CPU path tracer: dragon, 1 thread | M paths/s | 0.492 | 0.491 | - |
+| C1 | GPU rasterizer: sky demo, 3k props | ms/frame | 1.12 | 1.16 | 0.933 |
+| C2 | GPU rasterizer: sky demo, 18k props | ms/frame | 1.04 | 1.09 | 1.33 |
+| C3 | GPU rasterizer: sky demo, 48k props | ms/frame | 1.6 | 1.67 | 1.85 |
+| C4 | GPU rasterizer: dragon (871k triangles) | ms/frame | 0.617 | 0.594 | - |
+| C5 | CPU rasterizer: boxes | ms/frame | 22.1 | 22.2 | 172 |
+| C6 | CPU rasterizer: dragon | ms/frame | 38.3 | 37.9 | - |
+| D1 | denoiser: 1280x720 | ms/run | 1.81 | 1.55 | 1.63 |
+| D2 | denoiser: 640x640 | ms/run | 1.34 | 1.04 | 1.14 |
+| E1 | CPU top level (SAH), all moved: 48k | ms/build | 10.8 | 11.2 | 79.8 |
+| E2 | CPU top level (SAH), all moved: 18k | ms/build | 4.06 | 4 | 28.5 |
+| E3 | path traced frame, 2000 moving: 48k | ms/frame | 19.4 (GPU 0.404) | 5.8 | 20.8 (GPU 0.423) |
+| E4 | path traced frame, 2000 moving: 18k | ms/frame | 17.0 | 4.91 | 45.9 |
+| E5 | path traced frame, 2000 moving: 3k | ms/frame | 10.8 | 4.28 | 19.5 |
+| F1 | bodies on the CPU: 1000 falling, all threads | ms/step | 21.6 | 21.5 | 71.6 |
+| F2 | bodies on the CPU: 1000 falling, 1 thread | ms/step | 44.2 | 43.9 | 71.5 |
+| F3 | bodies on the GPU: 1000 falling | ms/step | 3.08 (GPU 1.16) | 1.69 (GPU 1.14) | 3.25 |
+| F4 | bodies on the CPU: tall pile of 400 | ms/step | 7.64 | 7.63 | 15.5 |
+| F5 | bodies on the GPU: tall pile of 400 | ms/step | 2.95 (GPU 1.13) | 1.63 (GPU 1.11) | 3.31 |
+| F6 | bodies on the GPU: 2000 falling | ms/step | 3.52 (GPU 1.61) | 2.16 (GPU 1.56) | 3.78 |
+| G1 | air and cloud on the GPU: 32^3, cloud 96^3 | ms/step | 1.04 (GPU 0.752) | 0.969 (GPU 0.75) | 1.98 |
+| G2 | air and cloud on the GPU: 32^3, cloud 192^3 | ms/step | 1.79 (GPU 1.46) | 1.61 (GPU 1.4) | 2.4 |
+| G3 | air and cloud on the CPU: 32^3, cloud 96^3 | ms/step | 15.8 | 15.8 | 31.9 |
+| H1 | start: a GPU ready | ms | 249 | 72.4 | 28.9 |
+| H2 | start: a new GPU to the first frames | ms | 338 | 131 | 95.6 |
+| H3 | start: the sky demo made (props, light probe) | ms | 731 | 727 | 4068 |
+| H4 | start: the dragon loaded, its tree built | ms | 572 | 576 | - |
+| H5 | start: the helmet loaded (glTF) | ms | 188 | 188 | 474 |
+| I1 | viewer: rasterized, still | ms/frame | 0.25 | 0.244 | - |
+| I2 | viewer: rasterized, moving | ms/frame | 0.25 | 0.242 | - |
+| I3 | viewer: path traced, still | ms/frame | 4.72 | 4.82 | - |
+| I4 | viewer: path traced, moving | ms/frame | 7.18 | 6.17 | - |
+| I5 | viewer: hybrid, still | ms/frame | 4.72 | 4.85 | - |
+| I6 | viewer: sky demo, bodies falling, path traced | ms/frame | 14.9 | 9.19 | - |
+| A1c | GPU path tracer, no hardware rays: boxes | ms/pass | - | 1.96 (GPU 1.95) | - |
+| A3c | GPU path tracer, no hardware rays: dragon | ms/pass | - | 7.42 (GPU 7.38) | - |
+| A8c | GPU path tracer, no hardware rays: sky 3k | ms/pass | - | 7.91 (GPU 7.81) | - |
 
 What it shows: our layer path traces 1.3-6x faster than wgpu (hardware rays: the dragon
 1.34 against 8.15 ms; without them, A1c/A3c/A8c, it is close to wgpu); the page path traces
 1.5-2x slower than wgpu natively (1.4); the rasterizers and the denoiser cost about the
 same everywhere; the CPU's code in the page runs on one thread, 0.9x native on one core
 for the path tracer (B2), 1.6x slower for the bodies (F2), and the light probe's bake (H3)
-takes 4 s there; the start of a GPU is 251 ms with wgpu, 69 with our layer, 29 in Chrome.
+takes 4 s there; the start of a GPU is 249 ms with wgpu, 72 with our layer, 29 in Chrome;
+the viewer, uncapped (`-vsync off`), draws the Cornell box at 4000 frames/s rasterized and
+210 path traced (still; 140-160 moving).
 
 Not in the suite (yet): tall piles fall fully asleep on the CPU in 11 s, on the GPU in 2 of
 3 runs within 60 s (P11); `mesh_rain` 1500 hulls 5.3 / 5.1 ms a step (wgpu / our layer).
@@ -417,6 +442,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 
 | when | what | measured |
 |---|---|---|
+| 2026-11-17 | **The viewer's frame rate** (1.2; branch `web`): a frame every time round (`-maxfps`), the path tracer's work per frame within the display's period, sized from the GPU's own timer of a pass (`gpu_view_trace_budget`), overlapping the wait for the display in a window; `-vsync off`, `-band ms`, `-stats file`; timestamps asked for whenever the GPU has them; group I of the suite | 1.2's table; section 2 |
 | 2026-11-17 | **The performance suite** (1.3; branch `web`): `bin/bench`, groups A-H, quick and full, natively on wgpu and our layer and in a page (JSPI, run by `tools/webbench.mjs` in a headless Chrome); the engine's GPU timers readable by programs (`gpu_set_timing`, `gpu_view_gpu_ms`, `gpu_rigid_gpu_ms`, `gpu_fluid_gpu_ms`); a page built to wait gives the browser its turns by a message to itself (setTimeout's 4 ms clamp made every wait 4 ms). Found on the way: our layer kept one table of device functions, and a second device (here one without hardware rays) cleared the first one's ray-tracing functions: a crash at its next build of an acceleration structure (fixed: the first device's are kept) | section 2 |
 | 2026-11-17 | **Bigger scenes** (R8, branch `next`). The GPU rasterizer culls the instances to the frustum and draws one call per mesh and level of detail (an order buffer between the draw's instance and its record); from 4096 instances on, a mesh instance small on the screen is drawn from a simpler copy (vertex clustering on grids of 16 and 6 cells: `scene_mesh_simplify`). The GPU path tracer builds the top level itself (LBVH) from 32768 instances on, where the CPU's SAH tree cost 12 ms a frame. Each instance carries the scene's change number of its last move (`Instance.version`), so the rasterizer's and the path tracer's records and our layer's top-level records go to the GPU again only for those moved or added; our layer then updates its top level in place (`lrCommandEncoderUpdateTlas`, at most a quarter moved, a build every 32). Found on the way: the GPU bodies' readback could be asked for without its copy (the last one's callback landing during the submit), so the newest body came back as zeros, and when the buffers grew right then it went back to the GPU as such: NaN, and the contacts filled their buffer (2 of 6 runs of the 18k scene at 150 frames/s; fixed) | RTX 3070, `-demo sky`, 1280x720 offscreen, 2000 bodies falling, wgpu / our layer. **Rasterized**, frames/s: 18k props 34 / 43 → 136 / 150; 48k props 16 / 20 → 121 / 132 (wgpu, step by step: culling alone about 65, with the levels of detail 103, with the records sent by change 121). **Path traced**: 48k props, wgpu 23 → 30 frames/s (the CPU's tree 12 ms a frame → none; rays slower through the LBVH: 12.5 → 14-15.6 ms a pass), 18k as fast either way (31-32, so the CPU's tree is kept there); our layer at 65-69 frames/s either way, its top level's update against its build no difference to measure (3.68 / 3.69 ms a pass). "GPU scene update" with 48k props 2.7 → 1.2 ms (wgpu), 2.3 → 1.0 (our layer). Images: the 64 of the set identical to the byte; the 48k scene with and without the levels of detail looks the same (out_next/lod*.png) |
 | 2026-11-17 | **Physics robustness** (branch `next`; PHYSICS.md 1.2, 1.3b, 1.3c, 1.5). The CPU's pairs by sort and sweep (the same contacts); its contacts found on all cores; fast bodies swept (CPU and GPU); the margin from the whole relative speed; the push out taken back after each substep; slow resting bodies damped; sleeping when going nowhere, not on a moving neighbour | CPU, 1000 falling bodies: 12.9 → 5.3 ms a step (sort and sweep, one thread), then 59.7 → 29.5 ms on 16 threads in the pile's busiest second (more contacts by then: the larger margins); a 4-unit slab now stops a ball, a box and two balls head on at 200 to 50000 units/s (before: a box went through at 500); a tall pile of 400 asleep in 11 s (6 of 6 runs, before 11–29 s and 1 of 6 not after 30 s). GPU, `mesh_rain` 1500 hulls, RTX 3070: 4.5 → 5.1 ms a step on our Vulkan layer, 4.6 → 5.3 on wgpu (the sweep 0.21 ms, the relax pass ~0.3 ms, more pairs from the margins); the sky demo's 2000 bodies 1.0 → 1.5 ms (our layer), 1.4 → 1.9 ms (wgpu) |
