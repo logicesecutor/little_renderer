@@ -563,6 +563,54 @@ static void case_setup(const Case *c, Res *r, int reps){
     }
 }
 
+// ---- I: the viewer, uncapped ---------------------------------------------------------------
+// bin/view itself, in its window with -vsync off (frames shown as soon as they are ready: the
+// rate the machine can do), for 6 s; its frames per second and path tracing passes per
+// second from its own counters (-stats: the first 2 s left out). ms per frame.
+static char view_exe[512];          // bin/view, beside this program
+static void case_viewer(const Case *c, Res *r, int reps){
+#ifdef __EMSCRIPTEN__
+    (void)c; (void)reps;
+    skip(r, "natively only (a page is paced by the browser)");
+#else
+    if (!view_exe[0]){ skip(r, "no bin/view beside bin/bench"); return; }
+    const char *stats = "bench_view_stats.txt";
+    double pps = 0;
+    for (int k = 0; k < reps; k++){
+        char cmd[1024];
+        remove(stats);
+        snprintf(cmd, sizeof(cmd), "\"%s\" %s -vsync off -autoquit 6 -stats %s -o out/bench_view > %s 2>&1",
+                 view_exe, c->args, stats,
+#ifdef _WIN32
+                 "NUL"
+#else
+                 "/dev/null"
+#endif
+                 );
+#ifdef _WIN32
+        char wrapped[1100];                      // (cmd.exe takes the whole line quoted once more)
+        snprintf(wrapped, sizeof(wrapped), "\"%s\"", cmd);
+        system(wrapped);
+#else
+        if (system(cmd)){}
+#endif
+        FILE *f = fopen(stats, "r");
+        if (!f){ skip(r, "bin/view gave no -stats"); return; }
+        char key[64];
+        double val, ms = 0;
+        while (fscanf(f, "%63s %lf", key, &val) == 2){
+            if (!strcmp(key, "ms_per_frame")) ms = val;
+            else if (!strcmp(key, "passes_per_s")) pps = val;
+        }
+        fclose(f);
+        remove(stats);
+        if (ms > 0) add(r, ms);
+    }
+    double med = median(r->v, r->n);
+    snprintf(r->note, sizeof(r->note), "%.0f frames/s, %.0f passes/s; window, -vsync off", med > 0 ? 1000 / med : 0, pps);
+#endif
+}
+
 // ---- the list ----------------------------------------------------------------------------
 
 #define R640 "-width 640 -height 640"
@@ -615,6 +663,12 @@ static const Case CASES[] = {
     {"H3", "start: the sky demo made (props, light probe)", "ms", 1, case_setup, SKYDEMO(3000), 0, 0},
     {"H4", "start: the dragon loaded, its tree built",     "ms", 0, case_setup, "-scene mesh -obj " DRAGON " -rot -35 " R640, 0, 0},
     {"H5", "start: the helmet loaded (glTF)",              "ms", 0, case_setup, "-gltf " HELMET " " R640, 0, 0},
+    {"I1", "viewer: rasterized, still",                    "ms/frame", 1, case_viewer, "-backend raster " R720, 0, 0},
+    {"I2", "viewer: rasterized, moving",                   "ms/frame", 0, case_viewer, "-backend raster -orbit 15 " R720, 0, 0},
+    {"I3", "viewer: path traced, still",                   "ms/frame", 1, case_viewer, "-backend rt " R720, 0, 0},
+    {"I4", "viewer: path traced, moving",                  "ms/frame", 0, case_viewer, "-backend rt -orbit 15 " R720, 0, 0},
+    {"I5", "viewer: hybrid, still",                        "ms/frame", 0, case_viewer, "-backend hybrid " R720, 0, 0},
+    {"I6", "viewer: sky demo, bodies falling, path traced", "ms/frame", 0, case_viewer, "-sim on -demo sky -sky " SKY " -backend rt " R720, 0, 0},
 };
 #define NCASES ((int)(sizeof(CASES) / sizeof(CASES[0])))
 
@@ -799,6 +853,18 @@ int main(int argc, char **argv){
         return 0;
     }
     if (reps <= 0) reps = full ? 5 : 3;
+    {   // bin/view beside this program (group I)
+        snprintf(view_exe, sizeof(view_exe), "%s", argv[0]);
+        char *slash = strrchr(view_exe, '/'), *bs = strrchr(view_exe, '\\');
+        if (bs && (!slash || bs > slash)) slash = bs;
+        size_t at = slash ? (size_t)(slash - view_exe + 1) : 0;
+#ifdef _WIN32
+        snprintf(view_exe + at, sizeof(view_exe) - at, "view.exe");
+#else
+        snprintf(view_exe + at, sizeof(view_exe) - at, "view");
+#endif
+        if (!file_there(view_exe)) view_exe[0] = 0;
+    }
     if (reps > MAXREP) reps = MAXREP;
 
     FILE *csv = NULL;
@@ -821,7 +887,7 @@ int main(int argc, char **argv){
         if (!selected(c, only)) continue;
         Res r;
         memset(&r, 0, sizeof(r));
-        int nreps = c->fn == case_pile && !full ? 2 : c->fn == case_pile ? 3 : reps;
+        int nreps = c->fn == case_pile && !full ? 2 : c->fn == case_pile ? 3 : c->fn == case_viewer ? 2 : reps;
         double t0 = clock_s();
         c->fn(c, &r, nreps);
         double secs = clock_s() - t0;
