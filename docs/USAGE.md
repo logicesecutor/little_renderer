@@ -359,7 +359,9 @@ Environment variables for measuring (docs/PERFORMANCE.md keeps what they showed)
 | `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
 | `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary) |
-| `LR_GPU_TLAS=gpu` | the GPU builds the top level over the instances itself every frame (default: it takes the CPU's SAH tree); `lbvh`, the old name, works too |
+| `LR_GPU_TLAS=gpu\|cpu` | `gpu`: the GPU builds the top level over the instances itself every frame (LBVH; `lbvh`, the old name, works too); `cpu`: it takes the CPU's SAH tree. Default: the CPU's below 32768 instances, the GPU's from there |
+| `LR_GPU_TLAS_UPDATE=0` | our Vulkan layer: the hardware top level built again whenever instances moved (default: updated in place while at most a quarter moved, built every 32 updates) |
+| `LR_GPU_LOD=0\|1` | the GPU rasterizer's simpler copies of meshes for instances small on the screen: `0` never, `1` at any instance count (default: from 4096 instances) |
 | `LR_VK_LOSE_AFTER=n` | our Vulkan layer (`make VK=1`): the n-th submission fails as on a lost device (to test what follows: VULKAN.md) |
 | `LR_VK_FAIL_MAP=n` | our Vulkan layer: the n-th buffer read back fails, the device staying ready (to test what waits for an image: `render`, a screenshot) |
 | `LR_GPU_BVH=ploc\|lbvh` | the GPU's tree builder for everything it builds (default: PLOC for meshes' trees, the LBVH for the top level) |

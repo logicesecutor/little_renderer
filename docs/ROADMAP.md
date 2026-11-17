@@ -17,7 +17,23 @@ Status: `next` · `planned` · `later` · `stopped` · `done`.
 | 3 | **P8: a parallel prefix sum for the contact lists** | done | below; PERFORMANCE.md P8 |
 | 4 | **R4b: PLOC, a GPU tree builder of SAH quality** | done | below; PERFORMANCE.md R4b |
 | 5 | **PBR: one physically based material model for all four pipelines** | done: PBR1–PBR6 (2026-11-14/15) | [PBR.md](PBR.md), phases PBR1–PBR6 |
-| 6 | **Our own Vulkan backend**: a WGSL → SPIR-V compiler and `webgpu.h` on Vulkan in place of wgpu-native, then native extensions, hardware ray tracing (R6) and remote rendering to browsers | next | [VULKAN.md](VULKAN.md); PERFORMANCE.md X1, R6, P10 |
+| 6 | **Our own Vulkan backend**: a WGSL → SPIR-V compiler and `webgpu.h` on Vulkan in place of wgpu-native, then native extensions, hardware ray tracing (R6) and remote rendering to browsers | done (merged into `main`, 2026-11-16; remote rendering not yet) | [VULKAN.md](VULKAN.md); PERFORMANCE.md X1, R6, P10 |
+
+## The order (decided 2026-11-17, branch `next`)
+
+| # | step | status | what it is |
+|---|---|---|---|
+| 7 | **Physics robustness**: continuous collision checks for very fast bodies, tall piles that come to rest, the CPU solver on all cores | done (f9ca27f … 8b3a18f) | PHYSICS.md 1.3b, 1.3c, 1.5; PERFORMANCE.md P6, P11 |
+| 8 | **Bigger scenes** (20–50k instances): culling and simpler distant copies of meshes in the rasterizer, the top level built on the GPU, instances updated in place | done (4f0edd0 … 824333e) | PERFORMANCE.md R8 |
+| 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | next | WEB.md |
+
+Later (agreed 2026-11-17, not scheduled):
+
+- **A Linux window for our Vulkan layer.** Today it shows a window only on Windows (Win32
+  surface); an X11 or Wayland surface would let the Linux laptop's integrated GPU run the
+  live viewer through our own layer.
+- **Automated builds and tests**: GitHub Actions building and running `make test` on Linux
+  and Windows (float and double, wgpu and our layer where a runner can) for every push.
 
 Later (agreed, not scheduled): P5 (AVBD solver) and P10 (the GPU's fixed cost per step),
 both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; R7
@@ -25,10 +41,9 @@ both "very good to have"; P9, P11 (P3 may settle P11), P4, P6, P7; R2, R6; R7
 pixel filter and denoiser guide); mixed materials for the falling meshes
 (`-meshmat mirror,diffuse`); M1 (surface depth from textures, below).
 
-**Stopped: the web.** No browser checks and no web work until the user resumes it
-(PERFORMANCE.md W1). Meanwhile `make web` is not run; when the web resumes, the web build is
-brought up to date with everything done since (the GPU kernels of P1, P2 and later steps
-must then be checked under Tint).
+**The web, resumed 2026-11-17** (step 9; it had been stopped since 2026-11-14,
+PERFORMANCE.md W1): the web build brought up to date with everything done since, the GPU
+kernels of P1, P2 and later steps checked under the browser's WGSL compiler (Tint).
 
 ## 1. PNG, and the FPS counter on the image
 
