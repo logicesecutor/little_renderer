@@ -94,6 +94,14 @@ int gpu_view_trace_denoise(GpuView *v, int on);
 // rasterized (with its media if volumes = 1), so the picture is painted over, not blanked.
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);
 void gpu_view_destroy(GpuView *v);
+// Benchmarks (bin/bench): the path tracer's GPU time from its own timers (gpu_set_timing)
+// since the last reset: what = 0 a pass (1 sample per pixel, the whole image), 1 the tree
+// builds of a frame that had some; 0 when not timed.
+double gpu_view_gpu_ms(GpuView *v, int what);
+void gpu_view_gpu_ms_reset(GpuView *v);
+// The denoiser run n times on the samples there are now (gpu_view_trace_denoise on, a pass
+// made), waited for: the milliseconds per run on the CPU's clock; < 0 if it cannot run.
+double gpu_view_bench_denoise(GpuView *v, int n);
 
 // Reads back the next frame gpu_view_present draws (a screenshot of the GPU's image):
 // fn is called later, when the GPU has finished, with w * h pixels 0x00RRGGBB, or with

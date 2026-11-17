@@ -37,6 +37,10 @@ void gpu_fluid_set_wait(GpuFluid *gf, int wait);
 int gpu_fluid_pending(const GpuFluid *gf);
 // gives the air back to the CPU (pw->fluid keeps the velocities it had when the GPU took
 // over, and the cloud as of the last sync) and frees the GPU's copy
+// Benchmarks: the GPU time of a step of the air and the cloud (gpu_set_timing) since the
+// last reset (0 when not timed), and a new measuring window
+double gpu_fluid_gpu_ms(GpuFluid *gf);
+void gpu_fluid_gpu_ms_reset(GpuFluid *gf);
 void gpu_fluid_destroy(GpuFluid *gf);
 
 #endif

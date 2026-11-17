@@ -25,14 +25,33 @@ const char *gpu_message(const Gpu *g){ (void)g; return "this build has no GPU ba
 int gpu_offscreen(const Gpu *g){ (void)g; return 0; }
 int gpu_software(const Gpu *g){ (void)g; return 0; }
 void gpu_destroy(Gpu *g){ free(g); }
+void gpu_set_timing(int on){ (void)on; }
+int gpu_timing(const Gpu *g){ (void)g; return 0; }
 
 #else
 #include "gpu/gpu_internal.h"
 #ifdef LR_WGPU_NATIVE
 #include <webgpu/wgpu.h>          // wgpuDevicePoll: wgpu-native's way to wait for the GPU
 #endif
+#if defined(__EMSCRIPTEN__) && defined(LR_WEB_WAIT)
+#include <emscripten.h>
+// A page built with -sJSPI can wait (bin/bench): it gives the browser a turn (its callbacks
+// run) and goes on. Through a message to itself, not setTimeout, which browsers hold back
+// to 4 ms after a few in a row.
+EM_ASYNC_JS(void, lr_web_yield, (void), {
+    await new Promise(function (r){ var c = new MessageChannel(); c.port1.onmessage = function (){ r(); }; c.port2.postMessage(0); });
+});
+#endif
 
 int gpu_available(void){ return 1; }
+
+#ifndef __EMSCRIPTEN__
+static int timing_wanted;              // gpu_set_timing (natively: browsers have no timers here)
+void gpu_set_timing(int on){ timing_wanted = on != 0; }
+#else
+void gpu_set_timing(int on){ (void)on; }
+#endif
+int gpu_timing(const Gpu *g){ return g && g->timestamps; }
 
 static void fail(Gpu *g, const char *what, WGPUStringView msg){
     g->state = GPU_FAILED;
@@ -172,7 +191,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     // timed passes (gpu_timer): only when asked, natively
     static WGPUFeatureName feats[2];
     size_t nfeats = 0;
-    if (getenv("LR_GPU_TIMING") && wgpuAdapterHasFeature(adapter, WGPUFeatureName_TimestampQuery)){
+    if ((timing_wanted || getenv("LR_GPU_TIMING")) && wgpuAdapterHasFeature(adapter, WGPUFeatureName_TimestampQuery)){
         feats[nfeats++] = WGPUFeatureName_TimestampQuery;
         g->timestamps = 1;
     }
@@ -270,12 +289,15 @@ void gpu_poll(Gpu *g){
 #ifdef LR_WGPU_NATIVE
     if (g->device) wgpuDevicePoll(g->device, 0, NULL);
 #endif
+#elif defined(LR_WEB_WAIT)
+    (void)g;
+    lr_web_yield();               // the browser runs its callbacks meanwhile
 #else
     (void)g;
 #endif
 }
 
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) || defined(LR_WEB_WAIT)
 static void on_idle(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)status; (void)msg; (void)u2;
     *(int *)u1 = 1;
@@ -304,6 +326,17 @@ void gpu_wait(Gpu *g){
         gpu_poll(g);
     }
     gpu_poll(g);                              // and the callbacks that this completed
+#elif defined(LR_WEB_WAIT)
+    // a page that can wait (built with -sJSPI: bin/bench's): until the queue is done
+    if (!g || g->state != GPU_READY) return;
+    int done = 0;
+    WGPUQueueWorkDoneCallbackInfo wd;
+    memset(&wd, 0, sizeof(wd));
+    wd.mode = WGPUCallbackMode_AllowSpontaneous;
+    wd.callback = on_idle;
+    wd.userdata1 = &done;
+    wgpuQueueOnSubmittedWorkDone(g->queue, wd);
+    while (!done && g->state == GPU_READY) lr_web_yield();
 #else
     (void)g;
 #endif
@@ -595,6 +628,22 @@ void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
         if (t->calls[s]) printf("  %-34s %8.3f ms  (%ld passes per round)\n", names[s], t->ns[s] / t->rounds / 1e6, t->calls[s] / t->rounds);
     // with what runs between the passes: copies, clears, the passes that are not timed
     printf("  %-34s %8.3f ms\n", "(first pass's start to last's end)", t->span_ns / t->rounds / 1e6);
+}
+
+void gpu_timer_reset(GpuTimer *t){
+    if (!t) return;
+    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    for (int s = 0; s < t->stages; s++){ t->ns[s] = 0; t->units[s] = 0; t->calls[s] = 0; }
+    t->span_ns = 0;
+    t->rounds = 0;
+}
+
+double gpu_timer_ms_per_round(GpuTimer *t){
+    if (!t) return 0;
+    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    double total = 0;
+    for (int s = 0; s < t->stages; s++) total += t->ns[s];
+    return t->rounds > 0 ? total / t->rounds / 1e6 : 0;
 }
 
 void gpu_timer_destroy(GpuTimer *t){

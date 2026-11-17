@@ -93,7 +93,7 @@ LIBS = -lm -lX11
 EXE =
 endif
 
-APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim)
+APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim $(BIN)/bench)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
                               $(BIN)/hello_physics $(BIN)/mesh_rain)
 # the unit tests, in the order make test runs them
@@ -289,6 +289,19 @@ SAME = n=$$(cmp -l $(1) $(2) | wc -l); if [ $$n = 0 ]; then echo "$(1) = $(2): i
        else echo "$(1) vs $(2): $$n bytes differ (ties, see Makefile)"; fi
 
 # all acceleration structures on the torus (2304 triangles)
+# the performance suite (apps/bench.c, docs/STATUS.md 1.3): every case timed by the program,
+# the results appended to out/perf/<commit>_<backend>.csv; make VK=1 perf-quick for our layer.
+# Compare two runs: $(BIN)/bench -compare out/perf/a.csv out/perf/b.csv
+# (the commit, + when the tree has changes; without git, the date: PERF_TAG=... to choose)
+PERF_TAG ?= $(or $(shell git rev-parse --short HEAD 2>/dev/null),$(shell date +%Y%m%d-%H%M))$(if $(shell git status --porcelain --untracked-files=no 2>/dev/null),+)
+PERF_BACKEND = $(if $(filter 1,$(VK)),vk,wgpu)
+perf-quick: $(BIN)/bench$(EXE)
+	mkdir -p out/perf
+	$(BIN)/bench -quick -tag $(PERF_TAG) -o out/perf/$(PERF_TAG)_$(PERF_BACKEND).csv $(ARGS)
+perf: $(BIN)/bench$(EXE)
+	mkdir -p out/perf
+	$(BIN)/bench -full -tag $(PERF_TAG) -o out/perf/$(PERF_TAG)_$(PERF_BACKEND).csv $(ARGS)
+
 bench: $(BIN)/render$(EXE)
 	mkdir -p out
 	$(BIN)/render -scene mesh -n 200 -s 16 -accel none   -o out/bench_none.png
@@ -324,6 +337,16 @@ WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pr
           -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB \
           -sEXIT_RUNTIME=0 -sENVIRONMENT=web
 WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m))
+
+# the performance suite in a page (apps/bench.c): built with JSPI so it can wait for the GPU
+# (Chrome 137+); tools/webbench.mjs runs it in a headless Chrome and keeps its results
+WEB_BENCH_MODELS = models/torus.obj models/dragon_recon/dragon_vrip_res2.ply \
+                   models/skies/kloofendal_48d_partly_cloudy_2k.hdr models/gltf/DamagedHelmet.glb
+web-bench: $(WEB)/bench.html
+$(WEB)/bench.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR)
+	@mkdir -p $(WEB)
+	$(EMCC) $(WEBBASE) -DLR_WEB_WAIT -sJSPI $(SRC) $(WGSL_C) apps/bench.c -o $@ \
+	    $(foreach m,$(wildcard $(WEB_BENCH_MODELS)),--preload-file $(m)@$(m))
 
 web: $(WEB)/index.html
 $(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
@@ -362,4 +385,4 @@ deps-clean:
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean

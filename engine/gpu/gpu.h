@@ -47,5 +47,11 @@ int gpu_offscreen(const Gpu *g);         // 1 if created with no canvas
 // engine's own CPU code
 int gpu_software(const Gpu *g);
 void gpu_destroy(Gpu *g);
+// Benchmarks (bin/bench): the GPU's own timers (timestamp queries; natively only, when the
+// adapter has them). Asked for before gpu_create (or LR_GPU_TIMING=1 in the environment);
+// gpu_timing says whether this GPU times its passes. Each part then reads its own
+// (gpu_view_gpu_ms, gpu_rigid_gpu_ms, gpu_fluid_gpu_ms).
+void gpu_set_timing(int on);
+int gpu_timing(const Gpu *g);
 
 #endif

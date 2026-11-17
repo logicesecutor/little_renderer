@@ -25,6 +25,9 @@ int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
+double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
+void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
+double gpu_view_bench_denoise(GpuView *v, int n){ (void)v; (void)n; return -1; }
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
     (void)v; (void)s; (void)p; (void)mp; (void)volumes;
     return 0;
@@ -952,6 +955,28 @@ void gpu_view_trace_wavefront(GpuView *v, int on){
     if (!v) return;
     v->wavefront = on;
     gpu_trace_set_wavefront(v->trace, on);
+}
+
+double gpu_view_gpu_ms(GpuView *v, int what){
+    GpuTimer *t = v ? gpu_trace_timer(v->trace) : NULL;
+    return t ? gpu_timer_ms_per_unit(t, what == 1 ? 2 : 0) : 0;
+}
+void gpu_view_gpu_ms_reset(GpuView *v){ if (v) gpu_timer_reset(gpu_trace_timer(v->trace)); }
+
+double gpu_view_bench_denoise(GpuView *v, int n){
+    if (!v || !v->trace || n <= 0 || !gpu_trace_guided(v->trace) || v->den_failed) return -1;
+    if (!v->den && !(v->den = gpu_denoise_create(v->g, v->w, v->h))){ v->den_failed = 1; return -1; }
+    gpu_wait(v->g);
+    double t0 = clock_s();
+    WGPUCommandEncoder enc = gpu_encoder(v->g, v->g->queue);
+    for (int i = 0; i < n; i++) gpu_denoise_encode(v->den, enc, gpu_trace_accum(v->trace));
+    WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
+    gpu_submit(v->g, cb);
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(enc);
+    gpu_wait(v->g);
+    v->den_bands = -1;                 // (made again for the image shown)
+    return (clock_s() - t0) * 1000.0 / n;
 }
 
 int gpu_view_trace_denoise(GpuView *v, int on){

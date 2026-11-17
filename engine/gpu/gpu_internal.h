@@ -124,6 +124,8 @@ void gpu_timer_submitted(GpuTimer *t);   // after submitting the encoder gpu_tim
 void gpu_timer_units(GpuTimer *t, double units);
 double gpu_timer_ms_per_unit(GpuTimer *t, int stage);
 void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names);
+void gpu_timer_reset(GpuTimer *t);              // (waits for the round on its way) all from 0
+double gpu_timer_ms_per_round(GpuTimer *t);     // the timed passes' GPU time per round (0: none)
 void gpu_timer_destroy(GpuTimer *t);
 
 // The GPU rasterizer (gpu/raster_gpu.c): the scene's surfaces into its own color (sRGB
@@ -223,6 +225,7 @@ int gpu_trace_guided(const GpuTrace *t);    // 1 = the denoiser's planes follow 
 // 1 = trace with the wavefront kernels (WAVE in trace_gpu.c), 0 = the single kernel
 void gpu_trace_set_wavefront(GpuTrace *t, int on);
 void gpu_trace_destroy(GpuTrace *t);
+GpuTimer *gpu_trace_timer(GpuTrace *t);   // its timer (NULL: not timed): TS_TRACE 0 per pass, TS_BUILD 2 per frame with builds
 
 // The denoiser (gpu/denoise_gpu.c): from the path tracer's 4 planes to a w * h image of
 // vec4 (rgb, 1), or (0, 0, 0, 0) where there is no sample yet.

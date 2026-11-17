@@ -10,6 +10,8 @@ void gpu_fluid_sync_cloud(GpuFluid *gf){ (void)gf; }
 int gpu_fluid_pending(const GpuFluid *gf){ (void)gf; return 0; }
 void gpu_fluid_set_wait(GpuFluid *gf, int wait){ (void)gf; (void)wait; }
 void gpu_fluid_destroy(GpuFluid *gf){ (void)gf; }
+double gpu_fluid_gpu_ms(GpuFluid *gf){ (void)gf; return 0; }
+void gpu_fluid_gpu_ms_reset(GpuFluid *gf){ (void)gf; }
 #else
 
 #include <stdio.h>
@@ -702,12 +704,15 @@ static void air_step(void *user, PhysWorld *pw, real dt){
 
 int gpu_fluid_pending(const GpuFluid *gf){ return gf ? gf->inflight : 0; }
 void gpu_fluid_set_wait(GpuFluid *gf, int wait){
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) || defined(LR_WEB_WAIT)      // (a page can wait only if built to: bin/bench's)
     if (gf) gf->wait = wait;
 #else
     (void)gf; (void)wait;
 #endif
 }
+
+double gpu_fluid_gpu_ms(GpuFluid *gf){ return gf ? gpu_timer_ms_per_round(gf->timer) : 0; }
+void gpu_fluid_gpu_ms_reset(GpuFluid *gf){ if (gf) gpu_timer_reset(gf->timer); }
 
 void gpu_fluid_destroy(GpuFluid *gf){
     if (!gf) return;

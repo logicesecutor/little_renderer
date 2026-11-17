@@ -32,6 +32,10 @@ void gpu_rigid_set_wait(GpuRigid *gr, int wait);
 void gpu_rigid_sync(GpuRigid *gr);
 // steps not made because every body slept and nothing had changed (they would change nothing)
 int gpu_rigid_skipped(const GpuRigid *gr);
+// Benchmarks: the GPU time of a step (all its passes, gpu_set_timing) since the last reset
+// (0 when not timed), and a new measuring window
+double gpu_rigid_gpu_ms(GpuRigid *gr);
+void gpu_rigid_gpu_ms_reset(GpuRigid *gr);
 // gives the bodies back to the CPU and frees the GPU's copy
 void gpu_rigid_destroy(GpuRigid *gr);
 

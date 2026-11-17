@@ -9,6 +9,8 @@ void gpu_rigid_set_wait(GpuRigid *gr, int wait){ (void)gr; (void)wait; }
 void gpu_rigid_sync(GpuRigid *gr){ (void)gr; }
 void gpu_rigid_destroy(GpuRigid *gr){ (void)gr; }
 int gpu_rigid_skipped(const GpuRigid *gr){ (void)gr; return 0; }
+double gpu_rigid_gpu_ms(GpuRigid *gr){ (void)gr; return 0; }
+void gpu_rigid_gpu_ms_reset(GpuRigid *gr){ (void)gr; }
 #else
 
 #include <stdio.h>
@@ -852,6 +854,8 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
 void gpu_rigid_set_wait(GpuRigid *gr, int wait){ if (gr) gr->wait = wait; }
 
 int gpu_rigid_skipped(const GpuRigid *gr){ return gr ? gr->skipped : 0; }
+double gpu_rigid_gpu_ms(GpuRigid *gr){ return gr ? gpu_timer_ms_per_round(gr->timer) : 0; }
+void gpu_rigid_gpu_ms_reset(GpuRigid *gr){ if (gr) gpu_timer_reset(gr->timer); }
 
 void gpu_rigid_sync(GpuRigid *gr){
     if (!gr) return;

@@ -1911,6 +1911,8 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
     t->has_image = 1;
 }
 
+GpuTimer *gpu_trace_timer(GpuTrace *t){ return t ? t->timer : NULL; }
+
 void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;
     if (t->check){
