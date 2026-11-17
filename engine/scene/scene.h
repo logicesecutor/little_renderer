@@ -203,6 +203,8 @@ typedef struct {
     Xform xf, inv;                  // object -> world, and back
     int material;                   // >= 0: instead of the triangles' own (shapes: required)
     Aabb box;                       // world bounds (scene_move_instance updates it)
+    unsigned version;               // the Scene.inst_version of its last change: a copy made at
+                                    // version v takes again those above v only
 } Instance;
 
 // SCENE_EMPTY: just the room and the lamp (e.g. for a physics simulation to fill)
@@ -298,6 +300,9 @@ typedef struct Scene {
                             // scene_move_instance; scene_mesh_changed for its mesh's instances): what
                             // holds a copy (the top level, the GPU) makes it again only then, so
                             // change s->insts through these
+    unsigned insts_id;      // the inst_version its first instance was given: which scene's instances
+                            // these are (a copy of the same scene's takes only those changed since,
+                            // Instance.version)
 
     // Acceleration structure, owned by the backend that built it (the path tracer's
     // scene_set_accel). scene_free calls accel_free. Rebuild it after adding geometry.

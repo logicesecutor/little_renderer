@@ -46,7 +46,8 @@ static int as_make(WGPUDevice dev, VkAs *a, uint32_t type, VkAccelerationStructu
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &a->buf, &a->mem, NULL)) return 0;
     uint32_t align = dev->ad->as_scratch_align;
-    if (!vk_alloc_buffer(dev, sz.buildScratchSize + align,
+    VkDeviceSize scratch = sz.buildScratchSize > sz.updateScratchSize ? sz.buildScratchSize : sz.updateScratchSize;
+    if (!vk_alloc_buffer(dev, scratch + align,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &a->scratch, &a->smem, NULL)) return 0;
     a->scratch_at = (raw_address(dev, a->scratch) + align - 1) / align * align;
@@ -172,7 +173,7 @@ static void tlas_info(VkAccelerationStructureBuildGeometryInfoKHR *info, VkAccel
     memset(info, 0, sizeof(*info));
     info->sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     info->type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    info->flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info->flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     info->mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     info->geometryCount = 1;
     info->pGeometries = g;
@@ -203,12 +204,20 @@ LRTlas lrDeviceCreateTlas(WGPUDevice device, uint32_t max, WGPUStringView label)
     return t;
 }
 
-void lrCommandEncoderBuildTlas(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instances, uint64_t offset, uint32_t count){
+static void tlas_build(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instances, uint64_t offset, uint32_t count, int update){
     if (!t) return;
     if (count > t->max){ vk_error(e->dev, WGPUErrorType_Validation, "lrCommandEncoderBuildTlas: %u instances, room for %u", count, t->max); count = t->max; }
+    if (!instances) count = 0;
+    update = update && t->has_built && t->built == count && count > 0;
     VkAccelerationStructureBuildGeometryInfoKHR info;
     VkAccelerationStructureGeometryKHR g;
     tlas_info(&info, &g, instances ? vk_buffer_address(instances) + offset : 0);
+    if (update){
+        info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        info.srcAccelerationStructure = t->a.as;
+    }
+    t->built = count;
+    t->has_built = 1;
     info.dstAccelerationStructure = t->a.as;
     info.scratchData.deviceAddress = t->a.scratch_at;
     VkAccelerationStructureBuildRangeInfoKHR r;
@@ -219,6 +228,13 @@ void lrCommandEncoderBuildTlas(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instan
     if (instances) refs_add(&e->refs, &instances->o);
     vk_before(e, VK_CMD_BUILD);
     vk.vkCmdBuildAccelerationStructuresKHR(e->cb, 1, &info, &pr);
+}
+
+void lrCommandEncoderBuildTlas(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instances, uint64_t offset, uint32_t count){
+    tlas_build(e, t, instances, offset, count, 0);
+}
+void lrCommandEncoderUpdateTlas(WGPUCommandEncoder e, LRTlas t, WGPUBuffer instances, uint64_t offset, uint32_t count){
+    tlas_build(e, t, instances, offset, count, 1);
 }
 
 void lrTlasRelease(LRTlas t){ if (t) obj_unref(&t->o); }

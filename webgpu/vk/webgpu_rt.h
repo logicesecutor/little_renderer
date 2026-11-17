@@ -62,6 +62,10 @@ LRTlas lrDeviceCreateTlas(WGPUDevice device, uint32_t maxInstances, WGPUStringVi
 // Built from `count` LRTlasInstance in `instances` (WGPUBufferUsage_Storage) at `offset`, as
 // they are when the command runs.
 void lrCommandEncoderBuildTlas(WGPUCommandEncoder encoder, LRTlas tlas, WGPUBuffer instances, uint64_t offset, uint32_t count);
+// Updated in place from the same number of instances as its last build, moved (a refit: the
+// tree's shape kept, its boxes made again; much faster than a build, slower to trace the
+// more they moved: build again now and then). Not built yet, or another count: built.
+void lrCommandEncoderUpdateTlas(WGPUCommandEncoder encoder, LRTlas tlas, WGPUBuffer instances, uint64_t offset, uint32_t count);
 void lrTlasRelease(LRTlas tlas);
 
 // Binding a top level: a bind group layout entry with no other binding type, chaining an

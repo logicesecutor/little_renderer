@@ -242,7 +242,7 @@ struct GpuTrace {
     // the instances as they were uploaded (upload_instances): nothing is packed or sent again
     // while the scene's are the same (Scene.inst_version); memory for packing them, kept
     int inst_valid, inst_count, inst_prim0, inst_tl;
-    unsigned inst_version;
+    unsigned inst_version, insts_id;
     void *sc_rec, *sc_box, *sc_nd, *sc_ax, *sc_hw;
     size_t sc_rec_cap, sc_box_cap, sc_nd_cap, sc_ax_cap, sc_hw_cap;
     unsigned mesh_version;   // the world's triangles and normals it holds: Scene.tris_version
@@ -274,6 +274,9 @@ struct GpuTrace {
     LRTlas hw_tlas;
     uint32_t hw_tlas_cap, hw_ninst;
     int hw_tlas_dirty;       // the top level's records are newer than it is
+    int hw_ident;            // record base + i is instance i's (every instance has its bottom level)
+    int hw_tlas_update;      // ... and only some moved: the top level updated, not built (hw_build)
+    int hw_updates;          // updates since its last build
 #endif
 };
 enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_WF0, NTS = TS_WF0 + 6 };
@@ -1130,6 +1133,9 @@ static int hw_on(const GpuTrace *t){
 #endif
 }
 
+// Changed records closer than this are sent in one write with those between
+#define REC_GAP 32
+
 #ifdef LR_VK
 static LRBlas hw_blas(GpuTrace *t, const char *label, LRGeometryType type, WGPUBuffer buf, uint64_t offset, uint32_t count){
     LRGeometry g;
@@ -1157,9 +1163,18 @@ static void hw_record(LRTlasInstance *r, const Xform *xf, uint32_t custom, uint3
     r->blas = lrBlasGetAddress(b);
 }
 
+// The top level is updated in place (lrCommandEncoderUpdateTlas) while at most a quarter
+// of the instances moved since the last time, up to HW_UPDATES in a row; else built again
+#define HW_UPDATES 32
+
 // the bottom levels missing made (built at the next gpu_trace_build), the top level's records
-static int hw_records(GpuTrace *t, const Scene *s){
+// (some: the same scene's instances, prev of them before; only those changed since `since`
+// are new)
+static int hw_records(GpuTrace *t, const Scene *s, int some, unsigned since, int prev){
     Gpu *g = t->g;
+    const LRBlas made[2] = {t->hw_tri, t->hw_prim};
+    const int had_unit = t->hw_unit != NULL;
+    int new_mesh = 0;
     if (!t->hw_tri && s->ntris > 0){
         t->hw_tri = hw_blas(t, "the world's triangles", LRGeometry_Triangles, t->hw_vtx, 0, (uint32_t)s->ntris);
         t->hw_tri_dirty = 1;
@@ -1179,7 +1194,42 @@ static int hw_records(GpuTrace *t, const Scene *s){
         if (!t->hw_mesh[m] && s->meshes[m].ntris > 0){
             t->hw_mesh[m] = hw_blas(t, "a mesh", LRGeometry_Triangles, t->hw_vtx, (uint64_t)t->mc[m].tri0 * 36, (uint32_t)s->meshes[m].ntris);
             t->hw_mesh_dirty[m] = 1;
+            new_mesh = 1;
         }
+    const uint32_t base = (t->hw_tri ? 1u : 0u) + (t->hw_prim ? 1u : 0u);
+    const uint32_t now = base + (uint32_t)s->ninsts;
+    for (int i = prev; i < s->ninsts && some; i++){          // (the new ones each need a bottom level)
+        const Instance *in = &s->insts[i];
+        some = in->mesh < 0 || (in->mesh < t->hw_nmesh && t->hw_mesh[in->mesh]);
+    }
+    if (some && t->hw_ident && t->hw_tlas && !new_mesh && had_unit && made[0] == t->hw_tri && made[1] == t->hw_prim &&
+        t->hw_ninst == base + (uint32_t)prev && now <= t->hw_tlas_cap && t->hw_rec_cap >= now * sizeof(LRTlasInstance) &&
+        t->sc_hw && t->sc_hw_cap >= now * sizeof(LRTlasInstance)){
+        // the records of the instances moved since, in runs (gaps under REC_GAP joined in)
+        LRTlasInstance *r = t->sc_hw;
+        int moved = 0;
+        for (int i = 0; i < s->ninsts;){
+            if (s->insts[i].version <= since){ i++; continue; }
+            int first = i, last = i;
+            for (int j = i; j < s->ninsts && j <= last + REC_GAP; j++){
+                const Instance *in = &s->insts[j];
+                if (in->version <= since) continue;
+                LRBlas b = in->mesh >= 0 ? t->hw_mesh[in->mesh] : t->hw_unit;
+                hw_record(&r[base + j], &in->xf, (uint32_t)j, in->mesh >= 0 ? t->mc[in->mesh].tri0 : 0, b);
+                last = j;
+                moved++;
+            }
+            wgpuQueueWriteBuffer(g->queue, t->hw_rec, (base + (uint64_t)first) * sizeof(*r), &r[base + first],
+                                 (size_t)(last + 1 - first) * sizeof(*r));
+            i = last + 1;
+        }
+        static int upd_env = -1;          // LR_GPU_TLAS_UPDATE=0: always built (to measure)
+        if (upd_env < 0){ const char *e = getenv("LR_GPU_TLAS_UPDATE"); upd_env = !e || atoi(e) != 0; }
+        t->hw_tlas_update = upd_env && moved <= s->ninsts / 4 && t->hw_updates < HW_UPDATES && now == t->hw_ninst;
+        t->hw_ninst = now;
+        t->hw_tlas_dirty = 1;
+        return 1;
+    }
     // the records: the world's triangles, its spheres and quads, the instances
     size_t most = (size_t)s->ninsts + 2;
     LRTlasInstance *r = scratch(&t->sc_hw, &t->sc_hw_cap, most * sizeof(*r));
@@ -1208,6 +1258,8 @@ static int hw_records(GpuTrace *t, const Scene *s){
     }
     t->hw_ninst = n;
     t->hw_tlas_dirty = 1;
+    t->hw_ident = n == base + (uint32_t)s->ninsts;
+    t->hw_tlas_update = 0;
     return 1;
 }
 
@@ -1223,8 +1275,14 @@ static void hw_build(GpuTrace *t, WGPUCommandEncoder enc){
     for (int m = 0; m < t->hw_nmesh; m++)
         if (t->hw_mesh_dirty[m] && t->hw_mesh[m]){ lrCommandEncoderBuildBlas(enc, t->hw_mesh[m]); t->hw_mesh_dirty[m] = 0; blas = 1; }
     if (!blas && !t->hw_tlas_dirty) return;
-    lrCommandEncoderBuildTlas(enc, t->hw_tlas, t->hw_rec, 0, t->hw_ninst);
-    t->hw_tlas_dirty = 0;
+    if (t->hw_tlas_update && !blas){
+        lrCommandEncoderUpdateTlas(enc, t->hw_tlas, t->hw_rec, 0, t->hw_ninst);
+        t->hw_updates++;
+    } else {
+        lrCommandEncoderBuildTlas(enc, t->hw_tlas, t->hw_rec, 0, t->hw_ninst);
+        t->hw_updates = 0;
+    }
+    t->hw_tlas_dirty = t->hw_tlas_update = 0;
 }
 #endif
 
@@ -1250,14 +1308,27 @@ static int upload_instances(GpuTrace *t, const Scene *s){
     // a tree asked for then was never built, or the top level would now come from elsewhere.)
     const int same = t->inst_valid && t->nbuild == 0 && t->inst_version == s->inst_version && t->inst_count == s->ninsts &&
                      t->inst_prim0 == s->nprims && t->inst_tl == (tl != NULL);
+    // the same scene's instances, as many or more (the layout had room: inst_valid), the rest
+    // as before: only the records of those moved or added since are sent (Instance.version),
+    // the boxes kept are the others' still
+    const size_t ni = (size_t)(s->ninsts > 0 ? s->ninsts : 0);
+    const int prev_count = t->inst_count;
+    const int some = !same && t->inst_valid && t->nbuild == 0 && t->insts_id == s->insts_id && t->inst_count <= s->ninsts &&
+                     t->inst_prim0 == s->nprims && t->inst_tl == (tl != NULL) && t->sc_rec && t->sc_rec_cap >= ni * 192 &&
+                     (!bvh || (t->sc_box && t->sc_box_cap >= ni * 32));
     t->nbuild = 0;
     if (s->ninsts > 0 && !same){
-        float *rec = scratch(&t->sc_rec, &t->sc_rec_cap, (size_t)s->ninsts * 192);
-        float *box = bvh ? scratch(&t->sc_box, &t->sc_box_cap, (size_t)s->ninsts * 32) : NULL;
+        float *rec = some ? t->sc_rec : scratch(&t->sc_rec, &t->sc_rec_cap, ni * 192);
+        float *box = !bvh ? NULL : some ? t->sc_box : scratch(&t->sc_box, &t->sc_box_cap, ni * 32);
         if (!rec || (bvh && !box)) return 0;
         Aabb all = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
         for (int i = 0; i < s->ninsts; i++){
             const Instance *in = &s->insts[i];
+            if (some && in->version <= t->inst_version){
+                all.lo = vec3(r_fmin(all.lo.x, in->box.lo.x), r_fmin(all.lo.y, in->box.lo.y), r_fmin(all.lo.z, in->box.lo.z));
+                all.hi = vec3(r_fmax(all.hi.x, in->box.hi.x), r_fmax(all.hi.y, in->box.hi.y), r_fmax(all.hi.z, in->box.hi.z));
+                continue;
+            }
             float *o = rec + 48 * (size_t)i;
             for (int r = 0; r < 3; r++)
                 for (int k = 0; k < 4; k++){ o[4 * r + k] = (float)in->inv.m[r][k]; o[12 + 4 * r + k] = (float)in->xf.m[r][k]; }
@@ -1274,7 +1345,17 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             all.lo = vec3(r_fmin(all.lo.x, in->box.lo.x), r_fmin(all.lo.y, in->box.lo.y), r_fmin(all.lo.z, in->box.lo.z));
             all.hi = vec3(r_fmax(all.hi.x, in->box.hi.x), r_fmax(all.hi.y, in->box.hi.y), r_fmax(all.hi.z, in->box.hi.z));
         }
-        wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96, rec, (size_t)s->ninsts * 192);
+        if (some){
+            // runs of the records changed (gaps of fewer than REC_GAP joined in)
+            for (int i = 0; i < s->ninsts;){
+                if (s->insts[i].version <= t->inst_version){ i++; continue; }
+                int first = i, last = i;
+                for (int j = i; j < s->ninsts && j <= last + REC_GAP; j++) if (s->insts[j].version > t->inst_version) last = j;
+                wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96 + (uint64_t)first * 192, rec + 48 * (size_t)first,
+                                     (size_t)(last + 1 - first) * 192);
+                i = last + 1;
+            }
+        } else wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96, rec, ni * 192);
         if (tl){
             // the CPU's (SAH) top level, as it is
             uint32_t *nd = scratch(&t->sc_nd, &t->sc_nd_cap, (size_t)tl->nnodes * 32);
@@ -1288,8 +1369,11 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         }
         if (!tl && bvh) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
     }
+    const unsigned since = t->inst_version;     // (hw_records)
+    (void)since; (void)prev_count;
     t->inst_valid = 1;
     t->inst_version = s->inst_version;
+    t->insts_id = s->insts_id;
     t->inst_count = s->ninsts;
     t->inst_prim0 = s->nprims;
     t->inst_tl = tl != NULL;
@@ -1320,7 +1404,7 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         c->built = 1;
     }
 #ifdef LR_VK
-    if (hw_on(t) && !(same && t->hw_tlas) && !hw_records(t, s)){ t->inst_valid = 0; return 0; }
+    if (hw_on(t) && !(same && t->hw_tlas) && !hw_records(t, s, some, since, prev_count)){ t->inst_valid = 0; return 0; }
 #endif
     return 1;
 }

@@ -60,7 +60,7 @@ struct GpuRaster {
     Gpu *g;
     int w, h;
     int inst_valid, inst_count;            // the instances' transforms as uploaded (upload_instances)
-    unsigned inst_version;
+    unsigned inst_version, insts_id;       // (Scene.inst_version, insts_id then)
     float *rec;                            // memory for packing them, kept
     size_t rec_cap;
     WGPUTexture color_tex, depth_tex;
@@ -381,34 +381,53 @@ static void rebind_all(GpuRaster *r){
 
 // the transforms (record 0: the world as it is; then the instances), and the meshes' own
 // triangles (again when a dynamic one changed)
+// record i (0: the world; then the instances): object -> world rows, the inverse's, material
+static void pack_record(float *o, const Scene *s, size_t i){
+    memset(o, 0, 112);
+    Xform xf = i ? s->insts[i - 1].xf : xform_identity(), inv = i ? s->insts[i - 1].inv : xform_identity();
+    for (int a = 0; a < 3; a++)
+        for (int k = 0; k < 4; k++){ o[4 * a + k] = (float)xf.m[a][k]; o[12 + 4 * a + k] = (float)inv.m[a][k]; }
+    uint32_t m = i && s->insts[i - 1].material >= 0 ? (uint32_t)s->insts[i - 1].material : 0xffffffffu;
+    memcpy(o + 24, &m, 4);
+}
+
+// Records closer than this are sent in one write with those between (the same as on the
+// GPU: rec keeps what was sent)
+#define REC_GAP 32
+
 static int upload_instances(GpuRaster *r, const Scene *s){
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     size_t n = 1 + (size_t)s->ninsts;
-    // (the same instances as last time, Scene.inst_version: they are there already)
+    // (the same instances as last time, Scene.inst_version: they are there already; the same
+    // scene's, as many or more: only those moved or added since, Instance.version)
     const int same = r->ix && r->inst_valid && r->inst_version == s->inst_version && r->inst_count == s->ninsts;
-    float *rec = NULL;
-    if (!same){
+    const int some = !same && r->ix && r->inst_valid && r->insts_id == s->insts_id && r->inst_count <= s->ninsts &&
+                     r->rec && r->rec_cap >= n * 112 && r->ix_cap >= n * 112;
+    if (some){
+        for (size_t i = 1; i < n;){
+            if (s->insts[i - 1].version <= r->inst_version){ i++; continue; }
+            // a run of changed records (gaps under REC_GAP joined in)
+            size_t first = i, last = i;
+            for (size_t j = i; j < n && j <= last + REC_GAP; j++)
+                if (s->insts[j - 1].version > r->inst_version){ pack_record(r->rec + 28 * j, s, j); last = j; }
+            wgpuQueueWriteBuffer(r->g->queue, r->ix, first * 112, r->rec + 28 * first, (last + 1 - first) * 112);
+            i = last + 1;
+        }
+        r->inst_version = s->inst_version;
+        r->inst_count = s->ninsts;
+    } else if (!same){
         if (r->rec_cap < n * 112){
             free(r->rec);
             r->rec = malloc(n * 112 + n * 28 + 1024);
             r->rec_cap = r->rec ? n * 112 + n * 28 + 1024 : 0;
         }
-        if (!(rec = r->rec)) return 0;
-        memset(rec, 0, n * 112);
-    }
-    for (size_t i = 0; i < n && !same; i++){
-        Xform xf = i ? s->insts[i - 1].xf : xform_identity(), inv = i ? s->insts[i - 1].inv : xform_identity();
-        float *o = rec + 28 * i;
-        for (int a = 0; a < 3; a++)
-            for (int k = 0; k < 4; k++){ o[4 * a + k] = (float)xf.m[a][k]; o[12 + 4 * a + k] = (float)inv.m[a][k]; }
-        uint32_t m = i && s->insts[i - 1].material >= 0 ? (uint32_t)s->insts[i - 1].material : 0xffffffffu;
-        memcpy(o + 24, &m, 4);
-    }
-    if (!same){
+        if (!r->rec) return 0;
+        for (size_t i = 0; i < n; i++) pack_record(r->rec + 28 * i, s, i);
         if (gpu_buffer_reserve(r->g, &r->ix, &r->ix_cap, n * 112, st, "raster: transforms")) rebind_all(r);
-        wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, rec, n * 112);
+        wgpuQueueWriteBuffer(r->g->queue, r->ix, 0, r->rec, n * 112);
         r->inst_valid = 1;
         r->inst_version = s->inst_version;
+        r->insts_id = s->insts_id;
         r->inst_count = s->ninsts;
     }
     if (s->nmeshes > r->nmg){

@@ -681,6 +681,7 @@ int scene_add_instance(Scene *s, int mesh, Xform xf, int material){
     in->material = material;
     s->ninsts++;
     scene_move_instance(s, s->ninsts - 1, xf);
+    if (s->ninsts == 1) s->insts_id = s->inst_version;
     return s->ninsts - 1;
 }
 
@@ -703,6 +704,7 @@ void scene_move_instance(Scene *s, int i, Xform xf){
         in->box = (Aabb){v_sub(c, vec3(r, r, r)), v_add(c, vec3(r, r, r))};
     }
     s->inst_version = ++inst_versions;
+    in->version = s->inst_version;
 }
 
 Primitive unit_box_face(int f, int material){
@@ -742,6 +744,7 @@ void scene_mesh_changed(Scene *s, int mesh){
         if (s->insts[i].mesh == mesh){
             s->insts[i].box = xform_box(&s->insts[i].xf, m->box);
             s->inst_version = ++inst_versions;      // (its box is in the top level and in the GPU's copy)
+            s->insts[i].version = s->inst_version;
         }
 }
 

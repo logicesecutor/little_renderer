@@ -300,6 +300,8 @@ struct LRTlasImpl {
     WGPUDevice dev;
     VkAs a;
     uint32_t max;
+    uint32_t built;      // the instances of its last build (lrCommandEncoderUpdateTlas: the same)
+    int has_built;
 };
 
 #define VK_SURFACE_IMAGES 8
