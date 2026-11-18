@@ -143,16 +143,20 @@ The engine builds natively on Windows with MSYS2's gcc: same Makefile, same comm
 Visual Studio (MSVC) is not supported: the code needs OpenMP 3 (tasks in the BVH build)
 and gcc builtins.
 
-### 2.2 The GPU (natively: make deps)
+### 2.2 The GPU natively
 
 ```sh
-make deps      # once: wgpu-native (a WebGPU library) into third_party/wgpu
-make           # every build now uses the GPU when one is found; NOGPU=1 to build without
+make           # the GPU through our own WebGPU on Vulkan (webgpu/vk): nothing to install
+make NOGPU=1   # a CPU-only build (objects in build/float/, not build/float-vk/)
 ```
 
-`bin/view`, `bin/render` and `bin/sim` then rasterize, path trace and simulate the air on
-the GPU. `-gpu off` runs everything on the CPU. `make deps-clean` removes the library.
-Details and measurements are in docs/WEB.md, section 3.
+Every build has the GPU unless `NOGPU=1`: `bin/view`, `bin/render` and `bin/sim`
+rasterize, path trace (with hardware ray tracing where the GPU has it) and simulate on it.
+The Vulkan loader the GPU's driver installs is opened at run time; on a machine without
+Vulkan 1.3, or with `-gpu off`, everything runs on the CPU. The windows are Win32 or X11
+swapchains. Details in docs/VULKAN.md. (Until 2026-11-18 the native GPU was wgpu-native,
+fetched by `make deps`, and our layer was `make VK=1` into `bin/vk/`: both are gone; `VK=1`
+is still accepted and changes nothing.)
 
 ### 2.3 Web browser (Emscripten, WebGPU)
 
@@ -338,7 +342,7 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-denoisemove n` | GPU denoiser while things move: its a-trous passes, 1-5 (a footprint of 5, 9, 17, 33, 65 pixels), fewer cost less and smooth less; still images keep 5; 0 = 5 | 3 |
 | `-aa fxaa\|off` | GPU: anti-aliasing of the rasterized frames shown (and their screenshots): FXAA after the composite, one more full-screen pass (0.05 ms at 1280x720 on an RTX 3070); the path traced ones are left as they are, their samples already spread over each pixel | fxaa |
 | `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); 12 at most while the physics runs; 0 = start over on every move | 32 |
-| `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
+| `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, and natively unless built with `NOGPU=1`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
 | `-gpurigid on\|off` | with `-sim on` (and `sim`) and the GPU: simulate the rigid bodies there (PHYSICS.md 1.4) | on |
 | `-gpuraster on\|off` | with the GPU: rasterize the scene there | on |
@@ -395,7 +399,7 @@ Environment variables for measuring (docs/STATUS.md keeps what they showed):
 | `LR_GPU_TLAS=gpu\|cpu` | `gpu`: the GPU builds the top level over the instances itself every frame (LBVH; `lbvh`, the old name, works too); `cpu`: it takes the CPU's SAH tree. Default: the CPU's below 32768 instances, the GPU's from there |
 | `LR_GPU_TLAS_UPDATE=0` | our Vulkan layer: the hardware top level built again whenever instances moved (default: updated in place while at most a quarter moved, built every 32 updates) |
 | `LR_GPU_LOD=0\|1` | the GPU rasterizer's simpler copies of meshes for instances small on the screen: `0` never, `1` at any instance count (default: from 4096 instances) |
-| `LR_VK_LOSE_AFTER=n` | our Vulkan layer (`make VK=1`): the n-th submission fails as on a lost device (to test what follows: VULKAN.md) |
+| `LR_VK_LOSE_AFTER=n` | our Vulkan layer: the n-th submission fails as on a lost device (to test what follows: VULKAN.md) |
 | `LR_VK_FAIL_MAP=n` | our Vulkan layer: the n-th buffer read back fails, the device staying ready (to test what waits for an image: `render`, a screenshot) |
 | `LR_GPU_BVH=ploc\|lbvh` | the GPU's tree builder for everything it builds (default: PLOC for meshes' trees, the LBVH for the top level) |
 | `LR_GPU_BLAS=gpu` | every mesh's tree is built once on the GPU instead of the CPU's being uploaded (to measure the GPU builders) |

@@ -739,7 +739,7 @@ cost the physics nothing. K blasts the pile. Live on an RTX 3070,
 `bin/view -sim on -demo sky -backend rt -sky models/skies/kloofendal_48d_partly_cloudy_2k.hdr
 -width 1280 -height 720`: 31 frames/s path traced and denoised with all 2000 bodies down,
 the bodies 1.3 ms per step on the GPU, the path tracer 10.9 ms per pass; with our Vulkan
-layer (`bin/vk/view`, hardware ray tracing) 53 frames/s, the path tracer 3.3 ms per pass.
+layer (`bin/vk/view` then, `bin/view` since 2026-11-18; hardware ray tracing) 53 frames/s, the path tracer 3.3 ms per pass.
 
 `bin/sim` writes each frame to `out/sim/frame_NNNN.png` (`-o folder`) and then
 `out/sim.gif` (`-gif off` to skip). Each frame: physics for 1/fps seconds (steps of at most

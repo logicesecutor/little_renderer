@@ -19,7 +19,7 @@ with hardware ray tracing, natively and in the browser.**
 [**Features**](#-features) · [**Gallery**](#-gallery) · [**Quick start**](#-quick-start) · [**How it is built**](#-how-it-is-built) · [**Performance**](#-performance) · [**Docs**](#-documentation)
 
 <img src="docs/images/sky_rain.jpg" width="97%" alt="Two thousand bodies of fourteen materials piled on brick paving under an HDR sky, among three thousand still objects">
-<br><sub><b>5000 instances under an HDR sky.</b> 2000 bodies of 14 physically based materials (gold, copper, chrome, glass, plastics, ceramic, rubber...) rain down and pile up, simulated on the GPU, among 3000 still props. Live it is path traced and denoised at 1280×720: <b>31 frames/s</b> on wgpu, <b>53</b> on our Vulkan layer with hardware ray tracing (<code>bin/view -sim on -demo sky -backend rt</code>, RTX 3070). This frame has 256 samples per pixel.</sub>
+<br><sub><b>5000 instances under an HDR sky.</b> 2000 bodies of 14 physically based materials (gold, copper, chrome, glass, plastics, ceramic, rubber...) rain down and pile up, simulated on the GPU, among 3000 still props. Live it is path traced and denoised at 1280×720: <b>53 frames/s</b> on our Vulkan layer with hardware ray tracing (<code>bin/view -sim on -demo sky -backend rt</code>, RTX 3070). This frame has 256 samples per pixel.</sub>
 
 </div>
 
@@ -51,13 +51,17 @@ JSON and glTF.
 
 ### Every pipeline, everywhere
 
-| | CPU | GPU · wgpu-native | GPU · our Vulkan layer | Browser (WebGPU) |
-|---|:---:|:---:|:---:|:---:|
-| **Rasterizer** (PBR, light probes, HDR skies) | ✅ | ✅ | ✅ | ✅ |
-| **Path tracer** (MIS, glass, caustics, media) | ✅ | ✅ | ✅ + hardware ray queries | ✅ |
-| **Denoised real-time path tracing** (SVGF-style, reprojection) | | ✅ | ✅ | ✅ |
-| **Rigid bodies** (spheres, boxes, hulls, meshes) | ✅ | ✅ | ✅ | ✅ |
-| **Air and cloud** (Stable Fluids, multigrid) | ✅ | ✅ | ✅ | ✅ |
+| | CPU | GPU natively: our WebGPU on Vulkan | Browser (its WebGPU) |
+|---|:---:|:---:|:---:|
+| **Rasterizer** (PBR, light probes, HDR skies) | ✅ | ✅ | ✅ |
+| **Path tracer** (MIS, glass, caustics, media) | ✅ | ✅ + hardware ray queries | ✅ |
+| **Denoised real-time path tracing** (SVGF-style, reprojection) | | ✅ | ✅ |
+| **Rigid bodies** (spheres, boxes, hulls, meshes) | ✅ | ✅ | ✅ |
+| **Air and cloud** (Stable Fluids, multigrid) | ✅ | ✅ | ✅ |
+
+One engine written against WebGPU (`webgpu.h` and WGSL): natively our own implementation of
+it on Vulkan, in a page the browser's. No WebGPU library is linked natively (wgpu-native,
+used until 2026-11-18, is gone).
 
 `float` or `double` precision for the whole engine, chosen when it is built.
 
@@ -68,7 +72,7 @@ JSON and glTF.
 | **Path tracer** | Next event estimation with multiple importance sampling, physically based materials (glTF metallic-roughness: GGX microfacets with visible-normal sampling, rough glass, multiple-scattering compensation; base colour, metallic-roughness and normal map textures), HDR skies (Radiance `.hdr`) sampled by luminance, caustics traced from the lamp, Owen-scrambled Sobol with blue noise, volumetric clouds and fog (delta and ratio tracking), SAH BVH (4-wide on the CPU), instanced meshes in a two-level tree |
 | **Rasterizer** | Edge functions, perspective-correct shading (flat, Gouraud, Phong, wireframe) with the path tracer's BSDF and glTF's textures (base colour, metallic-roughness, normal maps; trilinear mip-mapping), lit by the area lamp and a light probe or an HDR sky (split-sum, parallax-corrected) with an irradiance grid, multithreaded; clouds and fog raymarched over the frame |
 | **GPU (WebGPU)** | Every backend again in WGSL compute and render shaders: the rasterizer, the path tracer with an SVGF-style denoiser and temporal reprojection for real-time path tracing, light-traced caustics with a photon cache, GPU tree builders (LBVH and PLOC), the air and the cloud, the rigid bodies. Offline GPU renders are bit-reproducible: the same image every run |
-| **Our own Vulkan layer** | `make VK=1`: the `webgpu.h` API implemented on Vulkan 1.3 from scratch (our own declarations of Vulkan, no SDK and no wgpu-native), with our own WGSL → SPIR-V compiler; hardware ray tracing through ray queries (an extension of `webgpu.h` of our own), which makes the path tracer up to 2.7× faster; a lost device falls back to the CPU; clean under the Khronos validation layer ([VULKAN.md](docs/VULKAN.md)) |
+| **Our own Vulkan layer** | the native build's GPU: the `webgpu.h` API implemented on Vulkan 1.3 from scratch (our own declarations of Vulkan, no SDK, no library linked; Win32 and X11 windows), with our own WGSL → SPIR-V compiler; hardware ray tracing through ray queries (an extension of `webgpu.h` of our own), which makes the path tracer up to 2.7× faster; a lost device falls back to the CPU; clean under the Khronos validation layer ([VULKAN.md](docs/VULKAN.md)) |
 | **Physics** | Spheres, boxes, convex hulls and triangle meshes (separating axes, contacts found once per step with speculative margins, sequential impulses with warm starting, sleeping bodies; on the GPU over-relaxed Jacobi iterations with mass splitting, a grid broad phase, the hull pairs' last separating feature remembered), the air as Stable Fluids on a MAC grid with a multigrid pressure solve, a MacCormack-advected cloud, explosions; bodies push the air and the air drags them |
 | **Files** | Our own readers and writers: glTF 2.0 models (`.gltf`, `.glb`: meshes, the node tree, materials and textures), PNG (read and write), JPEG (baseline and progressive, the same pixels as libjpeg), Radiance `.hdr`, `.obj` and ASCII `.ply`, JSON |
 | **Platforms** | Linux (X11), Windows (Win32, MSYS2), web browsers (Emscripten + WebGPU); `float` or `double` precision |
@@ -114,21 +118,13 @@ bin/view -sim on     # the physics, live (Space pauses, K is an explosion)
 ```
 
 <table>
-<tr><th>On the GPU, natively</th><th>With our own Vulkan layer</th><th>In a browser</th></tr>
+<tr><th>On the GPU, natively</th><th>In a browser</th></tr>
 <tr>
 <td>
 
 ```sh
-make deps   # fetches wgpu-native
-make
-```
-
-</td>
-<td>
-
-```sh
-make VK=1   # binaries in bin/vk/
-bin/vk/view -backend rt
+make        # GPU through our Vulkan layer
+bin/view -backend rt
 ```
 
 </td>
@@ -144,10 +140,10 @@ make serve  # localhost:8000
 </table>
 
 The showcase at the top of this page, live: 5000 instances under an HDR sky, 2000 of them
-raining down, with physics and path tracing on the GPU (`bin/view` for wgpu-native):
+raining down, with physics and path tracing on the GPU:
 
 ```sh
-bin/vk/view -sim on -demo sky -backend rt -sky models/skies/kloofendal_48d_partly_cloudy_2k.hdr -width 1280 -height 720
+bin/view -sim on -demo sky -backend rt -sky models/skies/kloofendal_48d_partly_cloudy_2k.hdr -width 1280 -height 720
 ```
 
 <details>
@@ -184,7 +180,7 @@ flowchart LR
     raster --> gpu["gpu<br/>WebGPU backend · WGSL"]
     rt --> gpu
     phys --> gpu
-    gpu -.->|make VK=1| vk["webgpu/<br/>our WebGPU on Vulkan<br/>WGSL → SPIR-V"]
+    gpu -.->|natively| vk["webgpu/<br/>our WebGPU on Vulkan<br/>WGSL → SPIR-V"]
     gpu --> app["app<br/>options · demos"]
     platform --> app
     app --> programs["render · view · sim<br/>examples · tests"]
@@ -207,7 +203,7 @@ next to the GPU ones.
 |---|---|
 | `engine/` | the library, `liblr.a`: one folder per layer above (`base/`, `formats/`, `scene/`, `raster/`, `rt/`, `phys/`, `platform/`, `gpu/`, `app/`); include `engine/lr.h` |
 | `engine/gpu/shaders/` | the WGSL, by what it serves: `common/`, `view/`, `raster/`, `trace/`, `rigid/`, `fluid/` |
-| `webgpu/` | our WebGPU on Vulkan (`vk/`) and its WGSL → SPIR-V compiler (`wgsl/`), built in with `make VK=1`; they use nothing of the engine |
+| `webgpu/` | our WebGPU on Vulkan (`vk/`) and its WGSL → SPIR-V compiler (`wgsl/`), the native build's GPU; they use nothing of the engine. `webgpu/include/` holds the standard `webgpu.h`, the one file not written here |
 | `apps/` | the programs `render`, `view`, `sim` |
 | `examples/` | small programs on the library, to start from |
 | `tests/` | the unit tests, `make test` |
@@ -217,12 +213,13 @@ next to the GPU ones.
 
 ## ⚡ Performance
 
-Measured with the performance suite (`make perf`, `make VK=1 perf`, `make web-bench`) on
+Measured with the performance suite (`make perf`, `make web-bench`) on
 `main` at 6fe55ba: RTX 3070, 12 CPU threads, Windows. Nothing waits for the display (offscreen,
 and the viewer with `-vsync off`), so these are the fastest the machine goes.
-[docs/STATUS.md](docs/STATUS.md) has every case and the ideas still to try.
+[docs/STATUS.md](docs/STATUS.md) has every case and the ideas still to try. The first column is
+wgpu-native, the native WebGPU library used until 2026-11-18, kept here for comparison.
 
-| | wgpu | our Vulkan layer | Chrome |
+| | wgpu-native (until 2026-11-18) | our Vulkan layer | Chrome |
 |---|---|---|---|
 | Cornell box, 640×640, one path traced sample per pixel | 2.25 ms | **1.27 ms** | 3.82 ms |
 | Stanford dragon, 871k triangles, one pass | 8.32 ms | **1.34 ms** (hardware rays) | |
@@ -246,8 +243,8 @@ bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.
   queries, and the path tracer traced twice to the same bit.
 - **64 reference images**, CPU and GPU, rasterized and path traced, compared pixel for
   pixel across changes.
-- **Every build kept clean**, without warnings: Windows (wgpu, our Vulkan layer, `double`),
-  Linux (CPU only, `float` and `double`) and the browser.
+- **Every build kept clean**, without warnings: Windows (our Vulkan layer, CPU only, `double`),
+  Linux (our Vulkan layer, CPU only, `float` and `double`) and the browser.
 - **The Khronos validation layer** finds nothing in our Vulkan layer, across the tests,
   the viewer, `sim` and `render`.
 - **Layers checked** by `make check-layers` on every build.

@@ -7,19 +7,32 @@ kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web
 
 ## Status
 
+**Since 2026-11-18 this layer is the only native GPU**: `make` builds it, wgpu-native is gone
+(no `make deps`, no `VK=1`, no `bin/vk/`). The standard `webgpu.h` is our copy in
+`webgpu/include/webgpu/` (the version wgpu-native v29.0.1.1 shipped); what we add to it has
+names of our own: `webgpu/vk/webgpu_lr.h` (`lrQueueSubmitForIndex`, `lrDevicePoll`,
+`LRFeatureName_RayQuery`, `lrDeviceGetComputeQueue`; until then wgpu.h's `wgpuDevicePoll`,
+`wgpuQueueSubmitForIndex`, `WGPUNativeFeature_RayQuery`) and `webgpu/vk/webgpu_rt.h`. Why:
+on Windows and Linux the layer reaches the same hardware as wgpu-native did (which ran on
+Vulkan here; its Direct3D 12 backend never finished compiling the path tracer, its Metal one
+serves Macs, not a target), faster, with ray tracing; the WGSL is checked by the browser
+instead (the page's images against native: `bench -shots` / `-imgdiff`). What it costs:
+MSAA waits for multisampled targets here (R7); machines without Vulkan 1.3 run on the CPU
+natively (their browser still has WebGPU).
+
 | part | state |
 |---|---|
 | `webgpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | `tools/vk_check.py` checks every size, offset and constant against the official headers (899 checks, 0 differ) |
 | loader, instance, adapter, device, queue (timeline semaphore), submissions, polling, callbacks | done |
-| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/vk/test_gpu_basic` passes |
+| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/test_gpu_basic` passes |
 | bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | done |
 | WGSL → SPIR-V (`webgpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
 | render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
-| the window's surface (Win32 swapchain; X11 later): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC | done |
-| acceleration structures and ray queries (R6): our extension of webgpu.h (`webgpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/vk/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
+| the window's surface (Win32 swapchain; X11 since 2026-11-18, `VK_KHR_xlib_surface`): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC | done (X11: built, not yet run on a Linux GPU) |
+| acceleration structures and ray queries (R6): our extension of webgpu.h (`webgpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
 
-Checked so far, with the validation layer on and nothing reported: `make VK=1 test` passes;
+Checked so far, with the validation layer on and nothing reported: `make test` passes;
 `render` (rasterizer: every shading mode, the helmet's textures, the sky; path tracer: the
 box, the sky, the helmet) writes the same pixels as on wgpu, bit for bit; `sim` (drop,
 blast: GPU bodies, air and cloud) differs by at most 2 levels of 255 after 12 frames;
@@ -31,7 +44,7 @@ the physics' CPU time per frame 0.39 ms on ours, 0.80 ms on wgpu (GPU bodies 0.1
 
 ### Hardware ray tracing (R6)
 
-wgpu-native's C API has no acceleration structures, so ours is an extension of webgpu.h of
+webgpu.h has no acceleration structures (nor had wgpu-native's C API), so ours is an extension of webgpu.h of
 our own (`webgpu/vk/webgpu_rt.h`), shaped after the WebGPU proposal: bottom levels of
 triangles or boxes (`lrDeviceCreateBlas`, `lrCommandEncoderBuildBlas`), a top level of
 64-byte instance records (`lrDeviceCreateTlas`, `lrCommandEncoderBuildTlas`), bound through
@@ -92,8 +105,7 @@ get an error, mappings are aborted, the surface reports itself lost. The engine'
 `LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
 commands): the tests, `render`, `sim` and `view` run clean.
 
-Building: `make VK=1` (binaries in `bin/vk`; the webgpu.h header still comes from `make
-deps`). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed
+Building: `make` (the layer is the native build's GPU; `NOGPU=1` leaves it out). `LR_VK_VALIDATE=1` turns on the Khronos validation layer if it is installed
 (MSYS2: `mingw-w64-ucrt-x86_64-vulkan-validation-layers`; then `VK_ADD_LAYER_PATH` to its
 `bin`). Development tools only, nothing linked: SPIRV-Tools (`spirv-val`, `spirv-dis`) and
 the validation layers, through MSYS2 (updated on 2026-11-15 for them: gcc 12.1 → 16.2, the
@@ -111,15 +123,16 @@ write).
   GPU of its own: the page reaches the GPU only through the browser's WebGPU.
 - **WebGPU** is a portable, safe GPU interface (shaders in WGSL). In a browser it is a
   JavaScript API, which our WebAssembly calls through Emscripten's bindings for `webgpu.h`;
-  natively it is a C library implementing the same `webgpu.h` (today wgpu-native, Rust).
+  natively it is a C library implementing the same `webgpu.h` (ours, on Vulkan; until
+  2026-11-18 wgpu-native, Rust).
   WebGPU itself runs on Vulkan, Direct3D 12 or Metal underneath.
 - **Vulkan** is the low-level native GPU interface the drivers implement (Windows, Linux,
   Android; not Apple). Shaders in SPIR-V. Not reachable from a web page.
 
 ```
 browser:  engine (C → WebAssembly) → webgpu.h → browser's WebGPU → (Vulkan/D3D12/Metal) → GPU
-today:    engine (C) → webgpu.h → wgpu-native → Vulkan or D3D12 → GPU
-planned:  engine (C) → webgpu.h → our implementation on Vulkan → GPU
+natively: engine (C) → webgpu.h → our implementation on Vulkan → GPU
+(before 2026-11-18: engine (C) → webgpu.h → wgpu-native → Vulkan or D3D12 → GPU)
 ```
 
 So Vulkan can make the native engine faster, never the page; the page gets what its
@@ -149,7 +162,7 @@ What has to be written:
    our code needs a memory barrier between dependent dispatches, which is what WebGPU's
    tracking ends up doing), the swapchain (Win32, X11), timestamp queries. No validation in
    release builds; the Khronos validation layers while developing.
-3. **Native extensions**, asked for like wgpu-native's (`WGPUNativeFeature_*`), each with
+3. **Native extensions**, asked for as features of our own (`LRFeatureName_*`, webgpu_lr.h), each with
    the plain WGSL path kept for the browser:
    - more than 8 storage buffers per stage (the BSDF tables would leave the blue-noise
      buffer), push constants;
@@ -194,7 +207,7 @@ What has to be written:
 
 1. The compiler, checked against wgpu's on every kernel and test.
 2. `webgpu.h` on Vulkan; wgpu-native stays until `make test` and the image comparisons
-   pass on ours, then goes.
+   pass on ours, then goes (gone on 2026-11-18: Status above).
 3. The native extensions (P10 becomes cheap; then R6, ray tracing).
 4. Remote rendering; the browser's new features as they ship.
 

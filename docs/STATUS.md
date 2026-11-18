@@ -25,6 +25,7 @@ pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` �
 | 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | W2 (its tools) and W4, W6 done on branch `webgpu-perf` (1.7); W3, W5, W7, W8 next | WEB.md |
 | 10 | **The GPU's load**: what the GPU's time goes to in the path traced viewer, and more of it to path tracing | G1-G4, G6 done (branches `gpu-load`, `gpu-load-2`); G5 proposed | 1.5 |
 | 11 | **Adaptive sampling**: the samples where the image is still noisy, not one per pixel per pass everywhere | proposed 2026-11-18, plan in 1.6 | R9 |
+| 12 | **One native GPU**: wgpu-native removed, our Vulkan layer the default build, its X11 window | done on branch `vk-only` (2026-11-18) | 1.8; VULKAN.md |
 
 `next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
 from the repository; the dragon stays on disk, untracked: `make dragon-download`).
@@ -67,8 +68,7 @@ the quick set, 5 in the full) and its median kept with the fastest and slowest.
 
 | command | what |
 |---|---|
-| `make perf-quick` / `make perf` | the quick set (~35 s) / the full set (~3.5 min, the viewer's group I 1.5 of them) on wgpu, appended to `out/perf/<commit>_wgpu.csv` |
-| `make VK=1 perf-quick` / `make VK=1 perf` | the same on our Vulkan layer (`_vk.csv`; the full set adds A1c, A3c, A8c: without hardware rays) |
+| `make perf-quick` / `make perf` | the quick set (~35 s) / the full set (~3.5 min, the viewer's group I 1.5 of them) on our Vulkan layer, appended to `out/perf/<commit>_vk.csv` (the full set adds A1c, A3c, A8c: without hardware rays; `NOGPU=1`: `_cpu.csv`). The `_wgpu.csv` files of before 2026-11-18 were wgpu-native's |
 | `make web-bench`, `make serve`, `node tools/webbench.mjs quick\|full -tag <commit> -o out/perf/<commit>_web.csv` | the same program in a page (built with JSPI so it can wait for the GPU), run by a headless Chrome of its own on this machine's GPU (~2 / ~6 min) |
 | `bin/bench -compare old.csv new.csv` | each case before and after, faster or slower by more than 5% flagged |
 | `bin/bench -table a.csv b.csv c.csv` | the Markdown table of section 2 |
@@ -86,7 +86,7 @@ are skipped there.
 
 ### 1.5 The GPU's load (branch `gpu-load`, 2026-11-17)
 
-The question: `bin/vk/view -sim on -demo sky -props 48000 ... -width 1920 -height 1080
+The question: `bin/vk/view` (today `bin/view`) `-sim on -demo sky -props 48000 ... -width 1920 -height 1080
 -vsync off` never showed the GPU above 80%. The analysis (a parallel agent, its scripts and
 logs in `out/gpuload/`): the GPU was not idle (nvidia-smi 95-96%, its timestamps busy 18.3
 of every 19.1 ms); the 61-80% was Windows' "GPU 3D" counter (Task Manager), which reads low.
@@ -348,6 +348,40 @@ of webgpu_rt.h's 9 functions, the top level as a bind group entry (Emscripten's 
 knows none), and `trace_hw_traverse.wgsl` in the proposal's syntax (it differs from wgpu's
 naga syntax our layer takes). Nothing fake is shipped and nothing needs a browser flag.
 
+### 1.8 Step 12: one native GPU (branch `vk-only`, 2026-11-18)
+
+The user's decision: keep two WebGPUs, our Vulkan layer natively and the browser's in a
+page, and drop wgpu-native. What changed:
+
+- `make` builds the layer (`-DLR_GPU -DLR_VK`, objects in `build/float-vk/`, binaries in
+  `bin/`); `NOGPU=1` builds without the GPU. Gone: `make deps`, `deps-clean`, `VK=1`,
+  `bin/vk/`, `third_party/wgpu` (the folder can be deleted), `LR_WGPU_NATIVE`, about 16 MB
+  per program (wgpu-native was linked statically).
+- `webgpu/include/webgpu/webgpu.h`: our copy of the standard header (BSD-3-Clause, the
+  version wgpu-native v29.0.1.1 shipped). The browser build keeps Dawn's
+  (`--use-port=emdawnwebgpu`).
+- wgpu.h's extras the layer imitated now have names of our own, in
+  `webgpu/vk/webgpu_lr.h`: `lrQueueSubmitForIndex`, `lrDevicePoll`, `LRSubmissionIndex`,
+  `LRFeatureName_RayQuery` (with `lrDeviceGetComputeQueue`, moved there from webgpu_rt.h).
+- The layer's X11 surface (`VK_KHR_xlib_surface`): before, Linux drew offscreen (each
+  frame read back by the CPU). Built and warning-free; not yet run on a Linux GPU.
+- `bench`'s native column is `vk` (`cpu` with `NOGPU=1`); `-shots` names its images
+  `<name>_vk.png`.
+
+Checked: Windows `make`, `make test` (hardware ray tracing on), `make DOUBLE=1` and its
+tests, `make NOGPU=1` and its tests, `make check-layers`, `make web`, `make web THREADS=1`,
+`make web-check THREADS=1` (both pages, no GPU error); Linux (gcc 13, no `third_party` at
+all, a Vulkan loader but no GPU driver): `make`, `make test` (the GPU tests skip and the
+programs fall back to the CPU, as on a machine without Vulkan 1.3), `make DOUBLE=1` and its
+tests, `make NOGPU=1` and its tests, `make check-layers`; every build warning-free (two
+warnings the layer's code had on Linux fixed: `surface_free` unused without a surface,
+`failed` clobbered by `longjmp` in the WGSL compiler).
+
+What it costs: MSAA waits for multisampled targets in the layer (R7); a machine without
+Vulkan 1.3 runs natively on the CPU (its browser still has WebGPU); the WGSL is no longer
+compiled by a second native compiler (naga): the page's (Tint) checks it, `make web-check`
+and the images against native (`bench -shots`, `-imgdiff`).
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-18 on the branch `webgpu-perf` at b296213 (W4 and W6, 1.7):
@@ -452,7 +486,7 @@ Measure before and after every change, on the same machine, with the same comman
 | an offline film | `bin/sim ...` | physics and rendering time of the whole film |
 
 Reference machine for the numbers below: Windows, RTX 3070, 8-core CPU, native build
-(`make deps && make`), unless written otherwise. The GPU's speed varies by 10-20% from one
+(`make`; before 2026-11-18 wgpu-native through `make deps && make`, our layer `make VK=1`), unless written otherwise. The GPU's speed varies by 10-20% from one
 run (or hour) to the next: compare two versions in the same session, alternating, and take
 the fastest of a few runs (the benchmark script does 3).
 
@@ -519,7 +553,7 @@ phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 118
 
 | ID | idea | status | expected gain / why |
 |---|---|---|---|
-| X1 | Own Vulkan backend behind the same `webgpu.h` (drop wgpu-native), with our own WGSL → SPIR-V compiler | planned (step 6, after PBR; the plan: VULKAN.md) | no per-call validation or conservative barriers (P10), the hardware's features (subgroups, 64-bit atomics, bindless, more bindings, a second queue), hardware ray tracing (R6); less foreign code |
+| X1 | Own Vulkan backend behind the same `webgpu.h` (drop wgpu-native), with our own WGSL → SPIR-V compiler | done: the layer since 2026-11-16 (step 6), the only native GPU since 2026-11-18 (step 12, 1.8) | no per-call validation or conservative barriers (P10), the hardware's features (subgroups, 64-bit atomics, bindless, more bindings, a second queue), hardware ray tracing (R6); less foreign code |
 
 ## 5. Backlog (everything else to do, gathered 2026-11-17)
 
@@ -527,11 +561,10 @@ Not scheduled; the IDs point to section 4 (the ideas, with their measurements).
 
 Agreed for later (2026-11-17):
 
-- **A Linux window for our Vulkan layer.** Today it shows a window only on Windows (Win32
-  surface); an X11 or Wayland surface would let the Linux laptop's integrated GPU run the
-  live viewer through our own layer.
+- **A Linux window for our Vulkan layer**: the X11 surface is written (2026-11-18, 1.8) but
+  not yet run on a Linux machine with a GPU; Wayland not yet.
 - **Automated builds and tests**: GitHub Actions building and running `make test` on Linux
-  and Windows (float and double, wgpu and our layer where a runner can) for every push.
+  and Windows (float and double, our layer where a runner has a GPU) for every push.
 
 Physics:
 

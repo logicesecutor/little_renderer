@@ -12,7 +12,7 @@ the cloud), and whatever it does not do yet (the rigid bodies) stays on the CPU.
 | window | X11 / Win32 (`platform/window.c`, `window_win32.c`) | the `<canvas id="canvas">` (`platform/window_web.c`) |
 | main loop | `while (frame())` | `emscripten_set_main_loop`: the browser calls `frame()` once per display refresh |
 | threads | OpenMP | one thread; or, in a cross-origin isolated page, one per hardware thread (`make web THREADS=1`, section 1.1) |
-| GPU | WebGPU through wgpu-native after `make deps` (section 3), otherwise the CPU | WebGPU (`gpu/`), on by default |
+| GPU | WebGPU through our own implementation on Vulkan (section 3; `NOGPU=1`: none), otherwise the CPU | the browser's WebGPU (`gpu/`), on by default |
 
 ## 1. Building and running
 
@@ -358,7 +358,7 @@ keeps them on the CPU. In the browser it runs as natively (the dragons button to
 | `view -sim on`, 600 bodies, raster | 142 frames/s (19 ms of physics on the CPU) | 164 (the screen's limit; 0.6 ms) |
 | `sim -demo blast`, 300 bodies, physics of the film | 3.4 s | 1.7 s |
 
-A note for writing WGSL kernels that browsers accept (Tint is stricter than wgpu-native's
+A note for writing WGSL kernels that browsers accept (Tint is stricter than wgpu-native's (used natively until 2026-11-18)
 naga): a `workgroupBarrier` must be in uniform control flow, so a loop whose count lives in
 workgroup memory reads it with `workgroupUniformLoad`; an array or matrix indexed by a
 variable must be a `var`, not a `let`; and a kernel may bind at most 8 storage buffers, so
@@ -437,20 +437,16 @@ fallback for every browser and GPU without it.
 
 The native programs (`bin/view`, `bin/render`, `bin/sim`) run the same GPU code as the
 browser. The engine's `gpu/` layer is written against the standard WebGPU C API
-(`webgpu.h`), so natively it only needs a library that implements that API. The Makefile
-uses **wgpu-native** (the implementation inside Firefox, a plain C library). It reaches the
-GPU through the driver's Vulkan or Direct3D 12, and nothing else gets installed.
+(`webgpu.h`), so natively it only needs something that implements that API: our own layer
+on Vulkan (`webgpu/vk`, docs/VULKAN.md). It reaches the GPU through the driver's Vulkan
+loader, opened at run time; nothing gets installed and no library is linked. (Until
+2026-11-18 it was **wgpu-native**, fetched by `make deps`; the measurements below are its.)
 
 ```sh
-make deps      # once: downloads wgpu-native v29.0.1.1 for this system into third_party/wgpu (git-ignored)
-make           # from now on every build has the GPU (objects in build/float-gpu/)
+make           # every build has the GPU (objects in build/float-vk/)
 bin/view       # the window is drawn by the GPU; bin/render and bin/sim render on it too
-make NOGPU=1   # a CPU-only build even with the library there
-make deps-clean   # remove it: builds are CPU-only again, exactly as before
+make NOGPU=1   # a CPU-only build
 ```
-
-The library is linked statically, so the programs need no DLL or `.so` beside them. They
-grow from about 1.3 MB to 16 MB.
 
 | program | on the GPU | measured (RTX 3070, Windows) |
 |---|---|---|
