@@ -1,6 +1,5 @@
-
-
-// Vulkan layer: make VK=1): buffer writes small and large, copies, clears, read back by
+// test_gpu_basic.c - the GPU layer's basics, whatever implements webgpu.h (natively our
+// Vulkan layer, in a page the browser's): buffer writes small and large, copies, clears, read back by
 // mapping, several submissions in flight, waiting for one of them. No shaders.
 //
 // Part of make test. Without a GPU it says so and passes.

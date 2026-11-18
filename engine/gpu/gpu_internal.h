@@ -49,10 +49,9 @@ struct Gpu {
 static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU_STRLEN}; return v; }
 
 // One more reference to a buffer, a texture or a view (the bind groups kept by
-// gpu_bind_cached, the shared atlas). The webgpu.h of today names it wgpu...AddRef:
-
-
-// make web uses). Headers from before the renaming (an older wgpu-native, the webgpu.h older
+// gpu_bind_cached, the shared atlas). The webgpu.h of today names it wgpu...AddRef: our copy
+// (webgpu/include, our layer's) and Dawn's port for Emscripten (--use-port=emdawnwebgpu, what
+// make web uses). Headers from before the renaming (the webgpu.h older
 // Emscriptens carried themselves) have wgpu...Reference: build with -DLR_WGPU_REFERENCE
 // there (make web WGPU_REFERENCE=1).
 #ifdef LR_WGPU_REFERENCE

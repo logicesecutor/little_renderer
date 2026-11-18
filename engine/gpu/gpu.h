@@ -1,8 +1,7 @@
 // gpu.h - the GPU backend of the engine, on WebGPU (webgpu.h): the same C code drives the
 // GPU in a web browser (Emscripten + Dawn's "emdawnwebgpu" bindings over the browser's
-
-
-// configured. Shaders are WGSL, kept as strings inside the engine.
+// WebGPU) and, natively, through our own WebGPU on Vulkan (webgpu/vk, docs/VULKAN.md).
+// Shaders are WGSL, kept as strings inside the engine.
 //
 // Builds define LR_GPU unless made with NOGPU=1 (`make web` always does). Without it
 // these functions still exist: gpu_create says the GPU is not available, and everything
@@ -19,9 +18,8 @@ typedef struct Gpu Gpu;
 
 typedef enum { GPU_PENDING, GPU_READY, GPU_FAILED } GpuState;
 
-
-
-// by the Makefile: make deps), 0 if everything runs on the CPU
+// 1 if this build has a GPU backend (the browser's WebGPU, or natively our Vulkan layer; not
+// with NOGPU=1), 0 if everything runs on the CPU
 int gpu_available(void);
 
 // canvas: the CSS selector of the HTML canvas the GPU draws on (web), e.g. "#canvas". NULL
