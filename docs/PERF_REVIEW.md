@@ -12,7 +12,7 @@ GPU is our Vulkan layer alone). The wgpu columns below were measured before that
 they were.
 
 **N1-N8 built the same day** (branch `development`), measured against the build before each
-(medians of 3 alternated rounds), every one the same results to the bit except N8:
+(medians of 3 alternated rounds), every one the same results to the bit:
 
 | | what was built | measured |
 |---|---|---|
@@ -23,7 +23,7 @@ they were.
 | N5 | after a JPEG's scans, the inverse DCT, upsampling and colours in tasks of 64 rows; texmap_make's levels too; the threads idle at the textures' loop take them | H5 187.8 -> 97.9 |
 | N6 | the tests inline (`shape_test`), the Hit made once for the shape kept (`shape_hit`); the sampler's seeds not touched | B1 3.913 -> 5.159 M paths/s, B2 0.509 -> 0.625, B3 3.905 -> 4.093 |
 | N7 | hulls placed on the stack, the inverse inertia once per substep, `mark_solids` in one region | F1 7.149 -> 6.974, F2 23.43 -> 23.10 |
-| N8 | `make NATIVE=1`: `-O3 -march=x86-64-v3`, opt-in, folders of its own | against the default: C5 18.49 -> 13.85, C6 34.38 -> 27.79, F1 7.04 -> 6.20, G3 8.28 -> 7.15, B1 5.13 -> 5.70 |
+| N8 | `make NATIVE=1`: `-O3 -march=x86-64-v3 -ffp-contract=off`, opt-in, folders of its own; the same bits as the default build (10 shots). With FMA (contraction on) it was faster still (C5 13.85, F1 6.20) but other bits, and with gcc 13 (Linux) test_physics' two colliding hulls blew up (momentum check 31164 for 0.001): the collision is not robust to that rounding, a bug to look at | against the default: C5 18.56 -> 15.71, C6 34.47 -> 30.36, E1 9.66 -> 8.79, G3 8.49 -> 7.56, B1 5.12 -> 5.38, F1 7.06 -> 6.83 |
 
 Machine: i5-10600K (6 cores, 12 threads), RTX 3070, Windows, MSYS2 gcc 16.2, a 60 Hz display
 that day. Numbers are medians of `bin/bench` cases (docs/STATUS.md 1.3), the two builds run

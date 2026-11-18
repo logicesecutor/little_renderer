@@ -94,7 +94,7 @@ Build flags, combinable with any target:
 |---|---|
 | `make DOUBLE=1` | double precision everywhere: `build/double/liblr.a` and `bin/double/...` (the float build stays in `bin/`) |
 | `make SINGLE=1` | no OpenMP: both backends run on one thread (easier to debug) |
-| `make NATIVE=1` | faster on the CPU: `-O3 -march=x86-64-v3` (AVX2, FMA; a CPU from 2013 on), into `build/*-native` and `bin/native/`. Its images are no longer the same to the bit as the default build's and the browser's (FMA rounds differently: RMSE under 1 level); 10-25% on the CPU rasterizer, bodies, air and trees (docs/PERF_REVIEW.md, N8) |
+| `make NATIVE=1` | faster on the CPU: `-O3 -march=x86-64-v3 -ffp-contract=off` (AVX2, a CPU from 2013 on), into `build/*-native` and `bin/native/`; the same images to the bit as the default build. 9-15% on the CPU rasterizer, air and trees, 5% on the CPU path tracer (docs/PERF_REVIEW.md, N8) |
 | `make SAN=1` | address + undefined-behaviour sanitizers: catches bad memory access; ~10× slower |
 | `make CFLAGS="-O2 -DOCT_LEAF_SIZE=8"` | your own flags, e.g. to change a compile-time constant |
 

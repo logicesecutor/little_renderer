@@ -588,7 +588,7 @@ static uint32_t const_id(Cx *c, Type *t, const double *cv){
     if (t->k != T_VEC) wgsl_fail(c->W, 0, "internal: a constant of this type");
     for (int i = 0; i < S->ncc; i++)
         if (S->cc[i].t == t && !memcmp(S->cc[i].v, cv, sizeof(double) * (size_t)t->n)) return S->cc[i].id;
-    uint32_t comp[4];
+    uint32_t comp[4] = {0, 0, 0, 0};   // (a vector has 2 to 4: -O3 cannot tell)
     for (int i = 0; i < t->n; i++) comp[i] = const_bits(S, t->e, scalar_bits(t->e, cv[i]));
     uint32_t ty = tid(S, t), id = new_id(S);
     uint32_t a[6] = {ty, id, comp[0], comp[1], t->n > 2 ? comp[2] : 0, t->n > 3 ? comp[3] : 0};

@@ -22,13 +22,14 @@ SANFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer
 CFLAGS += $(if $(SAN),$(SANFLAGS))
 # OpenMP spreads the path tracer over the CPU cores; "make SINGLE=1" builds without it
 OMP = $(if $(SINGLE),,-fopenmp)
-# "make NATIVE=1": -O3 and the instructions of x86-64 CPUs from 2013 on (AVX2, FMA:
+# "make NATIVE=1": -O3 and the instructions of x86-64 CPUs from 2013 on (AVX2:
 # -march=x86-64-v3; other CPUs: -march=native), into folders of its own (build/*-native,
-# bin/native). Faster on the CPU (docs/PERF_REVIEW.md, N8), but FMA rounds differently: its
-# images are no longer the same to the bit as the default build's and the browser's, and it
-# runs only on such CPUs. Not the default.
+# bin/native). Faster on the CPU (docs/PERF_REVIEW.md, N8), and the same images to the bit as
+# the default build's: multiplies and adds are not fused (-ffp-contract=off). Fused (FMA) it
+# was faster still but rounded otherwise, and with gcc 13 two hulls colliding in test_physics
+# blew up (its momentum check: 31164 for 0.001). Not the default: it needs such a CPU.
 ARCHFLAGS = $(if $(findstring x86_64,$(shell $(CC) -dumpmachine)),-march=x86-64-v3,-march=native)
-CFLAGS += $(if $(NATIVE),-O3 $(ARCHFLAGS))
+CFLAGS += $(if $(NATIVE),-O3 $(ARCHFLAGS) -ffp-contract=off)
 
 # Precision of `real` (engine/base/lrmath.h). float is the default: half the memory and
 # faster math. In float mode, constants like 0.5 are made float too
