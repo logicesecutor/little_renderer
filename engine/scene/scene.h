@@ -340,6 +340,11 @@ int scene_load_mesh_object(Scene *s, const char *path, int material, real size);
 // An instance of mesh `mesh` (material -1: the triangles' own), or of a shape (mesh =
 // INST_SPHERE or INST_BOX, material >= 0). Returns its index.
 int scene_add_instance(Scene *s, int mesh, Xform xf, int material);
+// The runs of instances changed since `since` (Instance.version > since), for a backend that
+// sends only those: from *i on, the next run [*first, *last] of indices into s->insts, gaps
+// of up to `gap` unchanged ones joined in (fewer writes); 0 when none is left.
+//     for (int i = 0, a, b; scene_changed_run(s, since, 32, &i, &a, &b);) ...
+int scene_changed_run(const Scene *s, unsigned since, int gap, int *i, int *first, int *last);
 // rotation r (columns: the shape's axes), scaled per axis, then moved to t: a box of half
 // sizes `half`, or a sphere of radius r (scale r, r, r)
 Xform xform_axes(Mat3 r, Vec3 scale, Vec3 t);

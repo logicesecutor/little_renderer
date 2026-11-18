@@ -661,6 +661,18 @@ int scene_load_mesh_object(Scene *s, const char *path, int material, real size){
     return id;
 }
 
+int scene_changed_run(const Scene *s, unsigned since, int gap, int *i, int *first, int *last){
+    int k = *i;
+    while (k < s->ninsts && s->insts[k].version <= since) k++;
+    if (k >= s->ninsts){ *i = k; return 0; }
+    int l = k;
+    for (int j = k; j < s->ninsts && j <= l + gap; j++) if (s->insts[j].version > since) l = j;
+    *first = k;
+    *last = l;
+    *i = l + 1;
+    return 1;
+}
+
 int scene_add_instance(Scene *s, int mesh, Xform xf, int material){
     s->insts = lr_grow(s->insts, sizeof(Instance), &s->cap_insts, s->ninsts + 1, 64);
     Instance *in = &s->insts[s->ninsts];

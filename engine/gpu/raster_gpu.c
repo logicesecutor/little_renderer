@@ -405,14 +405,10 @@ static int upload_instances(GpuRaster *r, const Scene *s){
     const int some = !same && r->ix && r->inst_valid && r->insts_id == s->insts_id && r->inst_count <= s->ninsts &&
                      r->rec && r->rec_cap >= n * 112 && r->ix_cap >= n * 112;
     if (some){
-        for (size_t i = 1; i < n;){
-            if (s->insts[i - 1].version <= r->inst_version){ i++; continue; }
-            // a run of changed records (gaps under REC_GAP joined in)
-            size_t first = i, last = i;
-            for (size_t j = i; j < n && j <= last + REC_GAP; j++)
-                if (s->insts[j - 1].version > r->inst_version){ pack_record(r->rec + 28 * j, s, j); last = j; }
-            wgpuQueueWriteBuffer(r->g->queue, r->ix, first * 112, r->rec + 28 * first, (last + 1 - first) * 112);
-            i = last + 1;
+        // runs of changed records (gaps under REC_GAP joined in); record j + 1 is instance j
+        for (int i = 0, a, b; scene_changed_run(s, r->inst_version, REC_GAP, &i, &a, &b);){
+            for (int j = a; j <= b; j++) if (s->insts[j].version > r->inst_version) pack_record(r->rec + 28 * (size_t)(j + 1), s, (size_t)j + 1);
+            wgpuQueueWriteBuffer(r->g->queue, r->ix, (size_t)(a + 1) * 112, r->rec + 28 * (size_t)(a + 1), (size_t)(b + 1 - a) * 112);
         }
         r->inst_version = s->inst_version;
         r->inst_count = s->ninsts;

@@ -1241,20 +1241,16 @@ static int hw_records(GpuTrace *t, const Scene *s, int some, unsigned since, int
         // the records of the instances moved since, in runs (gaps under REC_GAP joined in)
         LRTlasInstance *r = t->sc_hw;
         int moved = 0;
-        for (int i = 0; i < s->ninsts;){
-            if (s->insts[i].version <= since){ i++; continue; }
-            int first = i, last = i;
-            for (int j = i; j < s->ninsts && j <= last + REC_GAP; j++){
+        for (int i = 0, first, last; scene_changed_run(s, since, REC_GAP, &i, &first, &last);){
+            for (int j = first; j <= last; j++){
                 const Instance *in = &s->insts[j];
                 if (in->version <= since) continue;
                 LRBlas b = in->mesh >= 0 ? t->hw_mesh[in->mesh] : t->hw_unit;
                 hw_record(&r[base + j], &in->xf, (uint32_t)j, in->mesh >= 0 ? t->mc[in->mesh].tri0 : 0, b);
-                last = j;
                 moved++;
             }
             wgpuQueueWriteBuffer(g->queue, t->hw_rec, (base + (uint64_t)first) * sizeof(*r), &r[base + first],
                                  (size_t)(last + 1 - first) * sizeof(*r));
-            i = last + 1;
         }
         // (LR_GPU_TLAS_UPDATE=0: always built, to measure)
         t->hw_tlas_update = lr_env_int("LR_GPU_TLAS_UPDATE", 1) != 0 && moved <= s->ninsts / 4 && t->hw_updates < HW_UPDATES && now == t->hw_ninst;
@@ -1378,15 +1374,10 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             all.hi = vec3(r_fmax(all.hi.x, in->box.hi.x), r_fmax(all.hi.y, in->box.hi.y), r_fmax(all.hi.z, in->box.hi.z));
         }
         if (some){
-            // runs of the records changed (gaps of fewer than REC_GAP joined in)
-            for (int i = 0; i < s->ninsts;){
-                if (s->insts[i].version <= t->inst_version){ i++; continue; }
-                int first = i, last = i;
-                for (int j = i; j < s->ninsts && j <= last + REC_GAP; j++) if (s->insts[j].version > t->inst_version) last = j;
+            // runs of the records changed (gaps under REC_GAP joined in)
+            for (int i = 0, first, last; scene_changed_run(s, t->inst_version, REC_GAP, &i, &first, &last);)
                 wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96 + (uint64_t)first * 192, rec + 48 * (size_t)first,
                                      (size_t)(last + 1 - first) * 192);
-                i = last + 1;
-            }
         } else wgpuQueueWriteBuffer(g->queue, t->prims, (uint64_t)s->nprims * 96, rec, ni * 192);
         if (tl){
             // the CPU's (SAH) top level, as it is
