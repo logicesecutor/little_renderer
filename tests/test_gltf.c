@@ -245,8 +245,15 @@ int main(void){
         "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}], \"nodes\": [{\"mesh\": 0}],"
         " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}],"
         " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 12, \"byteStride\": 1e19}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA\", \"byteLength\": 12}]}",
+        // indices that are not unsigned scalars: floats, and shorts three to an element
+        "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}, \"indices\": 1}]}], \"nodes\": [{\"mesh\": 0}],"
+        " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}, {\"bufferView\": 1, \"componentType\": 5126, \"count\": 3, \"type\": \"SCALAR\"}],"
+        " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 36}, {\"buffer\": 0, \"byteOffset\": 36, \"byteLength\": 12}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\", \"byteLength\": 48}]}",
+        "{\"asset\": {\"version\": \"2.0\"}, \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}, \"indices\": 1}]}], \"nodes\": [{\"mesh\": 0}],"
+        " \"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}, {\"bufferView\": 1, \"componentType\": 5123, \"count\": 2, \"type\": \"VEC3\"}],"
+        " \"bufferViews\": [{\"buffer\": 0, \"byteLength\": 36}, {\"buffer\": 0, \"byteOffset\": 36, \"byteLength\": 12}], \"buffers\": [{\"uri\": \"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\", \"byteLength\": 48}]}",
     };
-    for (int i = 0; i < 7; i++){
+    for (int i = 0; i < (int)(sizeof(bad_json) / sizeof(bad_json[0])); i++){
         write_file("out/test_gltf_bad.gltf", bad_json[i], strlen(bad_json[i]));
         int n = load(&s, "out/test_gltf_bad.gltf");
         refused += n < 0;
@@ -254,7 +261,7 @@ int main(void){
         scene_free(&s);
     }
     char d[96];
-    snprintf(d, sizeof(d), "truncated, version, past the buffer, Draco, loop, bad offsets: %d of %d refused", refused, tries);
+    snprintf(d, sizeof(d), "truncated, version, past the buffer, Draco, loop, bad offsets, indices: %d of %d refused", refused, tries);
     check(d, refused == tries);
     free(g); free(j); free(bu); free(iu); free(duri); free(iuri); free(png);
     if (failures){ printf("test_gltf: %d FAILED\n", failures); return 1; }

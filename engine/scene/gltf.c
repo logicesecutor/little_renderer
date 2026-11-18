@@ -392,6 +392,13 @@ static int mesh_of(G *g, int mi){
         int has_t = has_uv && json_get(at, "TANGENT") && !acc_get(g, json_int(json_get(at, "TANGENT"), -1), &atan) && atan.count >= pos.count && atan.comps >= 4;
         int has_i = json_get(pr, "indices") != NULL;
         if (has_i && acc_get(g, json_int(json_get(pr, "indices"), -1), &idx)){ bad = 1; break; }
+        // indices are unsigned bytes, shorts or ints, one each (acc_index reads 4 bytes for
+        // anything else: past the range acc_get checked)
+        if (has_i && ((idx.ctype != 5121 && idx.ctype != 5123 && idx.ctype != 5125) || idx.comps != 1)){
+            fprintf(stderr, "gltf: mesh %d: indices must be unsigned byte, short or int scalars\n", mi);
+            bad = 1;
+            break;
+        }
         int nb = nrm.n, ub = uvs.n;
         for (int i = 0; i < pos.count && !bad; i++){
             double d[4];
