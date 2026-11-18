@@ -234,6 +234,22 @@ static void prefilter_level(Env *e, float *const *src, int nsrc, int k){
     real r = (real)k / (ENV_LEVELS - 1);
     real a = r_fmax(r * r, 1e-3f), a2 = a * a;
     real texel = (real)(2 * PI * PI) / ((real)e->lw[0] * e->lh[0]);   // a level-0 texel's solid angle (at the equator)
+    // What a sample's half vector, weight and level are depends on the level alone, not on
+    // the texel: made once here (the same values as made per texel: the same expressions),
+    // so a texel's 128 samples call no sin, cos or log2 (docs/PERF_REVIEW.md, N4)
+    real s_ch[PREFILTER_SAMPLES], s_tc[PREFILTER_SAMPLES], s_bs[PREFILTER_SAMPLES], s_lod[PREFILTER_SAMPLES];
+    for (int i = 0; i < PREFILTER_SAMPLES; i++){
+        real e1 = (i + 0.5f) / PREFILTER_SAMPLES, e2 = radical_inverse((unsigned)i);
+        real ch = r_sqrt((1 - e1) / (1 + (a2 - 1) * e1)), sh = r_sqrt(r_fmax(1 - ch * ch, 0));
+        real ph = (real)(2 * PI) * e2;
+        real dd = ch * ch * (a2 - 1) + 1;
+        real D = a2 / ((real)PI * dd * dd);
+        real pdf = D * 0.25f;                       // D (n.h) / (4 v.h), v = n
+        s_ch[i] = ch;
+        s_tc[i] = sh * r_cos(ph);
+        s_bs[i] = sh * r_sin(ph);
+        s_lod[i] = 0.5f * r_log2(1 / (PREFILTER_SAMPLES * pdf * texel));
+    }
     #pragma omp parallel for schedule(dynamic, 2)
     for (int y = 0; y < h; y++){
         for (int x = 0; x < w; x++){
@@ -243,20 +259,14 @@ static void prefilter_level(Env *e, float *const *src, int nsrc, int k){
             Vec3 sum = vec3(0, 0, 0);
             real wsum = 0;
             for (int i = 0; i < PREFILTER_SAMPLES; i++){
-                real e1 = (i + 0.5f) / PREFILTER_SAMPLES, e2 = radical_inverse((unsigned)i);
-                real ch = r_sqrt((1 - e1) / (1 + (a2 - 1) * e1)), sh = r_sqrt(r_fmax(1 - ch * ch, 0));
-                real ph = (real)(2 * PI) * e2;
-                Vec3 hv = v_add(v_scale(n, ch), v_add(v_scale(t, sh * r_cos(ph)), v_scale(b, sh * r_sin(ph))));
+                const real ch = s_ch[i];
+                Vec3 hv = v_add(v_scale(n, ch), v_add(v_scale(t, s_tc[i]), v_scale(b, s_bs[i])));
                 Vec3 l = v_sub(v_scale(hv, 2 * ch), n);
                 real nl = v_dot(n, l);
                 if (nl <= 0) continue;
-                real dd = ch * ch * (a2 - 1) + 1;
-                real D = a2 / ((real)PI * dd * dd);
-                real pdf = D * 0.25f;                       // D (n.h) / (4 v.h), v = n
-                real lod = 0.5f * r_log2(1 / (PREFILTER_SAMPLES * pdf * texel));
                 real lu, lv;
-                map_uv(l, &lu, &lv);
-                sum = v_add(sum, v_scale(chain_lookup(src, nsrc, e->lw[0], e->lh[0], lu, lv, lod), nl));
+                map_uv(l, &lu, &lv);       // (map_uv_fast: 1% faster still, the images no longer the same)
+                sum = v_add(sum, v_scale(chain_lookup(src, nsrc, e->lw[0], e->lh[0], lu, lv, s_lod[i]), nl));
                 wsum += nl;
             }
             if (wsum > 0) sum = v_scale(sum, 1 / wsum);
