@@ -23,6 +23,8 @@ pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` �
 | 7 | **Physics robustness**: continuous collision checks for very fast bodies, tall piles that come to rest, the CPU solver on all cores | done (f9ca27f … 8b3a18f) | PHYSICS.md 1.3b, 1.3c, 1.5; P6, P11 |
 | 8 | **Bigger scenes** (20–50k instances): culling and simpler distant copies of meshes in the rasterizer, the top level built on the GPU, instances updated in place | done (4f0edd0 … 824333e) | R8 |
 | 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | next: branch `web`, plan below (proposed 2026-11-17) | WEB.md |
+| 10 | **The GPU's load**: what the GPU's time goes to in the path traced viewer, and more of it to path tracing | G1-G4, G6 done (branches `gpu-load`, `gpu-load-2`); G5 proposed | 1.5 |
+| 11 | **Adaptive sampling**: the samples where the image is still noisy, not one per pixel per pass everywhere | proposed 2026-11-18, plan in 1.6 | R9 |
 
 `next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
 from the repository; the dragon stays on disk, untracked: `make dragon-download`).
@@ -107,7 +109,64 @@ period it was meant to be, and at 165 frames/s the fixed work of every frame tak
 the GPU. G4 and G6 give back part of it (14.4 -> 19.2 passes/s); `-band 12` trades frames
 for passes. Where the rest of a 165 Hz frame goes now is not measured yet (the agent's
 per-submission timestamps, `out/gpuload/experiments.diff`, would tell); the next candidates
-are G5 and adaptive sampling (section 4, Rendering).
+are G5 and adaptive sampling (1.6).
+
+### 1.6 Step 11: adaptive sampling (proposed 2026-11-18)
+
+The question: send more rays to the objects in the scene than to the empty parts of the
+screen? A survey (a parallel agent: the code read, the literature checked) says that this is
+the crude form of **adaptive sampling**, samples where the error is still high, and that the
+renderer does not do it: every pixel gets one sample per pass (`trace.wgsl` `main`, one
+thread per pixel of a band of rows; the CPU path tracer a fixed count too), and nothing in
+the code or these docs tried it.
+
+Two ideas to keep apart: **(a) less work on empty pixels**: a pixel that sees the sky
+directly is exact after one sample (but at silhouettes, for their anti-aliasing), and its path
+is already cheap (it ends at the first miss), so the saving is small, and on a GPU it comes
+only where whole workgroups (64 pixels of a row) are sky; **(b) adaptive sampling proper**:
+samples go where the error is (edges, glossy surfaces, soft shadows, caustics, glass); "object
+or empty" is only a proxy for it, since a flat wall in direct light converges at once too.
+
+What is there already: the moments of each pixel's samples (`accum[N+k]`: the sum of the
+luminance and of its square), which the denoiser turns into a variance; the guide's `kind` per
+pixel (sky, lamp, surface, medium: `accum[3N+k].w`), a ready mask; the block prefix sum (to
+compact a list); the band and budget machinery (1.2, 1.5); and per sample already the
+"smarter rays": the lamp and the sky importance sampled with MIS, Russian roulette after 3
+bounces, Owen-scrambled Sobol with a blue-noise shift (1.35x), light tracing and the photon
+cache for caustics, reprojection while moving. Missing there: emissive glTF surfaces are
+found only when a path hits them, not sampled as lights.
+
+| # | step | what | expected |
+|---|---|---|---|
+| AS1 | **Still images: per-tile adaptive sampling** | every 16-32 passes the relative error of each 8x8 tile, `sqrt(var/n) / (mean + eps)`, the tile's largest, after at least 8-16 samples; the tiles still above a threshold compacted into a list (in row order: 8x8 workgroups measured 0-10% slower, R5) and traced by an indirect dispatch inside the band; the viewer stops when no tile is left. The sample index per pixel (the count, `acc.w`) instead of the global one (`T.cnt.z`), which weakens the blue-noise pairing of neighbours; the stop decided on two half-buffers (even and odd samples), since one fed by its own samples is slightly biased. Prototype first in the CPU path tracer (a loop per pixel with a threshold) | 1.5-2x for the same noise in the literature, more in views with sky or plain walls; the cost one small pass and an indirect dispatch per round |
+| AS2 | **Sky and lamp pixels** (the special case asked about) | stopped after a few samples where the whole 3x3 around is sky or lamp with no medium in front (edges keep their anti-aliasing), from the guide's `kind`; an early return frees whole sky rows | small, the sky demo only; a part of AS1 |
+| AS3 | **While moving: pixels with little history** | after the reprojection, pixels with 0-2 samples (uncovered by what moved) get a second sample through the same list (as ATAA, Hasselgren 2020); not the variance: 12-32 samples are too few to rank pixels by it | the holes that G1 now fills from neighbours, traced instead |
+| AS4 | **Better rays per sample** | emissive triangles sampled as lights; then ReSTIR DI for many emitters; ReSTIR GI or path guiding for hard indirect light | the last two are large projects |
+
+Not to do: per-pixel atomics or loops of varying length inside the main kernel (divergence
+eats the gain); per-pixel decisions under ~8 samples; "the pixel hits an object" as the
+measure of error.
+
+Literature (each checked by the agent): Mitchell 1987, the first adaptive sampling
+(https://history.siggraph.org/?p=116060); Dammertz et al. 2010, a hierarchical stop from
+two half-buffers, the basis of Cycles' noise threshold
+(https://dspace.zcu.cz/items/1663e1e8-27b7-4fcc-bded-32801c34b5b2); Rousselle, Knaus, Zwicker
+2011, samples placed to minimise the error with the filter
+(https://www.cs.umd.edu/~zwicker/publications/AdaptiveSamplingGreedyError-SIGA11.pdf);
+Zwicker et al. 2015, the survey (https://cs.dartmouth.edu/~wjarosz/publications/zwicker15star.html);
+RenderMan's `pixelvariance` and Cycles' noise threshold (a threshold between a least and a
+most samples per pixel); Kuznetsov et al. 2018, a network's sampling map: ~4 samples per
+pixel match 6 uniform (https://visualcomp.ucsd.edu/projects/dasr/); Marrs et al. 2018, ATAA,
+rays for ~5-6% of the pixels chosen by a mask
+(https://research.nvidia.com/sites/default/files/pubs/2018-08_Adaptive-Temporal-Antialiasing/adaptive-temporal-antialiasing-preprint.pdf);
+Schied et al. 2018, A-SVGF (https://cg.ivd.kit.edu/atf.php); Hasselgren et al. 2020, temporal
+adaptive sampling learned with the denoiser
+(https://research.nvidia.com/labs/rtr/publication/hasselgren2020neuraltemp); Firmino, Frisvad,
+Jensen 2023, sampling from the denoised image's variance: 1.49x on average, 2.77x at best,
+one scene 0.81x (https://graphics.ucsd.edu/~henrik/papers/daas.pdf); ReSTIR, Bitterli et al.
+2020, 6-60x for many lights (https://cs.dartmouth.edu/~wjarosz/publications/bitterli20spatiotemporal.html);
+ReSTIR GI, Ouyang et al. 2021; GRIS / ReSTIR PT, Lin et al. 2022; practical path guiding,
+Müller et al. 2017 (https://www.jannovak.info/publications/PathGuide/index.html).
 
 ### 1.4 Step 9: the browser (branch `web`)
 
@@ -262,7 +321,7 @@ recorded that way above should be measured again; from then on only frames shown
 | R6 | Hardware ray tracing | done natively on our Vulkan layer (2026-11-15, `vulkan` branch, VULKAN.md): ray queries in the existing kernels (traverse() has a hardware twin), the compute BVH kept for wgpu, the browser and `LR_GPU_HWRT=0` | 1.4-2.7x faster per pass (table of 2026-11-15 below); wgpu-native's C API cannot build acceleration structures, and browsers do not have them yet (a WebGPU proposal since 2026-10) |
 | R7 | **Anti-aliasing** where there is none yet. Today only the path tracer has it (each sample's camera ray jittered inside its pixel, a box filter); both rasterizers draw one sample per pixel (WebGPU `sampleCount` 1), so the viewer's edges stair-step while moving and in raster mode. Candidates, cheapest first: (a) **MSAA 4x in the GPU rasterizer** (every WebGPU device has 4 samples; a resolve after the pass, the cloud composited after the resolve); (b) **FXAA or SMAA 1x** as a post pass on any frame, CPU or GPU (edges from luminance, no geometry; SMAA's area tables made by our own tool); (c) **coverage-mask MSAA in the CPU rasterizer**: the edge functions tested at 4 sample positions, the pixel shaded once and weighted by its covered samples (depth per sample); (d) **TAA in the viewer**: the projection jittered each frame by a Halton (2, 3) subpixel offset, the history reprojected (the path tracer's reprojection, WEB.md 2.5) and clamped to the neighbourhood's colour box; it also smooths the switch from raster to path tracing, and shares its history with R2; (e) the path tracer: **the denoiser's guide jittered** with the samples (it is traced through the pixel centre, so a denoised edge can keep a stair step) and a better pixel filter (tent or Blackman-Harris by filter importance sampling, instead of the box) | idea | smooth edges in the viewer at a fraction of a millisecond (a, b, d); (c) and (e) for the CPU rasterizer's and the path tracer's still images |
 | R8 | **Bigger scenes** (20-50k instances; `-demo sky -props 18000` / `48000`, the props in a ring that grows with them): the rasterizer drew one call per run of the same mesh, about one per instance with mixed props; the GPU path tracer took the CPU's SAH top level, built on the CPU every frame something moved; every frame all the instances' records were packed and sent again | done (2026-11-17, branch `next`) | (a) the GPU rasterizer leaves out the instances outside the frustum and draws one call per mesh and level of detail through an order buffer (`ORD`); from 4096 instances on, simpler copies of each mesh (vertex clustering, `scene_mesh_simplify`) for those under 40 and 12 pixels of radius (`LR_GPU_LOD`); (b) the top level built on the GPU from 32768 instances on (`LR_GPU_TLAS`); (c) each instance knows when it last changed, so only the records of those moved or added are sent; (d) our layer's top level updated in place (a refit) while at most a quarter moved. Measurements in Done, 2026-11-17 |
-| R9 | **Adaptive sampling** (researched 2026-11-18): today every pixel gets one sample a pass. (a) Still images: every 16-32 passes the relative error of each 8x8 tile from the moments the samples already keep (`sqrt(var/n)/mean`, at least 8-16 samples), the tiles still noisy compacted into a list (the block prefix sum we have) and traced by an indirect dispatch inside the band; the viewer stops when none is left. (b) The case of sky and lamp pixels: the guide's `kind` already marks them; stopped after a few samples where the whole 3x3 is sky (edges keep their anti-aliasing); pays only where whole rows are sky. (c) While moving: a second sample for pixels with little history (uncovered). Catches: the sample index per pixel instead of global (weaker blue-noise pairing); a stop decided from its own samples is slightly biased (two half-buffers fix it); no per-pixel decisions under ~8 samples; no varying work per pixel inside the main kernel | idea | (a) 1.5-2x for the same noise in the literature (Dammertz 2010, as Cycles; Firmino et al. 2023: 1.5-1.9x on average, one scene slower), more where much is sky or plain walls. Sources: Mitchell 1987; Rousselle et al. 2011; Zwicker et al. 2015 (survey); Kuznetsov et al. 2018; Marrs et al. 2018 (ATAA, ~5% of pixels traced); Hasselgren et al. 2020. "Smarter rays" per sample, bigger projects: emissive surfaces sampled as lights, ReSTIR (2020) and ReSTIR GI/PT, path guiding (Müller 2017) |
+| R9 | **Adaptive sampling** (researched 2026-11-18): samples where the image is still noisy instead of one per pixel per pass; the skys pixels its special case | planned: step 11, plan and sources in 1.6 | 1.5-2x for the same noise on still images in the literature |
 
 R3-R5 were "points 4-6" of the list discussed on 2026-11-13; their wording here is
 reconstructed and may be refined.
