@@ -9,7 +9,21 @@ branch or estimated, and the risk. Every prototype was one commit on `perf` (fro
 P9, the profiler (`tools/lrprof`) and the `bench -compare` fix. **Not taken: P3**, which only
 concerned wgpu-native, removed from the engine the same day (docs/STATUS.md 1.8: the native
 GPU is our Vulkan layer alone). The wgpu columns below were measured before that and stay as
-they were; the N items are still to decide.
+they were.
+
+**N1-N8 built the same day** (branch `development`), measured against the build before each
+(medians of 3 alternated rounds), every one the same results to the bit except N8:
+
+| | what was built | measured |
+|---|---|---|
+| N1 | the air's finest multigrid level: one parallel region per half V-cycle, the threads meeting at a spinning barrier (`base/spin.h`) instead of 14 regions; the bodies' substep regions left (serial solver passes between them) | G3 15.08 -> 8.24 ms |
+| N2 | subtrees of 128 primitives (1024 left threads waiting at the joins), each node array reserved once, the children's bounds from the partition | E1 11.28 -> 9.73, E2 4.55 -> 3.57, H4 320 -> 312 |
+| N3 | a depth pass from the corners, then the shading of each pixel once; hidden triangles skip the vertex stage | C5 20.73 -> 18.49, C6 37.18 -> 34.47 |
+| N4 | the samples' half vectors, weights and levels in a table per level (the fast atan2 for the lookups too: 1% more, other bits: not taken) | H3 560.1 -> 507.9 |
+| N5 | after a JPEG's scans, the inverse DCT, upsampling and colours in tasks of 64 rows; texmap_make's levels too; the threads idle at the textures' loop take them | H5 187.8 -> 97.9 |
+| N6 | the tests inline (`shape_test`), the Hit made once for the shape kept (`shape_hit`); the sampler's seeds not touched | B1 3.913 -> 5.159 M paths/s, B2 0.509 -> 0.625, B3 3.905 -> 4.093 |
+| N7 | hulls placed on the stack, the inverse inertia once per substep, `mark_solids` in one region | F1 7.149 -> 6.974, F2 23.43 -> 23.10 |
+| N8 | `make NATIVE=1`: `-O3 -march=x86-64-v3`, opt-in, folders of its own | against the default: C5 18.49 -> 13.85, C6 34.38 -> 27.79, F1 7.04 -> 6.20, G3 8.28 -> 7.15, B1 5.13 -> 5.70 |
 
 Machine: i5-10600K (6 cores, 12 threads), RTX 3070, Windows, MSYS2 gcc 16.2, a 60 Hz display
 that day. Numbers are medians of `bin/bench` cases (docs/STATUS.md 1.3), the two builds run
