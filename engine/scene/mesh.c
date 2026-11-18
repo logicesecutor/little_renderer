@@ -68,12 +68,13 @@ static void add_polygon(Mesh *m, Caps *cap, int (*corners)[3], int nc){
 }
 
 // One line of any length into *line (grown as needed), like POSIX getline (which Windows
-// does not have). Returns its length, or -1 at the end of the file.
+// does not have). Returns its length, -1 at the end of the file, -2 (said on stderr) when
+// memory runs out (the file is then not read as if it ended there).
 static long read_line(char **line, size_t *cap, FILE *f){
     size_t n = 0;
     if (!*line || *cap < 128){
         char *p = realloc(*line, 128);
-        if (!p) return -1;
+        if (!p){ fprintf(stderr, "mesh: out of memory reading a line\n"); return -2; }
         *line = p;
         *cap = 128;
     }
@@ -83,7 +84,7 @@ static long read_line(char **line, size_t *cap, FILE *f){
         if (n > 0 && (*line)[n - 1] == '\n') break;
         if (n + 1 < *cap) continue;            // no newline, but the buffer is not full: end of file next
         char *p = realloc(*line, *cap * 2);
-        if (!p) return -1;
+        if (!p){ fprintf(stderr, "mesh: out of memory reading a line of %zu bytes\n", *cap * 2); return -2; }
         *line = p;
         *cap *= 2;
     }
@@ -93,7 +94,9 @@ static long read_line(char **line, size_t *cap, FILE *f){
 static int read_obj(FILE *fp, Mesh *m, Caps *cap){
     char *line = NULL;
     size_t linecap = 0;
-    while (read_line(&line, &linecap, fp) > 0){
+    long len;
+    int cut = 0;                 // faces cut to their first 64 corners
+    while ((len = read_line(&line, &linecap, fp)) > 0){
         double x, y, z;   // parse in double, store as real
         if (line[0] == 'v' && line[1] == ' '){
             if (sscanf(line + 2, "%lf %lf %lf", &x, &y, &z) == 3) PUSH(m->v, m->nv, cap->v, vec3(x, y, z));
@@ -107,11 +110,13 @@ static int read_obj(FILE *fp, Mesh *m, Caps *cap){
             int nc = 0;
             char *p = line + 1;
             while (nc < 64 && parse_corner(&p, m->nv, m->nvt, m->nvn, corners[nc])) nc++;
+            if (nc == 64){ int more[3]; if (parse_corner(&p, m->nv, m->nvt, m->nvn, more)) cut++; }
             add_polygon(m, cap, corners, nc);
         }
     }
     free(line);
-    return 0;
+    if (cut) fprintf(stderr, "mesh: %d face(s) of more than 64 corners: their first 64 kept\n", cut);
+    return len == -2;
 }
 
 // ---- a text's numbers, fast ---------------------------------------------------------
