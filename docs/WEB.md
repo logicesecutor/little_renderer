@@ -480,8 +480,8 @@ rays); it gives the same image but is slower here, and it is not yet tried in br
 To see where the GPU's time goes, set `LR_GPU_TIMING=1` before starting a native program:
 it asks the adapter for timestamp queries, and the GPU rigid bodies print the time of each
 of their passes when they are freed (the `GpuTimer` in `gpu/gpu_internal.h`: one query per
-pass, read back without waiting, averaged over the run). Browsers hide timestamps by
-default, so it is native only.
+pass, read back without waiting, averaged over the run). Chrome has timestamps too: the
+bench page asks for them (`gpu_set_timing`), so its F and G cases have their GPU times there.
 
 Two notes:
 - **One rasterized image:** the CPU is faster than the GPU for `bin/render -backend raster`,
