@@ -266,6 +266,7 @@ bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.
 | [VULKAN](docs/VULKAN.md) | our own `webgpu.h` on Vulkan, the WGSL compiler, hardware ray tracing |
 | [STATUS](docs/STATUS.md) | what comes next and how fast it runs now: the next steps, the latest measurements, the ideas, the backlog and the history |
 | [PBR](docs/PBR.md) | physically based materials in every pipeline |
+| [RND](docs/RND.md) | research and experiments (branch `rnd`): the browser at the hardware's full power, hardware ray tracing on the web |
 
 ## 📄 Licence
 

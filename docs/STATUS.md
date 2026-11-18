@@ -358,6 +358,7 @@ phase). Frames per second with N hulls: 500: 165 (the screen's limit), 1000: 118
 | ID | idea | status | expected gain / why |
 |---|---|---|---|
 | W1 | Bring this round's GPU changes to the browser: the new traversal stack is in the web build (a GPU path traced image checked in Chrome, 5 ms per pass on the spheres); the wavefront kernels (`?wavefront=on`) were not checked: their first compile in Chrome had not finished after more than a minute (stopped there) | stopped (no web work for now then) | the same speedups in browsers; the wavefront needs one shader module per kernel (or smaller ones) before it can be used there |
+| W9 | **Hardware ray tracing on the web** (researched 2026-11-18): no browser exposes the ray tracing cores yet (WebGPU proposals since 2026-10); a ray-query polyfill on plain WebGPU (the proposal's API now, in software, the hardware when a browser ships it), feedback to the proposals, maybe a patched Chromium on Direct3D 12 | R&D, branch `rnd`: RND.md (RD1-RD3) | the same ray tracing path in the page as on our Vulkan layer; useful to every WebGPU page |
 
 ### Platform
 
