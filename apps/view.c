@@ -392,6 +392,25 @@ static void save_traced(void *user, const float *sc, int w, int h){
         float c = sc[4 * i + 3];
         img.px[i] = c > 0 ? vec3(sc[4 * i] / c, sc[4 * i + 1] / c, sc[4 * i + 2] / c) : vec3(0, 0, 0);
     }
+    // the pixels with no sample yet (an image carried over: uncovered by what moved, in rows
+    // not yet traced) as the composite shows them: the mean of the nearest traced pixels on
+    // rings 1, 2, 4 ... 32 away in 8 directions (they were black in the screenshot)
+    static const int DX[8] = {1, -1, 0, 0, 1, -1, 1, -1}, DY[8] = {0, 0, 1, -1, 1, 1, -1, -1};
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++){
+        if (sc[4 * (y * w + x) + 3] > 0) continue;
+        for (int r = 1; r <= 32; r *= 2){
+            Vec3 sum = vec3(0, 0, 0);
+            int n = 0;
+            for (int k = 0; k < 8; k++){
+                int qx = x + DX[k] * r, qy = y + DY[k] * r;
+                qx = qx < 0 ? 0 : qx >= w ? w - 1 : qx;
+                qy = qy < 0 ? 0 : qy >= h ? h - 1 : qy;
+                const float *q = sc + 4 * (qy * w + qx);
+                if (q[3] > 0){ sum = v_add(sum, vec3(q[0] / q[3], q[1] / q[3], q[2] / q[3])); n++; }
+            }
+            if (n){ img.px[y * w + x] = v_scale(sum, (real)1 / n); break; }
+        }
+    }
     if (image_write_png(&img, shot_path) == 0)
         printf("saved %s (%dx%d, path traced on the GPU, %d samples/pixel%s)\n", shot_path, w, h,
                gpu_view_trace_passes(gview), o.denoise ? ", denoised" : "");
