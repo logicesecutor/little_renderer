@@ -335,28 +335,35 @@ void gpu_poll(Gpu *g){
 }
 
 #if !defined(__EMSCRIPTEN__) || defined(LR_WEB_WAIT)
+// u1 the Gpu, u2 the round << 1 | the queue (0 the main one, 1 the physics')
 static void on_idle(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)status; (void)msg; (void)u2;
-    *(int *)u1 = 1;
+    (void)status; (void)msg;
+    Gpu *g = u1;
+    if (!is_live(g)) return;                  // after gpu_destroy
+    const uint32_t seq = (uint32_t)((uintptr_t)u2 >> 1);
+    const int q = (int)((uintptr_t)u2 & 1);
+    if ((int32_t)(seq - g->idle_seq[q]) > 0) g->idle_seq[q] = seq;   // (a late one of an earlier round: older)
 }
+
+static int waited(const Gpu *g, uint32_t seq, int q){ return (int32_t)(g->idle_seq[q] - seq) >= 0; }
 #endif
 
 void gpu_wait(Gpu *g){
 #ifndef __EMSCRIPTEN__
     if (!g || g->state != GPU_READY) return;
-    int done = 0, done2 = 1;
+    const uint32_t seq = ++g->wait_seq;
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowProcessEvents;
     wd.callback = on_idle;
-    wd.userdata1 = &done;
+    wd.userdata1 = g;
+    wd.userdata2 = (void *)(uintptr_t)(seq << 1);
     wgpuQueueOnSubmittedWorkDone(g->queue, wd);
     if (g->compute && g->compute != g->queue){       // and the second queue's work
-        done2 = 0;
-        wd.userdata1 = &done2;
+        wd.userdata2 = (void *)(uintptr_t)(seq << 1 | 1);
         wgpuQueueOnSubmittedWorkDone(g->compute, wd);
-    }
-    while (!(done && done2) && g->state == GPU_READY){
+    } else g->idle_seq[1] = seq;
+    while (!(waited(g, seq, 0) && waited(g, seq, 1)) && g->state == GPU_READY){
 #ifdef LR_VK
         lrDevicePoll(g->device, 1, NULL);   // sleeps until the GPU is done
 #endif
@@ -366,14 +373,15 @@ void gpu_wait(Gpu *g){
 #elif defined(LR_WEB_WAIT)
     // a page that can wait (built with -sJSPI: bin/bench's): until the queue is done
     if (!g || g->state != GPU_READY) return;
-    int done = 0;
+    const uint32_t seq = ++g->wait_seq;
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowSpontaneous;
     wd.callback = on_idle;
-    wd.userdata1 = &done;
+    wd.userdata1 = g;
+    wd.userdata2 = (void *)(uintptr_t)(seq << 1);
     wgpuQueueOnSubmittedWorkDone(g->queue, wd);
-    while (!done && g->state == GPU_READY) lr_web_yield();
+    while (!waited(g, seq, 0) && g->state == GPU_READY) lr_web_yield();
 #else
     (void)g;
 #endif

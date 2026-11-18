@@ -37,6 +37,9 @@ struct Gpu {
     int rt_offered;      // in a browser: its adapter offers "acceleration-structure" (gpu.c; not used yet)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
+    // gpu_wait's rounds: the last one asked, and the last each queue finished (in here, not on
+    // gpu_wait's stack: a wait cut short by a lost device leaves its callbacks to come later)
+    uint32_t wait_seq, idle_seq[2];
 };
 
 // The shaders are files of their own, engine/gpu/shaders/<folder>/<file>.wgsl (common, view,
