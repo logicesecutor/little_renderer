@@ -1,4 +1,5 @@
 #include "phys/fluid.h"
+#include "base/mem.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@
 
 static float *falloc(size_t n){
     float *p = calloc(n ? n : 1, sizeof(float));
-    if (!p){ perror("calloc"); exit(1); }
+    if (!p) lr_oom("fluid");
     return p;
 }
 
@@ -39,17 +40,17 @@ Fluid *fluid_create(Aabb bounds, real cell, Volume *density){
     f->u = falloc(nu(f)); f->v = falloc(nv(f)); f->w = falloc(nw(f));
     f->tu = falloc(nu(f)); f->tv = falloc(nv(f)); f->tw = falloc(nw(f));
     f->p = falloc(n); f->div = falloc(n); f->scratch = falloc(4 * n);
-    if (poisson_init(&f->poisson, f->nx, f->ny, f->nz, f->h) != 0){ perror("calloc"); exit(1); }
+    if (poisson_init(&f->poisson, f->nx, f->ny, f->nz, f->h) != 0) lr_oom("fluid");
     f->su = falloc(n); f->sv = falloc(n); f->sw = falloc(n);
     f->solid = calloc(n, 1);
-    if (!f->solid){ perror("calloc"); exit(1); }
+    if (!f->solid) lr_oom("fluid");
     f->density = density;
     if (density){
         size_t nd = (size_t)density->nx * density->ny * density->nz;
         f->d0 = falloc(nd);
         f->d1 = falloc(nd);
         f->dvel = malloc(nd * sizeof(Vec3));
-        if (!f->dvel){ perror("malloc"); exit(1); }
+        if (!f->dvel) lr_oom("fluid");
     }
     f->wind = vec3(0, 0, 0);
     f->wind_rate = 0.3f;

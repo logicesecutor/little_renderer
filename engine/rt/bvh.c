@@ -1,4 +1,5 @@
 #include "rt/bvh.h"
+#include "base/mem.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,12 +45,7 @@ typedef struct {
 // room for `need` nodes in b->nodes (a tree of n primitives has at most 2n - 1: the
 // builders reserve that once, so new_node does not grow the array node by node)
 static void reserve_nodes(Bvh *b, int need){
-    if (need <= b->cap) return;
-    int cap = b->cap ? 2 * b->cap : need;     // (the first time: exactly what was asked)
-    if (cap < need) cap = need;
-    b->nodes = realloc(b->nodes, (size_t)cap * sizeof(BvhNode));
-    if (!b->nodes){ perror("realloc"); exit(1); }
-    b->cap = cap;
+    b->nodes = lr_grow(b->nodes, sizeof(BvhNode), &b->cap, need, 0);   // (the first time: exactly what was asked)
 }
 
 static int new_node(Bvh *b){
@@ -335,7 +331,7 @@ struct Sub {
 
 static Sub *build_par(const Bvh *b, const BuildInfo *bi, int start, int count, int depth){
     Sub *sb = calloc(1, sizeof(Sub));
-    if (!sb){ perror("calloc"); exit(1); }
+    if (!sb) lr_oom("bvh");
     if (count <= BVH_PAR_MIN || depth >= BVH_MAX_DEPTH){
         sb->part = *b;                                    // same parameters and refs...
         sb->part.nodes = NULL;                            // ...but its own nodes, room for
@@ -417,7 +413,7 @@ static void build_over(Bvh *b, const Scene *s, const Aabb *boxes, int nprims, in
     bi.box = malloc((size_t)nprims * sizeof(Aabb));
     bi.centroid = malloc((size_t)nprims * sizeof(Vec3));
     b->refs = malloc((size_t)nprims * sizeof(int));
-    if (!bi.box || !bi.centroid || !b->refs){ perror("malloc"); exit(1); }
+    if (!bi.box || !bi.centroid || !b->refs) lr_oom("bvh");
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -492,7 +488,7 @@ static int new_wide(Bvh *b){
     if (b->nwide >= b->wide_cap){
         b->wide_cap = b->wide_cap ? b->wide_cap * 2 : 256;
         b->wide = realloc(b->wide, (size_t)b->wide_cap * sizeof(BvhWideNode));
-        if (!b->wide){ perror("realloc"); exit(1); }
+        if (!b->wide) lr_oom("bvh");
     }
     return b->nwide++;
 }

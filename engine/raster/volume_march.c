@@ -1,4 +1,5 @@
 #include "raster/volume_march.h"
+#include "base/mem.h"
 #include "base/clock.h"
 
 #include <math.h>
@@ -219,7 +220,7 @@ static void build_grids(RasterVolumes *rv, const Scene *s, const Lamp *l, int li
         if (g->nx * g->ny * g->nz != nx * ny * nz || !g->tau){
             free(g->tau);
             g->tau = calloc((size_t)nx * ny * nz, sizeof(float));
-            if (!g->tau){ perror("calloc"); exit(1); }
+            if (!g->tau) lr_oom("raymarching");
         }
         g->nx = nx; g->ny = ny; g->nz = nz;
         g->bounds = v->bounds;
@@ -457,7 +458,7 @@ void raster_draw_volumes(RasterVolumes *rv, Framebuffer *fb, const Scene *s, con
         if (rv->low_n < n2){
             free(rv->low);
             rv->low = malloc(n2 * sizeof(*rv->low));
-            if (!rv->low){ perror("malloc"); exit(1); }
+            if (!rv->low) lr_oom("raymarching");
             rv->low_n = n2;
         }
         LowSample *low = rv->low;

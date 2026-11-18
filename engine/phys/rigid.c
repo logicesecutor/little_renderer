@@ -1,4 +1,5 @@
 #include "phys/rigid.h"
+#include "base/mem.h"
 
 #include "base/rng.h"
 
@@ -151,11 +152,7 @@ void rigid_set_room(RigidWorld *w, Aabb room){
 }
 
 static int add_body(RigidWorld *w, Body b){
-    if (w->nbodies >= w->cap){
-        w->cap = w->cap ? w->cap * 2 : 16;
-        w->bodies = realloc(w->bodies, (size_t)w->cap * sizeof(Body));
-        if (!w->bodies){ perror("realloc"); exit(1); }
-    }
+    w->bodies = lr_grow(w->bodies, sizeof(Body), &w->cap, w->nbodies + 1, 16);
     w->bodies[w->nbodies] = b;
     return w->nbodies++;
 }
@@ -411,11 +408,7 @@ void body_apply_impulse(Body *b, Vec3 j, Vec3 p){
 // ---- contacts -----------------------------------------------------------------------------
 
 static void add_contact(RigidWorld *w, int a, int b, Vec3 p, Vec3 n, real depth){
-    if (w->ncontacts >= w->cap_contacts){
-        w->cap_contacts = w->cap_contacts ? w->cap_contacts * 2 : 64;
-        w->contacts = realloc(w->contacts, (size_t)w->cap_contacts * sizeof(Contact));
-        if (!w->contacts){ perror("realloc"); exit(1); }
-    }
+    w->contacts = lr_grow(w->contacts, sizeof(Contact), &w->cap_contacts, w->ncontacts + 1, 64);
     Contact *c = &w->contacts[w->ncontacts++];
     memset(c, 0, sizeof(*c));
     c->a = a; c->b = b; c->p = p; c->n = n; c->depth = depth;
@@ -995,7 +988,7 @@ static void find_contacts(RigidWorld *w, real dt){
     for (int r = 0; r < nruns; r++) total += runs[r].n;
     if (total > w->cap_contacts){
         Contact *c = realloc(w->contacts, (size_t)total * sizeof(Contact));
-        if (!c){ perror("realloc"); exit(1); }
+        if (!c) lr_oom("rigid");
         w->contacts = c;
         w->cap_contacts = total;
     }
@@ -1439,7 +1432,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     char *bouncing = malloc(nc), *on = malloc(nc);
     real *relax = malloc(nc * sizeof(real));   // step 5
     SolveRows *rows = malloc(nc * sizeof(SolveRows));
-    if (!iw || !act || !bouncing || !on || !relax || !rows){ perror("malloc"); exit(1); }
+    if (!iw || !act || !bouncing || !on || !relax || !rows) lr_oom("rigid");
     Mat3 zero = {{{0}}};
     // The bodies' and the contacts' own work on all the CPU's cores (OpenMP), when there is
     // enough of it; the iterations stay on one: each contact needs the ones before it (a

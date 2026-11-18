@@ -1,4 +1,5 @@
 #include "gpu/rigid_gpu.h"
+#include "base/mem.h"
 
 #include <stdlib.h>
 
@@ -378,7 +379,7 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     gr->anchor = gpu_storage(g, "bodies: anchors", cap * 32);       // (zeroed: none)
     free(gr->zeros);
     gr->zeros = calloc(cap, 32);
-    if (!gr->zeros){ perror("calloc"); exit(1); }
+    if (!gr->zeros) lr_oom("rigid bodies on the GPU");
     { uint32_t *z = calloc(cap, 4); if (z){ wgpuQueueWriteBuffer(g->compute, gr->wake, 0, z, cap * 4); free(z); } }
     gr->cap_pairs = 32 * cap;
     gr->grid_h = 64;
@@ -400,7 +401,7 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     }
     free(gr->staging);
     gr->staging = malloc(cap * BODY_BYTES);
-    if (!gr->staging){ perror("malloc"); exit(1); }
+    if (!gr->staging) lr_oom("rigid bodies on the GPU");
     make_groups(gr);
     gr->prev_nb = 0;          // no lists of the last substep: no warm start this time
     return 1;

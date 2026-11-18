@@ -1,4 +1,5 @@
 #include "scene/scene.h"
+#include "base/mem.h"
 #include "scene/gltf.h"
 
 #include "scene/env.h"
@@ -84,23 +85,9 @@ int scene_add_material(Scene *s, Material m){
 }
 
 int scene_add_prim(Scene *s, Primitive p){
-    if (s->nprims >= s->cap_prims){
-        s->cap_prims = s->cap_prims ? s->cap_prims * 2 : 64;
-        s->prims = realloc(s->prims, (size_t)s->cap_prims * sizeof(Primitive));
-        if (!s->prims){ perror("realloc"); exit(1); }
-    }
+    s->prims = lr_grow(s->prims, sizeof(Primitive), &s->cap_prims, s->nprims + 1, 64);
     s->prims[s->nprims] = p;
     return s->nprims++;
-}
-
-static void *grow(void *p, int *cap, int need, size_t elem){
-    if (need <= *cap) return p;
-    int c = *cap ? *cap : 64;
-    while (c < need) c *= 2;
-    p = realloc(p, (size_t)c * elem);
-    if (!p){ perror("realloc"); exit(1); }
-    *cap = c;
-    return p;
 }
 
 // Numbers no two things share, across scenes (scene.h: Scene.tris_version, SceneMesh.id):
@@ -111,7 +98,7 @@ static unsigned tris_versions, mesh_ids;
 // a triangle with normal indices n0..n2 (or -1)
 static int add_tri(Scene *s, Vec3 a, Vec3 b, Vec3 c, const int *n, int material){
     s->tris_version = ++tris_versions;
-    s->tris = grow(s->tris, &s->cap_tris, s->ntris + 1, sizeof(Triangle));
+    s->tris = lr_grow(s->tris, sizeof(Triangle), &s->cap_tris, s->ntris + 1, 64);
     Triangle *t = &s->tris[s->ntris];
     t->q = a;
     t->u = v_sub(b, a);
@@ -123,7 +110,7 @@ static int add_tri(Scene *s, Vec3 a, Vec3 b, Vec3 c, const int *n, int material)
 
 static int add_normal(Scene *s, Vec3 n){
     s->tris_version = ++tris_versions;
-    s->normals = grow(s->normals, &s->cap_normals, s->nnormals + 1, sizeof(Vec3));
+    s->normals = lr_grow(s->normals, sizeof(Vec3), &s->cap_normals, s->nnormals + 1, 64);
     s->normals[s->nnormals] = v_norm(n);
     return s->nnormals++;
 }
@@ -139,16 +126,16 @@ int scene_add_mesh(Scene *s, const Mesh *m, int material){
     // the mesh's vertex normals, normalized once, shared by all its triangles
     int base = s->nnormals;
     s->tris_version = ++tris_versions;
-    s->normals = grow(s->normals, &s->cap_normals, s->nnormals + m->nvn, sizeof(Vec3));
+    s->normals = lr_grow(s->normals, sizeof(Vec3), &s->cap_normals, s->nnormals + m->nvn, 64);
     for (int i = 0; i < m->nvn; i++) s->normals[s->nnormals++] = v_norm(m->vn[i]);
     // its texture coordinates (v turned over: OBJ's v = 0 is the bottom, ours the top)
     int tbase = s->nuvs;
-    s->uvs = grow(s->uvs, &s->cap_uvs, s->nuvs + m->nvt, sizeof(Vec2));
+    s->uvs = lr_grow(s->uvs, sizeof(Vec2), &s->cap_uvs, s->nuvs + m->nvt, 64);
     s->tangents = realloc(s->tangents, (size_t)(s->cap_uvs ? s->cap_uvs : 1) * sizeof(Vec4));
-    if (!s->tangents){ perror("realloc"); exit(1); }
+    if (!s->tangents) lr_oom("scene");
     for (int i = 0; i < m->nvt; i++) s->uvs[s->nuvs++] = vec2(m->vt[i].x, 1 - m->vt[i].y);
     int first = s->ntris;
-    s->tris = grow(s->tris, &s->cap_tris, s->ntris + m->nf, sizeof(Triangle));
+    s->tris = lr_grow(s->tris, sizeof(Triangle), &s->cap_tris, s->ntris + m->nf, 64);
     for (int i = 0; i < m->nf; i++){
         const Face *f = &m->f[i];
         int has_n = f->n[0] >= 0 && f->n[1] >= 0 && f->n[2] >= 0;
@@ -164,7 +151,7 @@ int scene_add_mesh(Scene *s, const Mesh *m, int material){
 void scene_compute_tangents(const Triangle *tris, int ntris, const Vec2 *uvs, Vec4 *tangents, int base, int n){
     if (n <= 0) return;
     Vec3 *tu = calloc((size_t)n, sizeof(Vec3)), *up = calloc((size_t)n, sizeof(Vec3)), *nn = calloc((size_t)n, sizeof(Vec3));
-    if (!tu || !up || !nn){ perror("calloc"); exit(1); }
+    if (!tu || !up || !nn) lr_oom("scene");
     for (int i = 0; i < ntris; i++){
         const Triangle *t = &tris[i];
         if (t->t[0] < base || t->t[0] >= base + n) continue;
@@ -210,14 +197,14 @@ int scene_texture(Scene *s, const char *name, int srgb){
     int err = file ? texmap_load(&t, name, srgb) : texmap_procedural(&t, name);
     if (err) return 0;
     if (strlen(name) < sizeof(t.name)) snprintf(t.name, sizeof(t.name), "%s", name);
-    s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
+    s->texmaps = lr_grow(s->texmaps, sizeof(TexMap), &s->cap_texmaps, s->ntexmaps + 1, 64);
     s->texmaps[s->ntexmaps] = t;
     s->tex_version = next_tex_version();
     return ++s->ntexmaps;
 }
 
 int scene_add_texmap(Scene *s, const TexMap *t){
-    s->texmaps = grow(s->texmaps, &s->cap_texmaps, s->ntexmaps + 1, sizeof(TexMap));
+    s->texmaps = lr_grow(s->texmaps, sizeof(TexMap), &s->cap_texmaps, s->ntexmaps + 1, 64);
     s->texmaps[s->ntexmaps] = *t;
     s->tex_version = next_tex_version();
     return ++s->ntexmaps;
@@ -609,12 +596,12 @@ static void mesh_bounds(SceneMesh *m){
 }
 
 int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
-    s->meshes = grow(s->meshes, &s->cap_meshes, s->nmeshes + 1, sizeof(SceneMesh));
+    s->meshes = lr_grow(s->meshes, sizeof(SceneMesh), &s->cap_meshes, s->nmeshes + 1, 64);
     SceneMesh *m = &s->meshes[s->nmeshes];
     memset(m, 0, sizeof(*m));
     m->normals = malloc((size_t)(src->nvn ? src->nvn : 1) * sizeof(Vec3));
     m->tris = malloc((size_t)(src->nf ? src->nf : 1) * sizeof(Triangle));
-    if (!m->normals || !m->tris){ perror("malloc"); exit(1); }
+    if (!m->normals || !m->tris) lr_oom("scene");
     for (int i = 0; i < src->nvn; i++) m->normals[i] = v_norm(src->vn[i]);
     m->nnormals = src->nvn;
     for (int i = 0; i < src->nf; i++){
@@ -631,7 +618,7 @@ int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
     if (src->nvt > 0){                       // texture coordinates (v turned over) and tangents
         m->uvs = malloc((size_t)src->nvt * sizeof(Vec2));
         m->tangents = malloc((size_t)src->nvt * sizeof(Vec4));
-        if (!m->uvs || !m->tangents){ perror("malloc"); exit(1); }
+        if (!m->uvs || !m->tangents) lr_oom("scene");
         for (int i = 0; i < src->nvt; i++) m->uvs[i] = vec2(src->vt[i].x, 1 - src->vt[i].y);
         m->nuvs = src->nvt;
         scene_compute_tangents(m->tris, m->ntris, m->uvs, m->tangents, 0, m->nuvs);
@@ -644,7 +631,7 @@ int scene_add_mesh_object(Scene *s, const Mesh *src, int material){
 
 int scene_add_mesh_arrays(Scene *s, Triangle *tris, int ntris, Vec3 *normals, int nnormals,
                           Vec2 *uvs, Vec4 *tangents, int nuvs){
-    s->meshes = grow(s->meshes, &s->cap_meshes, s->nmeshes + 1, sizeof(SceneMesh));
+    s->meshes = lr_grow(s->meshes, sizeof(SceneMesh), &s->cap_meshes, s->nmeshes + 1, 64);
     SceneMesh *m = &s->meshes[s->nmeshes];
     memset(m, 0, sizeof(*m));
     m->tris = tris; m->ntris = ntris;
@@ -655,7 +642,7 @@ int scene_add_mesh_arrays(Scene *s, Triangle *tris, int ntris, Vec3 *normals, in
         m->tangents = tangents;
         if (!m->tangents){
             m->tangents = malloc((size_t)nuvs * sizeof(Vec4));
-            if (!m->tangents){ perror("malloc"); exit(1); }
+            if (!m->tangents) lr_oom("scene");
             scene_compute_tangents(tris, ntris, uvs, m->tangents, 0, nuvs);
         }
     } else { free(uvs); free(tangents); }
@@ -675,7 +662,7 @@ int scene_load_mesh_object(Scene *s, const char *path, int material, real size){
 }
 
 int scene_add_instance(Scene *s, int mesh, Xform xf, int material){
-    s->insts = grow(s->insts, &s->cap_insts, s->ninsts + 1, sizeof(Instance));
+    s->insts = lr_grow(s->insts, sizeof(Instance), &s->cap_insts, s->ninsts + 1, 64);
     Instance *in = &s->insts[s->ninsts];
     in->mesh = mesh;
     in->material = material;

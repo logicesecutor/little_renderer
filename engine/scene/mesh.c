@@ -1,4 +1,5 @@
 #include "scene/mesh.h"
+#include "base/mem.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -8,11 +9,7 @@
 
 // append to a growing array
 #define PUSH(arr, n, cap, val) do {                                          \
-        if ((n) >= (cap)){                                                    \
-            (cap) = (cap) ? (cap) * 2 : 64;                                   \
-            (arr) = realloc((arr), (size_t)(cap) * sizeof(*(arr)));           \
-            if (!(arr)){ perror("realloc"); exit(1); }                        \
-        }                                                                     \
+        if ((n) >= (cap)) (arr) = lr_grow((arr), sizeof(*(arr)), &(cap), (n) + 1, 64); \
         (arr)[(n)++] = (val);                                                 \
     } while (0)
 
@@ -313,7 +310,7 @@ void mesh_destroy(Mesh *m){
 void mesh_compute_normals(Mesh *m){
     free(m->vn);
     m->vn = calloc((size_t)m->nv, sizeof(Vec3));
-    if (!m->vn){ perror("calloc"); exit(1); }
+    if (!m->vn) lr_oom("mesh");
     m->nvn = m->nv;
     for (int i = 0; i < m->nf; i++){
         Face *f = &m->f[i];

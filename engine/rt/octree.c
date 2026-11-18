@@ -1,20 +1,11 @@
 #include "rt/octree.h"
+#include "base/mem.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 // ---- building -----------------------------------------------------------------------
-
-static void *grow(void *p, int *cap, int need, size_t elem){
-    if (need <= *cap) return p;
-    int c = *cap ? *cap : 64;
-    while (c < need) c *= 2;
-    p = realloc(p, (size_t)c * elem);
-    if (!p){ perror("realloc"); exit(1); }
-    *cap = c;
-    return p;
-}
 
 static int overlap(const Aabb *a, const Aabb *b){
     return a->lo.x <= b->hi.x && a->hi.x >= b->lo.x &&
@@ -33,7 +24,7 @@ static Aabb octant(const Aabb *b, int c){
 }
 
 static void make_leaf(Octree *o, int node, const int *ids, int n){
-    o->refs = grow(o->refs, &o->cap_refs, o->nrefs + n, sizeof(int));
+    o->refs = lr_grow(o->refs, sizeof(int), &o->cap_refs, o->nrefs + n, 64);
     o->nodes[node].first_child = -1;
     o->nodes[node].prim_start = o->nrefs;
     o->nodes[node].prim_count = n;
@@ -58,7 +49,7 @@ static void build(Octree *o, const Aabb *pb, int node, const int *ids, int n, in
     for (int c = 0; c < 8; c++){
         cbox[c] = octant(&box, c);
         cid[c] = malloc((size_t)n * sizeof(int));
-        if (!cid[c]){ perror("malloc"); exit(1); }
+        if (!cid[c]) lr_oom("octree");
         cn[c] = 0;
         for (int i = 0; i < n; i++)
             if (overlap(&pb[ids[i]], &cbox[c])) cid[c][cn[c]++] = ids[i];
@@ -73,7 +64,7 @@ static void build(Octree *o, const Aabb *pb, int node, const int *ids, int n, in
     }
 
     int first = o->nnodes;
-    o->nodes = grow(o->nodes, &o->cap_nodes, o->nnodes + 8, sizeof(OctNode));
+    o->nodes = lr_grow(o->nodes, sizeof(OctNode), &o->cap_nodes, o->nnodes + 8, 64);
     o->nnodes += 8;
     o->nodes[node].first_child = first;   // (index, not pointer: grow may move the array)
     o->nodes[node].prim_start = 0;
@@ -105,7 +96,7 @@ void octree_build(Octree *o, const Scene *s, int max_depth){
 
     Aabb *pb = malloc((size_t)nprims * sizeof(Aabb));
     int *ids = malloc((size_t)nprims * sizeof(int));
-    if (!pb || !ids){ perror("malloc"); exit(1); }
+    if (!pb || !ids) lr_oom("octree");
 
     Aabb root = scene_shape_bounds(s, 0);
     for (int i = 0; i < nprims; i++){
@@ -115,7 +106,7 @@ void octree_build(Octree *o, const Scene *s, int max_depth){
         root.hi = vec3(r_fmax(root.hi.x, pb[i].hi.x), r_fmax(root.hi.y, pb[i].hi.y), r_fmax(root.hi.z, pb[i].hi.z));
     }
 
-    o->nodes = grow(o->nodes, &o->cap_nodes, 1, sizeof(OctNode));
+    o->nodes = lr_grow(o->nodes, sizeof(OctNode), &o->cap_nodes, 1, 64);
     o->nnodes = 1;
     o->nodes[0].box = root;
     o->nodes[0].first_child = -1;

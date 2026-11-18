@@ -1,4 +1,5 @@
 #include "rt/accel.h"
+#include "base/mem.h"
 #include "base/envvar.h"
 #include "base/clock.h"
 
@@ -44,7 +45,7 @@ static void prepare_meshes(Scene *s, const AccelParams *p){
         if (m->bvh && m->bvh_version == m->version) continue;
         if (m->bvh && m->bvh_free) m->bvh_free(m->bvh);
         MeshBvh *mb = calloc(1, sizeof(*mb));
-        if (!mb){ perror("calloc"); exit(1); }
+        if (!mb) lr_oom("accel");
         mb->view.tris = m->tris;
         mb->view.ntris = m->ntris;
         mb->view.normals = m->normals;
@@ -178,7 +179,7 @@ void scene_set_accel(Scene *s, AccelKind kind, const AccelParams *p){
     prepare_meshes(s, p);
     if (s->accel && s->accel_free) s->accel_free(s->accel);
     RtAccel *a = calloc(1, sizeof(*a));
-    if (!a){ perror("calloc"); exit(1); }
+    if (!a) lr_oom("accel");
     double t0 = clock_ms();
     if (kind == ACCEL_OCTREE) octree_build(&a->octree, s, p->oct_depth);
     if (kind == ACCEL_BVH){

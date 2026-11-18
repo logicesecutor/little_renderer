@@ -1,4 +1,5 @@
 #include "raster/render.h"
+#include "base/mem.h"
 #include "base/envvar.h"
 
 #include "raster/raster.h"
@@ -224,7 +225,7 @@ typedef struct {
 
 static void *xmalloc(size_t n){
     void *p = malloc(n ? n : 1);
-    if (!p){ perror("malloc"); exit(1); }
+    if (!p) lr_oom("rasterizer");
     return p;
 }
 
@@ -334,11 +335,7 @@ static void draw_triangles(Framebuffer *fb, const TriJob *j){
             int r0, r1;
             if (!triangle_rows(j, fb, i, &r0, &r1)) continue;
             for (int b = r0 / RASTER_BAND_ROWS; b <= r1 / RASTER_BAND_ROWS; b++){
-                if (n == cap){
-                    cap *= 2;
-                    pair = realloc(pair, (size_t)cap * 2 * sizeof(int));
-                    if (!pair){ perror("realloc"); exit(1); }
-                }
+                if (n == cap) pair = lr_grow(pair, 2 * sizeof(int), &cap, n + 1, 0);
                 pair[2 * n] = b;
                 pair[2 * n + 1] = i;
                 n++;
@@ -348,7 +345,7 @@ static void draw_triangles(Framebuffer *fb, const TriJob *j){
         int *off = calloc((size_t)nbands + 1, sizeof(int));
         int *pos = xmalloc((size_t)nbands * sizeof(int));
         int *tri = xmalloc((size_t)n * sizeof(int));
-        if (!off){ perror("calloc"); exit(1); }
+        if (!off) lr_oom("rasterizer");
         for (int k = 0; k < n; k++) off[pair[2 * k] + 1]++;
         for (int b = 0; b < nbands; b++) off[b + 1] += off[b];
         memcpy(pos, off, (size_t)nbands * sizeof(int));

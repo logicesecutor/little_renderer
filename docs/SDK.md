@@ -42,6 +42,9 @@ Rules of thumb:
   `-fsingle-precision-constant` is optional for apps; it makes constants like `0.5` float
   so float math does not silently become double.
 - **A `Scene` must start zeroed**: declare it `static`, or `memset` it to 0.
+- **Out of memory** where the engine cannot go on (a scene, a tree, the solver) it says so and
+  ends the program, through `lr_oom` (`base/mem.h`): `lr_set_oom(hook)` lets the program do
+  something first (save, tell the user). Loading a file fails with an error instead.
 - **Paths are relative to where you run the program**: the examples load `models/...` and
   write `out/...`, so run them from the top folder.
 

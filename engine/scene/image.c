@@ -1,4 +1,5 @@
 #include "scene/image.h"
+#include "base/mem.h"
 
 #include "formats/png.h"
 #include <stdio.h>
@@ -80,7 +81,7 @@ int fb_save_png(const Framebuffer *fb, const char *path){
 
 Image image_create(int w, int h){
     Image img = {w, h, calloc((size_t)w * h, sizeof(Vec3))};
-    if (!img.px){ fprintf(stderr, "out of memory\n"); exit(1); }
+    if (!img.px) lr_oom("image");
     return img;
 }
 
