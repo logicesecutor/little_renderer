@@ -68,6 +68,9 @@ WGPUShaderModule gpu_shader(Gpu *g, const char *label, const char *wgsl);
 WGPUBuffer gpu_buffer(Gpu *g, const char *label, size_t size, WGPUBufferUsage usage);
 // (re)creates *buf if it is missing or smaller than size; returns 1 if it was recreated
 int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBufferUsage usage, const char *label);
+// the window's surface configured (again): its format, size, alpha and present mode. Also
+// after the surface said Outdated or Lost (a minimized window, a display change)
+void gpu_surface_reconfigure(Gpu *g);
 
 // compute kernels: a layout of n buffers (binding i of types[i], 'U' uniform, 'D' uniform at
 // a dynamic offset, 'R' read-only storage, 'W' read-write storage, 'T' a float texture read

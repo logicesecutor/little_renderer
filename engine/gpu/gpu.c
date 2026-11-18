@@ -117,6 +117,11 @@ static void configure_surface(Gpu *g){
     g->surface = wgpuInstanceCreateSurface(g->instance, &sd);
 #endif
     if (!g->surface) return;   // no window: compute and offscreen only
+    gpu_surface_reconfigure(g);
+}
+
+void gpu_surface_reconfigure(Gpu *g){
+    if (!g->surface || g->offscreen) return;
     WGPUSurfaceCapabilities caps;
     memset(&caps, 0, sizeof(caps));
     wgpuSurfaceGetCapabilities(g->surface, g->adapter, &caps);

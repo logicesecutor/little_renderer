@@ -687,8 +687,15 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
             st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
             view = wgpuTextureCreateView(st.texture, NULL);
         else {
+            // no frame this time (it is skipped); Outdated or Lost: the surface configured
+            // again, or the window would stay frozen. A texture given with the failure is ours
+            // to release.
             static int told = 0;
             if (!told++) fprintf(stderr, "GPU: no canvas texture to draw on (status %d)\n", (int)st.status);
+            if (st.texture){ wgpuTextureRelease(st.texture); st.texture = NULL; }
+            if ((st.status == WGPUSurfaceGetCurrentTextureStatus_Outdated || st.status == WGPUSurfaceGetCurrentTextureStatus_Lost) &&
+                gpu_state(g) == GPU_READY)
+                gpu_surface_reconfigure(g);
         }
     }
     WGPURenderPassColorAttachment ca;
