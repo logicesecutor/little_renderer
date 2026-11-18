@@ -199,9 +199,10 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
                       WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
 // Adaptive sampling (with the guide's planes, the single kernel): each 8 x 8 tile whose pixels
 // all have min_samples and a noise as shown under threshold (trace.wgsl, adapt) stops taking samples for the rest
-// of the image (threshold 0: off, the default). gpu_trace_adapt, after a gpu_trace_encode in
-// the same submission, decides it for every tile; 0 if it did nothing (off, no planes).
-void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples);
+// of the image (threshold 0: off, the default); a tile that with the ring around it sees only
+// the sky or a lamp after min_sky (0: min_samples). gpu_trace_adapt, after a gpu_trace_encode
+// in the same submission, decides it for every tile; 0 if it did nothing (off, no planes).
+void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples, int min_sky);
 int gpu_trace_adapt(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
 // Before the first band of an image: each pixel's guide for the denoiser (with no samples),
 // and with history > 0 the samples of the previous image reprojected (at most history each).

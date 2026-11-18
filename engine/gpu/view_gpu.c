@@ -175,6 +175,7 @@ struct GpuView {
 // may stop, and how often (in passes) the tiles are decided
 #define ADAPT_MIN 16
 #define ADAPT_EVERY 16
+#define ADAPT_SKY 4       // (AS2: a tile of sky or lamp only, and the ring around it; decided at pass 4 too)
 static GpuView *live_views[MAX_LIVE_VIEWS];
 static int view_is_live(const GpuView *v){
     for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (v && live_views[i] == v) return 1;
@@ -781,7 +782,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
         return 0;
     }
     gpu_trace_set_wavefront(v->trace, v->wavefront);
-    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN);
+    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN, ADAPT_SKY);
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
     v->t_prep = 1;
@@ -921,7 +922,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     // every ADAPT_EVERY passes (whatever moves starts the image over with every tile on)
     if (v->adapt_thr > 0 && !v->t_live && v->t_y + rows >= v->h){
         const int before = v->t_passes, after = v->t_passes + reps;
-        if (after >= ADAPT_MIN && after / ADAPT_EVERY != before / ADAPT_EVERY)
+        if ((before < ADAPT_SKY && after >= ADAPT_SKY) || (after >= ADAPT_MIN && after / ADAPT_EVERY != before / ADAPT_EVERY))
             gpu_trace_adapt(v->trace, enc, v->frame_u, v->dens, v->bricks, v->vstat);
     }
     // the caustics: while things move, one pass of light paths into the photon cache, which
@@ -1055,7 +1056,7 @@ void gpu_view_trace_denoise_moving(GpuView *v, int passes){ if (v) v->den_move =
 void gpu_view_trace_adaptive(GpuView *v, double threshold){
     if (!v) return;
     v->adapt_thr = threshold > 0 ? threshold : 0;
-    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN);   // (the next image: made when first used)
+    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN, ADAPT_SKY);   // (the next image: made when first used)
 }
 
 int gpu_view_trace_denoise(GpuView *v, int on){

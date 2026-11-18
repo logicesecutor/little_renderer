@@ -1147,7 +1147,19 @@ fn adapt(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw:
     let x1 = min(x0 + 8u, W);
     let y1 = min(y0 + 8u, H);
     let thr = bitcast<f32>(T.ad.x);
-    let nmin = f32(T.ad.y);
+    /* AS2: a tile that sees only the sky or a lamp, directly, and so does the ring of pixels
+       around it (its edges keep their anti-aliasing), may stop after T.ad.z samples: one is
+       exact there but for the sky's own texels within the pixel */
+    var sky = T.ad.z > 0u;
+    let xa = i32(x0) - 1;
+    let ya = i32(y0) - 1;
+    for (var y = ya; sky && y <= i32(y1); y++) {
+        for (var x = xa; x <= i32(x1); x++) {
+            if (x < 0 || y < 0 || x >= i32(W) || y >= i32(H)) { continue; }
+            if (accum[3u * N + u32(y) * W + u32(x)].w != 1.0) { sky = false; break; }
+        }
+    }
+    let nmin = f32(select(T.ad.y, T.ad.z, sky));
     for (var y = y0; y < y1; y++) {
         for (var x = x0; x < x1; x++) {
             let k = y * W + x;

@@ -162,6 +162,7 @@ struct GpuTrace {
     WGPUComputePipeline pipe, gbuf_pipe, rp_pipe, adapt_pipe;
     float adapt_thr;                   // gpu_trace_set_adaptive: the error a tile stops at (0: off)
     int adapt_min;                     // ... and the samples each pixel takes first
+    int adapt_sky;                     // ... in a tile of sky or lamp only (AS2; 0: as the others)
     WGPUBuffer params, rp_params, blue;   // parameters (MAX_REPS copies), reprojection's, blue noise
     WGPUBuffer acc[2];       // the image's samples, and (once reprojected) the previous image's
     int cur;                 // which one is the image's
@@ -1538,6 +1539,7 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
     if (t->adapt_thr > 0 && t->planes == 5){
         memcpy(&P.ad[0], &t->adapt_thr, 4);
         P.ad[1] = (uint32_t)(t->adapt_min > 1 ? t->adapt_min : 1);
+        P.ad[2] = (uint32_t)(t->adapt_sky > 0 ? t->adapt_sky : 0);
     }
     *Pp = P;
 }
@@ -1815,10 +1817,11 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
 }
 
-void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples){
+void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples, int min_sky){
     if (!t) return;
     t->adapt_thr = threshold > 0 ? (float)threshold : 0;
     t->adapt_min = min_samples;
+    t->adapt_sky = min_sky;
 }
 
 int gpu_trace_adapt(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
