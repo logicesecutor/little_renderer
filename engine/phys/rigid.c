@@ -855,7 +855,7 @@ static real pair_margin(const Body *a, const Body *b, real dt){
 // the brute force of every pair (i < j) had, so the contacts, and the solver's results, are
 // the same as before, only found in O(n log n + pairs) instead of O(n^2).
 
-typedef struct { real lo, hi; int i; } SweepEnd;
+typedef struct { real lo, hi, rad; int i; } SweepEnd;   // (rad: the bounding sphere's radius, grown)
 typedef struct { int i, j; } BodyPair;
 
 static int cmp_sweep(const void *pa, const void *pb){
@@ -889,7 +889,7 @@ static int broad_phase(const RigidWorld *w, real dt, BodyPair **out){
         // >= half of any pair margin of this body (pair_margin: |va - vb| <= |va| + |vb|)
         real grow = 0.5f * SPECULATIVE_MIN + dt * (v_len(b->vel) + v_len(b->angvel) * r);
         real c = comp(b->pos, axis);
-        e[i] = (SweepEnd){c - r - grow, c + r + grow, i};
+        e[i] = (SweepEnd){c - r - grow, c + r + grow, r + grow, i};
     }
     qsort(e, (size_t)n, sizeof(SweepEnd), cmp_sweep);
     int cap = 4 * n, np = 0, nopen = 0;
@@ -901,9 +901,17 @@ static int broad_phase(const RigidWorld *w, real dt, BodyPair **out){
             if (e[open[q]].hi >= e[k].lo) open[keep++] = open[q];
         nopen = keep;
         const Body *a = &w->bodies[e[k].i];
+        const real ra = e[k].rad;                         // its bounding sphere, grown as its interval
         for (int q = 0; q < nopen; q++){
             int i = e[k].i, j = e[open[q]].i;
             if (a->inv_mass == 0 && w->bodies[j].inv_mass == 0) continue;   // two fixed bodies
+            // their grown spheres apart: test_pair would drop the pair (its margin is no more
+            // than the two growths), so it is not listed at all. On one axis alone a pile on
+            // the floor pairs each body with every body of its slab: 100 times the pairs
+            // that touch, and sorting them was half of a step
+            Vec3 d = v_sub(a->pos, w->bodies[j].pos);
+            real rr = (ra + e[open[q]].rad) * 1.0001f + 1e-4f;
+            if (v_dot(d, d) > rr * rr) continue;
             if (np == cap){
                 BodyPair *t = realloc(p, (size_t)cap * 2 * sizeof(BodyPair));
                 if (!t){ free(p); free(e); free(open); return -1; }
