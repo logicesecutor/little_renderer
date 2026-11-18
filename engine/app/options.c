@@ -147,7 +147,7 @@ void options_usage(Program prog, FILE *f){
     if (view) fprintf(f,
         "\n"
         "real-time viewer\n"
-        "  -preview n                 -backend rt: 1/n resolution while moving, 1 = off (4)\n"
+        "  -preview n                 -backend rt: 1/n resolution while moving, 1 = off (4; -sim on: 2)\n"
         "  -movespp n                 samples per pixel of each preview frame  (1)\n"
         "  -speed units               movement speed per second                (300)\n"
         "  -autoquit seconds          quit (and save a screenshot) after this time (0 = never)\n"
@@ -265,7 +265,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->sim.vorticity = 0.25;
     o->sim.seed = 1;
     o->sim.gif = 1;
-    int backend_set = 0, march_scale_set = 0, fluidres_set = 0, cloudres_set = 0, scene_set = 0;
+    int backend_set = 0, march_scale_set = 0, fluidres_set = 0, cloudres_set = 0, scene_set = 0, preview_set = 0;
 
     for (int i = 1; i < argc; i++){
         const char *a = argv[i];
@@ -297,7 +297,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-bvhleaf")) o->ap.bvh_leaf = atoi(v);
         else if (!strcmp(a, "-bvhbins")) o->ap.bvh_bins = atoi(v);
         else if (!strcmp(a, "-bvhwidth")) o->ap.bvh_width = atoi(v);
-        else if (!strcmp(a, "-preview")) o->preview = atoi(v);
+        else if (!strcmp(a, "-preview")){ o->preview = atoi(v); preview_set = 1; }
         else if (!strcmp(a, "-movespp")) o->move_spp = atoi(v);
         else if (!strcmp(a, "-speed"))   o->speed = atof(v);
         else if (!strcmp(a, "-autoquit")) o->autoquit = atof(v);
@@ -432,6 +432,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         // live: coarser air and cloud, so that a physics step fits in a frame
         if (prog == PROG_VIEW && !fluidres_set) o->sim.fluid_res = 32;
         if (prog == PROG_VIEW && !cloudres_set) o->cloud.resolution = 96;
+        if (prog == PROG_VIEW && !preview_set) o->preview = 2;   // (1/2 resolution while moving)
     }
     // a glTF model and no scene: the room with the model (SCENE_MESH)
     if (o->scene.gltf_path && !scene_set) o->scene.kind = SCENE_MESH;

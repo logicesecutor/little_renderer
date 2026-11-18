@@ -1137,7 +1137,6 @@ int main(int argc, char **argv){
     if (!rvol){ fprintf(stderr, "out of memory\n"); return 1; }
     ema = (Ema){calloc((size_t)W * H, sizeof(Vec3)), 0, 0};
     if (!ema.px){ fprintf(stderr, "out of memory\n"); return 1; }
-    if (o.sim.on && o.preview == 4){ preview = 2; }   // -sim: 1/2 resolution by default
 
 #ifdef __EMSCRIPTEN__
 #if defined(__EMSCRIPTEN_PTHREADS__) && defined(_OPENMP)

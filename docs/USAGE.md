@@ -331,7 +331,7 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 
 | option | meaning | default |
 |---|---|---|
-| `-preview n` | `rt` mode: while moving, path trace at 1/n resolution (1 = always full resolution) | 4 |
+| `-preview n` | `rt` mode: while moving, path trace at 1/n resolution (1 = always full resolution) | 4 (with `-sim on`: 2) |
 | `-movespp n` | samples per pixel of each low-resolution frame while moving | 1 |
 | `-speed units` | movement speed in scene units per second | 300 |
 | `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks); prints the frame rate, and with `-orbit` the `render` command of the screenshot's camera | 0 = never |
