@@ -185,9 +185,9 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->ord = gpu_buffer(g, "raster: the draws' order", r->ord_cap, st);
     r->txt = gpu_buffer(g, "scene: the textures' table", sizeof(r->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     r->bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "URRRURRRRTUR");
-    char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(GPU_WGSL_TEX) + strlen(SHADER) + 3);
+    const char *const parts[] = {GPU_WGSL_BSDF, GPU_WGSL_TEX, SHADER};
+    char *src = gpu_wgsl_join(parts, 3);
     if (!src){ gpu_raster_destroy(r); return NULL; }
-    strcpy(src, GPU_WGSL_BSDF); strcat(src, "\n"); strcat(src, GPU_WGSL_TEX); strcat(src, "\n"); strcat(src, SHADER);
     WGPUShaderModule m = gpu_shader(g, "scene", src);
     free(src);
     r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);

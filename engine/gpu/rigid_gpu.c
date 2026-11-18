@@ -815,12 +815,11 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     gr->g = g;
     gr->pw = pw;
     for (int k = 0; k < NR; k++){
-        size_t n = strlen(RHEAD) + 8;
-        for (int q = 0; q < 4 && RK[k].part[q]; q++) n += strlen(*RK[k].part[q]) + 1;
-        char *src = malloc(n);
+        const char *parts[5] = {RHEAD};
+        int np = 1;
+        for (int q = 0; q < 4 && RK[k].part[q]; q++) parts[np++] = *RK[k].part[q];
+        char *src = gpu_wgsl_join(parts, np);
         if (!src){ gpu_rigid_destroy(gr); return NULL; }
-        size_t at = (size_t)snprintf(src, n, "%s\n", RHEAD);
-        for (int q = 0; q < 4 && RK[k].part[q]; q++) at += (size_t)snprintf(src + at, n - at, "%s\n", *RK[k].part[q]);
         gr->bgl[k] = gpu_layout(g, WGPUShaderStage_Compute, RK[k].types);
         gr->pipe[k] = gpu_compute(g, RK[k].name, src, "main", gr->bgl[k]);
         free(src);

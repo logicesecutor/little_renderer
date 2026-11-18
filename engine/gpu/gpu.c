@@ -105,6 +105,21 @@ int gpu_live_has(int kind, const void *p){
 }
 static int is_live(const Gpu *g){ return gpu_live_has(GPU_LIVE_GPU, g); }
 
+char *gpu_wgsl_join(const char *const *parts, int n){
+    size_t len = 1;
+    for (int i = 0; i < n; i++) len += strlen(parts[i]) + 1;
+    char *s = malloc(len), *o = s;
+    if (!s) return NULL;
+    for (int i = 0; i < n; i++){
+        size_t k = strlen(parts[i]);
+        memcpy(o, parts[i], k);
+        o += k;
+        *o++ = '\n';
+    }
+    *o = 0;
+    return s;
+}
+
 WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes){
     return gpu_buffer(g, label, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
 }

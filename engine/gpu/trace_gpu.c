@@ -332,34 +332,33 @@ static const char *const STACK_WG = "var<private> tlid: u32;\nvar<workgroup> sta
 // the path tracer's module: types, media, the BSDF, TRACE (with the sky's code or without),
 // and the wavefront's kernels (wave); free() it
 static char *trace_source(GpuTrace *t, int sky, int wave){
-    const char *parts[] = {sky ? "const SKY_ON: bool = true;\n" : "const SKY_ON: bool = false;\n",
-                           t->wide_ok ? "const WIDE_ON: bool = true;\n" : "const WIDE_ON: bool = false;\n",
-                           stack_in_workgroup() ? STACK_WG : STACK_PRIVATE,
-                           t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", GPU_WGSL_TEX, "\n", TRACE, "\n",
-                           wave ? WAVE : ""};
-    const int n = (int)(sizeof(parts) / sizeof(parts[0]));
-    size_t len = 1;
-    for (int i = 0; i < n; i++) len += strlen(parts[i]);
+    const char *parts[12] = {sky ? "const SKY_ON: bool = true;" : "const SKY_ON: bool = false;",
+                             t->wide_ok ? "const WIDE_ON: bool = true;" : "const WIDE_ON: bool = false;",
+                             stack_in_workgroup() ? STACK_WG : STACK_PRIVATE,
+                             t->types_wgsl, t->media_wgsl, GPU_WGSL_BSDF, GPU_WGSL_TEX, TRACE, wave ? WAVE : ""};
+    int n = 9;
 #ifdef LR_VK
-    if (t->hw) len += strlen(HW_TRAVERSE) + 8;
+    if (t->hw) parts[n++] = HW_TRAVERSE;
 #endif
-    char *src = malloc(len);
+    char *src = gpu_wgsl_join(parts, n);
     if (!src) return NULL;
-    src[0] = 0;
-    for (int i = 0; i < n; i++) strcat(src, parts[i]);
+    // two edits of TRACE's text; if it has changed so that they find nothing, say so (the
+    // kernels would not compile, or not do what is meant)
+    static const char STACK_DECL[] = "var stack: array<u32, STACK>;";
     if (stack_in_workgroup()){           // (traverse's own stack left out: the module's is used)
-        char *d = strstr(src, "var stack: array<u32, STACK>;");
-        if (d) memset(d, ' ', strlen("var stack: array<u32, STACK>;"));
+        char *d = strstr(src, STACK_DECL);
+        if (!d){ fprintf(stderr, "GPU: trace.wgsl has no \"%s\" to leave out\n", STACK_DECL); free(src); return NULL; }
+        memset(d, ' ', sizeof(STACK_DECL) - 1);
     }
 #ifdef LR_VK
-    if (t->hw){
+    if (t->hw){                          // the BVH's traverse renamed: HW_TRAVERSE's takes its place
+        char *more = realloc(src, strlen(src) + 1 + 4);   // (the 4 bytes of "_bvh")
+        if (!more){ free(src); return NULL; }
+        src = more;
         char *f = strstr(src, "fn traverse(");
-        if (f){
-            memmove(f + 15, f + 11, strlen(f + 11) + 1);   // (room made by the 4 bytes of len above)
-            memcpy(f + 11, "_bvh", 4);
-        }
-        strcat(src, "\n");
-        strcat(src, HW_TRAVERSE);
+        if (!f){ fprintf(stderr, "GPU: trace.wgsl has no \"fn traverse(\" to rename\n"); free(src); return NULL; }
+        memmove(f + 15, f + 11, strlen(f + 11) + 1);
+        memcpy(f + 11, "_bvh", 4);
     }
 #endif
     return src;

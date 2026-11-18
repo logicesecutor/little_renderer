@@ -33,12 +33,11 @@ static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
 
 int gpu_bsdf_run(Gpu *g, const float *in, int n, float *out){
     if (!g || g->state != GPU_READY || n <= 0) return 0;
-    char *src = malloc(strlen(GPU_WGSL_BSDF) + strlen(CHECK) + 64);
+    char size[64];
+    snprintf(size, sizeof(size), "const GPU_BSDF_TAB_VEC4 = %du;", GPU_BSDF_TABLE_FLOATS / 4);   // (the tables' size)
+    const char *const parts[] = {size, GPU_WGSL_BSDF, CHECK};
+    char *src = gpu_wgsl_join(parts, 3);
     if (!src) return 0;
-    sprintf(src, "const GPU_BSDF_TAB_VEC4 = %du;\n", GPU_BSDF_TABLE_FLOATS / 4);   // (the tables' size)
-    strcat(src, GPU_WGSL_BSDF);
-    strcat(src, "\n");
-    strcat(src, CHECK);
     WGPUBindGroupLayout bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
     WGPUComputePipeline pipe = gpu_compute(g, "BSDF check", src, "main", bgl);
     free(src);

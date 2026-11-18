@@ -236,22 +236,19 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         return NULL;
     }
 
-    char *src = malloc(strlen(TYPES) + strlen(COMMON) + strlen(LIGHT) + strlen(COMPOSITE) + strlen(STATS) + strlen(FINISH) +
-                       strlen(FRAME_CPU) + strlen(FRAME_GPU) + 16);
-    if (!src){ gpu_view_destroy(v); return NULL; }
-    strcpy(src, TYPES); strcat(src, "\n"); strcat(src, COMMON); strcat(src, "\n"); strcat(src, LIGHT);
-    WGPUShaderModule ml = gpu_shader(g, "light grid", src);
-    strcpy(src, TYPES); strcat(src, "\n"); strcat(src, COMMON); strcat(src, "\n"); strcat(src, FRAME_CPU); strcat(src, "\n");
-    strcat(src, COMPOSITE);
-    WGPUShaderModule mc = gpu_shader(g, "composite", src);
-    strcpy(src, TYPES); strcat(src, "\n"); strcat(src, COMMON); strcat(src, "\n"); strcat(src, FRAME_GPU); strcat(src, "\n");
-    strcat(src, COMPOSITE);
-    WGPUShaderModule mcg = gpu_shader(g, "composite (GPU frame)", src);
-    strcpy(src, TYPES); strcat(src, "\n"); strcat(src, STATS);
-    WGPUShaderModule ms = gpu_shader(g, "media stats", src);
-    strcpy(src, TYPES); strcat(src, "\n"); strcat(src, FINISH);
-    WGPUShaderModule mf = gpu_shader(g, "media boxes", src);
-    free(src);
+    const char *const light_src[] = {TYPES, COMMON, LIGHT}, *const comp_src[] = {TYPES, COMMON, FRAME_CPU, COMPOSITE},
+                      *const compg_src[] = {TYPES, COMMON, FRAME_GPU, COMPOSITE}, *const stats_src[] = {TYPES, STATS},
+                      *const finish_src[] = {TYPES, FINISH};
+    const struct { const char *label; const char *const *parts; int n; } mods[5] = {
+        {"light grid", light_src, 3}, {"composite", comp_src, 4}, {"composite (GPU frame)", compg_src, 4},
+        {"media stats", stats_src, 2}, {"media boxes", finish_src, 2}};
+    WGPUShaderModule mm[5];
+    for (int k = 0; k < 5; k++){
+        char *src = gpu_wgsl_join(mods[k].parts, mods[k].n);
+        mm[k] = src ? gpu_shader(g, mods[k].label, src) : NULL;
+        free(src);
+    }
+    WGPUShaderModule ml = mm[0], mc = mm[1], mcg = mm[2], ms = mm[3], mf = mm[4];
 
     const WGPUBufferBindingType U = WGPUBufferBindingType_Uniform, R = WGPUBufferBindingType_ReadOnlyStorage,
                                 W = WGPUBufferBindingType_Storage;

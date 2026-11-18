@@ -69,6 +69,10 @@ static inline void gpu_ref_view(WGPUTextureView v){ wgpuTextureViewAddRef(v); }
 
 WGPUShaderModule gpu_shader(Gpu *g, const char *label, const char *wgsl);
 WGPUBuffer gpu_buffer(Gpu *g, const char *label, size_t size, WGPUBufferUsage usage);
+// A shader's source made of parts (the shared types, helpers, the kernels): each part followed
+// by a newline, in one string; NULL if out of memory. Free with free().
+char *gpu_wgsl_join(const char *const *parts, int n);
+
 // a storage buffer that can be copied to and from (the physics' state)
 WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes);
 
