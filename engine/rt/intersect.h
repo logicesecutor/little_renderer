@@ -52,7 +52,71 @@ static inline int aabb_hit(const Aabb *b, const Ray *r, Vec3 inv_d, real tmin, r
 
 // Closest hit with t in (tmin, tmax). Returns 1 and fills *h on a hit (h->prim is NOT set).
 int intersect_primitive(const Primitive *prim, const Ray *ray, real tmin, real tmax, Hit *h);
-// the same for shape `id` of the scene (a primitive or a triangle, see scene/scene.h)
+// the same for shape `id` of the scene (a primitive or a triangle, see scene/scene.h), with
+// h->prim = id
 int intersect_shape(const Scene *s, int id, const Ray *ray, real tmin, real tmax, Hit *h);
+
+// ---- the tests alone, for the traversals (docs/PERF_REVIEW.md, N6) ----
+// A traversal tests many shapes and keeps the nearest: shape_test says only whether shape
+// `id` is hit in (tmin, tmax), at what t, and where on it (*uv: a quad's (a, b), a
+// triangle's barycentrics; nothing for a sphere); shape_hit then makes the Hit of the one
+// kept (point, normals, a sphere's longitude and latitude, a triangle's shading normal), with
+// h->prim = id. The same Hit, to the bit, as intersect_shape's; the tests are inline here, so
+// they are not a call into another file for every candidate.
+static inline int lr_hit_sphere_t(const Primitive *s, const Ray *ray, real tmin, real tmax, real *t_out){
+    Vec3 oc = v_sub(s->center, ray->o);
+    real a = v_dot(ray->d, ray->d);
+    real hh = v_dot(ray->d, oc);
+    real c = v_dot(oc, oc) - s->radius * s->radius;
+    real disc = hh * hh - a * c;
+    if (disc < 0) return 0;
+    real sq = r_sqrt(disc);
+    real t = (hh - sq) / a;                   // nearer root first
+    if (t <= tmin || t >= tmax){
+        t = (hh + sq) / a;                    // we may be inside the sphere (glass)
+        if (t <= tmin || t >= tmax) return 0;
+    }
+    *t_out = t;
+    return 1;
+}
+static inline int lr_hit_quad_t(const Primitive *s, const Ray *ray, real tmin, real tmax, real *t_out, Vec2 *uv){
+    real denom = v_dot(s->normal, ray->d);
+    if (r_fabs(denom) < 1e-12) return 0;      // ray parallel to the plane
+    real t = (s->plane_d - v_dot(s->normal, ray->o)) / denom;
+    if (t <= tmin || t >= tmax) return 0;
+    Vec3 p = v_add(ray->o, v_scale(ray->d, t));
+    Vec3 rel = v_sub(p, s->q);
+    real a = v_dot(s->w, v_cross(rel, s->v));
+    real b = v_dot(s->w, v_cross(s->u, rel));
+    if (a < 0 || a > 1 || b < 0 || b > 1) return 0;
+    *t_out = t;
+    *uv = vec2(a, b);
+    return 1;
+}
+static inline int lr_hit_triangle_t(const Triangle *s, const Ray *ray, real tmin, real tmax, real *t_out, Vec2 *uv){
+    Vec3 pvec = v_cross(ray->d, s->v);
+    real det = v_dot(s->u, pvec);
+    if (r_fabs(det) < 1e-12) return 0;        // ray parallel to the triangle (or degenerate)
+    real inv = 1.0 / det;
+    Vec3 tvec = v_sub(ray->o, s->q);
+    real b1 = v_dot(tvec, pvec) * inv;
+    if (b1 < 0 || b1 > 1) return 0;
+    Vec3 qvec = v_cross(tvec, s->u);
+    real b2 = v_dot(ray->d, qvec) * inv;
+    if (b2 < 0 || b1 + b2 > 1) return 0;
+    real t = v_dot(s->v, qvec) * inv;
+    if (t <= tmin || t >= tmax) return 0;
+    *t_out = t;
+    *uv = vec2(b1, b2);
+    return 1;
+}
+static inline int shape_test(const Scene *s, int id, const Ray *ray, real tmin, real tmax, real *t, Vec2 *uv){
+    if (id < s->nprims){
+        const Primitive *p = &s->prims[id];
+        return p->type == PRIM_SPHERE ? lr_hit_sphere_t(p, ray, tmin, tmax, t) : lr_hit_quad_t(p, ray, tmin, tmax, t, uv);
+    }
+    return lr_hit_triangle_t(&s->tris[id - s->nprims], ray, tmin, tmax, t, uv);
+}
+void shape_hit(const Scene *s, int id, const Ray *ray, real t, Vec2 uv, Hit *h);
 
 #endif

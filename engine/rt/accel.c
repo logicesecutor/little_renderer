@@ -257,18 +257,20 @@ static int intersect_world(const Scene *s, const Ray *ray, real tmin, real tmax,
     if (a && a->kind == ACCEL_BVH) return bvh_intersect(&a->bvh, s, ray, tmin, tmax, h, 0);
     if (a && a->kind == ACCEL_OCTREE) return octree_intersect(&a->octree, s, ray, tmin, tmax, h, 0);
 
-    // brute force: test everything, keep the closest
-    int found = 0;
-    Hit tmp;
+    // brute force: test everything, keep the closest (its Hit made once, at the end)
+    int found = -1;
+    Vec2 uv = {0, 0}, kept = {0, 0};
     for (int i = 0; i < scene_num_shapes(s); i++){
-        if (intersect_shape(s, i, ray, tmin, tmax, &tmp)){
-            found = 1;
-            tmax = tmp.t;          // only accept closer hits from now on
-            tmp.prim = i;
-            *h = tmp;
+        real t;
+        if (shape_test(s, i, ray, tmin, tmax, &t, &uv)){
+            found = i;
+            tmax = t;              // only accept closer hits from now on
+            kept = uv;
         }
     }
-    return found;
+    if (found < 0) return 0;
+    shape_hit(s, found, ray, tmax, kept, h);
+    return 1;
 }
 
 int scene_occluded(const Scene *s, const Ray *ray, real tmin, real tmax){
@@ -277,7 +279,10 @@ int scene_occluded(const Scene *s, const Ray *ray, real tmin, real tmax){
     if (s->ninsts > 0 && intersect_instances(s, ray, tmin, tmax, &tmp, 1)) return 1;
     if (a && a->kind == ACCEL_BVH) return bvh_intersect(&a->bvh, s, ray, tmin, tmax, &tmp, 1);
     if (a && a->kind == ACCEL_OCTREE) return octree_intersect(&a->octree, s, ray, tmin, tmax, &tmp, 1);
-    for (int i = 0; i < scene_num_shapes(s); i++)
-        if (intersect_shape(s, i, ray, tmin, tmax, &tmp)) return 1;
+    for (int i = 0; i < scene_num_shapes(s); i++){
+        real t;
+        Vec2 uv = {0, 0};
+        if (shape_test(s, i, ray, tmin, tmax, &t, &uv)) return 1;
+    }
     return 0;
 }

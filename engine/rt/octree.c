@@ -152,6 +152,8 @@ typedef struct {
     real best;     // closest hit so far (starts at tmax)
     Hit *hit;
     int found, any_hit;
+    int hit_id;    // the shape kept, its Hit made once at the end (shape_hit)
+    Vec2 hit_uv;
     int mailbox[OCT_MAILBOX];   // ids tested by this ray (-1 = empty)
 } Traversal;
 
@@ -166,11 +168,12 @@ static void visit(Traversal *tr, int node){
             if (*slot == id) continue;               // already tested by this ray
 #endif
             *slot = id;
-            Hit tmp;
-            if (intersect_shape(tr->s, id, tr->ray, tr->tmin, tr->best, &tmp)){
-                tmp.prim = id;
-                *tr->hit = tmp;
-                tr->best = tmp.t;
+            real t;
+            Vec2 uv = {0, 0};
+            if (shape_test(tr->s, id, tr->ray, tr->tmin, tr->best, &t, &uv)){
+                tr->best = t;
+                tr->hit_id = id;
+                tr->hit_uv = uv;
                 tr->found = 1;
                 if (tr->any_hit) return;
             }
@@ -221,6 +224,9 @@ int octree_intersect(const Octree *o, const Scene *s, const Ray *ray,
 
     real te;
     if (!aabb_hit(&o->nodes[0].box, ray, tr.inv_d, tmin, tmax, &te)) return 0;
+    tr.hit_id = -1;
+    tr.hit_uv = vec2(0, 0);
     visit(&tr, 0);
+    if (tr.found && !any_hit) shape_hit(s, tr.hit_id, ray, tr.best, tr.hit_uv, h);
     return tr.found;
 }

@@ -552,6 +552,8 @@ static int wide_intersect(const Bvh *b, const Scene *s, const Ray *ray, real tmi
     const int fx = 3 - nx, fy = 5 - ny, fz = 7 - nz;
     struct { int node, count; real t; } stack[4 * BVH_MAX_DEPTH + 8];
     int sp = 0, found = 0;
+    int hit_id = -1;                       // the shape kept, its Hit made once at the end
+    Vec2 uv = {0, 0}, kept = {0, 0};
     real best = tmax;
     stack[sp].node = 0; stack[sp].count = 0; stack[sp].t = tmin; sp++;
     while (sp > 0){
@@ -561,11 +563,11 @@ static int wide_intersect(const Bvh *b, const Scene *s, const Ray *ray, real tmi
             const int start = stack[sp].node, count = stack[sp].count;
             for (int k = 0; k < count; k++){
                 int id = b->refs[start + k];
-                Hit tmp;
-                if (intersect_shape(s, id, ray, tmin, best, &tmp)){
-                    tmp.prim = id;
-                    *h = tmp;
-                    best = tmp.t;
+                real t;
+                if (shape_test(s, id, ray, tmin, best, &t, &uv)){
+                    best = t;
+                    hit_id = id;
+                    kept = uv;
                     found = 1;
                     if (any_hit) return 1;
                 }
@@ -601,6 +603,7 @@ static int wide_intersect(const Bvh *b, const Scene *s, const Ray *ray, real tmi
             sp++;
         }
     }
+    if (found) shape_hit(s, hit_id, ray, best, kept, h);
     return found;
 }
 
@@ -617,6 +620,8 @@ int bvh_intersect(const Bvh *b, const Scene *s, const Ray *ray,
     int sp = 0;
     real best = tmax, te;
     int found = 0;
+    int hit_id = -1;                       // the shape kept, its Hit made once at the end
+    Vec2 uv = {0, 0}, kept = {0, 0};
 
     if (!aabb_hit(&b->nodes[0].box, ray, inv_d, tmin, best, &te)) return 0;
     stack[sp].node = 0; stack[sp].t = te; sp++;
@@ -629,11 +634,11 @@ int bvh_intersect(const Bvh *b, const Scene *s, const Ray *ray,
         if (n->count > 0){                         // leaf
             for (int k = 0; k < n->count; k++){
                 int id = b->refs[n->start + k];
-                Hit tmp;
-                if (intersect_shape(s, id, ray, tmin, best, &tmp)){
-                    tmp.prim = id;
-                    *h = tmp;
-                    best = tmp.t;
+                real t;
+                if (shape_test(s, id, ray, tmin, best, &t, &uv)){
+                    best = t;
+                    hit_id = id;
+                    kept = uv;
                     found = 1;
                     if (any_hit) return 1;
                 }
@@ -657,5 +662,6 @@ int bvh_intersect(const Bvh *b, const Scene *s, const Ray *ray,
             stack[sp].node = n->right; stack[sp].t = tr; sp++;
         }
     }
+    if (found) shape_hit(s, hit_id, ray, best, kept, h);
     return found;
 }
