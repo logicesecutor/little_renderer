@@ -25,8 +25,6 @@ typedef double real;
 #define r_atan2 atan2
 #define r_pow pow
 #define r_fabs fabs
-#define r_fmin fmin
-#define r_fmax fmax
 #define r_floor floor
 #define r_ceil ceil
 #define r_copysign copysign
@@ -45,8 +43,6 @@ typedef float real;
 #define r_atan2 atan2f
 #define r_pow powf
 #define r_fabs fabsf
-#define r_fmin fminf
-#define r_fmax fmaxf
 #define r_floor floorf
 #define r_ceil ceilf
 #define r_copysign copysignf
@@ -55,6 +51,13 @@ typedef float real;
 #define r_log2 log2f
 #define r_exp expf
 #endif
+
+// fmin and fmax, here and not the C library's: with this compiler each is a call into the
+// runtime's DLL (it may not inline them: a NaN and the zeros' signs), and they sit in the
+// inner loops (a pixel's clamps, a contact's limits, the sky's weights). The same results:
+// the other number when one is a NaN (fmin(-0, +0) may give either zero, as the library's).
+static inline real r_fmin(real a, real b){ return b != b ? a : (a < b ? a : b); }
+static inline real r_fmax(real a, real b){ return b != b ? a : (a > b ? a : b); }
 
 #define PI 3.14159265358979323846
 
