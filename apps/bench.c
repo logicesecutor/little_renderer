@@ -792,7 +792,8 @@ static int compare(const char *a, const char *b){
         for (int i = na - 1; i >= 0 && !o; i--)          // (the last of that case in the old file)
             if (!strcmp(ra[i].id, n->id) && !strcmp(ra[i].backend, n->backend)) o = &ra[i];
         if (!o || o->med <= 0 || n->med <= 0){ printf("%-5s %-5s %-46.46s %12s %12.3f %9s\n", n->id, n->backend, n->what, "-", n->med, ""); continue; }
-        int more_better = strstr(n->unit, "/s") != NULL;
+        size_t ul = strlen(n->unit);
+        int more_better = ul >= 2 && !strcmp(n->unit + ul - 2, "/s");   // (M paths/s; not ms/step)
         double gain = more_better ? n->med / o->med : o->med / n->med;   // > 1: faster
         printf("%-5s %-5s %-46.46s %12.3f %12.3f %+8.1f%%%s\n", n->id, n->backend, n->what, o->med, n->med,
                (gain - 1) * 100, gain < 0.95 ? "  slower" : gain > 1.05 ? "  faster" : "");
