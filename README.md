@@ -43,7 +43,7 @@ JSON and glTF.
 <tr>
 <td align="center"><b>~24k</b><br><sub>lines of C in the engine</sub></td>
 <td align="center"><b>~7k</b><br><sub>lines of C for our WebGPU on Vulkan and its WGSL compiler</sub></td>
-<td align="center"><b>76</b><br><sub>WGSL shaders, ~6k lines</sub></td>
+<td align="center"><b>79</b><br><sub>WGSL shaders, ~6.5k lines</sub></td>
 <td align="center"><b>4</b><br><sub>pipelines: CPU and GPU, raster and path traced</sub></td>
 <td align="center"><b>3</b><br><sub>platforms: Linux, Windows, the browser</sub></td>
 </tr>
@@ -183,7 +183,7 @@ flowchart LR
     gpu -.->|natively| vk["webgpu/<br/>our WebGPU on Vulkan<br/>WGSL → SPIR-V"]
     gpu --> app["app<br/>options · demos"]
     platform --> app
-    app --> programs["render · view · sim<br/>examples · tests"]
+    app --> programs["render · view · sim · bench<br/>examples · tests"]
 
     classDef layerCpu fill:#1f6feb22,stroke:#1f6feb
     classDef layerGpu fill:#7b3fe422,stroke:#7b3fe4
@@ -204,7 +204,7 @@ next to the GPU ones.
 | `engine/` | the library, `liblr.a`: one folder per layer above (`base/`, `formats/`, `scene/`, `raster/`, `rt/`, `phys/`, `platform/`, `gpu/`, `app/`); include `engine/lr.h` |
 | `engine/gpu/shaders/` | the WGSL, by what it serves: `common/`, `view/`, `raster/`, `trace/`, `rigid/`, `fluid/` |
 | `webgpu/` | our WebGPU on Vulkan (`vk/`) and its WGSL → SPIR-V compiler (`wgsl/`), the native build's GPU; they use nothing of the engine. `webgpu/include/` holds the standard `webgpu.h`, the one file not written here |
-| `apps/` | the programs `render`, `view`, `sim` |
+| `apps/` | the programs `render`, `view`, `sim` and `bench` (the benchmarks) |
 | `examples/` | small programs on the library, to start from |
 | `tests/` | the unit tests, `make test` |
 | `tools/` | Python and C helpers: models, test data, GIFs, the shader embedding, the Vulkan header check |

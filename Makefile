@@ -3,7 +3,7 @@
 #
 #   engine/{base,formats,scene,raster,rt,phys,platform,gpu,app}/*.c -> build/float-vk/liblr.a (the engine)
 #   webgpu/{vk,wgsl}/*.c                      -> into the same library (our WebGPU, on Vulkan)
-#   apps/*.c                                  -> bin/render, bin/view, bin/sim
+#   apps/*.c                                  -> bin/render, bin/view, bin/sim, bin/bench
 #   examples/*.c                              -> bin/hello_raster, bin/hello_rt, ...
 #   tests/*.c                                 -> bin/test_png, bin/test_physics, ... (make test runs them)
 #

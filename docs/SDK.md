@@ -1,7 +1,7 @@
 # Using little_renderer as an SDK
 
 The engine is one static library with one umbrella header. Your program includes `lr.h`
-and links `liblr.a`; that is all. The two apps in `apps/` and the four programs in
+and links `liblr.a`; that is all. The four apps in `apps/` and the six programs in
 `examples/` are built exactly this way, so they double as reference code.
 
 | build | library | binaries | `real` is |
