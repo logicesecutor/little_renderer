@@ -403,17 +403,30 @@ int convex_collide_cached(const WorldConvex *A, const WorldConvex *B, real margi
         if (s > margin){ ft->type = CONVEX_SEP_FACE_B; ft->i = f; return 0; }
         if (s > sb){ sb = s; fb = f; }
     }
+    // Every edge of a against every edge of b: 17 000 pairs for two hulls of 46 corners, and
+    // most of a step's time. What a pair's first test needs of b depends on b's faces alone
+    // (its normals against a's edge: one dot product per face, read twice by the edges, in
+    // place of two per edge), and the second test's cross product on b's edge alone (made
+    // once, not for every edge of a). The same numbers, so the same contacts.
+    enum { TAB_FACES = 256, TAB_EDGES = 512 };
+    real nb_bxa[TAB_FACES];
+    Vec3 dxc_b[TAB_EDGES];
+    const int tab = cb->nf <= TAB_FACES && cb->ne <= TAB_EDGES;
+    if (tab) for (int j = 0; j < cb->ne; j++)
+        dxc_b[j] = v_cross(v_neg(B->n[cb->e[j].fb]), v_neg(B->n[cb->e[j].fa]));
     for (int i = 0; i < ca->ne; i++){
         const ConvexEdge *E = &ca->e[i];
         Vec3 a = A->n[E->fa], b = A->n[E->fb];
         Vec3 pa = A->v[E->a], da = v_sub(A->v[E->b], pa);
         Vec3 bxa = v_cross(b, a);
+        if (tab) for (int f = 0; f < cb->nf; f++) nb_bxa[f] = v_dot(v_neg(B->n[f]), bxa);
         for (int j = 0; j < cb->ne; j++){
             const ConvexEdge *G = &cb->e[j];
-            Vec3 c = v_neg(B->n[G->fa]), d = v_neg(B->n[G->fb]);
-            real cba = v_dot(c, bxa), dba = v_dot(d, bxa);
+            real cba, dba;
+            if (tab){ cba = nb_bxa[G->fa]; dba = nb_bxa[G->fb]; }
+            else { cba = v_dot(v_neg(B->n[G->fa]), bxa); dba = v_dot(v_neg(B->n[G->fb]), bxa); }
             if (cba * dba >= 0) continue;
-            Vec3 dxc = v_cross(d, c);
+            Vec3 dxc = tab ? dxc_b[j] : v_cross(v_neg(B->n[G->fb]), v_neg(B->n[G->fa]));
             real adc = v_dot(a, dxc), bdc = v_dot(b, dxc);
             if (adc * bdc >= 0 || cba * bdc <= 0) continue;   // not a face of the Minkowski difference
             Vec3 pb = B->v[G->a], db = v_sub(B->v[G->b], pb);
