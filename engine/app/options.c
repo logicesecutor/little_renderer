@@ -252,6 +252,11 @@ static int pick(Program prog, const char *v, const char *const *names, const cha
 }
 
 static const char *const SCENES[] = {"boxes", "spheres", "mesh", "cloud", "empty", "showcase", "sky", NULL};
+// the names of -mat, -accel and -bvhsplit, read and printed (the order of MatType, AccelKind
+// + 1, BvhSplit)
+static const char *const MATS[] = {"diffuse", "mirror", "glass", NULL};
+static const char *const ACCELS[] = {"auto", "none", "octree", "bvh", NULL};
+static const char *const SPLITS[] = {"sah", "middle", NULL};
 
 void options_parse(Options *o, Program prog, int argc, char **argv){
     memset(o, 0, sizeof(*o));
@@ -441,10 +446,10 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         } else if (!strcmp(a, "-scene")){
             scene_set = 1;
             o->scene.kind = (SceneKind)pick(prog, v, SCENES, "unknown scene");
-        } else if (!strcmp(a, "-mat"))   // (the order of MatType, AccelKind, BvhSplit)
-            o->scene.mesh_mat = (MatType)pick(prog, v, (const char *const[]){"diffuse", "mirror", "glass", NULL}, "unknown material");
-        else if (!strcmp(a, "-accel")) o->accel = pick(prog, v, (const char *const[]){"auto", "none", "octree", "bvh", NULL}, "unknown acceleration") - 1;
-        else if (!strcmp(a, "-bvhsplit")) o->ap.bvh_split = (BvhSplit)pick(prog, v, (const char *const[]){"sah", "middle", NULL}, "unknown BVH split");
+        } else if (!strcmp(a, "-mat"))
+            o->scene.mesh_mat = (MatType)pick(prog, v, MATS, "unknown material");
+        else if (!strcmp(a, "-accel")) o->accel = pick(prog, v, ACCELS, "unknown acceleration") - 1;
+        else if (!strcmp(a, "-bvhsplit")) o->ap.bvh_split = (BvhSplit)pick(prog, v, SPLITS, "unknown BVH split");
         else fail(prog, "unknown option", a);
     }
 
@@ -558,14 +563,18 @@ void options_bake_probe(const Options *o, Scene *s){
            p->w, p->h, o->probe_spp, s->irr ? s->irr->n[0] : 0, s->irr ? s->irr->n[1] : 0, s->irr ? s->irr->n[2] : 0, 1000 * (clock_s() - t0));
 }
 
+// " -opt path", quoted when the path has a space
+static void put_path(FILE *f, const char *opt, const char *path){
+    fprintf(f, strchr(path, ' ') ? " %s \"%s\"" : " %s %s", opt, path);
+}
+
 void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FILE *f){
-    static const char *mats[] = {"diffuse", "mirror", "glass", "diffuse"};
     fprintf(f, "bin/render -scene %s", SCENES[o->scene.kind]);
     if (o->scene.instances > 0) fprintf(f, " -instances %d", o->scene.instances);
-    if (o->scene.gltf_path && (o->scene.kind == SCENE_MESH || o->scene.kind == SCENE_SKY)) fprintf(f, " -gltf %s", o->scene.gltf_path);
+    if (o->scene.gltf_path && (o->scene.kind == SCENE_MESH || o->scene.kind == SCENE_SKY)) put_path(f, "-gltf", o->scene.gltf_path);
     else if (o->scene.kind == SCENE_MESH || o->scene.instances > 0){
-        fprintf(f, " -obj %s", o->scene.obj_path);
-        if (o->scene.mesh_mat != MAT_DIFFUSE) fprintf(f, " -mat %s", mats[o->scene.mesh_mat]);
+        put_path(f, "-obj", o->scene.obj_path);
+        if (o->scene.mesh_mat != MAT_DIFFUSE && (int)o->scene.mesh_mat < 3) fprintf(f, " -mat %s", MATS[o->scene.mesh_mat]);
         const SceneOptions *so = &o->scene;
         if (so->mesh_set & MESH_SET_BASE) fprintf(f, " -base %g,%g,%g", (double)so->mesh_base.x, (double)so->mesh_base.y, (double)so->mesh_base.z);
         if (so->mesh_set & MESH_SET_METAL) fprintf(f, " -metal %g", (double)so->mesh_metal);
@@ -573,9 +582,9 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (so->mesh_set & MESH_SET_IOR) fprintf(f, " -ior %g", (double)so->mesh_ior);
         if (so->mesh_set & MESH_SET_TRANS) fprintf(f, " -transmission %g", (double)so->mesh_trans);
         if (o->scene.rot_deg != 0) fprintf(f, " -rot %g", (double)o->scene.rot_deg);
-        if (so->mesh_tex) fprintf(f, " -tex %s", so->mesh_tex);
-        if (so->mesh_mr) fprintf(f, " -mrmap %s", so->mesh_mr);
-        if (so->mesh_normal) fprintf(f, " -normalmap %s", so->mesh_normal);
+        if (so->mesh_tex) put_path(f, "-tex", so->mesh_tex);
+        if (so->mesh_mr) put_path(f, "-mrmap", so->mesh_mr);
+        if (so->mesh_normal) put_path(f, "-normalmap", so->mesh_normal);
         if (so->mesh_uv_scale > 0) fprintf(f, " -uvscale %g", (double)so->mesh_uv_scale);
     }
     if (o->use_cloud || o->scene.kind == SCENE_CLOUD || o->scene.kind == SCENE_SHOWCASE){
@@ -592,17 +601,27 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (c->resolution != d.resolution) fprintf(f, " -cloudres %d", c->resolution);
     }
     if (o->scene.fog > 0) fprintf(f, " -fog %g", (double)o->scene.fog);
-    if (o->scene.sky) fprintf(f, " -sky %s", o->scene.sky);
+    if (o->scene.sky) put_path(f, "-sky", o->scene.sky);
     if (o->scene.sky_scale > 0 && o->scene.sky_scale != 1) fprintf(f, " -skyscale %g", (double)o->scene.sky_scale);
     if (o->scene.sky_rot != 0) fprintf(f, " -skyrot %g", (double)o->scene.sky_rot);
     fprintf(f, " -cam %.1f,%.1f,%.1f -look %.1f,%.1f,%.1f -fov %g",
             (double)cam.x, (double)cam.y, (double)cam.z, (double)look.x, (double)look.y, (double)look.z, fov);
     if (o->width == o->height) fprintf(f, " -n %d", o->width);
     else fprintf(f, " -width %d -height %d", o->width, o->height);
-    fprintf(f, " -s 512");
+    // the samples asked for; the viewer's default (4096: refine until stopped) as 512, a render
+    fprintf(f, " -s %d", o->prog == PROG_VIEW && o->spp == 4096 ? 512 : o->spp);
     if (o->max_depth != 50) fprintf(f, " -d %d", o->max_depth);
     if (!o->mis) fprintf(f, " -mis off");
     if (!o->sampler) fprintf(f, " -sampler random");
     if (o->clamp > 0) fprintf(f, " -clamp %g", o->clamp);
+    if (!o->caustics_lt) fprintf(f, " -caustics pt");
+    if (o->photons != 1) fprintf(f, " -photons %g", (double)o->photons);
+    if (o->accel >= 0) fprintf(f, " -accel %s", ACCELS[o->accel + 1]);
+    const AccelParams ad = accel_default_params();
+    if (o->ap.oct_depth != ad.oct_depth) fprintf(f, " -octdepth %d", o->ap.oct_depth);
+    if (o->ap.bvh_leaf != ad.bvh_leaf) fprintf(f, " -bvhleaf %d", o->ap.bvh_leaf);
+    if (o->ap.bvh_bins != ad.bvh_bins) fprintf(f, " -bvhbins %d", o->ap.bvh_bins);
+    if (o->ap.bvh_width != ad.bvh_width) fprintf(f, " -bvhwidth %d", o->ap.bvh_width);
+    if (o->ap.bvh_split != ad.bvh_split) fprintf(f, " -bvhsplit %s", SPLITS[o->ap.bvh_split]);
     fprintf(f, " -o out/from_viewer.png\n");
 }
