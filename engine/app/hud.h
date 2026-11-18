@@ -12,7 +12,8 @@
 uint32_t *hud_text(const char *text, int scale, int *w, int *h);
 
 // Blends such a bitmap into a framebuffer at (x, y), keeping what was under it in *saved
-// (malloc'ed; w * h pixels) so hud_restore can put it back after the frame is shown.
+// (malloc'ed; w * h pixels) so hud_restore can put it back after the frame is shown. If that
+// copy cannot be made the bitmap is not drawn (*saved NULL: hud_restore then does nothing).
 void hud_draw(Framebuffer *fb, const uint32_t *px, int w, int h, int x, int y, uint32_t **saved);
 void hud_restore(Framebuffer *fb, int w, int h, int x, int y, uint32_t *saved);   // frees saved
 

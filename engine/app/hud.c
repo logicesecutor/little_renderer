@@ -49,12 +49,13 @@ uint32_t *hud_text(const char *text, int scale, int *pw, int *ph){
 
 void hud_draw(Framebuffer *fb, const uint32_t *px, int w, int h, int x0, int y0, uint32_t **saved){
     *saved = malloc((size_t)w * h * sizeof(uint32_t));
+    if (!*saved) return;                     // (not drawn: without the copy it could not be taken off)
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++){
             int fx = x0 + x, fy = y0 + y;
             if (fx < 0 || fy < 0 || fx >= fb->w || fy >= fb->h) continue;
             uint32_t *d = &fb->color[(size_t)fy * fb->w + fx], s = px[y * w + x];
-            if (*saved) (*saved)[y * w + x] = *d;
+            (*saved)[y * w + x] = *d;
             unsigned a = s >> 24;
             unsigned r = ((s >> 16 & 255) * a + (*d >> 16 & 255) * (255 - a)) / 255;
             unsigned g = ((s >> 8 & 255) * a + (*d >> 8 & 255) * (255 - a)) / 255;
