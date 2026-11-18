@@ -1,5 +1,6 @@
 // hdr.c - Radiance .hdr (RGBE) reading and writing (see hdr.h)
 #include "formats/hdr.h"
+#include "formats/limits.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -101,7 +102,8 @@ float *hdr_decode(const unsigned char *d, long n, int *pw, int *ph){
     res[end - at] = 0;
     at = end + 1;
     int w = 0, h = 0;
-    if (sscanf(res, "-Y %d +X %d", &h, &w) != 2 || w <= 0 || h <= 0 || w > 65536 || h > 65536){
+    if (sscanf(res, "-Y %d +X %d", &h, &w) != 2 || w <= 0 || h <= 0 || w > 65536 || h > 65536 ||
+        (uint64_t)w * h > LR_MAX_PIXELS){
         fprintf(stderr, "hdr: unsupported orientation or size \"%s\" (only -Y h +X w)\n", res);
         return NULL;
     }

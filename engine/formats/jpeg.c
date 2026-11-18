@@ -4,6 +4,7 @@
 // and the inverse DCT (libjpeg's accurate integer one, jidctint.c), chroma upsampling and
 // colour conversion.
 #include "formats/jpeg.h"
+#include "formats/limits.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -497,6 +498,7 @@ static int frame(Jpeg *j, const uint8_t *s, int len, int marker){
     if (s[0] != 8){ j->err = "only 8-bit samples are supported"; return 1; }
     j->h = be16(s + 1); j->w = be16(s + 3); j->ncomp = s[5];
     if (j->w <= 0 || j->h <= 0){ j->err = "no size (a DNL marker is not supported)"; return 1; }
+    if ((uint64_t)j->w * j->h > LR_MAX_PIXELS){ j->err = "image too large"; return 1; }
     if ((j->ncomp != 1 && j->ncomp != 3) || len < 6 + 3 * j->ncomp){ j->err = "only grey or 3-component images are supported"; return 1; }
     j->progressive = marker == 0xC2;
     j->hmax = j->vmax = 1;

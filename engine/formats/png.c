@@ -1,4 +1,5 @@
 #include "formats/png.h"
+#include "formats/limits.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -678,7 +679,8 @@ unsigned char *png_decode(const unsigned char *data, size_t size, int *pw, int *
             int ok = (ctype == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)) ||
                      (ctype == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8)) ||
                      ((ctype == 2 || ctype == 4 || ctype == 6) && (depth == 8 || depth == 16));
-            if (!ok || d[10] || d[11] || interlace > 1 || w == 0 || h == 0 || w > 1u << 24 || h > 1u << 24){
+            if (!ok || d[10] || d[11] || interlace > 1 || w == 0 || h == 0 || w > 1u << 24 || h > 1u << 24 ||
+                (uint64_t)w * h > LR_MAX_PIXELS){
                 free(idat.p);
                 return fail("unsupported IHDR");
             }
