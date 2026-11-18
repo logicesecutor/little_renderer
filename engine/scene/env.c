@@ -128,7 +128,9 @@ static int make_weights(Env *e){
     e->row_sin = malloc(sizeof(real) * (size_t)h);
     float *lum = malloc(sizeof(float) * (size_t)w * h);
     if (!e->wmax || !e->row_sin || !lum){ free(lum); return 1; }
-    #pragma omp parallel for schedule(static)
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
     for (int y = 0; y < h; y++){
         const float *p = e->rgb + 3 * (size_t)y * w;
         float *l = lum + (size_t)y * w, *o = e->wmax + (size_t)y * w;
@@ -142,7 +144,9 @@ static int make_weights(Env *e){
     }
     // down: lum is free now, the rows' maxima go through it
     memcpy(lum, e->wmax, sizeof(float) * (size_t)w * h);
-    #pragma omp parallel for schedule(static)
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
     for (int y = 0; y < h; y++){
         const float *a = lum + (size_t)(y > 0 ? y - 1 : y) * w, *b = lum + (size_t)y * w, *c = lum + (size_t)(y + 1 < h ? y + 1 : y) * w;
         float *o = e->wmax + (size_t)y * w;
