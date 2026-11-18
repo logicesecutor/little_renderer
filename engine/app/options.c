@@ -159,7 +159,9 @@ void options_usage(Program prog, FILE *f){
         "  -simhz n                   with -sim on: physics steps per second at most; frames between\n"
         "                             steps refine the same image (60; 0: a step every frame)\n"
         "  -denoisemove n             GPU denoiser while things move: its passes, 1-5 (a footprint of\n"
-        "                             5 to 65 pixels), cheaper and less smooth (3; 0: all 5, as still)\n");
+        "                             5 to 65 pixels), cheaper and less smooth (3; 0: all 5, as still)\n"
+        "  -aa fxaa|off               GPU: anti-aliasing of the rasterized frames (not of the path\n"
+        "                             traced ones, already smooth): FXAA, one more pass (fxaa)\n");
     fprintf(f, "\n  -h, --help                 this text\n");
 }
 
@@ -226,6 +228,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->vsync = 1;
     o->sim_hz = 60;
     o->denoise_move = 3;
+    o->aa = 1;
     o->march = march_default_params();
     o->probe = 1;
     o->probe_res = 0;                      // PROBE_RES in a room, PROBE_RES_OPEN under a sky
@@ -297,6 +300,11 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-stats")) o->stats = v;
         else if (!strcmp(a, "-simhz")) o->sim_hz = atof(v);
         else if (!strcmp(a, "-denoisemove")) o->denoise_move = atoi(v);
+        else if (!strcmp(a, "-aa")){
+            if (!strcmp(v, "fxaa")) o->aa = 1;
+            else if (!strcmp(v, "off")) o->aa = 0;
+            else fail(prog, "expected fxaa or off for -aa, got", v);
+        }
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
         else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);

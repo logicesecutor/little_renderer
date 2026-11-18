@@ -29,6 +29,7 @@ double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
+void gpu_view_aa(GpuView *v, int on){ (void)v; (void)on; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
 void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
@@ -71,6 +72,9 @@ GPU_WGSL(COMPOSITE, view_composite);
    of the canvas, its pixels from the buffer, blended over what the composite pass drew. */
 GPU_WGSL(HUD, view_hud);
 
+/* Anti-aliasing of rasterized frames (gpu_view_aa): FXAA over what the composite drew. */
+GPU_WGSL(FXAA, view_fxaa);
+
 /* What volume_update does on the CPU, for media whose densities live on the GPU (and, the
    same way, for all the others): the majorant of every brick (with the voxel of interpolation
    around it), and, with atomics, the box of the voxels with density > 0 and their maximum. */
@@ -106,8 +110,14 @@ struct GpuView {
     WGPURenderPipeline hud_pipe;
     WGPUBindGroupLayout hud_bgl;
     WGPUBuffer hud_u, hud_px;
+    // anti-aliasing (gpu_view_aa): the composite draws into aa_tex, FXAA from it onto the canvas
+    int aa;
+    WGPURenderPipeline fxaa_pipe;
+    WGPUBindGroupLayout fxaa_bgl;
+    WGPUTexture aa_tex;
+    WGPUTextureView aa_view;
     // the bind groups of every frame, kept (gpu_bind_cached)
-    GpuBindCache bc_comp, bc_comp_gpu, bc_hud, bc_stats[GPU_MAX_VOLUMES], bc_finish[GPU_MAX_VOLUMES], bc_light[GPU_MAX_VOLUMES];
+    GpuBindCache bc_comp, bc_comp_gpu, bc_hud, bc_fxaa, bc_stats[GPU_MAX_VOLUMES], bc_finish[GPU_MAX_VOLUMES], bc_light[GPU_MAX_VOLUMES];
     size_t hud_cap;
     int hud_w;                  // its width (0: none)
     // explicit: "auto" would drop the bindings a shader does not read
@@ -348,6 +358,18 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         wgpuShaderModuleRelease(mh);
         wgpuPipelineLayoutRelease(hud_pl);
     }
+    {   // FXAA: the composite's image (a texture) onto the canvas
+        WGPUShaderModule mx = gpu_shader(g, "anti-aliasing", FXAA);
+        v->fxaa_bgl = gpu_layout(g, WGPUShaderStage_Fragment, "T");
+        WGPUPipelineLayout fxaa_pl = make_pipeline_layout(g, v->fxaa_bgl);
+        rd.label = gpu_str("anti-aliasing");
+        rd.layout = fxaa_pl;
+        rd.vertex.module = mx;
+        fs.module = mx;
+        v->fxaa_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+        wgpuShaderModuleRelease(mx);
+        wgpuPipelineLayoutRelease(fxaa_pl);
+    }
     wgpuShaderModuleRelease(mcg);
     wgpuPipelineLayoutRelease(comp_gpu_pl);
     wgpuShaderModuleRelease(ml);
@@ -471,6 +493,24 @@ static void ensure_capture(GpuView *v){
     v->cap_tex = wgpuDeviceCreateTexture(g->device, &td);
     v->cap_row = ((uint32_t)v->w * 4 + 255) & ~255u;
     v->cap_buf = gpu_buffer(g, "screenshot readback", (size_t)v->cap_row * v->h, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+}
+
+// the composite's image when FXAA follows (canvas-sized, the canvas's format)
+static int ensure_aa(GpuView *v){
+    if (v->aa_view) return 1;
+    Gpu *g = v->g;
+    WGPUTextureDescriptor td;
+    memset(&td, 0, sizeof(td));
+    td.label = gpu_str("before anti-aliasing");
+    td.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = (WGPUExtent3D){(uint32_t)v->w, (uint32_t)v->h, 1};
+    td.format = g->surface_format;
+    td.mipLevelCount = 1;
+    td.sampleCount = 1;
+    if (!(v->aa_tex = wgpuDeviceCreateTexture(g->device, &td))) return 0;
+    v->aa_view = wgpuTextureCreateView(v->aa_tex, NULL);
+    return v->aa_view != NULL;
 }
 
 static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
@@ -608,8 +648,9 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
 
 // The second half: the composite pass (pipe, with the frame's inputs in bg, a kept one:
 // gpu_bind_cached) onto the canvas (unless offscreen) and the readback texture if a capture
-// was asked for; then everything is submitted.
-static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pipe, WGPUBindGroup bg){
+// was asked for; then everything is submitted. With aa (and gpu_view_aa on), the composite
+// draws into a texture once, and FXAA from it onto those.
+static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pipe, WGPUBindGroup bg, int aa){
     Gpu *g = v->g;
     int capture = v->cap_pending == 1;
     WGPUSurfaceTexture st;
@@ -635,6 +676,22 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
     memset(&rp, 0, sizeof(rp));
     rp.colorAttachmentCount = 1;
     rp.colorAttachments = &ca;
+    aa = aa && v->aa && v->fxaa_pipe && (view || capture) && ensure_aa(v);
+    if (aa){
+        ca.view = v->aa_view;
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+        wgpuRenderPassEncoderSetPipeline(pass, pipe);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+        wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+        WGPUBindGroupEntry fe;
+        memset(&fe, 0, sizeof(fe));
+        fe.binding = 0;
+        fe.textureView = v->aa_view;
+        pipe = v->fxaa_pipe;
+        bg = gpu_bind_cached(g, &v->bc_fxaa, v->fxaa_bgl, &fe, 1, NULL);
+    }
     for (int target = view ? 0 : 1; target < 1 + capture; target++){
         // target 0: the canvas; target 1: the screenshot texture (same pass, same pixels)
         WGPUTextureView tv = view;
@@ -709,7 +766,7 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
     frame_begin(v, enc, s, p, mp, volumes);
     WGPUBindGroupEntry e[7] = {entry(0, v->frame_u), entry(1, v->dens), entry(2, v->bricks),
                                entry(3, v->light), entry(4, v->color), entry(5, v->depth), entry(6, v->vstat)};
-    frame_end(v, enc, v->comp_pipe, gpu_bind_cached(g, &v->bc_comp, v->comp_bgl, e, 7, NULL));
+    frame_end(v, enc, v->comp_pipe, gpu_bind_cached(g, &v->bc_comp, v->comp_bgl, e, 7, NULL), 1);
 }
 
 // The path tracer's image to show or read back: the samples, or with the denoiser on, the
@@ -759,7 +816,8 @@ static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, 
     e[4].size = e[5].size = 0;
     e[4].textureView = gpu_raster_color(v->raster);
     e[5].textureView = gpu_raster_depth(v->raster);
-    frame_end(v, enc, v->comp_gpu_pipe, gpu_bind_cached(g, &v->bc_comp_gpu, v->comp_gpu_bgl, e, 8, NULL));
+    // (the path tracer's image needs none: its samples are spread over each pixel)
+    frame_end(v, enc, v->comp_gpu_pipe, gpu_bind_cached(g, &v->bc_comp_gpu, v->comp_gpu_bgl, e, 8, NULL), !traced);
     return 1;
 }
 
@@ -1049,6 +1107,7 @@ double gpu_view_bench_denoise(GpuView *v, int n){
 }
 
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ if (v) v->den_move = passes > 0 ? passes : 0; }
+void gpu_view_aa(GpuView *v, int on){ if (v) v->aa = on != 0; }
 
 int gpu_view_trace_denoise(GpuView *v, int on){
     if (!v) return 0;
@@ -1082,7 +1141,7 @@ void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
 
 void gpu_view_destroy(GpuView *v){
     if (!v) return;
-    GpuBindCache *bcs[] = {&v->bc_comp, &v->bc_comp_gpu, &v->bc_hud};
+    GpuBindCache *bcs[] = {&v->bc_comp, &v->bc_comp_gpu, &v->bc_hud, &v->bc_fxaa};
     for (size_t i = 0; i < sizeof(bcs) / sizeof(bcs[0]); i++) gpu_bind_cache_clear(bcs[i]);
     for (int k = 0; k < GPU_MAX_VOLUMES; k++){
         gpu_bind_cache_clear(&v->bc_stats[k]); gpu_bind_cache_clear(&v->bc_finish[k]); gpu_bind_cache_clear(&v->bc_light[k]);
@@ -1096,6 +1155,10 @@ void gpu_view_destroy(GpuView *v){
     if (v->comp_gpu_pipe) wgpuRenderPipelineRelease(v->comp_gpu_pipe);
     if (v->hud_pipe) wgpuRenderPipelineRelease(v->hud_pipe);
     if (v->hud_bgl) wgpuBindGroupLayoutRelease(v->hud_bgl);
+    if (v->fxaa_pipe) wgpuRenderPipelineRelease(v->fxaa_pipe);
+    if (v->fxaa_bgl) wgpuBindGroupLayoutRelease(v->fxaa_bgl);
+    if (v->aa_view) wgpuTextureViewRelease(v->aa_view);
+    if (v->aa_tex){ wgpuTextureDestroy(v->aa_tex); wgpuTextureRelease(v->aa_tex); }
     gpu_raster_destroy(v->raster);
     gpu_trace_destroy(v->trace);
     gpu_denoise_destroy(v->den);

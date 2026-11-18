@@ -579,6 +579,7 @@ static int frame(void){
                    gpu_offscreen(gpu) ? " (offscreen, read back to the canvas)" : "");
             gpu_view_trace_denoise(gview, o.denoise);
             gpu_view_trace_denoise_moving(gview, o.denoise_move);
+            gpu_view_aa(gview, o.aa);
             gpu_view_trace_wavefront(gview, o.wavefront);
             gpu_view_trace_limit(gview, o.spp);
             if (o.gpu_trace < 0){

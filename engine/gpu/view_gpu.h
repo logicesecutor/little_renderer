@@ -32,6 +32,10 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 // w x h pixels 0xAARRGGBB (app/hud.h makes them) at (x, y); argb = NULL removes it.
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y);
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);
+// Anti-aliasing of the rasterized frames shown (and their screenshots): on = FXAA after the
+// composite (gpu/shaders/view/view_fxaa.wgsl), one more full-screen pass; 0 = none (default).
+// Path traced images are left as they are (their samples already cover each pixel).
+void gpu_view_aa(GpuView *v, int on);
 
 // ---- path tracing on the GPU (gpu/trace_gpu.c: the light transport of rt/tracer.c) -------
 // The image builds up sample by sample in a buffer on the GPU, a band of rows at a time so
