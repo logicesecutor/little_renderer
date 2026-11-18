@@ -9,14 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "lr.h"
+#include "test_util.h"
 #include "app/gpu_frame.h"
-
-static int failures;
-
-static void check(const char *what, int ok){
-    printf("  %-60s %s\n", what, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
 
 #define W 96
 #define H 96

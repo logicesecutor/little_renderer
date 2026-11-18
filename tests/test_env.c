@@ -24,15 +24,7 @@
 #include "base/rng.h"
 #include "scene/scene.h"
 #include "rt/tracer.h"
-
-static int failures;
-
-static void check(const char *what, double got, double want, double tol){
-    double err = fabs(got - want);
-    int ok = err <= tol;
-    printf("  %-58s %10.5f  (want %.5f +- %.5f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
+#include "test_util.h"
 
 static double lum(Vec3 c){ return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z; }
 
@@ -76,14 +68,14 @@ static void test_hdr(void){
         double m = fmax(img[3 * i], fmax(img[3 * i + 1], img[3 * i + 2]));
         for (int k = 0; k < 3; k++) if (m > 0) worst = fmax(worst, fabs(back[3 * i + k] - img[3 * i + k]) / m);
     }
-    check("worst error / the pixel's largest channel", worst, 0, 1.0 / 128);
+    check_near("worst error / the pixel's largest channel", worst, 0, 1.0 / 128);
     free(img);
     free(back);
     // the old run-length form, repeat pixels one after another: each shifts the count 8 bits
     // more; past the row's length it is refused (it was undefined shifts)
     static const unsigned char rle[] = {35,63,82,65,68,73,65,78,67,69,10,70,79,82,77,65,84,61,51,50,45,98,105,116,95,114,108,101,95,114,103,98,101,10,10,45,89,32,49,32,43,88,32,52,10,128,128,128,129,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,128,128,128,129,128,128,128,129,128,128,128,129};
     float *bad = hdr_decode(rle, (long)sizeof(rle), &w2, &h2);
-    check("old run-length form, 20 repeats in a row: refused (stderr)", bad == NULL, 1, 0);
+    check_near("old run-length form, 20 repeats in a row: refused (stderr)", bad == NULL, 1, 0);
     free(bad);
 }
 
@@ -92,7 +84,7 @@ static void test_sampling(const char *name, Env *e){
     int grid = 2 * e->h < 1024 ? 2 * e->h : 1024;   // quadrature rows
     double total = sphere_integral(fn_pdf, e, grid);
     snprintf(what, sizeof(what), "%s: the density's integral", name);
-    check(what, total, 1, 0.01);
+    check_near(what, total, 1, 0.01);
     Rng r;
     rng_seed(&r, 11, 3);
     double worst = 0, est = 0;
@@ -110,14 +102,14 @@ static void test_sampling(const char *name, Env *e){
     }
     est /= n;
     snprintf(what, sizeof(what), "%s: worst |env_pdf - stated pdf| / pdf (the others)", name);
-    check(what, worst, 0, 2e-3);
+    check_near(what, worst, 0, 2e-3);
     snprintf(what, sizeof(what), "%s: samples across a pixel border from theirs, %%", name);
-    check(what, 100.0 * off / n, 0, 0.05);
+    check_near(what, 100.0 * off / n, 0, 0.05);
     snprintf(what, sizeof(what), "%s: samples without a density (of %d)", name, n);
-    check(what, bad, 0, 0);
+    check_near(what, bad, 0, 0);
     double quad = sphere_integral(fn_lum, e, grid);
     snprintf(what, sizeof(what), "%s: radiance integral, sampled / quadrature", name);
-    check(what, est / quad, 1, 0.01);
+    check_near(what, est / quad, 1, 0.01);
 }
 
 static double poly_env(Vec3 d){ return 2 + 0.5 * d.x + 0.8 * d.y + 0.6 * d.z * d.z - 0.4 * d.x * d.y; }
@@ -163,7 +155,7 @@ static void test_lookups(void){
         Vec3 irr = env_irradiance(c, dirs[k]);
         worst = fmax(worst, fabs(irr.z - 0.9) / 0.9);
     }
-    check("constant: worst relative error (levels, irradiance)", worst, 0, 2e-3);
+    check_near("constant: worst relative error (levels, irradiance)", worst, 0, 2e-3);
     env_free(c);
 
     int w = 256, h = 128;
@@ -189,8 +181,8 @@ static void test_lookups(void){
             worst_pre = fmax(worst_pre, fabs(got - want_pre) / want_pre);
         }
     }
-    check("degree 2: irradiance, harmonics against quadrature", worst, 0, 0.01);
-    check("degree 2: prefiltered levels against quadrature", worst_pre, 0, 0.02);
+    check_near("degree 2: irradiance, harmonics against quadrature", worst, 0, 0.01);
+    check_near("degree 2: prefiltered levels against quadrature", worst_pre, 0, 0.02);
     env_free(e);
 }
 
@@ -229,7 +221,7 @@ static void test_furnace(void){
             }
             char what[96];
             snprintf(what, sizeof(what), "%s, MIS %s", mats[k].name, mis ? "on" : "off");
-            check(what, sum / n, 1, mats[k].tol);
+            check_near(what, sum / n, 1, mats[k].tol);
             scene_free(&sc);
         }
 }

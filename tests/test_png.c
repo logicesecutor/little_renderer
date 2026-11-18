@@ -15,13 +15,7 @@
 #include "formats/png.h"
 #include "base/clock.h"
 #include "png_tests.h"
-
-static int failures;
-
-static void check(const char *what, int ok){
-    printf("  %-58s %s\n", what, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
+#include "test_util.h"
 
 static void others(void){
     printf("files from other encoders\n");

@@ -144,7 +144,7 @@ $(BIN)/%$(EXE): examples/%.c $(LIB) $(HDR)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 
-$(BIN)/%$(EXE): tests/%.c $(LIB) $(HDR) tests/png_tests.h tests/jpeg_tests.h
+$(BIN)/%$(EXE): tests/%.c $(LIB) $(HDR) $(wildcard tests/*.h)
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) $< $(LIB) -o $@ $(GPULIBS) $(LIBS)
 

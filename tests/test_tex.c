@@ -23,15 +23,7 @@
 #include "scene/texture.h"
 #include "scene/scene.h"
 #include "base/rng.h"
-
-static int failures;
-
-static void check(const char *what, double got, double want, double tol){
-    double err = fabs(got - want);
-    int ok = err <= tol;
-    printf("  %-58s %10.5f  (want %.5f +- %.5f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
+#include "test_util.h"
 
 static void test_mips(void){
     printf("1. mip levels\n");
@@ -50,9 +42,9 @@ static void test_mips(void){
     int halving = 1;
     for (int k = 1; k < t.levels; k++)
         halving &= t.lw[k] == (t.lw[k - 1] > 1 ? t.lw[k - 1] / 2 : 1) && t.lh[k] == (t.lh[k - 1] > 1 ? t.lh[k - 1] / 2 : 1);
-    check("levels of 300 x 37 (300 150 75 37 18 9 4 2 1)", t.levels, 9, 0);
-    check("each level half the one above", halving, 1, 0);
-    check("the last level is 1 x 1", t.lw[t.levels - 1] * t.lh[t.levels - 1], 1, 0);
+    check_near("levels of 300 x 37 (300 150 75 37 18 9 4 2 1)", t.levels, 9, 0);
+    check_near("each level half the one above", halving, 1, 0);
+    check_near("the last level is 1 x 1", t.lw[t.levels - 1] * t.lh[t.levels - 1], 1, 0);
     // the odd sides repeat their last texel, so the mean is that of a slightly different
     // image: compare with a power of two too
     free(px);
@@ -66,8 +58,8 @@ static void test_mips(void){
     texmap_free(&t);
     texmap_make(&t, px, w, h, 1);
     Vec4 last = texmap_texel(&t, t.levels - 1, 0, 0);
-    check("64 x 32 sRGB: last level red = the mean (linear)", last.x, sum[0] / (w * h), 0.01);
-    check("64 x 32 sRGB: last level alpha = the mean", last.w, sum[3] / (w * h), 0.01);
+    check_near("64 x 32 sRGB: last level red = the mean (linear)", last.x, sum[0] / (w * h), 0.01);
+    check_near("64 x 32 sRGB: last level alpha = the mean", last.w, sum[3] / (w * h), 0.01);
     texmap_free(&t);
     // a 2 x 2 black and white checker
     unsigned char ck[16];
@@ -76,11 +68,11 @@ static void test_mips(void){
         ck[4 * i] = ck[4 * i + 1] = ck[4 * i + 2] = c; ck[4 * i + 3] = 255;
     }
     texmap_make(&t, ck, 2, 2, 1);
-    check("black / white checker, sRGB: level 1 = half the light", texmap_texel(&t, 1, 0, 0).x, 0.5, 0.005);
-    check("... stored as sRGB 188", t.px[t.at[1]] & 255, 188, 1);
+    check_near("black / white checker, sRGB: level 1 = half the light", texmap_texel(&t, 1, 0, 0).x, 0.5, 0.005);
+    check_near("... stored as sRGB 188", t.px[t.at[1]] & 255, 188, 1);
     texmap_free(&t);
     texmap_make(&t, ck, 2, 2, 0);
-    check("the same as data (not sRGB): level 1 = 0.5", texmap_texel(&t, 1, 0, 0).x, 0.5, 0.005);
+    check_near("the same as data (not sRGB): level 1 = 0.5", texmap_texel(&t, 1, 0, 0).x, 0.5, 0.005);
     texmap_free(&t);
     free(px);
 }
@@ -112,15 +104,15 @@ static void test_lookups(void){
         Vec4 a = texmap_sample(&t, u, v, lod), b = texmap_sample(&t, u + 1, v - 2, lod), c = texmap_sample(&t, u - 3, v + 5, lod);
         e_wrap = fmax(e_wrap, fmax(fabs(a.y - b.y), fabs(a.y - c.y)));
     }
-    check("bilinear at texel centres = the texels", e_centre, 0, 1e-5);
-    check("bilinear halfway = the mean of the two (and wraps)", e_half, 0, 1e-5);
-    check("u + 1, v - 2 (and u - 3, v + 5) read the same", e_wrap, 0, 2e-3);
-    check("lod: 1 texel per pixel", texmap_lod(&t, 1.0f / w, 0, 0, 1.0f / h), 0, 1e-5);
-    check("lod: 4 texels per pixel across", texmap_lod(&t, 4.0f / w, 0, 0, 1.0f / h), 2, 1e-4);
-    check("lod: the longer side (8 down, 2 across)", texmap_lod(&t, 2.0f / w, 0, 0, 8.0f / h), 3, 1e-4);
-    check("lod: under a texel -> level 0", texmap_lod(&t, 0.1f / w, 0, 0, 0.1f / h), 0, 0);
+    check_near("bilinear at texel centres = the texels", e_centre, 0, 1e-5);
+    check_near("bilinear halfway = the mean of the two (and wraps)", e_half, 0, 1e-5);
+    check_near("u + 1, v - 2 (and u - 3, v + 5) read the same", e_wrap, 0, 2e-3);
+    check_near("lod: 1 texel per pixel", texmap_lod(&t, 1.0f / w, 0, 0, 1.0f / h), 0, 1e-5);
+    check_near("lod: 4 texels per pixel across", texmap_lod(&t, 4.0f / w, 0, 0, 1.0f / h), 2, 1e-4);
+    check_near("lod: the longer side (8 down, 2 across)", texmap_lod(&t, 2.0f / w, 0, 0, 8.0f / h), 3, 1e-4);
+    check_near("lod: under a texel -> level 0", texmap_lod(&t, 0.1f / w, 0, 0, 0.1f / h), 0, 0);
     Vec4 top = texmap_texel(&t, t.levels - 1, 0, 0);
-    check("trilinear past the last level = the last level", texmap_sample(&t, 0.3f, 0.7f, 20).y, top.y, 1e-5);
+    check_near("trilinear past the last level = the last level", texmap_sample(&t, 0.3f, 0.7f, 20).y, top.y, 1e-5);
     texmap_free(&t);
 }
 
@@ -153,8 +145,8 @@ static void test_tangents_normals(void){
             Vec3 b = v_scale(v_cross(vec3(0, 0, 1), vec3(tg[i].x, tg[i].y, tg[i].z)), tg[i].w);
             ew = fmax(ew, fabs(b.y - 1));                  // up the image = +y
         }
-        check(mirror ? "mirrored: tangent along +u (= -x)" : "tangent along +u (= +x)", ex, 0, 1e-5);
-        check(mirror ? "mirrored: w (n x t) up the image" : "w (n x t) up the image", ew, 0, 1e-5);
+        check_near(mirror ? "mirrored: tangent along +u (= -x)" : "tangent along +u (= +x)", ex, 0, 1e-5);
+        check_near(mirror ? "mirrored: w (n x t) up the image" : "w (n x t) up the image", ew, 0, 1e-5);
     }
 
     printf("4. normal maps\n");
@@ -172,10 +164,10 @@ static void test_tangents_normals(void){
         scene_compute_tangents(tr, 2, uv, tg, 0, 4);
         m.tex_normal = 1;
         Vec3 n = material_normal(&s, &m, vec2(0.5f, 0.5f), MATERIAL_LOD0, vec3(0, 0, 1), tg[0]);
-        check(mirror ? "mirrored: tilted map bends the normal up (+y)" : "tilted map bends the normal up (+y)", n.y > 0.3 && fabs(n.x) < 0.01, 1, 0);
+        check_near(mirror ? "mirrored: tilted map bends the normal up (+y)" : "tilted map bends the normal up (+y)", n.y > 0.3 && fabs(n.x) < 0.01, 1, 0);
         m.tex_normal = 2;
         n = material_normal(&s, &m, vec2(0.5f, 0.5f), MATERIAL_LOD0, vec3(0, 0, 1), tg[0]);
-        check(mirror ? "mirrored: flat map leaves it" : "flat map leaves it", fabs(n.x) + fabs(n.y) + fabs(n.z - 1), 0, 2e-2);
+        check_near(mirror ? "mirrored: flat map leaves it" : "flat map leaves it", fabs(n.x) + fabs(n.y) + fabs(n.z - 1), 0, 2e-2);
     }
     texmap_free(&maps[0]); texmap_free(&maps[1]);
     // the bricks: rows of 64 texels; in row 1, at x = 128 (between its joints), the green
@@ -188,8 +180,8 @@ static void test_tangents_normals(void){
         topg += texmap_texel(&b, 0, 128, rh + y).y - 0.5;
         botg += texmap_texel(&b, 0, 128, 2 * rh - 1 - y).y - 0.5;
     }
-    check("bricks: the top of a brick leans up the image", topg > 0.5, 1, 0);
-    check("bricks: its bottom leans down", botg < -0.5, 1, 0);
+    check_near("bricks: the top of a brick leans up the image", topg > 0.5, 1, 0);
+    check_near("bricks: its bottom leans down", botg < -0.5, 1, 0);
     texmap_free(&b);
 }
 
@@ -199,20 +191,20 @@ static void test_materials(void){
     int c = scene_texture(s, "checker", 1);
     int c2 = scene_texture(s, "checker", 1);
     int mr = scene_texture(s, "plate_mr", 0);
-    check("scene_texture: a name is loaded once", c == c2 && c > 0 && mr > 0 && s->ntexmaps == 2, 1, 0);
-    check("scene_texture: an unknown name -> 0", scene_texture(s, "no such texture", 1), 0, 0);
+    check_near("scene_texture: a name is loaded once", c == c2 && c > 0 && mr > 0 && s->ntexmaps == 2, 1, 0);
+    check_near("scene_texture: an unknown name -> 0", scene_texture(s, "no such texture", 1), 0, 0);
     Material m = material_pbr(vec3(0.5f, 1, 1), 1, 1, 1.5f, 0);
     m.tex_base = c; m.tex_mr = mr;
     TexMap *tc = &s->texmaps[c - 1], *tm = &s->texmaps[mr - 1];
     Vec2 at = vec2(0.37f, 0.61f);
     Material a = material_at(s, &m, at, MATERIAL_LOD0);
     Vec4 tex = texmap_sample(tc, at.x, at.y, 0), mrv = texmap_sample(tm, at.x, at.y, 0);
-    check("base = texture x factor", a.albedo.x, 0.5 * tex.x, 1e-4);
-    check("roughness = green", a.roughness, mrv.y, 1e-4);
-    check("metallic = blue", a.metallic, mrv.z, 1e-4);
+    check_near("base = texture x factor", a.albedo.x, 0.5 * tex.x, 1e-4);
+    check_near("roughness = green", a.roughness, mrv.y, 1e-4);
+    check_near("metallic = blue", a.metallic, mrv.z, 1e-4);
     m.uv_scale = 4;
     a = material_at(s, &m, vec2(at.x / 4, at.y / 4), MATERIAL_LOD0);
-    check("uv_scale: (u, v) / 4 with uv_scale 4 reads (u, v)", a.albedo.x, 0.5 * tex.x, 1e-4);
+    check_near("uv_scale: (u, v) / 4 with uv_scale 4 reads (u, v)", a.albedo.x, 0.5 * tex.x, 1e-4);
     scene_free(s);
     free(s);
 }

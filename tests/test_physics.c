@@ -9,27 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lr.h"
-
-static int failures = 0;
-
-static void check(const char *what, double got, double want, double tol){
-    double err = got - want;
-    if (err < 0) err = -err;
-    int ok = err <= tol;
-    printf("  %-48s %12.4f  (want %.4f +- %.4f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
-
-// the fastest point of any body (center speed + spin * size), units / s
-static double max_speed(const RigidWorld *w){
-    double m = 0;
-    for (int i = 0; i < w->nbodies; i++){
-        const Body *b = &w->bodies[i];
-        double s = v_len(b->vel) + v_len(b->angvel) * v_len(b->half);
-        if (s > m) m = s;
-    }
-    return m;
-}
+#include "test_util.h"
+#include "test_phys_util.h"
 
 static void test_free_fall(void){
     printf("free fall\n");
@@ -40,8 +21,8 @@ static void test_free_fall(void){
     const real dt = 1.0 / 240;
     for (int i = 0; i < 240; i++) rigid_step(&w, dt);
     // semi-implicit Euler is exact for the velocity and off by g dt t / 2 for the position
-    check("velocity after 1 s", w.bodies[0].vel.y, -981, 0.05);
-    check("height after 1 s", w.bodies[0].pos.y, 1000 - 0.5 * 981, 981 * dt * 0.5 + 0.1);
+    check_near("velocity after 1 s", w.bodies[0].vel.y, -981, 0.05);
+    check_near("height after 1 s", w.bodies[0].pos.y, 1000 - 0.5 * 981, 981 * dt * 0.5 + 0.1);
     rigid_free(&w);
 }
 
@@ -67,7 +48,7 @@ static void test_bounce(void){
         if (bounced && w.bodies[i].vel.y < 0) break;
     }
     // drop height 400 (center 410, radius 10); comes back to 100 above the floor
-    check("peak after the bounce (center)", top, 10 + 0.25 * 400, 4);
+    check_near("peak after the bounce (center)", top, 10 + 0.25 * 400, 4);
     rigid_free(&w);
 }
 
@@ -90,11 +71,11 @@ static void test_momentum(void){
     for (int k = 0; k < 600; k++) rigid_step(&w, 1.0 / 600);
     Vec3 p1 = rigid_momentum(&w);
     real scale = v_len(p0) + 1e5;
-    check("momentum x change / total", (p1.x - p0.x) / scale, 0, 1e-4);
-    check("momentum y change / total", (p1.y - p0.y) / scale, 0, 1e-4);
-    check("momentum z change / total", (p1.z - p0.z) / scale, 0, 1e-4);
+    check_near("momentum x change / total", (p1.x - p0.x) / scale, 0, 1e-4);
+    check_near("momentum y change / total", (p1.y - p0.y) / scale, 0, 1e-4);
+    check_near("momentum z change / total", (p1.z - p0.z) / scale, 0, 1e-4);
     // collisions happened: the first two spheres turned around
-    check("sphere a turned around (vx < 0)", w.bodies[a].vel.x < 0, 1, 0);
+    check_near("sphere a turned around (vx < 0)", w.bodies[a].vel.x < 0, 1, 0);
     rigid_free(&w);
 }
 
@@ -107,10 +88,10 @@ static void test_stack(void){
     for (int k = 0; k < 3; k++) rigid_add_box(&w, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
     int s = rigid_add_sphere(&w, vec3(278, 180 + 25, 278), 25, 1);
     for (int k = 0; k < 4 * 240 * 3; k++) rigid_step(&w, 1.0 / 960);
-    check("top box height", w.bodies[2].pos.y, 150, 1.5);
-    check("top box drift sideways", r_fabs(w.bodies[2].pos.x - 278) + r_fabs(w.bodies[2].pos.z - 278), 0, 1);
-    check("ball height", w.bodies[s].pos.y, 205, 1.5);
-    check("fastest point (at rest), units / s", max_speed(&w), 0, 1);
+    check_near("top box height", w.bodies[2].pos.y, 150, 1.5);
+    check_near("top box drift sideways", r_fabs(w.bodies[2].pos.x - 278) + r_fabs(w.bodies[2].pos.z - 278), 0, 1);
+    check_near("ball height", w.bodies[s].pos.y, 205, 1.5);
+    check_near("fastest point (at rest), units / s", max_speed(&w), 0, 1);
     rigid_free(&w);
 }
 
@@ -125,8 +106,8 @@ static void test_box_lands_flat(void){
     // resting on a face: the center is one of the half sizes above the floor
     real y = w.bodies[b].pos.y;
     real best = r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35)));
-    check("center height - nearest half size", best, 0, 1.5);
-    check("fastest point (at rest), units / s", max_speed(&w), 0, 1);
+    check_near("center height - nearest half size", best, 0, 1.5);
+    check_near("fastest point (at rest), units / s", max_speed(&w), 0, 1);
     rigid_free(&w);
 }
 
@@ -137,7 +118,7 @@ static void test_sleep(void){
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     for (int k = 0; k < 3; k++) rigid_add_box(&w, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
     for (int k = 0; k < 2 * 240; k++) rigid_steps(&w, 1.0 / 240, 4, NULL);
-    check("asleep after 2 s (of 3)", rigid_sleeping(&w), 3, 0);
+    check_near("asleep after 2 s (of 3)", rigid_sleeping(&w), 3, 0);
     int d = rigid_add_box(&w, vec3(278, 400, 278), vec3(40, 30, 40), quat_identity(), 1);
     int fewest = 3;
     for (int k = 0; k < 4 * 240; k++){
@@ -145,13 +126,13 @@ static void test_sleep(void){
         if (k < 240 && rigid_sleeping(&w) < fewest) fewest = rigid_sleeping(&w);
     }
     // (those it lands on wake; the bottom box, touched only by still ones, may sleep on)
-    check("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
-    check("asleep again 4 s later (of 4)", rigid_sleeping(&w), 4, 0);
-    check("the dropped box on top: height", w.bodies[d].pos.y, 210, 1.5);
-    check("the stack's top box: height", w.bodies[2].pos.y, 150, 1.5);
+    check_near("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
+    check_near("asleep again 4 s later (of 4)", rigid_sleeping(&w), 4, 0);
+    check_near("the dropped box on top: height", w.bodies[d].pos.y, 210, 1.5);
+    check_near("the stack's top box: height", w.bodies[2].pos.y, 150, 1.5);
     body_apply_impulse(&w.bodies[0], vec3(1e5, 0, 0), w.bodies[0].pos);
     rigid_steps(&w, 1.0 / 240, 4, NULL);
-    check("an impulse wakes a body", w.bodies[0].sleeping, 0, 0);
+    check_near("an impulse wakes a body", w.bodies[0].sleeping, 0, 0);
     rigid_free(&w);
 }
 
@@ -178,8 +159,8 @@ static void test_fast(void){
         missed += w.bodies[d].pos.x > w.bodies[e].pos.x;
         rigid_free(&w);
     }
-    check("bodies through the slab (of 6)", through, 0, 0);
-    check("head-on pairs that passed each other (of 3)", missed, 0, 0);
+    check_near("bodies through the slab (of 6)", through, 0, 0);
+    check_near("head-on pairs that passed each other (of 3)", missed, 0, 0);
 }
 
 // A pile three times as tall as it is wide (400 balls, boxes and tori dropped into a room
@@ -205,7 +186,7 @@ static void test_tall_pile(void){
         else rigid_add_hull_body(&w, geom, xform_make(p, quat_to_mat3(quat_axis_angle(vec3(1, 0, 0), rng_real(&r) * 3)).m, 1), 1);
     }
     for (int s = 0; s < 30 * 60; s++) rigid_steps(&w, 1.0 / 60, 4, NULL);
-    check("asleep after 30 s (of 400)", rigid_sleeping(&w), 400, 0);
+    check_near("asleep after 30 s (of 400)", rigid_sleeping(&w), 400, 0);
     rigid_free(&w);
     scene_free(&sc);
 }
@@ -231,7 +212,7 @@ static void test_fluid(void){
     real m0 = fluid_total_density(f);
     fluid_step(f, 1.0 / 60);
     // relative to the velocity scale / cell size, the divergence left must be small
-    check("max |div u| * h / |u|max after projection", f->max_divergence * f->h / 300, 0, 0.02);
+    check_near("max |div u| * h / |u|max after projection", f->max_divergence * f->h / 300, 0, 0.02);
     // a steady wind carries the cloud right without changing its amount much
     Fluid *g = fluid_create(room, 555.0 / 24, v);
     g->open = FLUID_OPEN_XLO | FLUID_OPEN_XHI;
@@ -248,8 +229,8 @@ static void test_fluid(void){
                 sx += d * volume_voxel_center(v, x, y, z).x;
                 sm += d;
             }
-    check("cloud center x after 1 s of 100/s wind", sx / sm, 250, 15);
-    check("cloud amount kept (ratio)", fluid_total_density(g) / m0, 1, 0.1);
+    check_near("cloud center x after 1 s of 100/s wind", sx / sm, 250, 15);
+    check_near("cloud amount kept (ratio)", fluid_total_density(g) / m0, 1, 0.1);
     fluid_free(f);
     fluid_free(g);
     volume_free(v);
@@ -264,46 +245,15 @@ static void test_fluid(void){
     e->pressure_cycles = 10;
     fluid_add_expansion(e, vec3(278, 278, 278), 100, 30, 1);
     fluid_step(e, 1.0 / 60);
-    check("multigrid: divergence left / rate (10 V-cycles)", e->max_divergence / 30, 0, 0.01);
+    check_near("multigrid: divergence left / rate (10 V-cycles)", e->max_divergence / 30, 0, 0.01);
     double want = 30.0 * 100 * 100 * 100 * (2.0 / 15) / (180.0 * 180.0);
     double up = fluid_velocity(e, vec3(278, 278 + 180, 278)).y, side = fluid_velocity(e, vec3(278 - 180, 278, 278)).x;
-    check("expansion: outward speed at 180 (up) / theory", up / want, 1, 0.2);
-    check("expansion: outward speed at 180 (side) / theory", -side / want, 1, 0.2);
+    check_near("expansion: outward speed at 180 (up) / theory", up / want, 1, 0.2);
+    check_near("expansion: outward speed at 180 (side) / theory", -side / want, 1, 0.2);
     fluid_free(e);
 }
 
 // ---- mesh bodies (phys/convex.h) ----
-
-// the 12 triangles of a box (half sizes h), turned by r and moved to c, in a growing array
-static int box_tris(Triangle *t, Vec3 h, Mat3 r, Vec3 c){
-    Vec3 p[8];
-    for (int i = 0; i < 8; i++)
-        p[i] = v_add(c, mat3_mul_vec(r, vec3((i & 1) ? h.x : -h.x, (i & 2) ? h.y : -h.y, (i & 4) ? h.z : -h.z)));
-    static const int q[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
-    int n = 0;
-    for (int f = 0; f < 6; f++){
-        Vec3 a = p[q[f][0]], b = p[q[f][1]], cc = p[q[f][2]], d = p[q[f][3]];
-        t[n].q = a; t[n].u = v_sub(b, a); t[n].v = v_sub(cc, a); t[n].n[0] = -1; t[n].material = 0; n++;
-        t[n].q = a; t[n].u = v_sub(cc, a); t[n].v = v_sub(d, a); t[n].n[0] = -1; t[n].material = 0; n++;
-    }
-    return n;
-}
-
-// a torus around the y axis (radii R, r), nu x nv quads
-static int torus_tris(Triangle *t, real R, real r, int nu, int nv){
-    int n = 0;
-    for (int i = 0; i < nu; i++)
-        for (int j = 0; j < nv; j++){
-            Vec3 p[4];
-            for (int k = 0; k < 4; k++){
-                real u = (i + (k == 1 || k == 2)) * 2 * (real)PI / nu, v = (j + (k >= 2)) * 2 * (real)PI / nv;
-                p[k] = vec3((R + r * r_cos(v)) * r_cos(u), r * r_sin(v), (R + r * r_cos(v)) * r_sin(u));
-            }
-            t[n].q = p[0]; t[n].u = v_sub(p[1], p[0]); t[n].v = v_sub(p[2], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
-            t[n].q = p[0]; t[n].u = v_sub(p[2], p[0]); t[n].v = v_sub(p[3], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
-        }
-    return n;
-}
 
 static void test_hulls(void){
     printf("mesh bodies: hulls (mass, landing, stacking), a mesh collider, the air's view of them\n");
@@ -317,11 +267,11 @@ static void test_hulls(void){
     w.sleep = 0;           // the solver alone (sleeping: test_sleep)
     rigid_set_room(&w, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     int g = rigid_geom_hull(&w, tri, n, 0);
-    check("hull made", g >= 0, 1, 0);
+    check_near("hull made", g >= 0, 1, 0);
     if (g < 0){ rigid_free(&w); return; }
     const RigidGeom *G = w.geoms[g];
-    check("hull volume / box volume", G->volume / (8 * h.x * h.y * h.z), 1, 1e-3);
-    check("hull centre of mass (moved by 10,30,-5)", v_len(v_sub(G->com, vec3(10, 30, -5))), 0, 1e-2);
+    check_near("hull volume / box volume", G->volume / (8 * h.x * h.y * h.z), 1, 1e-3);
+    check_near("hull centre of mass (moved by 10,30,-5)", v_len(v_sub(G->com, vec3(10, 30, -5))), 0, 1e-2);
     // principal moments of a box with density 1: m/3 (b^2 + c^2)
     real m = 8 * h.x * h.y * h.z, mo[3] = {m / 3 * (h.y * h.y + h.z * h.z), m / 3 * (h.x * h.x + h.z * h.z), m / 3 * (h.x * h.x + h.y * h.y)};
     real got[3] = {G->inertia.x, G->inertia.y, G->inertia.z}, err = 0;
@@ -330,14 +280,14 @@ static void test_hulls(void){
         for (int k = 0; k < 3; k++) best = r_fmin(best, r_fabs(got[i] - mo[k]) / mo[k]);
         err = r_fmax(err, best);
     }
-    check("principal moments vs the box's (worst rel. error)", err, 0, 2e-3);
+    check_near("principal moments vs the box's (worst rel. error)", err, 0, 2e-3);
     // it falls tilted and lands on a face, like a box would
     Xform place = xform_make(vec3(278, 300, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0.3, 0.5), 0.9)).m, 1);
     int b = rigid_add_hull_body(&w, g, place, 1);
     for (int k = 0; k < 4 * 240 * 3; k++) rigid_step(&w, 1.0 / 960);
     real y = w.bodies[b].pos.y;
     real best = r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35)));
-    check("hull at rest: centre height - nearest half size", best, 0, 1.5);
+    check_near("hull at rest: centre height - nearest half size", best, 0, 1.5);
     // a second one, dropped flat on top of it
     Vec3 top = w.bodies[b].pos;
     Mat3 rb = quat_to_mat3(w.bodies[b].rot);
@@ -346,9 +296,9 @@ static void test_hulls(void){
     int b2 = rigid_add_hull_body(&w, g, on, 1);
     (void)rb;
     for (int k = 0; k < 4 * 240 * 3; k++) rigid_step(&w, 1.0 / 960);
-    check("second hull rests on the first: height difference", w.bodies[b2].pos.y - w.bodies[b].pos.y, 2 * y, 1.5);
-    check("second hull drift sideways", r_fabs(w.bodies[b2].pos.x - top.x) + r_fabs(w.bodies[b2].pos.z - top.z), 0, 2);
-    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    check_near("second hull rests on the first: height difference", w.bodies[b2].pos.y - w.bodies[b].pos.y, 2 * y, 1.5);
+    check_near("second hull drift sideways", r_fabs(w.bodies[b2].pos.x - top.x) + r_fabs(w.bodies[b2].pos.z - top.z), 0, 2);
+    check_near("fastest point (at rest), units / s", max_speed(&w), 0, 2);
     // the air: the hull's cells inside it
     int inside = 0, tot = 0;
     for (int k = 0; k < 2000; k++){
@@ -361,7 +311,7 @@ static void test_hulls(void){
         inside += body_contains(&probe, xform_point(&xf, v_add(mat3_mul_vec(turn, lp), vec3(10, 30, -5))));
         tot++;
     }
-    check("points of the mesh inside the body (air cells)", (double)inside / tot, 1, 0.02);
+    check_near("points of the mesh inside the body (air cells)", (double)inside / tot, 1, 0.02);
     rigid_free(&w);
 
     // a torus: its hull is a puck that lands flat (centre at the tube radius)
@@ -372,8 +322,8 @@ static void test_hulls(void){
     g = rigid_geom_hull(&w, tri, n, 0);
     b = rigid_add_hull_body(&w, g, xform_make(vec3(278, 200, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0, 0.3), 0.5)).m, 1), 1);
     for (int k = 0; k < 4 * 240 * 4; k++) rigid_step(&w, 1.0 / 960);
-    check("torus hull lands flat: centre height", w.bodies[b].pos.y, 20, 1.5);
-    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    check_near("torus hull lands flat: centre height", w.bodies[b].pos.y, 20, 1.5);
+    check_near("fastest point (at rest), units / s", max_speed(&w), 0, 2);
     rigid_free(&w);
 
     // a fixed mesh (a block of 12 triangles, top at y = 100) with a ball and a hull on it,
@@ -390,10 +340,10 @@ static void test_hulls(void){
     int hb = rigid_add_hull_body(&w, g, xform_make(vec3(330, 250, 300), quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), 0.4)).m, 1), 1);
     int bx = rigid_add_box(&w, vec3(278, 400, 220), vec3(20, 20, 20), quat_identity(), 1);
     for (int k = 0; k < 4 * 240 * 4; k++) rigid_step(&w, 1.0 / 960);
-    check("ball on the mesh: centre height", w.bodies[s].pos.y, 125, 1.5);
-    check("hull on the mesh: centre height", w.bodies[hb].pos.y, 120, 1.5);
-    check("box on the mesh: centre height", w.bodies[bx].pos.y, 120, 1.5);
-    check("fastest point (at rest), units / s", max_speed(&w), 0, 2);
+    check_near("ball on the mesh: centre height", w.bodies[s].pos.y, 125, 1.5);
+    check_near("hull on the mesh: centre height", w.bodies[hb].pos.y, 120, 1.5);
+    check_near("box on the mesh: centre height", w.bodies[bx].pos.y, 120, 1.5);
+    check_near("fastest point (at rest), units / s", max_speed(&w), 0, 2);
     rigid_free(&w);
 
     rigid_init(&w);
@@ -404,7 +354,7 @@ static void test_hulls(void){
     int cells = 0;
     for (int i = 0; i < OCC_WORDS; i++) cells += __builtin_popcount(T->occ[i]);
     real cell = 8 * T->half.x * T->half.y * T->half.z / (OCC_RES * OCC_RES * OCC_RES);
-    check("torus inside / 2 pi^2 R r^2", cells * cell / (2 * PI * PI * 60 * 400), 1, 0.05);
+    check_near("torus inside / 2 pi^2 R r^2", cells * cell / (2 * PI * PI * 60 * 400), 1, 0.05);
     rigid_free(&w);
 
     // two hulls collide in empty space: momentum is kept
@@ -425,8 +375,8 @@ static void test_hulls(void){
     real scale = w.bodies[a1].mass * v_len(w.bodies[a1].vel) + w.bodies[a2].mass * v_len(w.bodies[a2].vel);
     for (int k = 0; k < 960; k++) rigid_step(&w, 1.0 / 960);
     Vec3 p1 = rigid_momentum(&w);
-    check("hulls: momentum change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
-    check("hulls: they met (first one slowed down)", w.bodies[a1].vel.x < 150, 1, 0);
+    check_near("hulls: momentum change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
+    check_near("hulls: they met (first one slowed down)", w.bodies[a1].vel.x < 150, 1, 0);
     rigid_free(&w);
 }
 

@@ -14,27 +14,10 @@
 #include "lr.h"
 #include "gpu/gpu.h"
 #include "gpu/rigid_gpu.h"
+#include "test_util.h"
+#include "test_phys_util.h"
 
-static int failures = 0;
 static Gpu *g;
-
-static void check(const char *what, double got, double want, double tol){
-    double err = got - want;
-    if (err < 0) err = -err;
-    int ok = err <= tol;
-    printf("  %-52s %12.4f  (want %.4f +- %.4f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
-
-static double max_speed(const RigidWorld *w){
-    double m = 0;
-    for (int i = 0; i < w->nbodies; i++){
-        const Body *b = &w->bodies[i];
-        double s = v_len(b->vel) + v_len(b->angvel) * v_len(b->half);
-        if (s > m) m = s;
-    }
-    return m;
-}
 
 // a world (no air) whose bodies the GPU steps, or the CPU (gpu = 0)
 typedef struct { PhysWorld pw; GpuRigid *gr; } World;
@@ -70,8 +53,8 @@ static void test_basics(void){
     rigid_add_sphere(&w.pw.rigid, vec3(0, 1000, 0), 10, 1);
     world_start(&w, 1);
     world_run(&w, 1.0);
-    check("free fall: velocity after 1 s", w.pw.rigid.bodies[0].vel.y, -981, 0.5);
-    check("free fall: height after 1 s", w.pw.rigid.bodies[0].pos.y, 1000 - 0.5 * 981, 1.5);
+    check_near("free fall: velocity after 1 s", w.pw.rigid.bodies[0].vel.y, -981, 0.5);
+    check_near("free fall: height after 1 s", w.pw.rigid.bodies[0].pos.y, 1000 - 0.5 * 981, 1.5);
     world_free(&w);
 
     world_init(&w, 1);
@@ -90,7 +73,7 @@ static void test_basics(void){
         if (s->vel.y > 0) bounced = 1;
         if (bounced && s->pos.y > top) top = s->pos.y;
     }
-    check("bounce: peak after the bounce (center)", top, 10 + 0.25 * 400, 4);
+    check_near("bounce: peak after the bounce (center)", top, 10 + 0.25 * 400, 4);
     world_free(&w);
 
     world_init(&w, 1);
@@ -109,8 +92,8 @@ static void test_basics(void){
     world_start(&w, 1);
     world_run(&w, 1.0);
     Vec3 p1 = rigid_momentum(&w.pw.rigid);
-    check("momentum: change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
-    check("momentum: sphere a turned around (vx < 0)", w.pw.rigid.bodies[a].vel.x < 0, 1, 0);
+    check_near("momentum: change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
+    check_near("momentum: sphere a turned around (vx < 0)", w.pw.rigid.bodies[a].vel.x < 0, 1, 0);
     world_free(&w);
 
     world_init(&w, 1);
@@ -119,10 +102,10 @@ static void test_basics(void){
     int s = rigid_add_sphere(&w.pw.rigid, vec3(278, 180 + 25, 278), 25, 1);
     world_start(&w, 1);
     world_run(&w, 3.0);
-    check("stack: top box height", w.pw.rigid.bodies[2].pos.y, 150, 1.5);
-    check("stack: top box drift sideways", r_fabs(w.pw.rigid.bodies[2].pos.x - 278) + r_fabs(w.pw.rigid.bodies[2].pos.z - 278), 0, 1);
-    check("stack: ball height", w.pw.rigid.bodies[s].pos.y, 205, 1.5);
-    check("stack: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 1);
+    check_near("stack: top box height", w.pw.rigid.bodies[2].pos.y, 150, 1.5);
+    check_near("stack: top box drift sideways", r_fabs(w.pw.rigid.bodies[2].pos.x - 278) + r_fabs(w.pw.rigid.bodies[2].pos.z - 278), 0, 1);
+    check_near("stack: ball height", w.pw.rigid.bodies[s].pos.y, 205, 1.5);
+    check_near("stack: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 1);
     world_free(&w);
 
     world_init(&w, 1);
@@ -131,40 +114,9 @@ static void test_basics(void){
     world_start(&w, 1);
     world_run(&w, 4.0);
     real y = w.pw.rigid.bodies[b].pos.y;
-    check("tilted box: center height - nearest half size", r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35))), 0, 1.5);
-    check("tilted box: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 1);
+    check_near("tilted box: center height - nearest half size", r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35))), 0, 1.5);
+    check_near("tilted box: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 1);
     world_free(&w);
-}
-
-// the 12 triangles of a box (half sizes h), turned by r and moved to c
-static int box_tris(Triangle *t, Vec3 h, Mat3 r, Vec3 c){
-    Vec3 p[8];
-    for (int i = 0; i < 8; i++)
-        p[i] = v_add(c, mat3_mul_vec(r, vec3((i & 1) ? h.x : -h.x, (i & 2) ? h.y : -h.y, (i & 4) ? h.z : -h.z)));
-    static const int q[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
-    int n = 0;
-    for (int f = 0; f < 6; f++){
-        Vec3 a = p[q[f][0]], b = p[q[f][1]], cc = p[q[f][2]], d = p[q[f][3]];
-        t[n].q = a; t[n].u = v_sub(b, a); t[n].v = v_sub(cc, a); t[n].n[0] = -1; t[n].material = 0; n++;
-        t[n].q = a; t[n].u = v_sub(cc, a); t[n].v = v_sub(d, a); t[n].n[0] = -1; t[n].material = 0; n++;
-    }
-    return n;
-}
-
-// a torus around the y axis (radii R, r), nu x nv quads
-static int torus_tris(Triangle *t, real R, real r, int nu, int nv){
-    int n = 0;
-    for (int i = 0; i < nu; i++)
-        for (int j = 0; j < nv; j++){
-            Vec3 p[4];
-            for (int k = 0; k < 4; k++){
-                real u = (i + (k == 1 || k == 2)) * 2 * (real)PI / nu, v = (j + (k >= 2)) * 2 * (real)PI / nv;
-                p[k] = vec3((R + r * r_cos(v)) * r_cos(u), r * r_sin(v), (R + r * r_cos(v)) * r_sin(u));
-            }
-            t[n].q = p[0]; t[n].u = v_sub(p[1], p[0]); t[n].v = v_sub(p[2], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
-            t[n].q = p[0]; t[n].u = v_sub(p[2], p[0]); t[n].v = v_sub(p[3], p[0]); t[n].n[0] = -1; t[n].material = 0; n++;
-        }
-    return n;
 }
 
 static void test_meshes(void){
@@ -181,15 +133,15 @@ static void test_meshes(void){
     world_start(&w, 1);
     world_run(&w, 3.0);
     real y = w.pw.rigid.bodies[b].pos.y;
-    check("hull (box mesh): centre height - nearest half size", r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35))), 0, 1.5);
+    check_near("hull (box mesh): centre height - nearest half size", r_fmin(r_fabs(y - 50), r_fmin(r_fabs(y - 20), r_fabs(y - 35))), 0, 1.5);
     Vec3 top = w.pw.rigid.bodies[b].pos;
     Xform on = body_mesh_xform(&w.pw.rigid.bodies[b]);
     on.m[1][3] += 2 * y + 1;
     int b2 = rigid_add_hull_body(&w.pw.rigid, g, on, 1);
     world_run(&w, 3.0);
-    check("second hull on the first: height difference", w.pw.rigid.bodies[b2].pos.y - w.pw.rigid.bodies[b].pos.y, 2 * y, 1.5);
-    check("second hull drift sideways", r_fabs(w.pw.rigid.bodies[b2].pos.x - top.x) + r_fabs(w.pw.rigid.bodies[b2].pos.z - top.z), 0, 2);
-    check("hulls: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 2);
+    check_near("second hull on the first: height difference", w.pw.rigid.bodies[b2].pos.y - w.pw.rigid.bodies[b].pos.y, 2 * y, 1.5);
+    check_near("second hull drift sideways", r_fabs(w.pw.rigid.bodies[b2].pos.x - top.x) + r_fabs(w.pw.rigid.bodies[b2].pos.z - top.z), 0, 2);
+    check_near("hulls: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 2);
     world_free(&w);
 
     world_init(&w, 1);
@@ -199,7 +151,7 @@ static void test_meshes(void){
     b = rigid_add_hull_body(&w.pw.rigid, g, xform_make(vec3(278, 200, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0, 0.3), 0.5)).m, 1), 1);
     world_start(&w, 1);
     world_run(&w, 4.0);
-    check("torus hull lands flat: centre height", w.pw.rigid.bodies[b].pos.y, 20, 1.5);
+    check_near("torus hull lands flat: centre height", w.pw.rigid.bodies[b].pos.y, 20, 1.5);
     world_free(&w);
 
     world_init(&w, 1);
@@ -214,10 +166,10 @@ static void test_meshes(void){
     int bx = rigid_add_box(&w.pw.rigid, vec3(278, 400, 220), vec3(20, 20, 20), quat_identity(), 1);
     world_start(&w, 1);
     world_run(&w, 4.0);
-    check("ball on the mesh: centre height", w.pw.rigid.bodies[s].pos.y, 125, 1.5);
-    check("hull on the mesh: centre height", w.pw.rigid.bodies[hb].pos.y, 120, 1.5);
-    check("box on the mesh: centre height", w.pw.rigid.bodies[bx].pos.y, 120, 1.5);
-    check("on the mesh: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 2);
+    check_near("ball on the mesh: centre height", w.pw.rigid.bodies[s].pos.y, 125, 1.5);
+    check_near("hull on the mesh: centre height", w.pw.rigid.bodies[hb].pos.y, 120, 1.5);
+    check_near("box on the mesh: centre height", w.pw.rigid.bodies[bx].pos.y, 120, 1.5);
+    check_near("on the mesh: fastest point (at rest), units / s", max_speed(&w.pw.rigid), 0, 2);
     world_free(&w);
 
     // a mesh brought into a world already running on the GPU (its pairs' buffers are made then)
@@ -230,7 +182,7 @@ static void test_meshes(void){
     gm = rigid_geom_mesh(&w.pw.rigid, tri, n);
     rigid_add_mesh_collider(&w.pw.rigid, gm, xform_make(vec3(278, 0, 278), mat3_identity().m, 1));
     world_run(&w, 4.0);
-    check("ball on a mesh added later: centre height", w.pw.rigid.bodies[s].pos.y, 125, 1.5);
+    check_near("ball on a mesh added later: centre height", w.pw.rigid.bodies[s].pos.y, 125, 1.5);
     world_free(&w);
 }
 
@@ -279,13 +231,13 @@ static void pile_checks(const char *who, const RigidWorld *rw, real side, double
     }
     char what[120];
     snprintf(what, sizeof(what), "pile (%s): bodies outside the room", who);
-    check(what, outside, 0, 0);
+    check_near(what, outside, 0, 0);
     snprintf(what, sizeof(what), "pile (%s): deepest ball-ball overlap, units", who);
-    check(what, worst, 0, 2.5);
+    check_near(what, worst, 0, 2.5);
     // settled: nobody falling or bouncing any more (balls may still roll: no rolling resistance,
     // and one may roll off a box and drop: at one of three moments a second apart, none does)
     snprintf(what, sizeof(what), "pile (%s): fastest vertical speed, 10-12 s, units / s", who);
-    check(what, calm, 0, 10);
+    check_near(what, calm, 0, 10);
 }
 
 static void test_pile(void){
@@ -312,27 +264,27 @@ static void test_sleep(void){
     for (int k = 0; k < 3; k++) rigid_add_box(&w.pw.rigid, vec3(278, 30 + 60 * k, 278), vec3(40, 30, 40), quat_identity(), 1);
     world_start(&w, 1);
     world_run(&w, 2.0);
-    check("asleep after 2 s (of 3)", rigid_sleeping(&w.pw.rigid), 3, 0);
+    check_near("asleep after 2 s (of 3)", rigid_sleeping(&w.pw.rigid), 3, 0);
     // all asleep, nothing changes: the steps are not made (P10), and nothing moves
     int skipped0 = gpu_rigid_skipped(w.gr);
     Vec3 top0 = w.pw.rigid.bodies[2].pos;
     world_run(&w, 0.5);
-    check("all asleep: steps not made (of 120)", gpu_rigid_skipped(w.gr) - skipped0, 120, 2);
-    check("all asleep: the top box moved", v_len(v_sub(w.pw.rigid.bodies[2].pos, top0)), 0, 0);
+    check_near("all asleep: steps not made (of 120)", gpu_rigid_skipped(w.gr) - skipped0, 120, 2);
+    check_near("all asleep: the top box moved", v_len(v_sub(w.pw.rigid.bodies[2].pos, top0)), 0, 0);
     int d = rigid_add_box(&w.pw.rigid, vec3(278, 400, 278), vec3(40, 30, 40), quat_identity(), 1);
     int fewest = 3;
     for (int k = 0; k < 240; k++){
         world_run(&w, 1.0 / 240);
         if (rigid_sleeping(&w.pw.rigid) < fewest) fewest = rigid_sleeping(&w.pw.rigid);
     }
-    check("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
+    check_near("the stack woken by the falling box (fewest asleep, of 3)", fewest, 1, 1);
     world_run(&w, 3.0);
-    check("asleep again 4 s later (of 4)", rigid_sleeping(&w.pw.rigid), 4, 0);
-    check("the dropped box on top: height", w.pw.rigid.bodies[d].pos.y, 210, 1.5);
-    check("the stack's top box: height", w.pw.rigid.bodies[2].pos.y, 150, 1.5);
+    check_near("asleep again 4 s later (of 4)", rigid_sleeping(&w.pw.rigid), 4, 0);
+    check_near("the dropped box on top: height", w.pw.rigid.bodies[d].pos.y, 210, 1.5);
+    check_near("the stack's top box: height", w.pw.rigid.bodies[2].pos.y, 150, 1.5);
     body_apply_impulse(&w.pw.rigid.bodies[0], vec3(1e5, 0, 0), w.pw.rigid.bodies[0].pos);
     world_run(&w, 1.0 / 240);
-    check("an impulse wakes a body", w.pw.rigid.bodies[0].sleeping, 0, 0);
+    check_near("an impulse wakes a body", w.pw.rigid.bodies[0].sleeping, 0, 0);
     world_free(&w);
 }
 

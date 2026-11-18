@@ -15,16 +15,9 @@
 #include <stdio.h>
 #include <math.h>
 #include "scene/brdf.h"
+#include "test_util.h"
 #include "base/rng.h"
 
-static int failures;
-
-static void check(const char *what, double got, double want, double tol){
-    double err = fabs(got - want);
-    int ok = err <= tol;
-    printf("  %-58s %9.4f  (want %.4f +- %.4f)  %s\n", what, got, want, tol, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
 static void check_le(const char *what, double got, double most){
     int ok = got <= most;
     printf("  %-58s %9.4f  (want <= %.4f)  %s\n", what, got, most, ok ? "ok" : "FAIL");
@@ -102,7 +95,7 @@ int main(void){
                 if (rel > worst) worst = rel;
             }
         }
-        check("reflection: worst |f(v,l) - f(l,v)| / f", worst, 0, 2e-3);
+        check_near("reflection: worst |f(v,l) - f(l,v)| / f", worst, 0, 2e-3);
         // rough glass, ior 1.5: v outside, l inside
         Material g = material_pbr(vec3(1, 1, 1), 0, 0.4f, 1.5f, 1);
         Bsdf out = bsdf_make(&g, 1), in = bsdf_make(&g, 0);
@@ -120,7 +113,7 @@ int main(void){
             if (rel > worst) worst = rel;
         }
         printf("  (%d pairs through the glass)\n", tested);
-        check("refraction: worst |f(v,l)/eta_l^2 - f(l,v)/eta_v^2| / f", worst, 0, 2e-3);
+        check_near("refraction: worst |f(v,l)/eta_l^2 - f(l,v)/eta_v^2| / f", worst, 0, 2e-3);
     }
 
     // ---- 2. sampling against evaluation
@@ -153,9 +146,9 @@ int main(void){
                 }
                 char what[96];
                 snprintf(what, sizeof(what), "%s, cos %.1f: sampled energy", cases[c].name, (double)cosv[k]);
-                check(what, es, eq, 4 * err + 2e-3);
+                check_near(what, es, eq, 4 * err + 2e-3);
                 snprintf(what, sizeof(what), "%s, cos %.1f: density's integral", cases[c].name, (double)cosv[k]);
-                check(what, pq, rough, 3e-3 + 0.002);
+                check_near(what, pq, rough, 3e-3 + 0.002);
             }
         }
     }
@@ -186,7 +179,7 @@ int main(void){
             check_le(what, fmax(e[0], fmax(e[1], e[2])), 1.0 + 4 * fmax(err[0], fmax(err[1], err[2])) + 1e-3);
             double least = fmin(e[0], fmin(e[1], e[2]));
             snprintf(what, sizeof(what), "%s: least", cases[c].name);
-            check(what, least >= cases[c].lo ? cases[c].lo : least, cases[c].lo, 0);
+            check_near(what, least >= cases[c].lo ? cases[c].lo : least, cases[c].lo, 0);
         }
     }
 

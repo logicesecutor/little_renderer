@@ -19,13 +19,8 @@
 #include "formats/json.h"
 #include "scene/gltf.h"
 #include "formats/png.h"
+#include "test_util.h"
 
-static int failures;
-
-static void check(const char *what, int ok){
-    printf("  %-62s %s\n", what, ok ? "ok" : "FAIL");
-    if (!ok) failures++;
-}
 static int near(double a, double b, double tol){ return fabs(a - b) <= tol; }
 
 static void test_json(void){
