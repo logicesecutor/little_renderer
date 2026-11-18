@@ -5,7 +5,6 @@ struct LU {
     h: vec4f,    /* h^2 */
 };
 @group(0) @binding(0) var<uniform> L: LU;
-fn tid(g: vec3u, nw: vec3u) -> u32 { return g.x + g.y * nw.x * 64u; }
 fn lcount() -> u32 { return L.d.x * L.d.y * L.d.z; }
 fn ccount() -> u32 { return L.c.x * L.c.y * L.c.z; }
 fn lcell(id: u32) -> vec3i { let i = i32(id); let n = vec3i(L.d.xyz); return vec3i(i % n.x, (i / n.x) % n.y, i / (n.x * n.y)); }

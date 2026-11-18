@@ -217,12 +217,13 @@ static char *kernel_source(int k){
     const int nd = KERNELS[k].needs;
     // room for every part it may take (six samplers, each at most SAMPLE's length plus names)
     size_t sl = strlen(SAMPLE) > strlen(SAMPLE_MM) ? strlen(SAMPLE) : strlen(SAMPLE_MM);
-    size_t cap = strlen(LHEAD) + strlen(FHEAD) + strlen(*KERNELS[k].body) + strlen(NSUM) + strlen(SOLID) + strlen(FIXED) +
+    size_t cap = strlen(GPU_WGSL_UTIL) + strlen(LHEAD) + strlen(FHEAD) + strlen(*KERNELS[k].body) + strlen(NSUM) + strlen(SOLID) + strlen(FIXED) +
                  strlen(VEL) + 6 * (2 * sl + 2) + 16;
     char *s = malloc(cap);
     if (!s) return NULL;
     s[0] = 0;
 #define ADD(t) do { strcat(s, t); strcat(s, "\n"); } while (0)
+    ADD(GPU_WGSL_UTIL);
     ADD(nd & LEVEL ? LHEAD : FHEAD);
     ADD(*KERNELS[k].body);
     if (nd & NEED_NSUM) ADD(NSUM);

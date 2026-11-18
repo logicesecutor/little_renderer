@@ -51,8 +51,11 @@ GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
     d->w = width;
     d->h = height;
     d->bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWWW");
-    d->prep = gpu_compute(g, "denoiser: prep", DENOISE, "prep", d->bgl);
-    d->atrous = gpu_compute(g, "denoiser: a-trous", DENOISE, "atrous", d->bgl);
+    const char *const parts[] = {GPU_WGSL_UTIL, DENOISE};
+    char *src = gpu_wgsl_join(parts, 2);
+    d->prep = gpu_compute(g, "denoiser: prep", src ? src : DENOISE, "prep", d->bgl);
+    d->atrous = gpu_compute(g, "denoiser: a-trous", src ? src : DENOISE, "atrous", d->bgl);
+    free(src);
     size_t n = (size_t)width * height;
     d->a = gpu_buffer(g, "denoiser A", n * 8, WGPUBufferUsage_Storage);
     d->b = gpu_buffer(g, "denoiser B", n * 8, WGPUBufferUsage_Storage);

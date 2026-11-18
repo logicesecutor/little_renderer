@@ -816,8 +816,8 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     gr->g = g;
     gr->pw = pw;
     for (int k = 0; k < NR; k++){
-        const char *parts[5] = {RHEAD};
-        int np = 1;
+        const char *parts[6] = {GPU_WGSL_UTIL, RHEAD};
+        int np = 2;
         for (int q = 0; q < 4 && RK[k].part[q]; q++) parts[np++] = *RK[k].part[q];
         char *src = gpu_wgsl_join(parts, np);
         if (!src){ gpu_rigid_destroy(gr); return NULL; }

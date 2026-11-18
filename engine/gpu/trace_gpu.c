@@ -335,9 +335,9 @@ static const char *const STACK_WG = "var<private> tlid: u32;\nvar<workgroup> sta
 static char *trace_source(GpuTrace *t, int sky, int wave){
     const char *parts[12] = {sky ? "const SKY_ON: bool = true;" : "const SKY_ON: bool = false;",
                              t->wide_ok ? "const WIDE_ON: bool = true;" : "const WIDE_ON: bool = false;",
-                             stack_in_workgroup() ? STACK_WG : STACK_PRIVATE,
+                             stack_in_workgroup() ? STACK_WG : STACK_PRIVATE, GPU_WGSL_UTIL,
                              t->types_wgsl, t->media_wgsl, GPU_WGSL_BSDF, GPU_WGSL_TEX, TRACE, wave ? WAVE : ""};
-    int n = 9;
+    int n = 10;
 #ifdef LR_VK
     if (t->hw) parts[n++] = HW_TRAVERSE;
 #endif
@@ -429,11 +429,15 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     }
     // the BVH builder
     t->bd_bgl = gpu_layout(g, WGPUShaderStage_Compute, "DRWWWW");   // (D: a pass's parameters, at its offset)
-    t->bd_morton = gpu_compute(g, "BVH builder: morton", BUILD, "morton", t->bd_bgl);
-    t->bd_sort = gpu_compute(g, "BVH builder: sort", BUILD, "bsort", t->bd_bgl);
-    t->bd_hier = gpu_compute(g, "BVH builder: hierarchy", BUILD, "hier", t->bd_bgl);
-    t->bd_leaves = gpu_compute(g, "BVH builder: leaves", BUILD, "leaves", t->bd_bgl);
-    t->bd_up = gpu_compute(g, "BVH builder: boxes", BUILD, "up", t->bd_bgl);
+    const char *const build_parts[] = {GPU_WGSL_UTIL, BUILD};
+    char *build = gpu_wgsl_join(build_parts, 2);
+    const char *bsrc = build ? build : BUILD;   // (out of memory: without the helpers it will not compile, and says so)
+    t->bd_morton = gpu_compute(g, "BVH builder: morton", bsrc, "morton", t->bd_bgl);
+    t->bd_sort = gpu_compute(g, "BVH builder: sort", bsrc, "bsort", t->bd_bgl);
+    t->bd_hier = gpu_compute(g, "BVH builder: hierarchy", bsrc, "hier", t->bd_bgl);
+    t->bd_leaves = gpu_compute(g, "BVH builder: leaves", bsrc, "leaves", t->bd_bgl);
+    t->bd_up = gpu_compute(g, "BVH builder: boxes", bsrc, "up", t->bd_bgl);
+    free(build);
     t->pl_bgl = gpu_layout(g, WGPUShaderStage_Compute, "DWW");
     t->pl_bgl_args = gpu_layout(g, WGPUShaderStage_Compute, "DWWW");
     t->pl_init = gpu_compute(g, "BVH builder (PLOC): init", PLOC, "init", t->pl_bgl_args);
@@ -453,7 +457,10 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->dc_params = gpu_buffer(g, "photon cache: fade parameters", 32, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     t->pc_params = gpu_buffer(g, "photon cache: light paths' parameters", GTP_STRIDE * MAX_REPS,
                               WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    t->rs_pipe = gpu_compute(g, "caustics: resolve", RESOLVE, "main", t->rs_bgl);
+    const char *const resolve_parts[] = {GPU_WGSL_UTIL, RESOLVE};
+    char *resolve = gpu_wgsl_join(resolve_parts, 2);
+    t->rs_pipe = gpu_compute(g, "caustics: resolve", resolve ? resolve : RESOLVE, "main", t->rs_bgl);
+    free(resolve);
     // the big ones last, asynchronously: in Chrome a pipeline made at once while these compile
     // waits for them (seen: a frame held 5 s), so every small one is asked for before
     t->preq[0] = gpu_compute_async(g, "path tracer", src, "main", t->bgl, &t->pipe, &t->pst[0]);

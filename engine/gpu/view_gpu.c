@@ -220,11 +220,11 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         return NULL;
     }
 
-    const char *const light_src[] = {TYPES, COMMON, LIGHT}, *const comp_src[] = {TYPES, COMMON, FRAME_CPU, COMPOSITE},
-                      *const compg_src[] = {TYPES, COMMON, FRAME_GPU, COMPOSITE}, *const stats_src[] = {TYPES, STATS},
+    const char *const light_src[] = {TYPES, COMMON, LIGHT}, *const comp_src[] = {GPU_WGSL_UTIL, TYPES, COMMON, FRAME_CPU, COMPOSITE},
+                      *const compg_src[] = {GPU_WGSL_UTIL, TYPES, COMMON, FRAME_GPU, COMPOSITE}, *const stats_src[] = {TYPES, STATS},
                       *const finish_src[] = {TYPES, FINISH};
     const struct { const char *label; const char *const *parts; int n; } mods[5] = {
-        {"light grid", light_src, 3}, {"composite", comp_src, 4}, {"composite (GPU frame)", compg_src, 4},
+        {"light grid", light_src, 3}, {"composite", comp_src, 5}, {"composite (GPU frame)", compg_src, 5},
         {"media stats", stats_src, 2}, {"media boxes", finish_src, 2}};
     WGPUShaderModule mm[5];
     for (int k = 0; k < 5; k++){

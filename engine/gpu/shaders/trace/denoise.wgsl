@@ -10,15 +10,7 @@ struct DP {
 @group(0) @binding(4) var<storage, read_write> gd: array<vec2u>;    /* the guide, packed (prep writes it) */
 @group(0) @binding(5) var<storage, read_write> outp: array<vec4f>;  /* the image (the last pass) */
 
-fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 
-fn hash32(x0: u32) -> u32 {
-    var x = x0;
-    x ^= x >> 16u; x *= 0x7feb352du;
-    x ^= x >> 15u; x *= 0x846ca68bu;
-    x ^= x >> 16u;
-    return x;
-}
 
 /* an image value: irradiance and variance (variance < 0: no sample yet) */
 fn put_iv(c: vec3f, v: f32) -> vec2u {

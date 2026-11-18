@@ -10,21 +10,6 @@ struct RS {
 @group(0) @binding(4) var<storage, read> grid: array<u32>;
 @group(0) @binding(5) var<storage, read> planes: array<vec4f>;
 const PC_CELLS = 1048576u;
-fn hash32(x0: u32) -> u32 {
-    var x = x0;
-    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
-    return x;
-}
-fn pc_axis(n: vec3f) -> u32 {
-    let a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) { return select(1u, 0u, n.x > 0.0); }
-    if (a.y >= a.z) { return select(3u, 2u, n.y > 0.0); }
-    return select(5u, 4u, n.z > 0.0);
-}
-fn pc_key(c: vec3i, axis: u32, level: u32) -> u32 {
-    return hash32((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u) ^
-                  ((axis + 6u * level) * 2654435761u));
-}
 /* rgb sums and photons of a cell (0 if it has none): its slot, as pc_claim found it */
 fn cell_sum(c: vec3i, axis: u32, level: u32) -> vec4f {
     let h = pc_key(c, axis, level);

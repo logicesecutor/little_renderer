@@ -181,6 +181,9 @@ void gpu_raster_destroy(GpuRaster *r);
 // frame's types and of the media's densities, and the buffers passed to gpu_trace_encode.
 typedef struct GpuTrace GpuTrace;
 extern const char *const GPU_WGSL_TYPES, *const GPU_WGSL_MEDIA;
+// the helpers several shaders share (shaders/common/util.wgsl: hash32, luma, tid, onb, the
+// sRGB functions, the photon cache's keys), put in front of their modules
+extern const char *const GPU_WGSL_UTIL;
 // the BSDF of scene/brdf.h in WGSL (gpu/brdf_gpu.c): a module that includes it defines
 // fn bsdf_tab(k: u32) -> f32, float k of the tables gpu_bsdf_tables packs
 extern const char *const GPU_WGSL_BSDF;

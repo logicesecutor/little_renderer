@@ -71,11 +71,6 @@ fn rnd(s: ptr<function, u32>) -> f32 {
     let w = ((old >> ((old >> 28u) + 4u)) ^ old) * 277803737u;
     return f32(((w >> 22u) ^ w) >> 8u) * (1.0 / 16777216.0);
 }
-fn hash32(x0: u32) -> u32 {
-    var x = x0;
-    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
-    return x;
-}
 
 /* ---- the sampler (base/sampler.c): Owen-scrambled Sobol, shifted per pixel by blue noise ---- */
 fn bn_value(x: u32, y: u32) -> f32 {
@@ -648,13 +643,6 @@ fn hg(c: f32, g: f32) -> f32 {
     return (1.0 - g * g) / (4.0 * PI_ * d * sqrt(d));
 }
 
-/* two tangents of n (Duff et al. 2017) */
-fn onb(n: vec3f) -> mat2x3f {
-    let s = select(-1.0, 1.0, n.z >= 0.0);
-    let a = -1.0 / (s + n.z);
-    let c = n.x * n.y * a;
-    return mat2x3f(vec3f(1.0 + s * n.x * n.x * a, s * c, -s * n.x), vec3f(c, s + n.y * n.y * a, -n.y));
-}
 
 fn cosine_hemisphere(n: vec3f, u: vec2f) -> vec3f {
     let u1 = u.x;
@@ -955,7 +943,6 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
     return g;
 }
 
-fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 
 /* the radiance arriving along one camera ray */
 fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
@@ -1135,20 +1122,10 @@ fn splat(pix: u32, c: vec3f) {
    which the resolve pass reads; it fades from frame to frame while things move. */
 const PC_CELLS = 1048576u;
 const PC_SCALE = 256.0;
-fn pc_axis(n: vec3f) -> u32 {
-    let a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) { return select(1u, 0u, n.x > 0.0); }
-    if (a.y >= a.z) { return select(3u, 2u, n.y > 0.0); }
-    return select(5u, 4u, n.z > 0.0);
-}
 /* 3 sizes of cells (x1, x4, x16) in one table: the lookup takes the finest that holds enough
    photons (adaptive density estimation). A slot: 3 x (low, high) sums, the photon count, the
    cell's key (0 = free). A cell takes the first slot from its hash on that is free or its own
    (up to 8 on): two cells never share a slot (that would light one with the other's photons). */
-fn pc_key(c: vec3i, axis: u32, level: u32) -> u32 {
-    return hash32((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u) ^
-                  ((axis + 6u * level) * 2654435761u));
-}
 fn pc_claim(c: vec3i, axis: u32, level: u32) -> u32 {
     let h = pc_key(c, axis, level);
     let key = hash32(h ^ 0x68e31da4u) | 1u;

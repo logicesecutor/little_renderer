@@ -43,7 +43,7 @@ JSON and glTF.
 <tr>
 <td align="center"><b>~24k</b><br><sub>lines of C in the engine</sub></td>
 <td align="center"><b>~7k</b><br><sub>lines of C for our WebGPU on Vulkan and its WGSL compiler</sub></td>
-<td align="center"><b>79</b><br><sub>WGSL shaders, ~6.5k lines</sub></td>
+<td align="center"><b>80</b><br><sub>WGSL shaders, ~6.5k lines</sub></td>
 <td align="center"><b>4</b><br><sub>pipelines: CPU and GPU, raster and path traced</sub></td>
 <td align="center"><b>3</b><br><sub>platforms: Linux, Windows, the browser</sub></td>
 </tr>

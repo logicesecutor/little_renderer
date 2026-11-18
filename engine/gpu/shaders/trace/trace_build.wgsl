@@ -13,7 +13,6 @@ struct BP {
 @group(0) @binding(4) var<storage, read_write> aux: array<u32>;
 @group(0) @binding(5) var<storage, read_write> flags: array<u32>;
 
-fn tid(gid: vec3u, nw: vec3u) -> u32 { return gid.x + gid.y * nw.x * 64u; }
 fn spread(v: u32) -> u32 {
     var x = v & 1023u;
     x = (x | (x << 16u)) & 0x030000ffu;

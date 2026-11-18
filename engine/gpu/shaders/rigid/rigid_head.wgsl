@@ -18,7 +18,6 @@ struct RP {
 struct Body { pos: vec4f, rot: vec4f, vel: vec4f, ang: vec4f, half: vec4f, iner: vec4f, f: vec4f, t: vec4f };
 struct Contact { p: vec4f, n: vec4f, ra: vec4f, rb: vec4f, t1: vec4f, t2: vec4f, j: vec4f, imp: vec4f, la: vec4f, lb: vec4f };
 const NONE: u32 = 0xffffffffu;
-fn tid(gid: vec3u, nw: vec3u) -> u32 { return gid.x + gid.y * nw.x * 64u; }
 fn body_radius(b: Body) -> f32 { return select(length(b.half.xyz), b.half.x, b.pos.w < 0.5); }
 /* how far apart a pair may be and still get a contact (rigid.c's pair_margin): as far as
    they can close in a step (their whole relative speed), plus a little; at most half their
@@ -47,11 +46,4 @@ fn inv_inertia(b: Body) -> mat3x3f {
     if (b.vel.w == 0.0) { return mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0)); }   /* fixed, or asleep */
     let r = qmat(b.rot);
     return r * mat3x3f(vec3f(b.iner.x, 0.0, 0.0), vec3f(0.0, b.iner.y, 0.0), vec3f(0.0, 0.0, b.iner.z)) * transpose(r);
-}
-/* two tangents of a unit normal (base/rng.h onb_from_normal, Duff et al. 2017) */
-fn onb(n: vec3f) -> mat2x3f {
-    let s = select(-1.0, 1.0, n.z >= 0.0);
-    let a = -1.0 / (s + n.z);
-    let b = n.x * n.y * a;
-    return mat2x3f(vec3f(1.0 + s * n.x * n.x * a, s * b, -s * n.x), vec3f(b, s + n.y * n.y * a, -n.y));
 }

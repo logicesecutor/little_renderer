@@ -85,6 +85,8 @@ static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringVie
             gpu_sv_len(msg), msg.data ? msg.data : "");
 }
 
+GPU_WGSL_EXPORT(GPU_WGSL_UTIL, util);
+
 // ---- the objects alive (gpu_internal.h): views, fluids, rigid worlds, timers and the Gpu
 // itself (a device-lost callback can arrive after gpu_destroy) ----
 #define GPU_LIVE_MAX 256

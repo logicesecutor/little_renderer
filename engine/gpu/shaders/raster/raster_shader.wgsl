@@ -364,10 +364,6 @@ fn clip_of(p: vec3f) -> vec4f {
     let c = U.vp * vec4f(p, 1.0);
     return vec4f(c.x, c.y, (c.z + c.w) * 0.5, c.w);
 }
-fn to_srgb(c0: vec3f) -> vec3f {
-    let c = clamp(c0, vec3f(0.0), vec3f(1.0));
-    return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3f(0.0031308));
-}
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> VO {
@@ -412,14 +408,14 @@ fn fs(i: VO) -> @location(0) vec4f {
     let dx = dpdxFine(i.uv);
     let dy = dpdyFine(i.uv);
     let m = U.mats[i.mat];
-    if (m.base.w > 0.5) { return vec4f(to_srgb(m.base.rgb), 1.0); }
+    if (m.base.w > 0.5) { return vec4f(linear_to_srgb(m.base.rgb), 1.0); }
     /* flat and gouraud: the vertex stage shaded */
-    if (u32(U.eye.w) != 3u) { return vec4f(to_srgb(i.light), 1.0); }
+    if (u32(U.eye.w) != 3u) { return vec4f(linear_to_srgb(i.light), 1.0); }
     /* phong: render_shade at every pixel; a texture's level from how uv changes to the next
        pixels (raster.c's derivatives) */
     let mm = max(dot(dx, dx), dot(dy, dy));
     let uv_lod = select(-1000.0, 0.5 * log2(mm), mm > 0.0);
-    return vec4f(to_srgb(scene_shade(i.mat, i.wp, normalize(i.n), i.uv, i.tg, uv_lod)), 1.0);
+    return vec4f(linear_to_srgb(scene_shade(i.mat, i.wp, normalize(i.n), i.uv, i.tg, uv_lod)), 1.0);
 }
 
 /* the sky where nothing was drawn: a triangle over the whole screen at the far depth (1),
@@ -437,7 +433,7 @@ fn fs_sky(i: SO) -> @location(0) vec4f {
     let ny = (1.0 - 2.0 * i.pos.y / U.vps.y) * U.cam_u.w;
     let d = normalize(U.cam_r.xyz * nx + U.cam_u.xyz * ny - U.cam_b.xyz);
     let c = map_bilerp(0u, i32(U.skyd.x), i32(U.skyd.y), env_uv(d, U.sky.y, U.sky.z), true) * U.sky.x;
-    return vec4f(to_srgb(c), 1.0);
+    return vec4f(linear_to_srgb(c), 1.0);
 }
 
 /* wireframe: the 3 edges of every triangle as lines, 6 vertices per triangle */
@@ -458,4 +454,4 @@ fn vs_wire(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> 
     return o;
 }
 @fragment
-fn fs_wire(i: WO) -> @location(0) vec4f { return vec4f(to_srgb(U.mats[i.mat].base.rgb), 1.0); }
+fn fs_wire(i: WO) -> @location(0) vec4f { return vec4f(linear_to_srgb(U.mats[i.mat].base.rgb), 1.0); }

@@ -17,7 +17,6 @@ fn NX() -> i32 { return i32(P.n.x); }
 fn NY() -> i32 { return i32(P.n.y); }
 fn NZ() -> i32 { return i32(P.n.z); }
 fn H() -> f32 { return P.lo.w; }
-fn tid(g: vec3u, nw: vec3u) -> u32 { return g.x + g.y * nw.x * 64u; }
 fn ncells() -> u32 { return P.n.x * P.n.y * P.n.z; }
 fn npoints() -> u32 { return (P.n.x + 1u) * (P.n.y + 1u) * (P.n.z + 1u); }
 fn nvoxels() -> u32 { return P.dn.x * P.dn.y * P.dn.z; }

@@ -30,13 +30,6 @@ fn pixel_jitter(x: u32, y: u32) -> f32 {
     return f32(h >> 8u) * (1.0 / 16777216.0);
 }
 
-fn srgb_to_linear(c: vec3f) -> vec3f {
-    return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
-}
-fn linear_to_srgb(c0: vec3f) -> vec3f {
-    let c = clamp(c0, vec3f(0.0), vec3f(1.0));
-    return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3f(0.0031308));
-}
 
 /* the ray from the eye along unit dir, stopped at tmax: the light it collects, and T */
 fn march(dir: vec3f, tmax: f32, jit: f32) -> vec4f {
