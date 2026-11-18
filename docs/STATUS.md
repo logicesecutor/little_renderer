@@ -24,7 +24,7 @@ pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` �
 | 8 | **Bigger scenes** (20–50k instances): culling and simpler distant copies of meshes in the rasterizer, the top level built on the GPU, instances updated in place | done (4f0edd0 … 824333e) | R8 |
 | 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | next: branch `web`, plan below (proposed 2026-11-17) | WEB.md |
 | 10 | **The GPU's load**: what the GPU's time goes to in the path traced viewer, and more of it to path tracing | G1-G4, G6 done (branches `gpu-load`, `gpu-load-2`); G5 proposed | 1.5 |
-| 11 | **Adaptive sampling**: the samples where the image is still noisy, not one per pixel per pass everywhere | proposed 2026-11-18, plan in 1.6 | R9 |
+| 11 | **Adaptive sampling**: the samples where the image is still noisy, not one per pixel per pass everywhere | AS1-AS3 done (branch `adaptive`), AS4 proposed | 1.6, R9 |
 
 `next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
 from the repository; the dragon stays on disk, untracked: `make dragon-download`).
@@ -111,7 +111,7 @@ for passes. Where the rest of a 165 Hz frame goes now is not measured yet (the a
 per-submission timestamps, `out/gpuload/experiments.diff`, would tell); the next candidates
 are G5 and adaptive sampling (1.6).
 
-### 1.6 Step 11: adaptive sampling (proposed 2026-11-18)
+### 1.6 Step 11: adaptive sampling (AS1-AS3 done 2026-11-18, branch `adaptive`)
 
 The question: send more rays to the objects in the scene than to the empty parts of the
 screen? A survey (a parallel agent: the code read, the literature checked) says that this is
@@ -136,11 +136,11 @@ bounces, Owen-scrambled Sobol with a blue-noise shift (1.35x), light tracing and
 cache for caustics, reprojection while moving. Missing there: emissive glTF surfaces are
 found only when a path hits them, not sampled as lights.
 
-| # | step | what | expected |
+| # | step | what was built | status, measured (our layer, RTX 3070) |
 |---|---|---|---|
-| AS1 | **Still images: per-tile adaptive sampling** | every 16-32 passes the relative error of each 8x8 tile, `sqrt(var/n) / (mean + eps)`, the tile's largest, after at least 8-16 samples; the tiles still above a threshold compacted into a list (in row order: 8x8 workgroups measured 0-10% slower, R5) and traced by an indirect dispatch inside the band; the viewer stops when no tile is left. The sample index per pixel (the count, `acc.w`) instead of the global one (`T.cnt.z`), which weakens the blue-noise pairing of neighbours; the stop decided on two half-buffers (even and odd samples), since one fed by its own samples is slightly biased. Prototype first in the CPU path tracer (a loop per pixel with a threshold) | 1.5-2x for the same noise in the literature, more in views with sky or plain walls; the cost one small pass and an indirect dispatch per round |
-| AS2 | **Sky and lamp pixels** (the special case asked about) | stopped after a few samples where the whole 3x3 around is sky or lamp with no medium in front (edges keep their anti-aliasing), from the guide's `kind`; an early return frees whole sky rows | small, the sky demo only; a part of AS1 |
-| AS3 | **While moving: pixels with little history** | after the reprojection, pixels with 0-2 samples (uncovered by what moved) get a second sample through the same list (as ATAA, Hasselgren 2020); not the variance: 12-32 samples are too few to rank pixels by it | the holes that G1 now fills from neighbours, traced instead |
+| AS1 | **Still images: per-tile adaptive sampling** | every 16 passes a kernel (`adapt`, one thread per 8x8 tile) stops a tile once every pixel has 16 samples and its noise as shown is under the threshold: the standard error of its mean (the moments already kept), through the clamp and the sRGB curve, so an error in the 0..1 of the image (`-adaptive err`; the viewer 0.004, about 1/255; render 0). A stopped tile is marked in plane 1's z and the kernel returns at once for its pixels (an early exit, not the planned compacted list: a warp of 32 pixels leaves together when its 4 tiles stop), for the rest of the image (gbuf and the reprojection clear the mark), so a pixel's samples are the first n of the sequence (no per-pixel index, no gaps). Bench A10, A11. The CPU prototype was not needed | done (c5a4a45). Against 16k-sample references: on the Cornell box at 0.008 the worst tiles' error (99th percentile) is reached 1.4x sooner than with uniform sampling, the image's RMSE at the same time is the same (a threshold equalizes the error, it does not minimize its mean); with the error dominated by fireflies (the sky's sun on glass and metal) no gain; a rule on the tile's mean error left the worst tiles worse. A10: 1.265 -> 1.17 ms a pass over the first 512 passes. A still image whose tiles are all under the threshold then costs the GPU almost nothing |
+| AS2 | **Sky and lamp tiles** (the special case asked about) | a tile that sees only the sky or a lamp, and so does the ring of pixels around it (edges keep their anti-aliasing), may stop after 4 samples; decided at pass 4 too | done (959b9c5): at most ~1%, as expected (such a ray ends at its first miss, and AS1 stopped these tiles at 16 already): the sky scene at 256 samples 1.05 -> 1.04 ms a pass, A11 unchanged |
+| AS3 | **While moving: pixels with little history** | an image carried over, until its first whole pass: after each band a second dispatch of the kernel (its own copy of the parameters, a point of the sequence none took) in which only the pixels that had fewer than n samples take one (`-fill n`) | done (cf08baf), off by default: the sky demo with bodies falling, 1080p, -vsync off 55 -> 46-47 frames/s (`-fill 1`, only the pixels with no history; `-fill 3` 46), vsync on 35.5 -> 31.6 passes/s. With bodies moving every pixel on them has no history (the reprojection follows the camera, not the bodies), so the second sample costs their share of the image |
 | AS4 | **Better rays per sample** | emissive triangles sampled as lights; then ReSTIR DI for many emitters; ReSTIR GI or path guiding for hard indirect light | the last two are large projects |
 
 Not to do: per-pixel atomics or loops of varying length inside the main kernel (divergence
