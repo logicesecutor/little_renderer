@@ -32,7 +32,7 @@ Gpu *gpu_create_window(void *display, uintptr_t window, int width, int height);
 // GPU_FAILED also comes later if the browser takes the GPU away (device lost): then stop
 // using it and draw on the CPU again. Natively it also delivers the callbacks that are ready
 // (gpu_poll), so a program that calls it every frame needs nothing else.
-GpuState gpu_state(const Gpu *g);
+GpuState gpu_state(Gpu *g);
 // Natively: runs the callbacks of the work the GPU has finished (readbacks, finished steps).
 // In a browser they arrive by themselves, and this does nothing.
 void gpu_poll(Gpu *g);

@@ -19,7 +19,7 @@ Gpu *gpu_create_window(void *display, uintptr_t window, int width, int height){
     (void)display; (void)window; (void)width; (void)height;
     return calloc(1, sizeof(Gpu));
 }
-GpuState gpu_state(const Gpu *g){ (void)g; return GPU_FAILED; }
+GpuState gpu_state(Gpu *g){ (void)g; return GPU_FAILED; }
 void gpu_poll(Gpu *g){ (void)g; }
 void gpu_wait(Gpu *g){ (void)g; }
 const char *gpu_message(const Gpu *g){ (void)g; return "this build has no GPU backend (built with NOGPU=1)"; }
@@ -459,9 +459,9 @@ void gpu_wait_for(Gpu *g, uint64_t submission){
     gpu_poll(g);
 }
 
-GpuState gpu_state(const Gpu *g){
+GpuState gpu_state(Gpu *g){
     if (!g) return GPU_FAILED;
-    gpu_poll((Gpu *)g);                       // natively: deliver what is ready
+    gpu_poll(g);                              // natively: deliver what is ready
     return g->state;
 }
 const char *gpu_message(const Gpu *g){ return g ? g->message : "no GPU"; }
