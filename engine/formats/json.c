@@ -151,11 +151,31 @@ static int parse_value(Parser *ps, Json *v){
         v->str = parse_string(ps);
         r = !v->str;
     } else if (c == '-' || (c >= '0' && c <= '9')){
+        // JSON's numbers only: -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)? (strtod
+        // alone also took 0x10, inf, nan, 01, 1.)
+        const char *q = ps->p;
+        int ok = 1;
+        if (*q == '-') q++;
+        if (*q == '0') q++;
+        else if (*q >= '1' && *q <= '9') while (*q >= '0' && *q <= '9') q++;
+        else ok = 0;
+        if (ok && *q == '.'){
+            q++;
+            if (!(*q >= '0' && *q <= '9')) ok = 0;
+            while (*q >= '0' && *q <= '9') q++;
+        }
+        if (ok && (*q == 'e' || *q == 'E')){
+            q++;
+            if (*q == '+' || *q == '-') q++;
+            if (!(*q >= '0' && *q <= '9')) ok = 0;
+            while (*q >= '0' && *q <= '9') q++;
+        }
+        if (ok && ((*q >= '0' && *q <= '9') || *q == 'x' || *q == 'X' || *q == '.')) ok = 0;   // ("01", "0x10", "1.2.3")
         char *e;
         v->type = JSON_NUMBER;
-        v->num = strtod(ps->p, &e);        // (the text is NUL-terminated by json_parse)
-        if (e == ps->p){ error(ps, "bad number"); r = 1; }
-        ps->p = e;
+        v->num = ok ? strtod(ps->p, &e) : 0;   // (the text is NUL-terminated by json_parse)
+        if (!ok || e != q){ error(ps, "bad number"); r = 1; }
+        ps->p = q;
     } else if (ps->end - ps->p >= 4 && !strncmp(ps->p, "true", 4)){ v->type = JSON_TRUE; ps->p += 4; }
     else if (ps->end - ps->p >= 5 && !strncmp(ps->p, "false", 5)){ v->type = JSON_FALSE; ps->p += 5; }
     else if (ps->end - ps->p >= 4 && !strncmp(ps->p, "null", 4)){ v->type = JSON_NULL; ps->p += 4; }

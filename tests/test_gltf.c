@@ -33,10 +33,18 @@ static void test_json(void){
     check("missing keys and wrong types give the defaults", j && json_num(json_get(j, "zz"), 7) == 7 && json_str(json_get(j, "a"), "d")[0] == 'd'
           && json_get(NULL, "a") == NULL && json_len(json_get(j, "s")) == 0);
     json_free(j);
-    const char *bad[] = {"{\"a\":}", "[1,2", "{\"a\" 1}", "\"abc", "[1] x", "{\"a\":[1,{\"b\":tru}]}", "", "[\"\\q\"]"};
+    const char *bad[] = {"{\"a\":}", "[1,2", "{\"a\" 1}", "\"abc", "[1] x", "{\"a\":[1,{\"b\":tru}]}", "", "[\"\\q\"]",
+                         "[0x10]", "[-inf]", "[01]", "[1.]", "[.5]", "[1e]", "[-]", "[- 1]"};
+    const int nbad = (int)(sizeof(bad) / sizeof(bad[0]));
     int refused = 0;
-    for (int i = 0; i < 8; i++){ Json *b = json_parse(bad[i], strlen(bad[i])); refused += !b; json_free(b); }
-    check("8 broken texts refused (messages on stderr)", refused == 8);
+    for (int i = 0; i < nbad; i++){ Json *b = json_parse(bad[i], strlen(bad[i])); refused += !b; json_free(b); }
+    char what[80];
+    snprintf(what, sizeof(what), "%d broken texts refused (messages on stderr)", nbad);
+    check(what, refused == nbad);
+    const char *good = "[0, -0, 0.5, -12.5e-2, 1E3, 3e+2]";
+    Json *gj = json_parse(good, strlen(good));
+    check("numbers as JSON writes them", gj && json_len(gj) == 6 && json_num(json_at(gj, 3), 0) == -0.125 && json_num(json_at(gj, 5), 0) == 300);
+    json_free(gj);
 }
 
 // ---- the model ---------------------------------------------------------------------------
