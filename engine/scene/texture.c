@@ -78,14 +78,8 @@ const float *texmap_srgb_table(void){
     return SRGB;
 }
 
-static unsigned char to_srgb8(double c){
-    c = c < 0 ? 0 : c > 1 ? 1 : c;
-    c = c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1 / 2.4) - 0.055;
-    return (unsigned char)(c * 255 + 0.5);
-}
-
 // the linear values where the sRGB byte steps up: byte(c) = how many of them c reaches (the
-// same bytes as to_srgb8 without a pow per texel: making the helmet's mips spent most of its
+// same bytes as image_srgb8 without a pow per texel: making the helmet's mips spent most of its
 // time there)
 static double SRGB_UP[255];
 static int srgb_up_ready;
@@ -398,7 +392,7 @@ int texmap_procedural(TexMap *t, const char *name){
                 g = 0.15 + 0.5 * wear * wear + 0.15 * scratch;               // roughness
                 b = wear > 0.55 ? 0.15 : 1.0;                                 // metal, but where it wore off
             }
-            if (srgb){ o[0] = to_srgb8(r); o[1] = to_srgb8(g); o[2] = to_srgb8(b); }
+            if (srgb){ o[0] = image_srgb8(r); o[1] = image_srgb8(g); o[2] = image_srgb8(b); }
             else { o[0] = (unsigned char)(r * 255 + 0.5); o[1] = (unsigned char)(g * 255 + 0.5); o[2] = (unsigned char)(b * 255 + 0.5); }
             o[3] = 255;
         }

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "scene/volume.h"
+#include "scene/texture.h"   // texmap_srgb_table
 
 // Multiple-scattering octaves (Wrenninge, "Art-Directable Multiple Volumetric Scattering",
 // 2015): octave i adds the lamp light again with weight OCT_WEIGHT^i, optical depth
@@ -277,18 +278,6 @@ static real brick_majorant(const Volume *v, Vec3 p){
 
 // ---- the march ---------------------------------------------------------------------------------
 
-static float srgb_to_linear_lut[256];
-
-static void init_lut(void){
-    static int done = 0;
-    if (done) return;
-    for (int i = 0; i < 256; i++){
-        double c = i / 255.0;
-        srgb_to_linear_lut[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
-    }
-    done = 1;
-}
-
 // a fixed, per-pixel offset of the first step in [0, 1): breaks up the banding of regular
 // steps into fine noise (the same every frame, so it does not flicker)
 static real pixel_jitter(int x, int y){
@@ -395,7 +384,8 @@ static void march_ray(const MarchCtx *mc, Vec3 dir, real tmax, real jit, Vec3 *L
 static void composite(Framebuffer *fb, size_t idx, Vec3 L, real T){
     if (T >= 1) return;
     uint32_t c = fb->color[idx];
-    Vec3 bg = vec3(srgb_to_linear_lut[(c >> 16) & 255], srgb_to_linear_lut[(c >> 8) & 255], srgb_to_linear_lut[c & 255]);
+    const float *lin = texmap_srgb_table();   // sRGB byte -> linear
+    Vec3 bg = vec3(lin[(c >> 16) & 255], lin[(c >> 8) & 255], lin[c & 255]);
     fb->color[idx] = image_pack_srgb(v_add(L, v_scale(bg, T)));
 }
 
@@ -405,7 +395,7 @@ void raster_draw_volumes(RasterVolumes *rv, Framebuffer *fb, const Scene *s, con
     if (s->nvolumes == 0) return;
     MarchParams def = march_default_params();
     if (!mp) mp = &def;
-    init_lut();
+    texmap_srgb_table();                       // (made before the threads need it)
     srgb_lut_init();
     MarchCtx mc;
     mc.rv = rv; mc.s = s; mc.mp = mp;
