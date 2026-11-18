@@ -3,6 +3,14 @@
 A proposal only: **no code was changed**. Every item has an id, so the ones to apply can be
 picked by id. The line numbers are those of `main` at 37b805c.
 
+**Since then** (in `development`, from main 30ab6ee, 2026-11-18): wgpu-native was removed (the
+native GPU is our Vulkan layer alone: docs/STATUS.md 1.8; the "wgpu" and `VK=1` builds of
+section 0 are now one, `make`) and the performance review's speedups went in
+(docs/PERF_REVIEW.md: `rigid.c`, `convex.c`, `env.c`, `mesh.c`, `bvh.c`, `lrmath.h`,
+`denoise.wgsl`, `gpu.c`, `vk_surface.c`, `wgsl.c` changed), so some line numbers have moved; each
+item is checked against the code as it is before it is applied. The fixes are made in
+`development`.
+
 - Categories: **bug**, **dead** (dead code), **useless**, **dup** (duplication), **smell**, **design**.
 - Status of a bug: **CONFIRMED** (reproduced by a run, or proven by reading every path / by
   `git`, `grep`, `make -q`) or **SUSPECTED** (the reasoning holds, but it was not reproduced).
