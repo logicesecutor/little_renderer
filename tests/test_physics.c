@@ -419,9 +419,12 @@ static void test_hulls(void){
     w.bodies[a1].vel = vec3(200, 0, 0);
     w.bodies[a2].vel = vec3(-100, 0, 0);
     Vec3 p0 = rigid_momentum(&w);
+    // twice the mass at half the speed: the two momenta cancel, so the change is measured
+    // against the size of each one's, not against their sum (0: divided by it, a rounding of
+    // 1e-9 of them, as fused multiply-adds give, read as a failure of 31164)
+    real scale = w.bodies[a1].mass * v_len(w.bodies[a1].vel) + w.bodies[a2].mass * v_len(w.bodies[a2].vel);
     for (int k = 0; k < 960; k++) rigid_step(&w, 1.0 / 960);
     Vec3 p1 = rigid_momentum(&w);
-    real scale = v_len(p0) + 1e-6f;
     check("hulls: momentum change / total", v_len(v_sub(p1, p0)) / scale, 0, 1e-3);
     check("hulls: they met (first one slowed down)", w.bodies[a1].vel.x < 150, 1, 0);
     rigid_free(&w);
