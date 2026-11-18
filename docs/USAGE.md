@@ -164,6 +164,7 @@ make web                                # -> web/build/
 make serve                              # then open http://localhost:8000
 make webtest                            # the GPU air against the CPU's: web/build/test_gpu_fluid.html
 make web-check                          # every pipeline of the page compiled and run once in a headless Chrome
+make web NOSIMD=1                       # without WebAssembly SIMD (-msimd128, on by default)
 ```
 
 The options go in the address: `http://localhost:8000/?scene=cloud&backend=raster`.

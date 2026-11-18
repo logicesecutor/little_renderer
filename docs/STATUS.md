@@ -288,6 +288,25 @@ tracer's (the probe is path traced from one point), so on a page's first run it 
 for that same 5-9 s compile, against 4.2 s for the CPU's bake on one thread; the CPU's bake
 on the page's threads (step 4) is the way taken.
 
+**Step 4, the CPU's code in the page.** (a) WebAssembly SIMD: `-msimd128` for the whole web
+build (`NOSIMD=1` without), the compiler vectorizing what it can (no intrinsics written).
+Single-threaded page, before -> after:
+
+| case | before | -msimd128 | -msimd128 -fno-slp-vectorize | -msimd128 -fno-vectorize |
+|---|---|---|---|---|
+| B2 CPU path tracer, 1 thread (M paths/s) | 0.444 | 0.459 | 0.443 | 0.464 |
+| C5 CPU rasterizer (ms/frame) | 173 | 146 | 150 | 149 |
+| E1 CPU top level, 48k (ms/build) | 79.6 | 52.6 | 79.2 | 52.6 |
+| E2 CPU top level, 18k (ms/build) | 28.4 | 18.6 | | |
+| F2 bodies on the CPU, 1 thread (ms/step) | 71.3 | 70.9 | 71.2 | 71.2 |
+| F4 tall pile on the CPU (ms/step) | 15.5 | 15.4 | | |
+| G3 air and cloud on the CPU (ms/step) | 32.2 | 34.8 | 32.1 | 34.7 |
+| H3 the sky demo made (ms) | 4191 | 4131 | | |
+
+Kept: all of it (the SLP vectorizer makes the top level's build 1.5x faster and the air's
+step 8% slower; the loop vectorizer the rasterizer 15% faster); the bodies' contacts did not
+vectorize by themselves (F2 the same): that would take written SIMD.
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`

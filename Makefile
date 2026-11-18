@@ -336,7 +336,10 @@ WEB_SRC = $(SRC) $(WGSL_C) apps/view.c
 # the GPU backend: WebGPU through Dawn's bindings for Emscripten (fetched by emcc once)
 # (WGPU_REFERENCE=1: for a webgpu.h from before wgpu...Reference became wgpu...AddRef)
 WEBGPU = -DLR_GPU --use-port=emdawnwebgpu $(if $(WGPU_REFERENCE),-DLR_WGPU_REFERENCE)
-WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pragmas $(WEBGPU) -sDEFAULT_TO_CXX \
+# WebAssembly SIMD (128-bit; every browser with WebGPU has it): the compiler vectorizes the
+# CPU's loops where it can; NOSIMD=1 leaves it out
+WEBSIMD = $(if $(NOSIMD),,-msimd128)
+WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pragmas $(WEBGPU) $(WEBSIMD) -sDEFAULT_TO_CXX \
           -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB \
           -sEXIT_RUNTIME=0 -sENVIRONMENT=web
 WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m))
