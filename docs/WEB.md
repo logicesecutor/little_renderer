@@ -3,8 +3,9 @@
 The same C code runs natively (Linux, Windows) and in a web browser. In the browser it is
 compiled to WebAssembly with **Emscripten**, draws on an HTML canvas, and uses the GPU
 through **WebGPU**. The CPU backends are always there; the GPU takes over what it does
-(rasterizing the scene, path tracing it, raymarching clouds and fog, simulating the air and
-the cloud), and whatever it does not do yet (the rigid bodies) stays on the CPU.
+(rasterizing the scene, path tracing it, raymarching clouds and fog, simulating the air,
+the cloud and the rigid bodies), and whatever it cannot take (a medium too big for its
+buffers, a pipeline that fails) stays on the CPU.
 
 | | native (Linux / Windows) | browser |
 |---|---|---|
@@ -81,7 +82,9 @@ http://localhost:8000/?scene=cloud&backend=raster&gpu=off               everythi
 ```
 
 The page's "console" box shows what the program prints (the GPU it found, timings,
-errors); the title line under the heading is the window title of `bin/view`.
+errors; its last 500 lines); the title line under the heading is the window title of
+`bin/view`. `tools/serve.mjs` serves only the folder it is given (a path that leaves it gets
+403, a malformed one 400).
 
 ## 2. The GPU: what runs where
 
@@ -94,11 +97,12 @@ errors); the title line under the heading is the window title of `bin/view`.
 | showing a CPU frame | the framebuffer is uploaded and drawn by one full-screen pass | `putImageData` on a 2D canvas |
 | rigid bodies of `-sim on` (`-gpurigid on`) | forces, pairs, contacts (balls, boxes, hulls, fixed meshes, walls), the contact solver with mass splitting (2.8) | `rigid_step` |
 
-Measured at 640×640 in Chrome on an NVIDIA Ampere GPU: the path tracer takes 6 ms per pass
-(one sample per pixel) on the Cornell box, 10 ms on the 100k-triangle dragon, 20 ms with
-the cloud, 48 ms with the mirror and glass spheres in cloud and fog (the browser's CPU path
-tracer: about 700 ms per pass on the box, on one thread). The physics demo runs the air,
-the cloud and the drawing on the GPU in real time.
+Measured at 640×640 in Chrome on an NVIDIA Ampere GPU (the performance suite, 2026-11-18,
+docs/STATUS.md 2): the path tracer takes 3.0 ms per pass (one sample per pixel) on the
+Cornell box, 4.1 ms on 40 instanced dragons, 12.6 ms with the cloud, 20.4 ms with the
+spheres in cloud and fog (the browser's CPU path tracer: 0.47 M paths/s on one thread, 3.5 M
+on the threaded page). The physics demos run the air, the cloud, the bodies and the drawing
+on the GPU in real time.
 
 On a *software* GPU (SwiftShader, llvmpipe: headless browsers, machines without a GPU
 driver) the simple kernels still win (cloud raster 159 → 42 ms per frame, cloud + fog
@@ -136,7 +140,10 @@ used for 2D drawing any more, so reload the page with `?gpu=off` or `?gpu=offscr
 The shaders are WGSL, one file each in `engine/gpu/shaders/`, in a folder by what they serve:
 `common/` (the types, media, BSDF and textures the others put together), `view/`, `raster/`,
 `trace/` (the path tracer, its tree builds and the denoiser), `rigid/` and `fluid/`
-(`trace/trace.wgsl`, `rigid/rigid_solve.wgsl`, ...). The build turns them into C strings inside the library (`tools/wgsl_embed.c`: a file
+(`trace/trace.wgsl`, `rigid/rigid_solve.wgsl`, ...). The helpers several of them use (the
+hash, the luminance, the sRGB curve, a pixel's id, an orthonormal basis, the sort keys) are
+written once, in `common/util.wgsl`, which the C side puts in front of each module that
+needs it (`gpu_wgsl_join`). The build turns them into C strings inside the library (`tools/wgsl_embed.c`: a file
 `x.wgsl` becomes `lr_wgsl_x`, which the C file using it names with `GPU_WGSL`), so the engine stays a C
 library with nothing to load at run time, natively or in a browser. Some are pieces put
 together by their C file (the path tracer's module, the air's kernels with their samplers). Every kernel has an explicit binding
@@ -150,7 +157,12 @@ Rules the GPU code follows, because a browser is asynchronous:
 - a slow GPU cannot fall behind without limit: at most 2 air steps are in flight (the time
   of a skipped step goes into the next one), one band of the path tracer, and offscreen at
   most one frame;
-- a callback that arrives after its object was destroyed does nothing (live lists).
+- a callback that arrives after its object was destroyed does nothing: one list of the
+  objects alive (`gpu_live_add` / `_remove` / `_has` in `gpu.c`), which every callback checks;
+- a surface that answers Outdated or Lost (a minimized window, a display change) is
+  configured again and the frame skipped; a GPU whose path tracing pipelines fail is not
+  waited for: `render`, `sim` and `bench` path trace on the CPU, the viewer turns
+  `-gputrace` off.
 
 ### 2.3 Checking the GPU against the CPU
 
@@ -450,9 +462,9 @@ make NOGPU=1   # a CPU-only build, into bin/cpu/
 
 | program | on the GPU | measured (RTX 3070, Windows) |
 |---|---|---|
-| `bin/view` | everything the browser does: rasterizer, path tracer, clouds, the air | path tracing 5.7 ms per pass at 640×640 (the box), as fast as Chrome on the same GPU |
-| `bin/render` | the path tracer and the rasterizer, offscreen, read back at full precision | box, 640×640, 256 spp: 2.0 s against 22.4 s on 8 CPU threads; cloud 2.0 s against 15.7 s; glass spheres in cloud and fog 2.6 s against 24.6 s |
-| `bin/sim` | the air, the cloud, the frames | 60 rasterized frames: under 1 s against 7 s; 30 path traced frames (320², 64 spp): 11 s against 82 s |
+| `bin/view` | everything the browser does: rasterizer, path tracer, clouds, the air, the bodies | path tracing 1.3 ms per pass at 640×640 (the box, hardware ray queries), 2.3x faster than Chrome on the same GPU; 207 frames/s path traced and denoised at 1280×720 (docs/STATUS.md 2) |
+| `bin/render` | the path tracer and the rasterizer, offscreen, read back at full precision | box, 640×640, 256 spp: 2.0 s against 22.4 s on 8 CPU threads; cloud 2.0 s against 15.7 s; glass spheres in cloud and fog 2.6 s against 24.6 s (measured on wgpu-native; our layer is faster) |
+| `bin/sim` | the air, the cloud, the bodies, the frames | 60 rasterized frames: under 1 s against 7 s; 30 path traced frames (320², 64 spp): 11 s against 82 s (on wgpu-native) |
 
 The GPU images agree with the CPU's: average brightness within 0.05% on the path traced
 scenes, the rasterizer identical except 0.04% of pixels (triangle edge ties), and the
@@ -479,16 +491,11 @@ of their passes when they are freed (the `GpuTimer` in `gpu/gpu_internal.h`: one
 pass, read back without waiting, averaged over the run). Chrome has timestamps too: the
 bench page asks for them (`gpu_set_timing`), so its F and G cases have their GPU times there.
 
-Two notes:
-- **One rasterized image:** the CPU is faster than the GPU for `bin/render -backend raster`,
-  3 ms against 55 ms, most of which is the GPU making its pipelines once.
-- **Linker warnings on Windows:** with MSYS2's binutils 2.38 the link prints many
-  `.drectve ... -exclude-symbols ... unrecognized` warnings. They are harmless: the library
-  was built with a newer linker, and the old one ignores those hints. Updating MSYS2
-  (`pacman -Syu`) makes them go away.
+One note: for one rasterized image the CPU is faster than the GPU (`bin/render -backend
+raster`: 3 ms against 55 ms, most of which is the GPU making its pipelines once).
 
-Later the engine can bring its own implementation of the same `webgpu.h` (a Vulkan backend),
-and drop the library without touching the GPU code.
+The engine brought its own implementation of the same `webgpu.h` (docs/VULKAN.md) and dropped
+wgpu-native on 2026-11-18 without touching the GPU code.
 
 ## 4. Using the engine in your own web page
 

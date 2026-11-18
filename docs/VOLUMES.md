@@ -337,6 +337,10 @@ for each pixel:                                   (or each 2x2 block, -marchscal
   viewer's default) marches one ray per 2×2 block and upsamples with depth-aware weights,
   so silhouettes in front of the cloud stay sharp: 3–4× faster. 640×640 on 4 cores: the
   cloud 63 ms full / 21 ms half resolution, cloud + fog 220 / 64 ms.
+- **On the GPU** (WEB.md 2) the light grid and the march are compute kernels of the same
+  model. Media whose density grid is larger than the GPU's largest storage buffer are not
+  handed to it: they are marched on the CPU instead, the surfaces under them rasterized there
+  too (`gpu_view_volumes_fit`), so a very large cloud still shows.
 - **Not modelled**: shadows of the media on the surfaces, light the media bounce onto the
   walls, shadows of the bodies on the cloud. The path tracer has all of these.
 - **Checked** (`bin/test_medium`): an absorbing block in an unlit scene leaves exactly

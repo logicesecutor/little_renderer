@@ -1,6 +1,7 @@
-# Our own Vulkan backend: the plan (after PBR)
+# Our own Vulkan backend (`webgpu/vk`, `webgpu/wgsl`)
 
-The plan agreed on 2026-11-14 for the engine's GPU layer natively, step 6 of
+The native build's GPU: the `webgpu.h` API implemented on Vulkan 1.3, with its own WGSL →
+SPIR-V compiler. What follows began as the plan agreed on 2026-11-14 for the engine's GPU layer natively, step 6 of
 [STATUS.md](STATUS.md). Work happens on the `vulkan` branch (merged only when agreed).
 Decided on 2026-11-15: `webgpu.h` on Vulkan first, natively only (the browser build is not
 kept up meanwhile); hardware ray tracing is the aim; the WebGPU side for the web comes after.
@@ -29,7 +30,7 @@ natively (their browser still has WebGPU).
 | WGSL → SPIR-V (`webgpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
 | render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
-| the window's surface (Win32 swapchain; X11 since 2026-11-18, `VK_KHR_xlib_surface`): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC | done (X11: built, not yet run on a Linux GPU) |
+| the window's surface (Win32 swapchain; X11 since 2026-11-18, `VK_KHR_xlib_surface`): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC; the display's refresh rate from the monitor's mode (Win32; X11 by XRandR, loaded when there) | done (X11: built, not yet run on a Linux GPU) |
 | acceleration structures and ray queries (R6): our extension of webgpu.h (`webgpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
 
 Checked so far, with the validation layer on and nothing reported: `make test` passes;
@@ -63,8 +64,8 @@ records written by the CPU with the instances. Kernel ms per pass, 640×640, RTX
 BVH on our layer → ray queries): boxes 2.08 → 1.35, a sphere mesh 3.36 → 1.25, the helmet
 4.82 → 1.80, the showcase 12.17 → 7.40 (STATUS.md).
 
-Next: the WGSL out of the C files into files of their own (asked for 2026-11-15); then the
-native extensions (below) where measurements show a gain.
+The WGSL lives in files of its own (`engine/gpu/shaders/`, WEB.md 2.2). Next: the native
+extensions (below) where measurements show a gain.
 
 Barriers: a command waits only for the commands since the last barrier, at their stages
 (compute, transfer, a build, a render pass) and for their writes, not for everything
@@ -101,6 +102,10 @@ from then on fails what waits for the GPU instead of waiting for good: work-done
 get an error, mappings are aborted, the surface reports itself lost. The engine's
 `gpu_state` goes to `GPU_FAILED` and the programs carry on with the CPU (the viewer says
 "GPU lost"). `LR_VK_LOSE_AFTER=n` makes the n-th submission fail that way, to test it.
+The engine's waits keep their flags in the `Gpu`, not on the stack, so a callback that comes
+after a wait gave up writes nowhere it should not. A surface that answers Outdated or Lost is
+configured again by the engine, the frame skipped. A submission of more command buffers than
+the layer holds at once is a validation error, not a silent drop.
 
 `LR_VK_VALIDATE=sync` adds the validation layer's synchronization checks (hazards between
 commands): the tests, `render`, `sim` and `view` run clean.

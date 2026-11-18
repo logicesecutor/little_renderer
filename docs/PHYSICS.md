@@ -521,6 +521,13 @@ All sweeps are **red-black**: cells are colored like a 3D checkerboard, and each
 updates one color from the other only. Cells of one color do not depend on each other, so
 they are updated in parallel, and the result is the same for any number of threads.
 
+The sweeps of one level are short (a 12³ level is a few microseconds of work), so starting
+a parallel loop for each cost more than the sweep: half a V-cycle (the smoothing, the
+residual, the restriction of one level) now runs in **one parallel region**, its threads
+meeting at a barrier between the steps that spins briefly before it yields (`base/spin.h`;
+Windows' OpenMP runtime never spins, so every barrier slept). The air on the CPU, 32³ with
+a cloud of 96³: 15.1 → 8.2 ms a step on 12 threads (bench G3), the same results to the bit.
+
 ### 2.6 Explosions: air that appears
 
 A plain outward kick does nothing in an incompressible fluid: an outward flow from a point
@@ -800,7 +807,17 @@ byte-identical images to before (the physics only adds code).
 
 ## 7. Performance
 
-8 threads, demo settings (air 48³, cloud 128³):
+The performance suite (docs/STATUS.md 1.3 and 2; RTX 3070, 12 threads, 2026-11-18): 1000
+bodies falling, a 1/60 s step, 7.1 ms on the CPU's 12 threads (23.6 on one), 1.64 ms on the
+GPU; a tall pile of 400, 3.7 ms on the CPU, 1.66 on the GPU; the air and the cloud (32³, 96³)
+9.0 ms a step on the CPU, 0.97 on the GPU. In a page (Chrome, the threaded build) the CPU's
+1000 bodies take 9.2 ms. Recent changes on the CPU: a hull's placed copy (`Placed`) lives on
+the stack instead of being allocated for every pair, each body's inverse inertia is made
+once per substep, the bodies' cells in the air are marked in one parallel region (bench F1
+7.15 → 6.97 ms); none changes the results.
+
+The older measurements below are of the first versions, 8 threads, demo settings (air 48³,
+cloud 128³):
 
 | part | time per physics step (1/60 s) |
 |---|---|

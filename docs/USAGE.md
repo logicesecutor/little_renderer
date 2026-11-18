@@ -14,6 +14,7 @@ for `models/` and write into `out/` relative to it.
 | `bin/render` | `apps/render.c` | offline: renders the Cornell box into a `.png`, with the path tracer (`-backend rt`, default) or the rasterizer (`-backend raster`) |
 | `bin/view` | `apps/view.c` | real time: a window you fly through; rasterizer while moving, path tracer when still; `-sim on` runs the physics live |
 | `bin/sim` | `apps/sim.c` | offline: a physics simulation (rigid bodies, air, the cloud it carries), path traced frame by frame into `out/sim/` and a GIF |
+| `bin/bench` | `apps/bench.c` | the performance suite (`make perf`, docs/STATUS.md 1.3): every case timed, results into a CSV; `-compare old.csv new.csv`, `-table`, `-shots dir` |
 | `bin/raster_milestones` | `examples/raster_milestones.c` | the rasterizer step by step: one image per milestone into `out/*.png` |
 | `bin/hello_rt`, `bin/hello_raster`, `bin/custom_scene` | `examples/` | small programs using the library (see `SDK.md`); write into `out/` |
 | `bin/mesh_rain` | `examples/mesh_rain.c` | random meshes rain into the room as convex hulls, without end (the oldest are reused past `-max`); the frame rate and the bodies asleep in the window's title. Options: `-rate meshes/s` (8), `-max bodies`, `-size units` (70), `-obj model`, `-gpu on\|off`, `-sleep on\|off` (on: bodies at rest fall asleep, PHYSICS.md 1.5), `-endless on\|off` (off: the rain stops at `-max` and the pile settles), `-seed n`, `-autoquit seconds`, `-n`/`-h` the window |
@@ -22,7 +23,8 @@ for `models/` and write into `out/` relative to it.
 | `tools/gen_models.py` | `tools/` | writes the test models (cube, sphere, torus, dense torus) |
 
 Everything is written from scratch in C. The only libraries are `libm`, `libX11` (for the
-window) and, optionally, OpenMP, which spreads both the path tracer and the rasterizer
+window), `libdl` (the GPU's Vulkan loader and X11's XRandR are opened at run time, when they
+are there) and, optionally, OpenMP, which spreads both the path tracer and the rasterizer
 over the CPU cores.
 
 ---
@@ -98,6 +100,11 @@ Build flags, combinable with any target:
 | `make SAN=1` | address + undefined-behaviour sanitizers: catches bad memory access; ~10× slower, into `build/*-san` and `bin/san/` |
 | `make CFLAGS="-O2 -DOCT_LEAF_SIZE=8"` | your own flags, e.g. to change a compile-time constant |
 
+The default flags are `-Wall -Wextra -Wshadow -O2 -g`, and every build is kept free of
+warnings. Each object depends on the headers it includes (gcc's `-MMD -MP`), so editing a
+header rebuilds what uses it, and nothing else; the web pages depend on their flags and on
+the models they pack.
+
 Run `make clean` first when you change `CFLAGS`. Every other flag (`DOUBLE`, `NOGPU`,
 `SINGLE`, `SAN`, `NATIVE`) has folders of its own, their names combined (`make NOGPU=1
 NATIVE=1`: `build/float-cpu-native/`, `bin/cpu-native/`), so switching needs no clean and
@@ -113,7 +120,7 @@ What gets built:
 | output | from |
 |---|---|
 | `build/float-vk/liblr.a` | `engine/*/*.c` (headers next to them; include `engine/lr.h`) |
-| `bin/render`, `bin/view`, `bin/sim` | `apps/*.c` + the library |
+| `bin/render`, `bin/view`, `bin/sim`, `bin/bench` | `apps/*.c` + the library |
 | `bin/hello_raster`, `bin/hello_rt`, `bin/custom_scene`, `bin/raster_milestones`, `bin/hello_physics`, `bin/mesh_rain` | `examples/*.c` + the library |
 | `bin/test_*` | `tests/*.c` + the library |
 
@@ -203,7 +210,11 @@ headless Chrome of its own on this machine's GPU):
 ## 3. `render`, `view` and `sim` options
 
 The three programs accept the same options; the defaults differ where noted. Values are
-given as `-option value`. The physics options are in section 3.1.
+given as `-option value`. The physics options are in section 3.1. `-h` prints them all, from
+the same table the parser reads (`engine/app/options.c`), with the defaults the program
+starts from. A value that is not what the option takes stops the program with the reason
+(`error: expected a number after -s, got '12x'`, `expected rt|raster after -backend`): numbers
+must be whole and in range, names one of those listed.
 
 ### Backend
 
@@ -648,6 +659,5 @@ the render time of each shading mode. For the rasterizer in real time, use
 | `view -sim on` is slow / jerky | the physics takes ~30 ms per step at the viewer's defaults: `-fluidres 24 -cloudres 64`, a smaller window, or `Space` to pause and look |
 | the raymarched cloud looks banded or blocky | more steps (`-march 256`), full resolution (`-marchscale 1`), a finer light grid (`-lightres 96`) |
 | the browser build: `GPU not used`, `GPU lost`, a black canvas | docs/WEB.md, section 5 |
-| `GPU not used (no GPU adapter ...)` natively | no Vulkan / Direct3D 12 driver for the GPU: update the GPU driver; `-gpu off` meanwhile |
-| Windows link: many `.drectve ... unrecognized` warnings | harmless (old binutils); `pacman -Syu` in MSYS2 updates them |
+| `GPU not used (no GPU adapter ...)` natively | no Vulkan 1.3 driver for the GPU: update the GPU driver; `-gpu off` meanwhile |
 | linker errors / garbage after changing `DOUBLE` | apps and library must use the same precision; the Makefile keeps them in separate folders, so use `bin/double/...` for `DOUBLE=1` |

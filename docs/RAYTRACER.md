@@ -132,7 +132,9 @@ The path tracer is the `rt/` layer of the engine. It builds on `base/`, `formats
 engine/
 ├── base/                what everything uses
 │   ├── lrmath.h         `real` (float or double), Vec3 (points, directions, RGB), Mat4, v_* functions
-│   └── rng.h            PCG32 random numbers, orthonormal basis, cosine-weighted hemisphere sampling
+│   ├── rng.h            PCG32 random numbers, orthonormal basis, cosine-weighted hemisphere sampling
+│   ├── sampler.h/c      Owen-scrambled Sobol with blue noise: a path's random numbers
+│   └── mem.h/c          growing arrays (lr_grow) and one out-of-memory policy (lr_oom)
 ├── formats/             files, by our own code
 │   ├── png.h/c          PNG writer and reader, with deflate / inflate (no library)
 │   └── hdr.h/c          Radiance .hdr (RGBE) reader and writer: the skies
@@ -147,13 +149,13 @@ engine/
 │   ├── octree.h/c       octree build and front-to-back traversal (closest hit and any hit)
 │   ├── bvh.h/c          BVH build (binned SAH or middle split) and stack-based traversal
 │   ├── accel.h/c        builds none / octree / BVH for a scene; scene_intersect, scene_occluded
-│   ├── tracer.h/c       trace_path(): direct light sampling, glass / mirror logic
+│   ├── tracer.h/c       trace_path(): direct light sampling, glass / mirror logic; trace_image(): a whole image
 │   └── probe.h/c        light probes for the rasterizers (PBR4)
 ├── raster/              the rasterizer (RASTERIZER.md)
 ├── platform/window.h/c  the X11 window (the viewer)
-└── app/options.h/c      command-line options of the two programs
+└── app/options.h/c      command-line options of the programs: one table, parsed and printed by -h
 apps/
-├── render.c             `bin/render`: pixel loop (OpenMP), anti-aliasing, timing, PNG output
+├── render.c             `bin/render`: the image (trace_image), timing, PNG output
 └── view.c               `bin/view`: camera controls, raster preview + progressive path tracing
 examples/hello_rt.c      the smallest program that path traces
 ```
@@ -179,7 +181,7 @@ Dependencies only point downward, so each layer can be understood on its own
 ### What happens for one pixel
 
 ```
-apps/render.c   for each of the spp samples:
+rt/tracer.c     trace_image(), for each of the spp samples:
                   pick a random point inside the pixel            (anti-aliasing)
 scene/camera.h     build the ray from the camera through that point
 rt/tracer.c       trace_path(): loop over bounces
@@ -191,7 +193,7 @@ rt/tracer.c         material: diffuse -> sample the lamp + bounce randomly
                               glass   -> reflect or refract (Fresnel)
                               light   -> add its emission, stop
                     Russian roulette may stop the path
-apps/render.c   average the samples -> linear RGB pixel
+rt/tracer.c     average the samples -> linear RGB pixel           (trace_image)
 rt/tracer.c     light_trace_caustics adds the caustics, traced from the lamp (section 5.14)
 scene/image.c    clamp, sRGB encode, write 3 bytes
 ```
@@ -283,6 +285,11 @@ rasterizer can draw it too (`render_scene` in `raster/render.c`).
   `front_face` whether it was flipped. Glass needs that to know if the ray is entering or
   leaving, and the lamp uses it to emit on one side only.
 - `aabb_hit`, the ray-box test both trees use (section 5.11).
+- The tests a tree runs for every candidate are `static inline` in the header
+  (`shape_test`: the distance and where on the shape, nothing else), so they compile into the
+  trees' loops; the full `Hit` (point, normals, side) is made once, for the shape kept
+  (`shape_hit`). That made the CPU path tracer 1.3x faster on the boxes (bench B1 3.91 → 5.16 M
+  paths/s; the dragon 5%), the same image.
 
 **`rt/accel.h/c`**: the bridge between a scene and the trees.
 - `scene_set_accel(scene, kind, params)` builds an octree or a BVH (or nothing) over the
@@ -317,14 +324,17 @@ palettes, transparency, interlacing) with an inflate that decodes all three kind
 deflate blocks; the textures and, later, glTF files use it. Every chunk carries a CRC-32,
 the compressed stream an Adler-32: both are checked.
 
-**`app/options.h/c`**: one parser for both programs (`-h` prints the list), so every option
-means the same in `render` and `view`. `options_setup_scene` builds the scene, applies
+**`app/options.h/c`**: one table of every option (its name, kind, field, the programs that
+show it, its help line), which both the parser and `-h` read, so every option means the same
+in `render`, `view` and `sim`, and `-h` prints the defaults the parser starts from. Numbers
+must be whole and in range. `options_setup_scene` builds the scene, applies
 `-cam`/`-look`/`-fov`, picks the acceleration structure (`-accel auto` = BVH from 64
 primitives up) and sets the thread count. `options_print_command` writes the `render`
 command line that reproduces a view, which is what key **C** in the viewer uses.
 
-**`apps/render.c`**: parses options, builds the scene and camera, and loops over pixels. Each
-pixel gets **its own seeded random generator**, so the image is bit-for-bit identical for any
+**`apps/render.c`**: parses options, builds the scene and camera, and calls `trace_image`
+(`rt/tracer.c`, also what `sim` and `bench` use), which loops over the pixels. Each pixel
+gets **its own seeded random generator**, so the image is bit-for-bit identical for any
 number of threads. `#pragma omp parallel for schedule(dynamic, 1)` hands out one row at a
 time to each core. Rows near the boxes and spheres cost more than rows of empty wall, and
 dynamic scheduling keeps all cores busy. The pragmas sit inside `#ifdef _OPENMP`, so the
@@ -857,12 +867,16 @@ leaves (`-bvhleaf 1`) adds nodes without helping.
 
 **Parallel build.** The two children of a node own disjoint ranges of the primitive list,
 so they can be built at the same time. `bvh_build` splits the top of the tree (nodes with
-more than 32,768 primitives) with OpenMP tasks, builds each smaller subtree serially into
-its own node array, and a final pass copies everything in preorder into one array. The
-split decisions are the same functions as the serial build (`choose_split`), and the
-preorder copy reproduces the serial layout exactly, so the tree, its statistics and the
-images are the same for any number of threads. The bounds of all primitives are also
-computed in parallel. Dragon, 4 cores / 8 threads: **3.5 s → 1.1 s**.
+more than 128 primitives, `BVH_PAR_MIN`) with OpenMP tasks, builds each smaller subtree
+serially into its own node array, reserved at once for the most nodes it can have, and a
+final pass copies everything in preorder into one array. The children's boxes come out of
+their parent's partition, not from a pass of their own. The split decisions are the same
+functions as the serial build (`choose_split`), and the preorder copy reproduces the serial
+layout exactly, so the tree, its statistics and the images are the same for any number of
+threads. The bounds of all primitives are also computed in parallel. Dragon, 4 cores / 8
+threads: **3.5 s → 1.1 s**. With subtrees of 128 (they were of 32,768, then 1024) the threads
+stay busy to the end: the top level over 48k instances 11.3 → 9.7 ms on 12 threads (bench E1),
+the dragon's whole start 320 → 312 ms.
 
 ### 5.13 The real-time viewer (`view`)
 
@@ -890,6 +904,18 @@ engine's `Framebuffer`, so the rasterizer draws straight into what is shown, and
 tracer's average is converted into the same framebuffer. On a Wayland desktop (GNOME) this
 runs through Xwayland, already part of the system. `XkbSetDetectableAutoRepeat` stops held
 keys from sending fake "released" events, so holding **W** means "keep moving".
+Losing the focus releases the keys held (their release goes to another window), as on
+Windows and in a page, and the display's refresh rate (which paces the GPU path tracer's
+work per frame) is read from the monitor's mode through XRandR when it is there, 60
+otherwise.
+
+**The loop.** Everything the viewer keeps between frames is one struct, `Viewer` (in
+`apps/view.c`), and a frame is six steps in order, each a function: `viewer_gpu` (the GPU
+starting, or lost: the CPU takes over), `viewer_input` (the window's events), `viewer_update`
+(the camera, `-orbit`, the physics), `viewer_render` (a raster frame, a step of the CPU path
+tracer, or the GPU's), `viewer_present` and `viewer_report` (the title, `-stats`,
+`-autoquit`). Natively `main` calls the frame until it says stop; in a page the browser
+calls it once per display refresh (WEB.md).
 
 **Camera.** The view is a position plus two angles, *yaw* (left/right) and *pitch*
 (up/down), turned into a direction:

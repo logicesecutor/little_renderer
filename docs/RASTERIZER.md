@@ -153,9 +153,18 @@ stage of triangle *i*) and hand it to `draw_triangles`, which works in two paral
    is added to the list of every band it touches. Triangles behind the camera, off screen,
    culled, or so small that they cover no pixel center are dropped here (on the dragon at
    640 × 640, about half of the 871k triangles).
-2. **Drawing**, in parallel over the bands: each band is drawn by one thread, which runs the
-   full vertex stage for the triangles in its list and fills only its own rows
-   (`draw_triangle_rows`, `draw_line_rows` in `raster.c`).
+2. **Drawing**, in parallel over the bands: each band is drawn by one thread, which fills
+   only its own rows, in two passes over its triangles (`draw_triangle_rows_pass` in
+   `raster.c`):
+   - **depth**: from the corners alone, the depth of every triangle, noting at each pixel
+     which one is nearest (an id per pixel); no colour, no shader;
+   - **shading**: the full vertex stage, then each pixel shaded once, by the triangle the
+     depth pass left there. A triangle nearest nowhere is hidden and skips this pass.
+   Shading in one pass shaded every fragment nearer than what was there yet, and most were
+   drawn over again: 75% of the time went to shading (docs/PERF_REVIEW.md, N3). The image is
+   the same: the depth pass keeps the fragment one pass would (nearer only, the first of a
+   tie), and the shading computes it as one pass did. Wireframe lines are drawn in one pass
+   (`draw_line_rows`).
 
 Why bands, and why this order:
 
@@ -186,10 +195,12 @@ Why bands, and why this order:
 One thread is a little slower than before (the binning pass is extra work); from 2 threads
 up it is faster, and with all 8 about 3–4× faster. Past 4 threads the gain is small: the
 machine has 4 physical cores, and the dragon is limited by memory traffic (every frame
-reads 871k primitives).
+reads 871k primitives). (These were measured before the two passes and the PBR lighting; on
+the 12 threads of the performance suite's machine the Cornell box takes 18.6 ms at 640 × 640
+with the full PBR lighting, the dragon 34.5 ms: bench C5, C6, docs/STATUS.md 2. The two
+passes took them from 20.7 and 37.2 ms.)
 
-Volumes (the cloud, `Scene.volume`) are not drawn by the rasterizer yet; VOLUMES.md
-section 7.1 describes how a raymarching pass would add them.
+The media (clouds, fog) are drawn over the frame by raymarching: the next section.
 
 Not done on purpose: top-left fill rule (harmless for opaque triangles with a z-test),
 far-plane clipping (pixels beyond it fail the depth test), shadows (a

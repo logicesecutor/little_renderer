@@ -364,6 +364,24 @@ Decided and found on the way:
   alpha masking and blending (drawn opaque), texture coordinates 1, KHR_texture_transform;
   Draco and meshopt compression are refused, KTX2 and WebP images skipped.
 
+### Since the phases (2026-11-18)
+
+- **Faster starts, the same pixels**: the sky's prefiltering reads each sample's half vector,
+  weight and level from a table made once per level (the sky demo made in 560 → 508 ms, bench
+  H3); a JPEG's inverse DCT, upsampling and colours, and a texture's mip levels, run in tasks of
+  64 rows that the threads idle in the glTF textures' loop take (the helmet loaded in 188 →
+  98 ms, H5).
+- **Files refused rather than read wrong**: glTF indices must be unsigned bytes, shorts or
+  ints, one per element (others read past their buffer); an image of more than 2^28 pixels
+  (`formats/limits.h`) is refused by the PNG, HDR and JPEG decoders before they allocate (a
+  32-bit `size_t`, in the WebAssembly build, could wrap the size); the JSON reader takes
+  JSON's numbers only (`0x10`, `inf`, `nan`, `01`, `1.` are errors). `bin/test_gltf` has the
+  broken files for each.
+- The sRGB tables and the blue noise are made on first use by whichever thread comes first
+  (`base/once.h`), without the race two threads had; the sRGB curve has one table each way,
+  shared: bytes to linear (`texmap_srgb_table`, which the clouds' march uses too) and linear to
+  bytes (`image_srgb8`, which the textures' mip levels use).
+
 ## Open questions (decided during the phases)
 
 - The lamp in the rasterizer: representative point first; linearly transformed cosines if

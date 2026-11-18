@@ -19,7 +19,7 @@ with hardware ray tracing, natively and in the browser.**
 [**Features**](#-features) · [**Gallery**](#-gallery) · [**Quick start**](#-quick-start) · [**How it is built**](#-how-it-is-built) · [**Performance**](#-performance) · [**Docs**](#-documentation)
 
 <img src="docs/images/sky_rain.jpg" width="97%" alt="Two thousand bodies of fourteen materials piled on brick paving under an HDR sky, among three thousand still objects">
-<br><sub><b>5000 instances under an HDR sky.</b> 2000 bodies of 14 physically based materials (gold, copper, chrome, glass, plastics, ceramic, rubber...) rain down and pile up, simulated on the GPU, among 3000 still props. Live it is path traced and denoised at 1280×720: <b>53 frames/s</b> on our Vulkan layer with hardware ray tracing (<code>bin/view -sim on -demo sky -backend rt</code>, RTX 3070). This frame has 256 samples per pixel.</sub>
+<br><sub><b>5000 instances under an HDR sky.</b> 2000 bodies of 14 physically based materials (gold, copper, chrome, glass, plastics, ceramic, rubber...) rain down and pile up, simulated on the GPU, among 3000 still props. Live it is path traced and denoised at 1280×720: <b>121 frames/s</b> on our Vulkan layer with hardware ray tracing (<code>bin/view -sim on -demo sky -backend rt -vsync off</code>, RTX 3070). This frame has 256 samples per pixel.</sub>
 
 </div>
 
@@ -41,7 +41,7 @@ JSON and glTF.
 
 <table>
 <tr>
-<td align="center"><b>~24k</b><br><sub>lines of C in the engine</sub></td>
+<td align="center"><b>~27k</b><br><sub>lines of C in the engine</sub></td>
 <td align="center"><b>~7k</b><br><sub>lines of C for our WebGPU on Vulkan and its WGSL compiler</sub></td>
 <td align="center"><b>80</b><br><sub>WGSL shaders, ~6.5k lines</sub></td>
 <td align="center"><b>4</b><br><sub>pipelines: CPU and GPU, raster and path traced</sub></td>
@@ -111,6 +111,7 @@ You need `gcc` and `make` (on Windows, an MSYS2 UCRT64 shell), and libX11 on Lin
 make models          # the test models, HDR skies, glTF samples and the dragon (uv or python3; ~41 MB, once)
 make                 # the library, the programs, the examples and the tests
 make test            # 14 unit tests (the GPU ones skip without a GPU)
+make NATIVE=1        # optional: faster on the CPU (-O3, AVX2), the same images, into bin/native/
 
 bin/view             # fly through the Cornell box: WASD + mouse, M changes mode
 bin/render           # a path traced image -> out/cornell_boxes.png
@@ -163,7 +164,8 @@ bin/view -sim on -demo sky -backend rt -sky models/skies/kloofendal_48d_partly_c
 
 </details>
 
-Every program lists its options with `-h`; all of them are in [docs/USAGE.md](docs/USAGE.md).
+Every program lists its options with `-h` (printed from the same table the parser reads, with
+the defaults it starts from); all of them are in [docs/USAGE.md](docs/USAGE.md).
 To build your own program on the engine, start with `examples/hello_rt.c` (40 lines) and
 [docs/SDK.md](docs/SDK.md).
 
@@ -171,7 +173,7 @@ To build your own program on the engine, start with `examples/hello_rt.c` (40 li
 
 ```mermaid
 flowchart LR
-    base["base<br/>math · random · noise"] --> formats["formats<br/>PNG · JPEG · HDR · JSON"]
+    base["base<br/>math · random · noise · memory · files"] --> formats["formats<br/>PNG · JPEG · HDR · JSON"]
     formats --> scene["scene<br/>scene · meshes · textures · volumes"]
     scene --> raster["raster<br/>rasterizer"]
     scene --> rt["rt<br/>path tracer"]
@@ -213,27 +215,31 @@ next to the GPU ones.
 
 ## ⚡ Performance
 
-Measured with the performance suite (`make perf`, `make web-bench`) on
-`main` at 6fe55ba: RTX 3070, 12 CPU threads, Windows. Nothing waits for the display (offscreen,
-and the viewer with `-vsync off`), so these are the fastest the machine goes.
-[docs/STATUS.md](docs/STATUS.md) has every case and the ideas still to try. The first column is
-wgpu-native, the native WebGPU library used until 2026-11-18, kept here for comparison.
+Measured with the performance suite (`make perf`, `make web-bench`) on `main` at d48a2c3
+(2026-11-18): RTX 3070, 12 CPU threads, Windows, Chrome 157 for the page. Nothing waits for the
+display (offscreen, and the viewer with `-vsync off`), so these are the fastest the machine
+goes; the GPU's clock varies by 10-20% from run to run, and the GPU rows are the fastest of
+that day's runs. [docs/STATUS.md](docs/STATUS.md) section 2 has every case, and the ideas
+still to try. The first column is wgpu-native, the native WebGPU library used until
+2026-11-18 (measured at 6fe55ba), kept for comparison.
 
 | | wgpu-native (until 2026-11-18) | our Vulkan layer | Chrome |
 |---|---|---|---|
-| Cornell box, 640×640, one path traced sample per pixel | 2.25 ms | **1.27 ms** | 3.82 ms |
-| Stanford dragon, 871k triangles, one pass | 8.32 ms | **1.34 ms** (hardware rays) | |
-| The helmet (glTF, textured), one pass | 5.30 ms | **1.76 ms** | 9.74 ms |
-| The sky demo with 48k instances, 1280×720, one pass | 17.7 ms | **3.97 ms** | 29.0 ms |
-| The same scene rasterized, a frame | 1.61 ms | 1.65 ms | 1.83 ms |
-| The denoiser, 1280×720 | 1.98 ms | **1.59 ms** | 1.83 ms |
-| 1000 rigid bodies falling, one 1/60 s step | 3.45 ms (GPU 1.18) | **1.74 ms** | 4.10 ms |
-| The viewer, Cornell box rasterized, 1280×720 | 3566 fps | 3598 fps | |
-| The viewer, Cornell box path traced and denoised, still | 201 fps, 178 passes/s | **223 fps, 339 passes/s** | |
-| The viewer, sky demo with 2000 bodies falling, path traced and denoised | 64 fps | **103 fps** | |
+| Cornell box, 640×640, one path traced sample per pixel | 2.25 ms | **1.28 ms** | 2.99 ms |
+| Stanford dragon, 871k triangles, one pass | 8.32 ms | **1.35 ms** (hardware rays) | |
+| The helmet (glTF, textured), one pass | 5.30 ms | **1.79 ms** | 6.99 ms |
+| The sky demo with 48k instances, 1280×720, one pass | 17.7 ms | **4.00 ms** | 25.8 ms |
+| The same scene rasterized, a frame | 1.61 ms | 1.65 ms | 1.90 ms |
+| The denoiser, 1280×720 | 1.98 ms | **1.37 ms** | 1.71 ms |
+| 1000 rigid bodies falling, one 1/60 s step | 3.45 ms (GPU 1.18) | **1.64 ms** | 3.92 ms |
+| The viewer, Cornell box rasterized, 1280×720 | 3566 fps | 3002 fps | |
+| The viewer, Cornell box path traced and denoised, still | 201 fps, 178 passes/s | **207 fps, 370 passes/s** | |
+| The viewer, sky demo with 2000 bodies falling, path traced and denoised | 64 fps | **121 fps** | |
 
-On the CPU, for comparison: the dragon path traced at 3.8 M paths/s on 12 threads, the 1000
-bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.6 ms.
+On the CPU, for comparison: the dragon path traced at 4.0 M paths/s on 12 threads, the 1000
+bodies in 7.1 ms a step (23.6 on one thread), the Cornell box rasterized in 18.6 ms, the air
+(32³, a cloud of 96³) in 9.0 ms a step. In the threaded page the CPU's code runs close to
+native speed: 3.5 M paths/s on the boxes, the bodies in 9.2 ms a step.
 
 ## 🧪 Quality
 
@@ -243,8 +249,11 @@ bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.
   queries, and the path tracer traced twice to the same bit.
 - **64 reference images**, CPU and GPU, rasterized and path traced, compared pixel for
   pixel across changes.
-- **Every build kept clean**, without warnings: Windows (our Vulkan layer, CPU only, `double`),
-  Linux (our Vulkan layer, CPU only, `float` and `double`) and the browser.
+- **Every build kept clean**, without warnings under `-Wall -Wextra -Wshadow`: Windows (our
+  Vulkan layer, CPU only, `double`, `NATIVE=1`), Linux (the same, and the sanitizers' build,
+  `SAN=1`, whose tests run clean) and the browser (one thread and threaded).
+- **Changes checked to the bit**: the clean-ups of 2026-11-18 (docs/REVIEW.md) changed no
+  image: the reference shots, the renders and the physics films are byte-identical.
 - **The Khronos validation layer** finds nothing in our Vulkan layer, across the tests,
   the viewer, `sim` and `render`.
 - **Layers checked** by `make check-layers` on every build.
@@ -263,6 +272,8 @@ bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.
 | [VULKAN](docs/VULKAN.md) | our own `webgpu.h` on Vulkan, the WGSL compiler, hardware ray tracing |
 | [STATUS](docs/STATUS.md) | what comes next and how fast it runs now: the next steps, the latest measurements, the ideas, the backlog and the history |
 | [PBR](docs/PBR.md) | physically based materials in every pipeline |
+| [PERF_REVIEW](docs/PERF_REVIEW.md) | a profiled review of where the time goes, and the speedups it led to |
+| [REVIEW](docs/REVIEW.md) | a code review: the bugs, duplications and smells found, and how each was fixed |
 
 ## 📄 Licence
 
