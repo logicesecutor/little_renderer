@@ -201,7 +201,9 @@ static void half_cycle(PoissonLevel *l, const PoissonLevel *c, int sweeps){
 
 static void vcycle(Poisson *ps, int k){
     PoissonLevel *l = &ps->lv[k];
-    if (k == ps->nlevels - 1){          // the coarsest grid: a few cells, just sweep
+    // the coarsest grid: a few cells, just sweep (nlevels <= POISSON_MAX_LEVELS: the second
+    // test only tells -O3, which unrolls this recursion, that lv[k + 1] below exists)
+    if (k == ps->nlevels - 1 || k >= POISSON_MAX_LEVELS - 1){
         smooth(l, 40);
         return;
     }

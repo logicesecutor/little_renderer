@@ -535,7 +535,8 @@ static size_t lcells(const GLevel *l){ return (size_t)l->nx * l->ny * l->nz; }
 static void vcycle(WGPUComputePassEncoder pass, GpuFluid *gf, int k){
     GLevel *l = &gf->lv[k];
     const Poisson *ps = &gf->f->poisson;
-    if (k == gf->nlevels - 1){
+    // (the second test only tells -O3, which unrolls this recursion, that lv[k + 1] exists)
+    if (k == gf->nlevels - 1 || k >= (int)(sizeof(gf->lv) / sizeof(gf->lv[0])) - 1){
         run(pass, gf, K_COARSEST_, l->bg_coarsest, 0);
         return;
     }
