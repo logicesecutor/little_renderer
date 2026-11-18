@@ -34,6 +34,7 @@ struct Gpu {
     int timestamps;      // passes can be timed (the adapter can: asked for whenever it can)
     int timing_report;   // the parts' GPU times printed when they end (LR_GPU_TIMING=1, gpu_set_timing)
     int rt;              // hardware ray queries (make VK=1 on a GPU that has them; LR_GPU_HWRT=0: off)
+    int rt_offered;      // in a browser: its adapter offers "acceleration-structure" (gpu.c; not used yet)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
 };

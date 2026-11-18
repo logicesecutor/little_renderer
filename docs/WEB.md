@@ -395,6 +395,44 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
 - The images stay those of the native build: `bin/bench -shots` and `webbench -shots` make
   the same images in both, `bin/bench -imgdiff` compares them (STATUS.md 1.7).
 
+### 2.10 Hardware ray queries in a browser: the seam, and what is missing
+
+Natively our Vulkan layer traces with hardware ray queries (VULKAN.md): the GPU's
+acceleration structures are built from the scene (`webgpu/vk/webgpu_rt.h`: bottom levels of
+triangles and boxes, a top level of instances), the path tracer's module gets
+`trace_hw_traverse.wgsl`'s `traverse()` in place of its own tree walk (`trace_source` renames
+that one `traverse_bvh`), and its layout an acceleration structure at binding 20 (`'A'` in
+`gpu_layout`). Everything turns on one flag, `Gpu.rt`, set in `gpu.c` when the adapter has the
+feature; without it the tree walk is used, as in every browser today.
+
+Browsers have no ray queries yet. The WebGPU proposals of October 2026 are gpuweb #11054
+(acceleration structures: the feature `"acceleration-structure"`,
+`GPUDevice.createAccelerationStructure`, `GPUCommandEncoder.buildAccelerationStructure`,
+`refitAccelerationStructure`, a top level placed in a bind group, WGSL
+`enable acceleration_structures;` and the handle type `acceleration_structure`) and #11056
+(WGSL's `ray_query`). What the page does now: it looks for the feature **by its name** on the
+adapter (`gpu.c`, `lr_web_adapter_offers`: it has no `WGPUFeatureName` in webgpu.h yet), and
+when a browser offers it, says so on the console (`GPU note: the browser offers
+"acceleration-structure"...`) and goes on with the tree walk; `gpu_rt_offered()` tells a
+program. Nothing is asked for that the page could not use, and nothing needs a flag of the
+browser.
+
+What is missing before `Gpu.rt` can be set in a page (in this order):
+
+| piece | natively (our layer) | in a page | missing |
+|---|---|---|---|
+| the feature | `WGPUNativeFeature_RayQuery` in requiredFeatures | `"acceleration-structure"` on the adapter (detected) | asking for it (`requiredFeatures`) once the rest exists |
+| building | `lrDeviceCreateBlas/Tlas`, `lrCommandEncoderBuildBlas/BuildTlas/UpdateTlas`, `lrBlasGetAddress` (webgpu_rt.h) | `createAccelerationStructure`, `buildAccelerationStructure`, `refitAccelerationStructure` (JavaScript) | a web implementation of webgpu_rt.h's functions over those (EM_JS on the JavaScript objects, as `gpu.c` reads the adapter), or C names in Emscripten's WebGPU port once the proposal lands; the top level's instances as the proposal lays them out (our layer's are Vulkan's 64-byte records, written by `upload_instances`) |
+| binding | a bind group entry chaining `LRBindGroupEntryTlas` (`hw_entry`) | a `GPUAccelerationStructure` as a bind group entry's resource | Emscripten's port turns C bind group entries into JavaScript ones and knows no acceleration structure: the path tracer's bind group would be made in JavaScript, or the port taught the new entry |
+| WGSL | `var rq: ray_query; rayQueryInitialize(&rq, ACC, RayDesc(flags, mask, tmin, tmax, origin, dir))`, `rayQueryGetCandidateIntersection(&rq)` (a struct), `rayQueryGenerateIntersection(&rq, t)` (wgpu's naga syntax, which our layer's compiler takes) | the proposal: `enable acceleration_structures;`, `rayQueryInitialize(tlas, flags, RayDesc(origin, direction, t_min, t_max, mask)) -> ray_query`, one getter per value (`rayQueryGetCandidateType`, `rayQueryGetCommittedT`, `...InstanceId`, `...PrimitiveIndex`, `...TriangleBarycentrics`), `rayQueryCommitCandidate(rq, t)` for boxes | a second `trace_hw_traverse` written to the final syntax (the proposal is still under review: its names may change), chosen by `trace_source` in a page |
+| the switch | `g->rt = 1` in `gpu.c` (`LR_GPU_HWRT=0` turns it off) | `g->rt_offered` | `g->rt = g->rt_offered` once the three rows above exist; the engine's hardware path (`t->hw` in `trace_gpu.c`, today under `#ifdef LR_VK`) compiled for the page too |
+
+So the day a browser ships the feature, the work is a web implementation of webgpu_rt.h,
+the bind group's entry, and the WGSL in the final syntax; the scene's layout for the hardware
+(the bottom levels, the instance records, the custom data the WGSL reads: `HW_WTRI`,
+`HW_WPRIM`) and the rest of the path tracer stay as they are, and the tree walk stays the
+fallback for every browser and GPU without it.
+
 ## 3. The GPU natively (Windows, Linux)
 
 The native programs (`bin/view`, `bin/render`, `bin/sim`) run the same GPU code as the

@@ -46,6 +46,9 @@ int gpu_offscreen(const Gpu *g);         // 1 if created with no canvas
 // air, the cloud's raymarch) but long branching ones (the path tracer) far slower than the
 // engine's own CPU code
 int gpu_software(const Gpu *g);
+// 1 = a browser's adapter offers hardware ray queries ("acceleration-structure", the WebGPU
+// proposal's name); not used yet: the page traces with its own tree walk (docs/WEB.md 2.10)
+int gpu_rt_offered(const Gpu *g);
 void gpu_destroy(Gpu *g);
 // Benchmarks (bin/bench): the GPU's own timers (timestamp queries; natively only, when the
 // adapter has them). Asked for before gpu_create (or LR_GPU_TIMING=1 in the environment);

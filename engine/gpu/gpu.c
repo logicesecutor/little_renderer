@@ -10,6 +10,7 @@
 struct Gpu { int unused; };
 
 int gpu_available(void){ return 0; }
+int gpu_rt_offered(const Gpu *g){ (void)g; return 0; }
 Gpu *gpu_create(const char *canvas, int width, int height){
     (void)canvas; (void)width; (void)height;
     return calloc(1, sizeof(Gpu));
@@ -44,7 +45,26 @@ EM_ASYNC_JS(void, lr_web_yield, (void), {
 });
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+// Hardware ray queries in a browser (docs/WEB.md 2.10): no browser has them yet; the WebGPU
+// proposals (gpuweb #11054, acceleration structures, and #11056, WGSL's rayQuery, Oct 2026)
+// name the feature "acceleration-structure". It has no WGPUFeatureName in webgpu.h yet, so it
+// is looked for by its name on the adapter's JavaScript object. Found, it is only reported:
+// the page has no implementation of the hardware path for it (the path tracer's software walk
+// is used); that implementation is what switches g->rt on there, as our Vulkan layer does.
+EM_JS_DEPS(lr_gpu_rt, "$WebGPU,$UTF8ToString");
+EM_JS(int, lr_web_adapter_offers, (WGPUAdapter adapter, const char *name), {
+    try {
+        var a = WebGPU.getJsObject(adapter);
+        return a && a.features && a.features.has(UTF8ToString(name)) ? 1 : 0;
+    } catch (e) { return 0; }
+});
+#endif
+#define GPU_RT_FEATURE "acceleration-structure"
+
 int gpu_available(void){ return 1; }
+int gpu_rt_offered(const Gpu *g){ return g && g->rt_offered; }
 
 static int timing_wanted;              // gpu_set_timing (a page too: Chrome has the timers)
 void gpu_set_timing(int on){ timing_wanted = on != 0; }
@@ -179,6 +199,9 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
     wgpuAdapterInfoFreeMembers(info);
     g->state = GPU_READY;
     printf("GPU ready: %s\n", g->message);
+    if (g->rt_offered)
+        printf("GPU note: the browser offers \"" GPU_RT_FEATURE "\" (hardware ray queries); this build has no hardware path "
+               "for it yet and traces with its own tree walk (docs/WEB.md 2.10)\n");
 }
 
 static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView msg, void *u1, void *u2){
@@ -205,6 +228,9 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
         g->timestamps = 1;
     }
     g->timing_report = g->timestamps && (timing_wanted || getenv("LR_GPU_TIMING"));
+#ifdef __EMSCRIPTEN__
+    g->rt_offered = lr_web_adapter_offers(adapter, GPU_RT_FEATURE);   // (not asked for: see above)
+#endif
 #ifdef LR_VK
     // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)

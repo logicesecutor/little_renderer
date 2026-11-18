@@ -337,6 +337,17 @@ than natively (F2 71 against 44). The images: the same as natively and as the
 single-threaded page (`-shots`, both pages: the CPU's path traced and rasterized boxes, and
 the GPU's 8, the same RMSE to the last digit as the single-threaded page's).
 
+**Step 5, ready for hardware ray queries.** No browser has them; the proposals (gpuweb #11054
+acceleration structures, feature `"acceleration-structure"`; #11056 WGSL's `ray_query`) are
+under review. The page now looks for the feature by its name on the adapter (it has no
+`WGPUFeatureName` in webgpu.h), reports it when a browser offers it (`gpu_rt_offered`) and
+traces with its own tree walk either way; checked by looking for a name Chrome has
+(`timestamp-query`: found). What is missing before the hardware path (`Gpu.rt`, as our Vulkan
+layer sets it) can switch on in a page is written down in WEB.md 2.10: a web implementation
+of webgpu_rt.h's 9 functions, the top level as a bind group entry (Emscripten's WebGPU port
+knows none), and `trace_hw_traverse.wgsl` in the proposal's syntax (it differs from wgpu's
+naga syntax our layer takes). Nothing fake is shipped and nothing needs a browser flag.
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`

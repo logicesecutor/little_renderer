@@ -35,9 +35,11 @@ wgpu-native's C API has no acceleration structures, so ours is an extension of w
 our own (`webgpu/vk/webgpu_rt.h`), shaped after the WebGPU proposal: bottom levels of
 triangles or boxes (`lrDeviceCreateBlas`, `lrCommandEncoderBuildBlas`), a top level of
 64-byte instance records (`lrDeviceCreateTlas`, `lrCommandEncoderBuildTlas`), bound through
-chained bind group entries. The WGSL is wgpu's and the proposal's: `acceleration_structure`,
+chained bind group entries. The WGSL is wgpu's: `acceleration_structure`,
 `ray_query`, `rayQueryInitialize` / `Proceed` / `GenerateIntersection` /
-`GetCommittedIntersection`, `RayDesc`, `RayIntersection`, the `RAY_*` constants.
+`GetCommittedIntersection`, `RayDesc`, `RayIntersection`, the `RAY_*` constants. (The WebGPU
+proposals of October 2026, gpuweb #11054 and #11056, differ from it in places; what a page
+needs to use the same hardware path once a browser ships them: WEB.md 2.10.)
 
 The device asks for ray queries when the GPU has them (`LR_GPU_HWRT=0`: not). The path
 tracer then compiles a `traverse()` on ray queries in place of the BVH walk (the same
