@@ -523,6 +523,8 @@ static LRBindGroupLayoutEntryTlas tlas_entry = {{NULL, LRSType_BindGroupLayoutEn
 WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types){
     WGPUBindGroupLayoutEntry e[24];
     memset(e, 0, sizeof(e));
+    if (strlen(types) > 24)                    // (a longer one is a mistake here: said, not cut quietly)
+        fprintf(stderr, "GPU: gpu_layout \"%s\": more than 24 bindings, the rest left out\n", types);
     int n = 0;
     for (int i = 0; types[i] && i < 24; i++){
         if (types[i] == '-') continue;          // no binding with this number
@@ -847,6 +849,7 @@ WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channel
 // the count of them
 static int fill_entries(WGPUBindGroupEntry e[16], const WGPUBuffer *bufs, int n){
     memset(e, 0, 16 * sizeof(e[0]));
+    if (n > 16) fprintf(stderr, "GPU: a bind group of %d buffers: more than 16, the rest left out\n", n);
     int m = 0;
     for (int i = 0; i < n && i < 16; i++){
         if (!bufs[i]) continue;
