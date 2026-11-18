@@ -3,6 +3,8 @@
 //   view    (real-time window: rasterized preview while moving, path tracing when still)
 //   sim     (offline: a physics simulation rendered frame by frame into an animation)
 // Run either one with -h for the full list. Apps only, not needed to use the engine.
+// The options are one table in options.c (OPTS), which both options_parse and -h read: an
+// option added there is parsed, checked against its kind and shown with its default.
 #ifndef LR_OPTIONS_H
 #define LR_OPTIONS_H
 
