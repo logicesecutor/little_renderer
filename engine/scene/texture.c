@@ -1,4 +1,5 @@
 #include "scene/texture.h"
+#include "base/once.h"
 #include "base/file.h"
 
 #include "scene/image.h"   // rgb8
@@ -58,22 +59,15 @@ Vec3 texture_sample(const Texture *t, real u, real v){
 // ---- the materials' textures ------------------------------------------------------------
 
 static float SRGB[256];
-static int srgb_ready;
+static LrOnce srgb_ready;
 
 const float *texmap_srgb_table(void){
-    if (!srgb_ready)
-#ifdef _OPENMP
-#pragma omp critical(texmap_srgb)
-#endif
-    if (!srgb_ready){
+    if (lr_once_begin(&srgb_ready)){
         for (int i = 0; i < 256; i++){
             double c = i / 255.0;
             SRGB[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
         }
-#ifdef _OPENMP
-#pragma omp flush
-#endif
-        srgb_ready = 1;
+        lr_once_done(&srgb_ready);
     }
     return SRGB;
 }
@@ -82,22 +76,15 @@ const float *texmap_srgb_table(void){
 // same bytes as image_srgb8 without a pow per texel: making the helmet's mips spent most of its
 // time there)
 static double SRGB_UP[255];
-static int srgb_up_ready;
+static LrOnce srgb_up_ready;
 
 static void srgb_up_init(void){
-    if (srgb_up_ready) return;
-#ifdef _OPENMP
-#pragma omp critical(texmap_srgb_up)
-#endif
-    if (!srgb_up_ready){
+    if (lr_once_begin(&srgb_up_ready)){
         for (int i = 0; i < 255; i++){
             double e = (i + 0.5) / 255;
             SRGB_UP[i] = e <= 0.0031308 * 12.92 ? e / 12.92 : pow((e + 0.055) / 1.055, 2.4);
         }
-#ifdef _OPENMP
-#pragma omp flush
-#endif
-        srgb_up_ready = 1;
+        lr_once_done(&srgb_up_ready);
     }
 }
 
@@ -232,7 +219,7 @@ Vec4 texmap_texel(const TexMap *t, int level, int x, int y){
     uint32_t c = t->px[t->at[level] + (size_t)wrap_i(y, h) * w + wrap_i(x, w)];
     Vec4 r;
     if (t->srgb){
-        const float *lut = srgb_ready ? SRGB : texmap_srgb_table();
+        const float *lut = lr_once_made(&srgb_ready) ? SRGB : texmap_srgb_table();
         r.x = lut[c & 255]; r.y = lut[(c >> 8) & 255]; r.z = lut[(c >> 16) & 255];
     } else {
         r.x = (c & 255) * (1.0f / 255); r.y = ((c >> 8) & 255) * (1.0f / 255); r.z = ((c >> 16) & 255) * (1.0f / 255);
@@ -285,7 +272,7 @@ Vec4 texmap_bilinear(const TexMap *t, int level, real u, real v){
     int xa = edge(x0, w, t->wrap_u), xb = edge(x0 + 1, w, t->wrap_u);
     int ya = edge(y0, h, t->wrap_v), yb = edge(y0 + 1, h, t->wrap_v);
     const uint32_t *px = t->px + t->at[level];
-    const float *lut = t->srgb ? (srgb_ready ? SRGB : texmap_srgb_table()) : NULL;
+    const float *lut = t->srgb ? (lr_once_made(&srgb_ready) ? SRGB : texmap_srgb_table()) : NULL;   // (per sample: the test inline)
     Vec4 a = decode(px[(size_t)ya * w + xa], lut), b = decode(px[(size_t)ya * w + xb], lut);
     Vec4 c = decode(px[(size_t)yb * w + xa], lut), d = decode(px[(size_t)yb * w + xb], lut);
     return v4_lerp(v4_lerp(a, b, fx), v4_lerp(c, d, fx), fy);

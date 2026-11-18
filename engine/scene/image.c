@@ -1,4 +1,5 @@
 #include "scene/image.h"
+#include "base/once.h"
 #include "base/mem.h"
 
 #include "formats/png.h"
@@ -118,19 +119,12 @@ int image_write_png(const Image *img, const char *path){
 // ---- fast linear -> sRGB pixel ------------------------------------------------------
 
 static unsigned char srgb_lut[4096];   // linear [0,1] -> sRGB byte
-static int srgb_lut_ready;
+static LrOnce srgb_lut_ready;
 
 void srgb_lut_init(void){
-    if (srgb_lut_ready) return;
-#ifdef _OPENMP
-#pragma omp critical(srgb_lut)
-#endif
-    if (!srgb_lut_ready){
+    if (lr_once_begin(&srgb_lut_ready)){
         for (int i = 0; i < 4096; i++) srgb_lut[i] = to_srgb8(i / 4095.0);
-#ifdef _OPENMP
-#pragma omp flush
-#endif
-        srgb_lut_ready = 1;
+        lr_once_done(&srgb_lut_ready);
     }
 }
 
@@ -141,7 +135,7 @@ static inline int lut_index(real c){
 }
 
 uint32_t image_pack_srgb(Vec3 c){
-    if (!srgb_lut_ready) srgb_lut_init();     // (it was black before someone called it)
+    if (!lr_once_made(&srgb_lut_ready)) srgb_lut_init();     // (it was black before someone called it)
     return ((uint32_t)srgb_lut[lut_index(c.x)] << 16) |
            ((uint32_t)srgb_lut[lut_index(c.y)] << 8) |
             (uint32_t)srgb_lut[lut_index(c.z)];

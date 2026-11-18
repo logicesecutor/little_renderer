@@ -1,4 +1,5 @@
 #include "base/sampler.h"
+#include "base/once.h"
 
 #include <math.h>
 #include <string.h>
@@ -60,7 +61,7 @@ uint32_t sampler_sobol1(uint32_t i){ return reverse_bits(sobol1_reversed(i)); }
 #define BN BLUE_NOISE_SIZE
 #define BN_N (BN * BN)
 static uint16_t bn_rank[BN_N];
-static volatile int bn_ready;
+static LrOnce bn_ready;
 
 static void bn_update(float *energy, const float *kern, int p, float sign){
     int px = p % BN, py = p / BN;
@@ -131,14 +132,7 @@ static void bn_make(void){
 }
 
 const uint16_t *blue_noise_mask(void){
-    if (!bn_ready){
-#ifdef _OPENMP
-#pragma omp critical (lr_blue_noise)
-#endif
-        {
-            if (!bn_ready){ bn_make(); bn_ready = 1; }
-        }
-    }
+    if (lr_once_begin(&bn_ready)){ bn_make(); lr_once_done(&bn_ready); }
     return bn_rank;
 }
 

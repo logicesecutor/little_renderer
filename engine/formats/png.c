@@ -1,4 +1,5 @@
 #include "formats/png.h"
+#include "base/once.h"
 #include "base/file.h"
 #include "formats/limits.h"
 
@@ -10,25 +11,18 @@
 // ---- checksums ---------------------------------------------------------------------------
 
 static uint32_t crc_table[256];
-static int crc_ready;
+static LrOnce crc_ready;
 
-// The tables made on first use are made by one thread at a time (glTF models decode their
-// images in parallel): a critical section around the making
+// The tables made on first use are made once, by one thread (glTF models decode their
+// images in parallel): base/once.h
 static uint32_t crc32_update(uint32_t c, const unsigned char *p, size_t n){
-    if (!crc_ready)                                // (the critical section only the first times)
-#ifdef _OPENMP
-#pragma omp critical(png_tables)
-#endif
-    if (!crc_ready){
+    if (lr_once_begin(&crc_ready)){
         for (uint32_t i = 0; i < 256; i++){
             uint32_t k = i;
             for (int j = 0; j < 8; j++) k = k & 1 ? 0xEDB88320u ^ (k >> 1) : k >> 1;
             crc_table[i] = k;
         }
-#ifdef _OPENMP
-#pragma omp flush
-#endif
-        crc_ready = 1;
+        lr_once_done(&crc_ready);
     }
     c = ~c;
     for (size_t i = 0; i < n; i++) c = crc_table[(c ^ p[i]) & 255] ^ (c >> 8);
@@ -442,21 +436,14 @@ static int huff_decode(BitR *r, const Huff *h){
 
 static int inflate_into(BitR *r, Buf *out){
     static Huff fixed_lit, fixed_dist;
-    static int fixed_ready;
-    if (!fixed_ready)
-#ifdef _OPENMP
-#pragma omp critical(png_tables)
-#endif
-    if (!fixed_ready){
+    static LrOnce fixed_ready;
+    if (lr_once_begin(&fixed_ready)){
         uint8_t l[288];
         for (int i = 0; i < 288; i++) l[i] = i < 144 ? 8 : (i < 256 ? 9 : (i < 280 ? 7 : 8));
         huff_build(&fixed_lit, l, 288);
         for (int i = 0; i < 30; i++) l[i] = 5;
         huff_build(&fixed_dist, l, 30);
-#ifdef _OPENMP
-#pragma omp flush
-#endif
-        fixed_ready = 1;
+        lr_once_done(&fixed_ready);
     }
     int last;
     do {
