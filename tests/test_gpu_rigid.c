@@ -7,7 +7,7 @@
 // the room, nobody sunk into anybody, all at rest; and the time per step, CPU vs GPU, from a
 // few tens to a few thousand bodies.
 //
-// Needs a GPU build (make deps): bin/test_gpu_rigid. Without a GPU it says so and passes.
+// Needs a GPU build (the default one): bin/test_gpu_rigid. Without a GPU it says so and passes.
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -390,7 +390,7 @@ static void timings(void){
 }
 
 int main(void){
-    if (!gpu_available()){ printf("test_gpu_rigid: this build has no GPU (make deps): skipped\n"); return 0; }
+    if (!gpu_available()){ printf("test_gpu_rigid: this build has no GPU (NOGPU=1): skipped\n"); return 0; }
     g = gpu_create(NULL, 64, 64);
     for (int k = 0; k < 20000 && g && gpu_state(g) == GPU_PENDING; k++) gpu_poll(g);
     if (!g || gpu_state(g) != GPU_READY){ printf("test_gpu_rigid: no GPU (%s): skipped\n", g ? gpu_message(g) : "none"); return 0; }

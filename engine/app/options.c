@@ -54,7 +54,7 @@ void options_usage(Program prog, FILE *f){
              : "  -backend rt|raster         path tracer or rasterizer                (rt)\n",
         sim ? "the cloud" : "clouds and fog", view ? "2" : "1", !view ? "" :
         "  -gpu on|off|offscreen      render (rasterizer, path tracer, clouds) and simulate the air on the GPU\n"
-        "                             (WebGPU; on when the build has it: make web, or make deps natively);\n"
+        "                             (WebGPU; on when the build has it: make web, or natively unless NOGPU=1);\n"
         "                             offscreen: the GPU draws into a texture read back to the canvas\n"
         "  -gpufluid on|off           with -sim on and the GPU: the air and the cloud are simulated there too\n"
         "  -gpurigid on|off           with -sim on and the GPU: the balls and boxes are simulated there too\n"
@@ -218,7 +218,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->photons = 1;
     o->shading = MODE_PHONG;
     o->raster_clouds = 1;
-    o->gpu = gpu_available();              // the GPU whenever the build has one (make deps, make web)
+    o->gpu = gpu_available();              // the GPU whenever the build has one (natively, make web)
     o->gpu_fluid = 1;
     o->gpu_rigid = 1;
     o->gpu_raster = 1;

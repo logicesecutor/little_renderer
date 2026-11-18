@@ -5,7 +5,7 @@
 // Everything here goes through the engine's public API (nothing in engine/ is special for
 // it): the room from scene_cornell_box, each model loaded once in its own space
 // (scene_load_mesh_object) with its convex hull (rigid_geom_hull), every falling copy a
-// hull body drawn as an instance (phys_add_mesh_to_scene). With a GPU (make deps) the
+// hull body drawn as an instance (phys_add_mesh_to_scene). With a GPU (the default build) the
 // bodies are simulated there (gpu/rigid_gpu.h) and the scene is rasterized there
 // (gpu_view_present_scene); without one the CPU does both.
 //
@@ -150,7 +150,7 @@ int main(int argc, char **argv){
             printf("GPU not used (%s): the CPU does everything\n", gpu ? gpu_message(gpu) : "none");
             if (gpu){ gpu_destroy(gpu); gpu = NULL; }
         }
-    } else printf("no GPU in this build (make deps) or -gpu off: the CPU does everything\n");
+    } else printf("no GPU in this build (NOGPU=1) or -gpu off: the CPU does everything\n");
     // a full room's pile: on an RTX 3070, 500 hulls keep the screen's 165 frames/s; past ~700
     // the hulls' contact tests (48-corner SAT, LR_GPU_TIMING=1) become the limit. The CPU's
     // solver and rasterizer slow down past a hundred or so.

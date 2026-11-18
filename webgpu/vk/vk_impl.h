@@ -1,11 +1,11 @@
 // vk_impl.h - the Vulkan layer's insides: the part of webgpu.h the engine uses, implemented
-// on Vulkan (webgpu/vk/*.c), in place of wgpu-native (`make VK=1`).
+// on Vulkan (webgpu/vk/*.c): the native build's WebGPU.
 //
 // How WebGPU's model maps here:
 // - one queue (graphics + compute), a second when asked for (LR_VK_QUEUES=2,
 //   lrDeviceGetComputeQueue); each submit signals its queue's timeline semaphore with the
-//   next number: wgpuQueueSubmitForIndex returns it (the queue in bits 62-63),
-//   wgpuDevicePoll waits for it;
+//   next number: lrQueueSubmitForIndex returns it (the queue in bits 62-63),
+//   lrDevicePoll waits for it;
 // - objects are reference counted; a command buffer holds a reference to everything it uses
 //   until its submission is done, so releasing early (as WebGPU allows) is safe;
 // - every command is preceded by a barrier from the stages of the commands since the last
@@ -17,7 +17,6 @@
 #define LR_VK_IMPL_H
 
 #include <webgpu/webgpu.h>
-#include <webgpu/wgpu.h>
 #include "vk/vk.h"
 #include "vk/webgpu_rt.h"
 
@@ -154,7 +153,7 @@ struct WGPUDeviceImpl {
     Staging *stage_free;             // staging memory to use again
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
-    int rt;                          // ray queries asked for (WGPUNativeFeature_RayQuery) and on
+    int rt;                          // ray queries asked for (LRFeatureName_RayQuery) and on
     WGPUDeviceLostCallbackInfo on_lost;
     int lost;                        // vk_device_lost: the callback was called, what waited was failed
     int nsubmits;                    // (LR_VK_LOSE_AFTER counts them)

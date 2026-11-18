@@ -31,7 +31,7 @@ static void destroy_swapchain(WGPUSurface s){
     if (!s->dev) return;
     VkDevice d = s->dev->vk;
     vk.vkDeviceWaitIdle(d);
-    wgpuDevicePoll(s->dev, 0, NULL);           // the finished submissions given back
+    lrDevicePoll(s->dev, 0, NULL);           // the finished submissions given back
     release_images(s);
     if (s->sc){ vk.vkDestroySwapchainKHR(d, s->sc, NULL); s->sc = 0; }
     if (s->acquired){ vk.vkDestroyFence(d, s->acquired, NULL); s->acquired = 0; }

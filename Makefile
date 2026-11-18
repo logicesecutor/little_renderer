@@ -1,8 +1,8 @@
 # little_renderer - one Makefile for the whole engine. Run everything from this folder.
 # Every target, option and key is documented in docs/USAGE.md; the library API in docs/SDK.md.
 #
-#   engine/{base,formats,scene,raster,rt,phys,platform,gpu,app}/*.c -> build/float/liblr.a (the engine)
-#   webgpu/{vk,wgsl}/*.c                      -> into the same library with VK=1 (our WebGPU)
+#   engine/{base,formats,scene,raster,rt,phys,platform,gpu,app}/*.c -> build/float-vk/liblr.a (the engine)
+#   webgpu/{vk,wgsl}/*.c                      -> into the same library (our WebGPU, on Vulkan)
 #   apps/*.c                                  -> bin/render, bin/view, bin/sim
 #   examples/*.c                              -> bin/hello_raster, bin/hello_rt, ...
 #   tests/*.c                                 -> bin/test_png, bin/test_physics, ... (make test runs them)
@@ -13,9 +13,8 @@
 # Linux: gcc + make + libX11. Windows: the same Makefile in an MSYS2 UCRT64 (or MINGW64)
 # shell, with MSYS2's gcc and make (docs/USAGE.md, "Windows"); programs get a .exe.
 #
-#   make deps       the GPU: fetches wgpu-native (a WebGPU library) into third_party/wgpu;
-#                   from then on every build uses the GPU (docs/WEB.md, "native GPU").
-#                   Without it everything builds and runs on the CPU, as before.
+#   make NOGPU=1    without the GPU (CPU only). With it (the default) a machine without
+#                   Vulkan 1.3 still runs everything, on the CPU.
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -g
 # "make SAN=1": address + undefined-behaviour sanitizers (catches bad memory access)
@@ -38,42 +37,26 @@ PRECFLAGS = -fsingle-precision-constant
 BIN = bin
 endif
 
-# ---- the GPU, natively: WebGPU through wgpu-native, if make deps fetched it ------------------
-# The engine's GPU code (engine/gpu) is written against the standard webgpu.h, so any WebGPU
-# implementation can stand here; wgpu-native is linked statically (no DLL to carry along),
-# and reaches the GPU through Vulkan (Linux) or Direct3D 12 / Vulkan (Windows), which the
-# GPU's driver provides. NOGPU=1 builds without it even when it is there.
-WGPU_VERSION = v29.0.1.1
-WGPU_DIR = third_party/wgpu
-ifeq ($(OS),Windows_NT)
-WGPU_ZIP = wgpu-windows-x86_64-gnu-release.zip
-WGPU_SYSLIBS = -lws2_32 -luserenv -lbcrypt -lntdll -lopengl32 -ld3dcompiler -lole32 -loleaut32 -luuid \
-               -lpropsys -lruntimeobject -ladvapi32 -lshell32 -luser32 -lkernel32 -lsynchronization -ldwmapi
-else
-WGPU_ZIP = wgpu-linux-x86_64-release.zip
-WGPU_SYSLIBS = -lpthread -ldl -lm
-endif
-ifeq ($(NOGPU)$(wildcard $(WGPU_DIR)/lib/libwgpu_native.a),$(WGPU_DIR)/lib/libwgpu_native.a)
-GPUFLAGS = -DLR_GPU -DLR_WGPU_NATIVE -I$(WGPU_DIR)/include
-GPULIBS = $(WGPU_DIR)/lib/libwgpu_native.a $(WGPU_SYSLIBS)
-GPUDIR = -gpu
-endif
-
-# VK=1: our own Vulkan layer (webgpu/vk, docs/VULKAN.md) in place of wgpu-native: the
-# same webgpu.h (its header still from make deps), the WGSL compiled by webgpu/wgsl; the
-# Vulkan loader is opened at run time (no SDK needed to build). Binaries in bin/vk.
-ifeq ($(VK),1)
-GPUFLAGS = -DLR_GPU -DLR_WGPU_NATIVE -DLR_VK -I$(WGPU_DIR)/include
+# ---- the GPU, natively: our own WebGPU on Vulkan -------------------------------------------
+# The engine's GPU code (engine/gpu) is written against the standard webgpu.h (our copy:
+# webgpu/include/webgpu/webgpu.h). Natively our own layer implements it on Vulkan 1.3
+# (webgpu/vk, docs/VULKAN.md), its WGSL compiled to SPIR-V by our compiler (webgpu/wgsl), with
+# hardware ray tracing where the GPU has it. The Vulkan loader, which the GPU's driver
+# installs, is opened at run time: no SDK and no library to build with. A machine without
+# Vulkan 1.3 runs everything on the CPU. NOGPU=1 builds without the GPU. (In the browser the
+# same engine runs on the browser's WebGPU: make web.)
+ifeq ($(NOGPU),)
+GPUFLAGS = -DLR_GPU -DLR_VK -Iwebgpu/include
 GPULIBS = $(if $(filter Windows_NT,$(OS)),,-ldl)
 GPUDIR = -vk
-BIN := $(BIN)/vk
+GPUSRC = $(wildcard webgpu/vk/*.c webgpu/wgsl/*.c)
 endif
 
 BUILD = build/$(PREC)$(GPUDIR)
 INC = -Iengine -Iwebgpu
-HDR = $(wildcard engine/*.h engine/*/*.h webgpu/*/*.h)
-SRC = $(wildcard engine/*/*.c) $(if $(filter 1,$(VK)),$(wildcard webgpu/vk/*.c webgpu/wgsl/*.c))
-OBJ = $(patsubst webgpu/%.c,$(BUILD)/webgpu/%.o,$(patsubst engine/%.c,$(BUILD)/%.o,$(SRC))) $(BUILD)/wgsl_shaders.o
+HDR = $(wildcard engine/*.h engine/*/*.h webgpu/*/*.h webgpu/include/webgpu/*.h)
+SRC = $(wildcard engine/*/*.c)
+OBJ = $(patsubst webgpu/%.c,$(BUILD)/webgpu/%.o,$(patsubst engine/%.c,$(BUILD)/%.o,$(SRC) $(GPUSRC))) $(BUILD)/wgsl_shaders.o
 LIB = $(BUILD)/liblr.a
 
 # the shaders: engine/gpu/shaders/<folder>/*.wgsl, carried inside the library as C strings
@@ -293,11 +276,11 @@ SAME = n=$$(cmp -l $(1) $(2) | wc -l); if [ $$n = 0 ]; then echo "$(1) = $(2): i
 
 # all acceleration structures on the torus (2304 triangles)
 # the performance suite (apps/bench.c, docs/STATUS.md 1.3): every case timed by the program,
-# the results appended to out/perf/<commit>_<backend>.csv; make VK=1 perf-quick for our layer.
+# the results appended to out/perf/<commit>_<backend>.csv (vk, or cpu with NOGPU=1).
 # Compare two runs: $(BIN)/bench -compare out/perf/a.csv out/perf/b.csv
 # (the commit, + when the tree has changes; without git, the date: PERF_TAG=... to choose)
 PERF_TAG ?= $(or $(shell git rev-parse --short HEAD 2>/dev/null),$(shell date +%Y%m%d-%H%M))$(if $(shell git status --porcelain --untracked-files=no 2>/dev/null),+)
-PERF_BACKEND = $(if $(filter 1,$(VK)),vk,wgpu)
+PERF_BACKEND = $(if $(NOGPU),cpu,vk)
 perf-quick: $(BIN)/bench$(EXE)
 	mkdir -p out/perf
 	$(BIN)/bench -quick -tag $(PERF_TAG) -o out/perf/$(PERF_TAG)_$(PERF_BACKEND).csv $(ARGS)
@@ -394,25 +377,7 @@ web-check: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
 	node tools/webbench.mjs check -serve
 	$(if $(THREADS),node tools/webbench.mjs check -serve -page bench_mt.html)
 
-# ---- the native GPU's library ------------------------------------------------------------
-# make deps: wgpu-native $(WGPU_VERSION), the build for this system, into third_party/wgpu
-# (kept out of git). make deps-clean removes it: the builds are CPU-only again.
-WGPU_URL = https://github.com/gfx-rs/wgpu-native/releases/download/$(WGPU_VERSION)/$(WGPU_ZIP)
-WINTAR = /c/Windows/System32/tar.exe
-deps:
-	@mkdir -p $(WGPU_DIR)
-	@echo "downloading $(WGPU_URL)"
-	curl -fL --retry 3 -o $(WGPU_DIR)/wgpu.zip $(WGPU_URL)
-	cd $(WGPU_DIR) && (unzip -oq wgpu.zip 2>/dev/null || ([ -x $(WINTAR) ] && $(WINTAR) -xf wgpu.zip) || \
-	    $(PYTHON) python -m zipfile -e wgpu.zip . 2>/dev/null || python3 -m zipfile -e wgpu.zip .)
-	rm -f $(WGPU_DIR)/wgpu.zip
-	echo $(WGPU_VERSION) > $(WGPU_DIR)/VERSION
-	@echo "wgpu-native $(WGPU_VERSION) is in $(WGPU_DIR): make now builds with the GPU"
-
-deps-clean:
-	rm -rf $(WGPU_DIR)
-
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve clean

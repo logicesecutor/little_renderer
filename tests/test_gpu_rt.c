@@ -3,7 +3,7 @@
 // compute kernel with ray queries (our WGSL compiler), each hit checked against the answer
 // worked out here; then one instance moved, the top level built again, and checked again.
 //
-// Part of make test. Without our Vulkan layer (make VK=1) or a GPU with ray queries it says
+// Part of make test. Without a GPU build (NOGPU=1) or a GPU with ray queries it says
 // so and passes.
 #include <math.h>
 #include <stdio.h>
@@ -234,7 +234,7 @@ int main(void){
     printf(failures ? "test_gpu_rt: %d FAILED\n" : "all hardware ray tracing tests passed\n", failures);
     return failures ? 1 : 0;
 #else
-    printf("test_gpu_rt: hardware ray tracing needs our Vulkan layer (make VK=1): skipped\n");
+    printf("test_gpu_rt: hardware ray tracing needs our Vulkan layer (a build without NOGPU=1): skipped\n");
     gpu_destroy(g);
     return 0;
 #endif

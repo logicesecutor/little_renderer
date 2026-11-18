@@ -4,7 +4,7 @@
 // the same weight (to float precision: a case on the edge of a decision, say a lobe's
 // chance, may go either way, so a few in ten thousand may differ).
 //
-// Needs a GPU build (make deps): bin/test_gpu_brdf (part of make test). Without a GPU it says
+// Needs a GPU build (the default one): bin/test_gpu_brdf (part of make test). Without a GPU it says
 // so and passes.
 #include <math.h>
 #include <stdio.h>

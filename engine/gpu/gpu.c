@@ -22,7 +22,7 @@ Gpu *gpu_create_window(void *display, uintptr_t window, int width, int height){
 GpuState gpu_state(const Gpu *g){ (void)g; return GPU_FAILED; }
 void gpu_poll(Gpu *g){ (void)g; }
 void gpu_wait(Gpu *g){ (void)g; }
-const char *gpu_message(const Gpu *g){ (void)g; return "this build has no GPU backend (make deps, then make; or make web)"; }
+const char *gpu_message(const Gpu *g){ (void)g; return "this build has no GPU backend (built with NOGPU=1)"; }
 int gpu_offscreen(const Gpu *g){ (void)g; return 0; }
 int gpu_software(const Gpu *g){ (void)g; return 0; }
 void gpu_destroy(Gpu *g){ free(g); }
@@ -32,9 +32,6 @@ void gpu_set_vsync(int on){ (void)on; }
 
 #else
 #include "gpu/gpu_internal.h"
-#ifdef LR_WGPU_NATIVE
-#include <webgpu/wgpu.h>          // wgpuDevicePoll: wgpu-native's way to wait for the GPU
-#endif
 #if defined(__EMSCRIPTEN__) && defined(LR_WEB_WAIT)
 #include <emscripten.h>
 // A page built with -sJSPI can wait (bin/bench): it gives the browser a turn (its callbacks
@@ -235,8 +232,8 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
     const char *hw = getenv("LR_GPU_HWRT");
-    if (!(hw && *hw == '0') && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)WGPUNativeFeature_RayQuery)){
-        feats[nfeats++] = (WGPUFeatureName)WGPUNativeFeature_RayQuery;
+    if (!(hw && *hw == '0') && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)LRFeatureName_RayQuery)){
+        feats[nfeats++] = (WGPUFeatureName)LRFeatureName_RayQuery;
         g->rt = 1;
     }
 #endif
@@ -321,8 +318,8 @@ void gpu_poll(Gpu *g){
 #ifndef __EMSCRIPTEN__
     if (!g || !g->instance) return;
     wgpuInstanceProcessEvents(g->instance);
-#ifdef LR_WGPU_NATIVE
-    if (g->device) wgpuDevicePoll(g->device, 0, NULL);
+#ifdef LR_VK
+    if (g->device) lrDevicePoll(g->device, 0, NULL);
 #endif
 #elif defined(LR_WEB_WAIT)
     (void)g;
@@ -355,8 +352,8 @@ void gpu_wait(Gpu *g){
         wgpuQueueOnSubmittedWorkDone(g->compute, wd);
     }
     while (!(done && done2) && g->state == GPU_READY){
-#ifdef LR_WGPU_NATIVE
-        wgpuDevicePoll(g->device, 1, NULL);   // sleeps until the GPU is done
+#ifdef LR_VK
+        lrDevicePoll(g->device, 1, NULL);   // sleeps until the GPU is done
 #endif
         gpu_poll(g);
     }
@@ -379,8 +376,8 @@ void gpu_wait(Gpu *g){
 
 uint64_t gpu_submit_to(Gpu *g, WGPUQueue q, WGPUCommandBuffer cb){
     (void)g;
-#ifdef LR_WGPU_NATIVE
-    return (uint64_t)wgpuQueueSubmitForIndex(q, 1, &cb);
+#ifdef LR_VK
+    return (uint64_t)lrQueueSubmitForIndex(q, 1, &cb);
 #else
     wgpuQueueSubmit(q, 1, &cb);
     return 0;
@@ -408,9 +405,9 @@ WGPUCommandEncoder gpu_encoder(Gpu *g, WGPUQueue q){
 
 void gpu_wait_for(Gpu *g, uint64_t submission){
     if (!g || g->state != GPU_READY) return;
-#ifdef LR_WGPU_NATIVE
-    WGPUSubmissionIndex i = (WGPUSubmissionIndex)submission;
-    wgpuDevicePoll(g->device, 1, &i);         // sleeps until that submission is done
+#ifdef LR_VK
+    LRSubmissionIndex i = (LRSubmissionIndex)submission;
+    lrDevicePoll(g->device, 1, &i);         // sleeps until that submission is done
 #else
     (void)submission;
 #endif
@@ -528,7 +525,7 @@ WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, con
 // pipeline there and then and the device's work after it waits: the path tracer's pipelines
 // held the first frame for 10 s in Chrome (docs/STATUS.md 1.7). Made with
 // createComputePipelineAsync they compile on the browser's worker threads, side by side,
-// while the page goes on drawing. Natively they are made at once (wgpu-native has no
+// while the page goes on drawing. Natively they are made at once (our layer has no
 // asynchronous creation; the driver's cache makes them fast there).
 struct GpuPipeReq {
     WGPUComputePipeline *slot;   // NULL: cancelled (its owner went away)
@@ -771,7 +768,7 @@ void gpu_timer_destroy(GpuTimer *t){
     if (!t) return;
     for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
     for (int i = 0; i < MAX_LIVE_TIMERS; i++) if (live_timers[i] == t) live_timers[i] = NULL;
-    if (t->qs) wgpuQuerySetRelease(t->qs);      // (wgpu-native has no wgpuQuerySetDestroy)
+    if (t->qs) wgpuQuerySetRelease(t->qs);      // (our layer has no wgpuQuerySetDestroy)
     if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
     if (t->readback){ wgpuBufferDestroy(t->readback); wgpuBufferRelease(t->readback); }
     free(t->stage_of); free(t->pending_stage); free(t->ns); free(t->calls);

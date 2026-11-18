@@ -1,5 +1,5 @@
 // webgpu_rt.h - hardware ray tracing: our own extension of webgpu.h, implemented by our Vulkan
-// layer only (`make VK=1`, webgpu/vk/vk_rt.c). Shaped after the WebGPU proposal and
+// layer only (webgpu/vk/vk_rt.c). Shaped after the WebGPU proposal and
 // wgpu's ray queries: bottom-level structures of triangles or boxes, a top level of
 // instances, bound like a buffer and queried in WGSL with
 //
@@ -9,13 +9,13 @@
 //     while (rayQueryProceed(&rq)) { ... rayQueryGenerateIntersection(&rq, t) for boxes ... }
 //     let hit = rayQueryGetCommittedIntersection(&rq);
 //
-// The device asks for WGPUNativeFeature_RayQuery (wgpu.h) in its requiredFeatures; the
+// The device asks for LRFeatureName_RayQuery (webgpu_lr.h) in its requiredFeatures; the
 // adapter has it when wgpuAdapterHasFeature says so.
 #ifndef LR_WEBGPU_RT_H
 #define LR_WEBGPU_RT_H
 
 #include <webgpu/webgpu.h>
-#include <webgpu/wgpu.h>
+#include "vk/webgpu_lr.h"
 
 typedef struct LRBlasImpl *LRBlas;
 typedef struct LRTlasImpl *LRTlas;
@@ -74,20 +74,5 @@ void lrTlasRelease(LRTlas tlas);
 #define LRSType_BindGroupEntryTlas ((WGPUSType)0x4C520002)
 typedef struct { WGPUChainedStruct chain; } LRBindGroupLayoutEntryTlas;
 typedef struct { WGPUChainedStruct chain; LRTlas tlas; } LRBindGroupEntryTlas;
-
-// Not ray tracing, but our layer's too: a second queue, to run compute (the physics) beside
-// the main queue's work. Of a compute-only family when the GPU has one (its asynchronous
-// compute engine), else of the main queue's family. Only when asked for: LR_VK_QUEUES=2 (or
-// =same for a second of the main family); else this is the main queue itself. (On an RTX
-// 3070 mesh_rain was slower with it: 35 frames/s against 45, the same family 42.)
-// - Its command buffers come from encoders made for it: an LRCommandEncoderQueue chained
-//   to the WGPUCommandEncoderDescriptor. Compute, copies and builds only (no render passes),
-//   and buffers only (textures are the main queue's).
-// - Nothing orders the two queues' work: a buffer one queue writes and the other uses needs
-//   the first's submission waited for (wgpuDevicePoll with its wgpuQueueSubmitForIndex
-//   index) before the second's submit.
-WGPUQueue lrDeviceGetComputeQueue(WGPUDevice device);
-#define LRSType_CommandEncoderQueue ((WGPUSType)0x4C520003)
-typedef struct { WGPUChainedStruct chain; WGPUQueue queue; } LRCommandEncoderQueue;
 
 #endif

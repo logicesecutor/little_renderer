@@ -359,7 +359,7 @@ WGPUStatus wgpuAdapterGetLimits(WGPUAdapter adapter, WGPULimits *l){
 
 WGPUBool wgpuAdapterHasFeature(WGPUAdapter adapter, WGPUFeatureName feature){
     if (feature == WGPUFeatureName_TimestampQuery) return adapter->ts_bits > 0 && adapter->props.limits.timestampComputeAndGraphics;
-    if ((int)feature == (int)WGPUNativeFeature_RayQuery) return adapter->rt;
+    if ((int)feature == (int)LRFeatureName_RayQuery) return adapter->rt;
     if (feature == WGPUFeatureName_Subgroups) return adapter->subgroups;
     return 0;
 }
@@ -421,7 +421,7 @@ static void device_free(Obj *o){
     WGPUDevice d = (WGPUDevice)o;
     if (d->vk){
         vk.vkDeviceWaitIdle(d->vk);
-        wgpuDevicePoll(d, 1, NULL);
+        lrDevicePoll(d, 1, NULL);
         for (int k = 0; k < d->nqueues; k++){
             WGPUQueue q = &d->queues[k];
             refs_release(&q->up_refs);
@@ -460,7 +460,7 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
         d->on_lost = descriptor->deviceLostCallbackInfo;
         for (size_t i = 0; i < descriptor->requiredFeatureCount; i++){
             if (descriptor->requiredFeatures[i] == WGPUFeatureName_TimestampQuery) d->timestamps = 1;
-            if ((int)descriptor->requiredFeatures[i] == (int)WGPUNativeFeature_RayQuery) d->rt = adapter->rt;
+            if ((int)descriptor->requiredFeatures[i] == (int)LRFeatureName_RayQuery) d->rt = adapter->rt;
         }
     }
     // Vulkan 1.2 (timeline semaphores, buffer addresses) and 1.3 (dynamic rendering) features
@@ -901,8 +901,8 @@ void wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer con
 
 // a submission's index: its number on its queue's timeline, the queue in the top bits
 #define SUB_QUEUE_SHIFT 62
-WGPUSubmissionIndex wgpuQueueSubmitForIndex(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const *commands){
-    return (WGPUSubmissionIndex)(submit(queue, commandCount, commands) | (uint64_t)queue->index << SUB_QUEUE_SHIFT);
+LRSubmissionIndex lrQueueSubmitForIndex(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const *commands){
+    return (LRSubmissionIndex)(submit(queue, commandCount, commands) | (uint64_t)queue->index << SUB_QUEUE_SHIFT);
 }
 
 static void pend_push(WGPUDevice dev, Pending *p){
@@ -1012,8 +1012,8 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
     return busy == 0;
 }
 
-// a submission's index (wgpuQueueSubmitForIndex), or with wait and none, everything so far
-WGPUBool wgpuDevicePoll(WGPUDevice device, WGPUBool wait, WGPUSubmissionIndex const *submissionIndex){
+// a submission's index (lrQueueSubmitForIndex), or with wait and none, everything so far
+WGPUBool lrDevicePoll(WGPUDevice device, WGPUBool wait, LRSubmissionIndex const *submissionIndex){
     if (!device) return 1;
     uint64_t until[2] = {0, 0};
     if (submissionIndex){

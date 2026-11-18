@@ -11,7 +11,7 @@
 //
 // -shots dir: instead of the cases, the page's images (bench.c -shots: path traced, denoised,
 // rasterized) as PNG files <dir>/<name>_web.png, to compare with bin/bench -shots dir's
-// <name>_wgpu.png (bin/bench -imgdiff a.png b.png).
+// <name>_vk.png (bin/bench -imgdiff a.png b.png).
 // check (make web-check): one round of the cases that make every pipeline the page uses (the
 // path tracer with and without the sky, the guide, the light tracer, the rasterizer, the
 // denoiser, the trees built on the GPU, the bodies, the air), failing on any GPU error or a

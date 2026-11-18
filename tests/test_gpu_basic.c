@@ -1,4 +1,5 @@
-// test_gpu_basic.c - the GPU layer's basics, whatever implements webgpu.h (wgpu-native, or our
+
+
 // Vulkan layer: make VK=1): buffer writes small and large, copies, clears, read back by
 // mapping, several submissions in flight, waiting for one of them. No shaders.
 //

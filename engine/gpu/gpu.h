@@ -1,9 +1,10 @@
 // gpu.h - the GPU backend of the engine, on WebGPU (webgpu.h): the same C code drives the
 // GPU in a web browser (Emscripten + Dawn's "emdawnwebgpu" bindings over the browser's
-// WebGPU) and, natively, through a WebGPU library (Dawn or wgpu-native) when one is
+
+
 // configured. Shaders are WGSL, kept as strings inside the engine.
 //
-// Builds define LR_GPU when webgpu.h is available (`make web` always does). Without it
+// Builds define LR_GPU unless made with NOGPU=1 (`make web` always does). Without it
 // these functions still exist: gpu_create says the GPU is not available, and everything
 // stays on the CPU backends, which are always there.
 //
@@ -18,7 +19,8 @@ typedef struct Gpu Gpu;
 
 typedef enum { GPU_PENDING, GPU_READY, GPU_FAILED } GpuState;
 
-// 1 if this build has a GPU backend (the browser's WebGPU, or natively a WebGPU library found
+
+
 // by the Makefile: make deps), 0 if everything runs on the CPU
 int gpu_available(void);
 

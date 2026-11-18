@@ -20,7 +20,7 @@
 //
 // Groups: A the GPU path tracer, B the CPU path tracer, C the rasterizers, D the denoiser,
 // E the trees and the scene's updates, F the rigid bodies, G the air and the cloud, H the
-// start. The same program built with VK=1 measures our Vulkan layer (bin/vk/bench).
+// start. Natively it measures our Vulkan layer (column vk; NOGPU=1: cpu).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,7 +56,7 @@ static const char *BACKEND = "web-mt";      // (make web-bench THREADS=1: bench_
 #elif defined(__EMSCRIPTEN__)
 static const char *BACKEND = "web";
 #else
-static const char *BACKEND = "wgpu";
+static const char *BACKEND = "cpu";        // (make NOGPU=1)
 #endif
 
 // ---- results ----------------------------------------------------------------------------
@@ -839,7 +839,7 @@ static int table(char **files, int nfiles){
         if (!any) continue;
         table_row(rows, n, nfiles, CASES[i].id, CASES[i].what, CASES[i].unit);
     }
-    // and the cases this build does not have (our layer's own, run by bin/vk/bench), once each
+    // and the cases this build does not have (another build's own, e.g. A1c natively), once each
     for (int f = 0; f < nfiles; f++)
         for (int j = 0; j < n[f]; j++){
             int known = 0;

@@ -33,7 +33,7 @@ struct Gpu {
     int software;        // the adapter is a CPU emulating a GPU
     int timestamps;      // passes can be timed (the adapter can: asked for whenever it can)
     int timing_report;   // the parts' GPU times printed when they end (LR_GPU_TIMING=1, gpu_set_timing)
-    int rt;              // hardware ray queries (make VK=1 on a GPU that has them; LR_GPU_HWRT=0: off)
+    int rt;              // hardware ray queries (natively, on a GPU that has them; LR_GPU_HWRT=0: off)
     int rt_offered;      // in a browser: its adapter offers "acceleration-structure" (gpu.c; not used yet)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
@@ -50,7 +50,8 @@ static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU
 
 // One more reference to a buffer, a texture or a view (the bind groups kept by
 // gpu_bind_cached, the shared atlas). The webgpu.h of today names it wgpu...AddRef:
-// wgpu-native's, our layer's, and Dawn's port for Emscripten (--use-port=emdawnwebgpu, what
+
+
 // make web uses). Headers from before the renaming (an older wgpu-native, the webgpu.h older
 // Emscriptens carried themselves) have wgpu...Reference: build with -DLR_WGPU_REFERENCE
 // there (make web WGPU_REFERENCE=1).
