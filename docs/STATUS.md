@@ -253,6 +253,17 @@ props stand a little elsewhere: the page's CPU code computes its constants in do
 native float build in float, `-fsingle-precision-constant`). The same numbers as with the
 private stack in the page.
 
+**Step 2, subgroups and f16** (Chrome 157 has both on this GPU: `subgroups`, sizes 32 to 32,
+and `shader-f16`; tried behind feature detection, the plain kernels kept for GPUs without;
+none kept: no gain):
+
+| tried | page, GPU ms (before -> after) | why not kept |
+|---|---|---|
+| the tree walk as "while-while" (Aila and Laine 2009): inner nodes until the thread holds a leaf, then the leaf; with subgroups the threads wait (`subgroupAny`) until all hold one, so the leaves' tests run side by side | while-while alone: A1 3.16 -> 2.87, A2 2.64 -> 2.44, A5 17.6 -> 16.6, A6 3.64 -> 3.31, A8 11.0 -> 10.6, A9 23.4 -> 22.7 (3-9% faster); with the subgroup vote: A1 2.98, A5 17.0, A9 23.2 (no better than without) | the vote gains nothing; while-while alone is 40-90% slower natively (wgpu: A1 2.3 -> 3.9, A4 9.1 -> 13.6), so it would need a second copy of the walk for the page alone, for 3-9% |
+| the bodies' 8-thread sums of a body's contacts by `subgroupShuffleXor` instead of workgroup memory and two barriers | not built: in the page the 44 solve passes of a step take 0.35 ms of the GPU's 1.4 (F3), the step 3.8 ms of wall clock (the rest is encoding ~150 passes and waiting for them) | at most ~0.1 ms of 3.8 |
+| the prefix sums (the bodies' grid and contact lists) and the media's box reductions by subgroup operations | not built: 0.005-0.023 ms a pass (F3: grid scan 0.017, contact lists 0.005 + 0.023) | nothing to gain |
+| the denoiser's neighbour weights (the normal's power 128, the luminance's exp) in f16 (`enable f16;`) | D1 1.70 -> 1.75-1.77 ms, D2 1.13 -> 1.17 | slower; the passes are memory bound (their inputs are already half floats), and the page's denoiser is already as fast as natively (D1 1.58-1.70 against 1.82) |
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`
@@ -637,6 +648,7 @@ Path tracer benchmark (RTX 3070; GPU: 640x640, ms per pass of 1 sample per pixel
 
 | when | what | why |
 |---|---|---|
+| 2026-11-18 | In the page (W4, 1.7): subgroups for the path tracer's tree walk (while-while with a `subgroupAny` vote), f16 for the denoiser's weights, workgroup sizes 32 and 128 for the path tracer, a 24- or 32-entry stack | the vote and f16 no faster; while-while 3-9% faster in the page but 40-90% slower natively; the other sizes no faster; a smaller stack is faster (A8 9.9 -> 7.8 ms at 24) but drops entries in deep trees |
 | 2026-11-17 | The CPU solver's iterations by colours (no shared moving body) on all cores (OpenMP) | some 60 colours and 44 passes a step: 2600 barriers; 1000 bodies 60 → 111 ms a step on 16 threads, 49 ms on 4: the iterations stay on one thread |
 | 2026-11-17 | Spin friction for balls (an angular impulse about the normal, limited as friction over a small patch) | stopped the spinning balls, but sleeping them earlier set off avalanches in tall piles; the settling damping (PHYSICS.md 1.5) does it without them |
 | 2026-11-15 | The review's dead ends: the GPU's sRGB decode of texels by a 256-entry table instead of `pow` (the helmet 5.12 → 5.12 ms per pass); the photon cache at its finest level only (the light pass -7 to -9 %); skipping the instance upload when no instance moved (the GPU scene update is 0.02-0.06 ms per frame) | no gain worth it, or a loss of quality |
