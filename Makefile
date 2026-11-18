@@ -110,13 +110,23 @@ tests: $(TESTS)
 
 # ---- the library ------------------------------------------------------------------------
 
-$(BUILD)/%.o: engine/%.c $(HDR)
+# Each object depends on the headers it includes, not on every header: the compiler writes
+# them into its .d file (-MMD; -MP: a header since removed does not stop the build), read
+# below. An object without its .d (a build from before) is made again once, which writes it;
+# the .o is touched after the .d is in place, so it is the newer of the two.
+DEPS = $(OBJ:.o=.d)
+$(BUILD)/%.o: engine/%.c $(BUILD)/%.d
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -MT $@ -MMD -MP -MF $(BUILD)/$*.Td -c $< -o $@
+	@mv -f $(BUILD)/$*.Td $(BUILD)/$*.d && touch $@
 
-$(BUILD)/webgpu/%.o: webgpu/%.c $(HDR)
+$(BUILD)/webgpu/%.o: webgpu/%.c $(BUILD)/webgpu/%.d
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(PRECFLAGS) $(OMP) $(INC) $(GPUFLAGS) -MT $@ -MMD -MP -MF $(BUILD)/webgpu/$*.Td -c $< -o $@
+	@mv -f $(BUILD)/webgpu/$*.Td $(BUILD)/webgpu/$*.d && touch $@
+
+$(DEPS):
+-include $(wildcard $(DEPS))
 
 $(WGSL_EMBED): tools/wgsl_embed.c
 	@mkdir -p $(dir $@)
@@ -344,6 +354,14 @@ WEBBASE = -O3 -Iengine $(if $(DOUBLE),-DLR_DOUBLE) -Wall -Wextra -Wno-unknown-pr
           -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB \
           -sEXIT_RUNTIME=0 -sENVIRONMENT=web
 WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m))
+# the pages depend on the flags they were built with (a file that changes only when they do:
+# make web DOUBLE=1 after make web builds them again) and on the files they preload
+WEB_STAMP = $(WEB)/flags.txt
+WEB_FLAGS_NOW = $(if $(DOUBLE),DOUBLE) $(if $(NOSIMD),NOSIMD) $(if $(WGPU_REFERENCE),WGPU_REFERENCE) $(if $(WEB_DRAGON),WEB_DRAGON)
+$(WEB_STAMP): FORCE
+	@mkdir -p $(WEB)
+	@if [ ! -f $@ ] || [ "$$(cat $@)" != "flags: $(strip $(WEB_FLAGS_NOW))" ]; then echo "flags: $(strip $(WEB_FLAGS_NOW))" > $@; fi
+FORCE:
 
 # the performance suite in a page (apps/bench.c): built with JSPI so it can wait for the GPU
 # (Chrome 137+); tools/webbench.mjs runs it in a headless Chrome and keeps its results
@@ -351,11 +369,11 @@ WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_M
 WEB_BENCH_MODELS = models/torus.obj models/dragon_recon/dragon_vrip_res2.ply models/dragon_recon/dragon_vrip_res4.ply \
                    models/skies/kloofendal_48d_partly_cloudy_2k.hdr models/gltf/DamagedHelmet.glb
 web-bench: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
-$(WEB)/bench.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR)
+$(WEB)/bench.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR) $(WEB_STAMP) $(wildcard $(WEB_BENCH_MODELS))
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) -DLR_WEB_WAIT -sJSPI $(SRC) $(WGSL_C) apps/bench.c -o $@ \
 	    $(foreach m,$(wildcard $(WEB_BENCH_MODELS)),--preload-file $(m)@$(m))
-$(WEB)/bench_mt.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR) web/include/omp.h
+$(WEB)/bench_mt.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR) web/include/omp.h $(WEB_STAMP) $(wildcard $(WEB_BENCH_MODELS))
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) $(WEBMT) -DLR_WEB_WAIT -sJSPI $(SRC) $(WGSL_C) apps/bench.c -o $@ \
 	    $(foreach m,$(wildcard $(WEB_BENCH_MODELS)),--preload-file $(m)@$(m))
@@ -369,10 +387,10 @@ $(WEB)/bench_mt.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR) web/include/omp.h
 WEBMT = -pthread -Xclang -fopenmp -Iweb/include -sENVIRONMENT=web,worker \
         -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency -sDEFAULT_PTHREAD_STACK_SIZE=2MB
 web: $(WEB)/index.html $(if $(THREADS),$(WEB)/index_mt.js)
-$(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
+$(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html $(WEB_STAMP) $(wildcard $(WEB_MODELS))
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBFLAGS) $(WEB_SRC) -o $@
-$(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h
+$(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h $(WEB_STAMP) $(wildcard $(WEB_MODELS))
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) $(WEBMT) $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m)) $(WEB_SRC) -o $@
 
@@ -380,7 +398,7 @@ $(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h
 # the GPU air against the CPU air in a browser (open web/build/test_gpu_fluid.html, or see
 # docs/WEB.md; natively it is part of make test)
 webtest: $(WEB)/test_gpu_fluid.html
-$(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) tests/test_gpu_fluid.c
+$(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) tests/test_gpu_fluid.c $(WEB_STAMP)
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) $(SRC) $(WGSL_C) tests/test_gpu_fluid.c -o $@
 
@@ -398,4 +416,4 @@ web-check: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve clean
+.PHONY: FORCE all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve clean
