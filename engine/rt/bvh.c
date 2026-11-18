@@ -591,7 +591,7 @@ int bvh_intersect(const Bvh *b, const Scene *s, const Ray *ray,
 
         // Inner node: test both children, push the FARTHER first so the nearer one is
         // popped (visited) first; that finds close hits early and prunes more.
-        real tl, tr;
+        real tl = 0, tr = 0;                       // (set by aabb_hit when it hits; gcc 13 cannot tell)
         int hl = aabb_hit(&b->nodes[n->left].box, ray, inv_d, tmin, best, &tl);
         int hr = aabb_hit(&b->nodes[n->right].box, ray, inv_d, tmin, best, &tr);
         if (hl && hr){
