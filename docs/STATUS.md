@@ -235,6 +235,12 @@ suite at this point is `out/webperf/perf/base_table.md`, from the code of 4197a1
 | the CPU's code | B2 0.44 / 0.50 M paths/s on one thread; F2 71 / 44 ms; G3 32 / 15.7; H3 4164 / 728 ms (natively on 12 threads); E1 79.5 / 10.6 | one thread and no SIMD: step 4 |
 | Direct3D 12 natively (wgpu-native on DX12, to compare the same driver path) | wgpu's DX12 backend did not finish compiling the path tracer in 8 minutes (FXC) | not measurable here |
 
+**The changes**, in order (GPU ms a pass; before -> after, the same session):
+
+| # | change | page (Chrome) | wgpu natively | our layer |
+|---|---|---|---|---|
+| 1 | the 4-wide walk compiled only with `LR_GPU_WIDE=1` (`WIDE_ON`, a constant of the module: its private arrays and insertion sort were in every kernel) | A4 15.3 -> 14.1, A5 29.3 -> 26.2, A7 8.7 -> 8.3, A8 13.0 -> 12.6; A1, A2, A6, A9 within the noise | A4 10.1 -> 9.06, A5 15.0 -> 12.9; the rest within the noise | the same (its kernels trace with ray queries; A1c 1.94 -> 1.93) |
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`

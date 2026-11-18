@@ -273,7 +273,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
         /* a 4-wide node (rt/bvh.h): 4 slots, each a child's box; a leaf child is pushed as its
            slot (a leaf node of the binary layout), an inner one as WIDE | its slots; the hit
            children go on the stack farthest first */
-        if ((ni & WIDE) != 0u) {
+        if (WIDE_ON && (ni & WIDE) != 0u) {
             let g = ni & 0x7fffffffu;
             var ce: array<u32, 4>;
             var ct: array<f32, 4>;

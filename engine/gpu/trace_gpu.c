@@ -309,6 +309,7 @@ void gpu_trace_after_submit(GpuTrace *t){
 // and the wavefront's kernels (wave); free() it
 static char *trace_source(GpuTrace *t, int sky, int wave){
     const char *parts[] = {sky ? "const SKY_ON: bool = true;\n" : "const SKY_ON: bool = false;\n",
+                           t->wide_ok ? "const WIDE_ON: bool = true;\n" : "const WIDE_ON: bool = false;\n",
                            t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", GPU_WGSL_TEX, "\n", TRACE, "\n",
                            wave ? WAVE : ""};
     const int n = (int)(sizeof(parts) / sizeof(parts[0]));
@@ -377,6 +378,8 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
 #ifdef LR_VK
     t->hw = g->rt;
 #endif
+    const char *wide_env = getenv("LR_GPU_WIDE");
+    t->wide_ok = wide_env && atoi(wide_env) > 0;   // (before the source: without it the 4-wide walk is left out)
     char *src = trace_source(t, 0, 0);
     char lt[32];
     if (!src){ free(t); return NULL; }
@@ -384,8 +387,6 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     // blue noise
     t->bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRRWU-----TTTU", lt, sizeof(lt)));
     t->timer = gpu_timer_create(g, 1024, NTS);
-    const char *wide_env = getenv("LR_GPU_WIDE");
-    t->wide_ok = wide_env && atoi(wide_env) > 0;
     const char *tlas_env = getenv("LR_GPU_TLAS");
     t->tlas_mode = !tlas_env ? 2 : !strcmp(tlas_env, "gpu") || !strcmp(tlas_env, "lbvh") ? 0 : !strcmp(tlas_env, "cpu") ? 1 : 2;
     const char *bvh_env = getenv("LR_GPU_BVH");
