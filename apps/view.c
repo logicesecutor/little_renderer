@@ -781,11 +781,15 @@ static int frame(void){
     }
     if (changed){ last_change = t; raster_dirty = 1; }
 
-    // ---- 2b. physics: advance by the time that passed, then the image starts over
+    // ---- 2b. physics: advance by the time that passed, then the image starts over. At most
+    // -simhz steps a second (60): faster frames step every few, and those between refine the
+    // same image (no new guide, reprojection, top level or bodies' step on the GPU). Each
+    // step takes all the time since the last one, so slower frames step every frame, as before
     if (o.sim.on){
         double sdt = fmin(t - sim_last, 0.05);
-        sim_last = t;
         sim_moved = 0;
+        if (sim_paused || sdt <= 0 || o.sim_hz <= 0 || sdt >= 1.0 / o.sim_hz) sim_last = t;
+        else sdt = 0;                                   // (not yet: the time goes on adding up)
         if (!sim_paused && sdt > 0){
             PROF(PROF_SIM, sim_step(&sim, &scene, sdt));   // the bodies are instances: the world stays
             sim_moved = 1;                                  // (their trees: scene_trees, when read)

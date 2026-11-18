@@ -155,6 +155,8 @@ void options_usage(Program prog, FILE *f){
         "  -band ms                   GPU path tracer: GPU time per frame (0: 60%% of the display's\n"
         "                             refresh period; bigger: fewer frames, the image cleaner sooner) (0)\n"
         "  -stats file                with -autoquit: the frame rate written to file (bin/bench)\n"
+        "  -simhz n                   with -sim on: physics steps per second at most; frames between\n"
+        "                             steps refine the same image (60; 0: a step every frame)\n"
         "  -denoisemove n             GPU denoiser while things move: its passes, 1-5 (a footprint of\n"
         "                             5 to 65 pixels), cheaper and less smooth (3; 0: all 5, as still)\n");
     fprintf(f, "\n  -h, --help                 this text\n");
@@ -221,6 +223,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->denoise = prog != PROG_RENDER;      // a still image is the unbiased one unless asked
     o->maxfps = 1;
     o->vsync = 1;
+    o->sim_hz = 60;
     o->denoise_move = 3;
     o->march = march_default_params();
     o->probe = 1;
@@ -291,6 +294,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-vsync")) o->vsync = on_off(prog, a, v);
         else if (!strcmp(a, "-band")) o->band_ms = atof(v);
         else if (!strcmp(a, "-stats")) o->stats = v;
+        else if (!strcmp(a, "-simhz")) o->sim_hz = atof(v);
         else if (!strcmp(a, "-denoisemove")) o->denoise_move = atoi(v);
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
