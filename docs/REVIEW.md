@@ -9,8 +9,8 @@ section 0 are now one, `make`) and the performance review's speedups went in
 (docs/PERF_REVIEW.md: `rigid.c`, `convex.c`, `env.c`, `mesh.c`, `bvh.c`, `lrmath.h`,
 `denoise.wgsl`, `gpu.c`, `vk_surface.c`, `wgsl.c` changed), so some line numbers have moved; each
 item is checked against the code as it is before it is applied. The fixes are made in
-`development`. Fixed so far: **B4** (every kind of build in folders of its own: STATUS.md
-step 15).
+`development`. Fixed: **B1-B16** (STATUS.md step 15; B1 by the docs: `-photoncache` stays off by
+default).
 
 - Categories: **bug**, **dead** (dead code), **useless**, **dup** (duplication), **smell**, **design**.
 - Status of a bug: **CONFIRMED** (reproduced by a run, or proven by reading every path / by
