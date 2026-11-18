@@ -545,6 +545,9 @@ static void case_first_frame(const Case *c, Res *r, int reps){
         teardown(&o, &s, &SIM);
         if (!ok){ skip(r, "no GPU"); return; }
         add(r, ms);
+        // the first one compiles the pipelines; the others find them in the driver's (or the
+        // browser's) cache
+        if (k == 0) snprintf(r->note, sizeof(r->note), "the first %.0f ms (its pipelines compiled)", ms);
     }
 }
 
@@ -837,6 +840,15 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "-tag") && i + 1 < argc) tag = argv[++i];
         else if (!strcmp(argv[i], "-reps") && i + 1 < argc) reps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-env") && i + 1 < argc){     // NAME=value: an environment variable (a page has no other way)
+            static char kv[8][128];
+            static int nkv;
+            char *eq = strchr(argv[++i], '=');
+            if (eq && nkv < 8){
+                snprintf(kv[nkv], sizeof(kv[nkv]), "%.*s", (int)(eq - argv[i]), argv[i]);
+                set_env(kv[nkv++], eq + 1);
+            }
+        }
         else if (!strcmp(argv[i], "-compare") && i + 2 < argc){ cmp_a = argv[i + 1]; cmp_b = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "-table") && i + 1 < argc) return table(argv + i + 1, argc - i - 1);
         else {

@@ -196,6 +196,45 @@ The steps, in order (each its own commits; measured before and after with W2's t
 | W7 | **The page** | the sky scene a link with its sky (today 20 MB of data to load: a 1k sky for the web, or fetched when that link is opened), a bigger-scene link (`props`), loading progress, the frame-rate HUD |
 | W8 | **Docs and publishing** | WEB.md, README, W1; optionally the page on GitHub Pages (with the GitHub Actions item below) |
 
+### 1.7 W4 and W6: the page against the machine (branch `webgpu-perf`, 2026-11-18)
+
+The goal: the page (Emscripten, the browser's own WebGPU, no server but a static one, no
+helper process) as close to the machine as it goes. The steps, each measured before and after
+and committed on its own: (1) where the page loses, (2) subgroups, (3) the start, (4) the
+CPU's code in the page (SIMD, threads), (5) a seam for hardware ray queries when browsers
+get them. Chrome 157 (Dawn on Direct3D 12, DXC), Emscripten 7.0.0, RTX 3070, 12 threads.
+
+**Tools added for it:** `node tools/webbench.mjs ... -serve` serves `web/build` itself
+(`tools/serve.mjs`, also `make serve`: cross-origin isolated), `-flags "..."` passes switches
+to Chrome for measuring (Dawn's toggles), `-q "env=NAME=value"` sets an environment variable
+in the page (`bin/bench -env`), `-log file` keeps every console line; `make web-check` runs
+one round of the cases that make every pipeline of the page and fails on any GPU error. The
+bench page now preloads `dragon_vrip_res4.ply`: before, the sky demo in the page had no
+dragon props (`not found`), so A8/A9, C1-C3 and E3-E5 measured a smaller scene than natively
+(A8 in the page: 12.6 ms a pass without them, 14.4 with). The GPU timers of the bodies and
+the air run in the page too now (`gpu_set_timing`: Chrome has timestamps), so F and G have
+their GPU column there.
+
+**Step 1, where the page loses** (before any change; GPU = the kernel's own timestamps; the
+suite at this point is `out/webperf/perf/base_table.md`, from the code of 4197a1a):
+
+| what | measured | so |
+|---|---|---|
+| the path tracer's kernel | A1 3.52 / 2.03 ms (page / wgpu natively), A4 15.3 / 10.1, A5 29.3 / 15.0, A7 8.7 / 4.86, A8 13.0 / 8.18, A9 25.9 / 17.9: 1.45-1.95x | the loss is in the kernel itself, as compiled by Chrome |
+| a pass's time besides the kernel (wall clock - GPU) | A1 0.14 ms, A4 0.9, A8 1.4 (natively 0.01-0.1) | small next to the kernel |
+| the simple kernels | denoiser D1 1.58 / 1.82 ms, rasterizer C1 1.36 / 1.13, bodies' kernels F3 1.36 / 1.19, air G1 0.88 / 0.75 (GPU) | within 0.85-1.25x: the browser is not slow at GPU work as such |
+| a step of the bodies, the air (wall clock) | F3 3.72 / 3.07, G1 1.93 / 0.98 (GPU 1.36 and 0.88 of it) | the page pays ~1-2.4 ms a step to encode ~150 passes and wait for the readback (the bench waits every step; the viewer does not) |
+| bounds checks (`--enable-dawn-features=allow_unsafe_apis,disable_robustness`) | A1 3.92 -> 4.32, A4 15.1 -> 15.3, A5 29.1 -> 30.9, A8 11.8 -> 10.2 ms | 0 to 15%, only A8; not the cause. (Also off: workgroup init, validation, lazy clears: the same) |
+| Chrome's shader compiler: FXC instead of DXC (`--disable-dawn-features=use_dxc`) | A1 3.9 -> 5.3 ms, A4 15.1 -> 24.8; the first compile 70 s instead of 9 | DXC is Chrome's default already |
+| the HLSL Chrome makes (`--enable-dawn-features=dump_shaders,disable_symbol_renaming`) | every index into the stack clamped (`min(uint(sp), 39u)`), every loop given a 64-bit counter that stops it (`tint_loop_idx`), the stack zeroed at each walk; the 4-wide node walk (off by default: `LR_GPU_WIDE`) compiled in with its two private arrays | the 4-wide walk now left out when it is off (below) |
+| the limits asked for | the adapter's own (`requiredLimits` = its limits) already | nothing to gain |
+| workgroup sizes of the path tracer (32, 64, 128 threads) | A1 3.52 / 3.69 / 3.89 ms, A4 14.6 / 13.9 / 14.1, A5 27.5 / 26.0 / 26.3 | 64 stays |
+| the walk's stack in private memory | in workgroup memory instead (64 stacks interleaved): A1 3.40 -> 3.16, A4 13.9 -> 11.6, A5 26.2 -> 17.7, A8 11.6 -> 10.1; natively (wgpu) the same within the noise (A1 2.08 -> 2.30, A6 3.06 -> 2.76, the rest +-2%) | the main loss: private arrays on Direct3D 12 here; workgroup memory in the page (below) |
+| a smaller stack in workgroup memory (40 -> 32 -> 24 entries) | A8 9.9 -> 9.4 -> 7.8 ms, A5 17.9 -> 17.3 -> 17.2 | faster, but a full stack drops entries (missing geometry in deep trees, the 48k props): kept at 40 |
+| the first compile of the path tracer | the first pass of a new page 10.3 s (H2's first run; natively 0.32 s with wgpu, 0.12 with our layer, from the driver's cache); 9 s of A1's first case | the start's stall: step 3 |
+| the CPU's code | B2 0.44 / 0.50 M paths/s on one thread; F2 71 / 44 ms; G3 32 / 15.7; H3 4164 / 728 ms (natively on 12 threads); E1 79.5 / 10.6 | one thread and no SIMD: step 4 |
+| Direct3D 12 natively (wgpu-native on DX12, to compare the same driver path) | wgpu's DX12 backend did not finish compiling the path tracer in 8 minutes (FXC) | not measurable here |
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`

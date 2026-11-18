@@ -343,7 +343,8 @@ WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_M
 
 # the performance suite in a page (apps/bench.c): built with JSPI so it can wait for the GPU
 # (Chrome 137+); tools/webbench.mjs runs it in a headless Chrome and keeps its results
-WEB_BENCH_MODELS = models/torus.obj models/dragon_recon/dragon_vrip_res2.ply \
+# (dragon_vrip_res4: the sky demo's props, so its cases are the scene measured natively)
+WEB_BENCH_MODELS = models/torus.obj models/dragon_recon/dragon_vrip_res2.ply models/dragon_recon/dragon_vrip_res4.ply \
                    models/skies/kloofendal_48d_partly_cloudy_2k.hdr models/gltf/DamagedHelmet.glb
 web-bench: $(WEB)/bench.html
 $(WEB)/bench.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR)
@@ -364,8 +365,15 @@ $(WEB)/test_gpu_fluid.html: $(SRC) $(WGSL_C) $(HDR) tests/test_gpu_fluid.c
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) $(SRC) $(WGSL_C) tests/test_gpu_fluid.c -o $@
 
+# (Node: tools/serve.mjs, which also sends the headers of a cross-origin isolated page, which
+# the threaded build needs; without Node, Python's server, without them)
 serve:
-	cd $(WEB) && (python3 -m http.server 8000 || uv run python -m http.server 8000)
+	node tools/serve.mjs $(WEB) -port 8000 || (cd $(WEB) && (python3 -m http.server 8000 || uv run python -m http.server 8000))
+
+# every pipeline of the page compiled and run once in a headless Chrome on this GPU (the bench
+# page's cases that make them), failing on any GPU error (tools/webbench.mjs check)
+web-check: $(WEB)/bench.html
+	node tools/webbench.mjs check -serve
 
 # ---- the native GPU's library ------------------------------------------------------------
 # make deps: wgpu-native $(WGPU_VERSION), the build for this system, into third_party/wgpu
@@ -388,4 +396,4 @@ deps-clean:
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean
+.PHONY: all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve deps deps-clean clean

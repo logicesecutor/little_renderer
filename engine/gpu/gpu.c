@@ -46,12 +46,8 @@ EM_ASYNC_JS(void, lr_web_yield, (void), {
 
 int gpu_available(void){ return 1; }
 
-#ifndef __EMSCRIPTEN__
-static int timing_wanted;              // gpu_set_timing (natively: browsers have no timers here)
+static int timing_wanted;              // gpu_set_timing (a page too: Chrome has the timers)
 void gpu_set_timing(int on){ timing_wanted = on != 0; }
-#else
-void gpu_set_timing(int on){ (void)on; }
-#endif
 int gpu_timing(const Gpu *g){ return g && g->timestamps; }
 int gpu_timing_report(const Gpu *g){ return g && g->timing_report; }
 
@@ -208,9 +204,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
         feats[nfeats++] = WGPUFeatureName_TimestampQuery;
         g->timestamps = 1;
     }
-#ifndef __EMSCRIPTEN__
-    g->timing_report = timing_wanted || getenv("LR_GPU_TIMING");
-#endif
+    g->timing_report = g->timestamps && (timing_wanted || getenv("LR_GPU_TIMING"));
 #ifdef LR_VK
     // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
