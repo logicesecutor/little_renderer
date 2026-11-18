@@ -218,25 +218,25 @@ next to the GPU ones.
 ## ⚡ Performance
 
 Measured with the performance suite (`make perf`, `make VK=1 perf`, `make web-bench`) on
-`main` at 6fe55ba: RTX 3070, 12 CPU threads, Windows. Nothing waits for the display (offscreen,
+`main` at 4197a1a: RTX 3070, 12 CPU threads, Windows. Nothing waits for the display (offscreen,
 and the viewer with `-vsync off`), so these are the fastest the machine goes.
 [docs/STATUS.md](docs/STATUS.md) has every case and the ideas still to try.
 
 | | wgpu | our Vulkan layer | Chrome |
 |---|---|---|---|
-| Cornell box, 640×640, one path traced sample per pixel | 2.25 ms | **1.27 ms** | 3.82 ms |
-| Stanford dragon, 871k triangles, one pass | 8.32 ms | **1.34 ms** (hardware rays) | |
-| The helmet (glTF, textured), one pass | 5.30 ms | **1.76 ms** | 9.74 ms |
-| The sky demo with 48k instances, 1280×720, one pass | 17.7 ms | **3.97 ms** | 29.0 ms |
-| The same scene rasterized, a frame | 1.61 ms | 1.65 ms | 1.83 ms |
-| The denoiser, 1280×720 | 1.98 ms | **1.59 ms** | 1.83 ms |
-| 1000 rigid bodies falling, one 1/60 s step | 3.45 ms (GPU 1.18) | **1.74 ms** | 4.10 ms |
-| The viewer, Cornell box rasterized, 1280×720 | 3566 fps | 3598 fps | |
-| The viewer, Cornell box path traced and denoised, still | 201 fps, 178 passes/s | **223 fps, 339 passes/s** | |
-| The viewer, sky demo with 2000 bodies falling, path traced and denoised | 64 fps | **103 fps** | |
+| Cornell box, 640×640, one path traced sample per pixel | 2.14 ms | **1.26 ms** | 4.15 ms |
+| Stanford dragon, 871k triangles, one pass | 8.46 ms | **1.33 ms** (hardware rays) | |
+| The helmet (glTF, textured), one pass | 5.08 ms | **1.83 ms** | 9.83 ms |
+| The sky demo with 48k instances, 1280×720, one pass | 17.4 ms | **4.31 ms** | 30.8 ms |
+| The same scene rasterized, a frame | 1.62 ms | 1.79 ms | 2.04 ms |
+| The denoiser, 1280×720 | 1.81 ms | 1.75 ms | 1.61 ms |
+| 1000 rigid bodies falling, one 1/60 s step | 3.71 ms (GPU 1.33) | **1.76 ms** | 3.79 ms |
+| The viewer, Cornell box rasterized, 1280×720 | 3379 fps | 3587 fps | |
+| The viewer, Cornell box path traced and denoised, still | 185 fps, 185 passes/s | **227 fps, 307 passes/s** | |
+| The viewer, sky demo with 2000 bodies falling, path traced and denoised | 37 fps, 34 passes/s | **118 fps, 119 passes/s** | |
 
-On the CPU, for comparison: the dragon path traced at 3.8 M paths/s on 12 threads, the 1000
-bodies in 21.9 ms a step (44.4 on one thread), the Cornell box rasterized in 23.6 ms.
+On the CPU, for comparison: the dragon path traced at 3.75 M paths/s on 12 threads, the 1000
+bodies in 22.6 ms a step (46.0 on one thread), the Cornell box rasterized in 22.5 ms.
 
 ## 🧪 Quality
 
