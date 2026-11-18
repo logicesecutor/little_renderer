@@ -14,6 +14,7 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
     (void)v; (void)s; (void)p; (void)mp; (void)volumes;
     return 0;
 }
+int gpu_view_volumes_fit(GpuView *v, const Scene *s, const MarchParams *mp){ (void)v; (void)s; (void)mp; return 0; }
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ (void)v; (void)s; (void)tp; return 0; }
 void gpu_view_trace_prepare(GpuView *v){ (void)v; }
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
@@ -124,6 +125,7 @@ struct GpuView {
     WGPUBindGroupLayout light_bgl, comp_bgl, comp_gpu_bgl, stats_bgl, finish_bgl;
     GpuRaster *raster;          // the scene's surfaces drawn on the GPU (created when first used)
     int raster_failed;
+    int vol_warned;             // gpu_view_volumes_fit said the media do not fit
     // the path tracer (created when first used) and the image it is making
     GpuTrace *trace;
     int trace_failed, show_traced;
@@ -415,6 +417,35 @@ static int sources_prune(GpuView *v){
     return gone;
 }
 
+// the cells of the first n media: densities, bricks and (with mp) light grids
+static void media_cells(const Scene *s, int n, const MarchParams *mp, size_t *nd, size_t *nb, size_t *nl){
+    *nd = *nb = *nl = 0;
+    for (int k = 0; k < n; k++){
+        const Volume *vol = s->volumes[k];
+        *nd += (size_t)vol->nx * vol->ny * vol->nz;
+        *nb += (size_t)vol->bnx * vol->bny * vol->bnz;
+        if (mp){
+            int ld[3];
+            march_light_dims(vol, mp->light_res, ld);
+            *nl += (size_t)ld[0] * ld[1] * ld[2];
+        }
+    }
+}
+
+int gpu_view_volumes_fit(GpuView *v, const Scene *s, const MarchParams *mp){
+    if (!v || !s) return 0;
+    const int n = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
+    size_t nd, nb, nl;
+    media_cells(s, n, mp, &nd, &nb, &nl);
+    size_t most = nd > nb ? nd : nb;
+    if (nl > most) most = nl;
+    if ((uint64_t)most * 4 <= v->g->max_storage) return 1;
+    if (!v->vol_warned++)
+        fprintf(stderr, "gpu: the media need a buffer of %.0f MB, more than this GPU's %.0f MB: marched on the CPU\n",
+                (double)most * 4 / 1048576, (double)v->g->max_storage / 1048576);
+    return 0;
+}
+
 static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, MarchLamp *lamp, WGPUCommandEncoder enc){
     Gpu *g = v->g;
     int n = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
@@ -424,15 +455,8 @@ static int upload_volumes(GpuView *v, const Scene *s, const MarchParams *mp, Mar
     for (int k = 0; k < n && !changed; k++)
         if (v->vol_ids[k] != s->volumes[k]->id || v->versions[k] != s->volumes[k]->version) changed = 1;
     if (!changed) return !v->light_valid;
-    size_t nd = 0, nb = 0, nl = 0;
-    for (int k = 0; k < n; k++){
-        const Volume *vol = s->volumes[k];
-        int ld[3];
-        march_light_dims(vol, mp->light_res, ld);
-        nd += (size_t)vol->nx * vol->ny * vol->nz;
-        nb += (size_t)vol->bnx * vol->bny * vol->bnz;
-        nl += (size_t)ld[0] * ld[1] * ld[2];
-    }
+    size_t nd, nb, nl;
+    media_cells(s, n, mp, &nd, &nb, &nl);
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     int fresh = gpu_buffer_reserve(g, &v->dens, &v->dens_cap, nd * 4, st, "density");
     gpu_buffer_reserve(g, &v->bricks, &v->bricks_cap, nb * 4, st, "bricks");
@@ -579,7 +603,8 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
     Gpu *g = v->g;
     MarchParams def = march_default_params();
     if (!mp) mp = &def;
-    const int n = volumes ? (s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES) : 0;
+    int n = volumes ? (s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES) : 0;
+    if (n && !gpu_view_volumes_fit(v, s, mp)) n = 0;   // (too big for this GPU: none drawn here)
     MarchLamp lamp = march_lamp(s);
 
     int relight = n ? upload_volumes(v, s, mp, &lamp, enc) : 0;
@@ -798,6 +823,7 @@ static WGPUBuffer traced_image(GpuView *v, WGPUCommandEncoder enc){
 static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes,
                              int traced, int draw_scene){
     if (!v || v->raster_failed) return 0;
+    if (volumes && s->nvolumes > 0 && !gpu_view_volumes_fit(v, s, mp)) return 0;   // the CPU marches them
     Gpu *g = v->g;
     if (!v->raster && !(v->raster = gpu_raster_create(g, v->w, v->h))){ v->raster_failed = 1; return 0; }
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
@@ -837,6 +863,7 @@ void gpu_view_trace_prepare(GpuView *v){
 
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     if (!v || v->trace_failed) return 0;
+    if (!gpu_view_volumes_fit(v, s, NULL)) return 0;   // media too big for this GPU: on the CPU
     if (!v->trace && !(v->trace = gpu_trace_create(v->g, v->w, v->h, GPU_WGSL_TYPES, GPU_WGSL_MEDIA))){
         v->trace_failed = 1;
         return 0;
@@ -863,7 +890,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
 
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){
     if (!v || !v->trace || history < 1) return gpu_view_trace_start(v, s, tp);
-    if (v->trace_failed) return 0;
+    if (v->trace_failed || !gpu_view_volumes_fit(v, s, NULL)) return 0;
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
     if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; }   // (an image not begun yet has nothing to keep)

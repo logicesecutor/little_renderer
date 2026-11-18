@@ -463,6 +463,9 @@ int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBu
     if (*buf && *cap >= size) return 0;
     if (*buf){ wgpuBufferDestroy(*buf); wgpuBufferRelease(*buf); }
     size_t want = size + size / 4 + 1024;   // a little room to grow without recreating
+    // (but not past the largest buffer a shader may bind, when the size itself is within it:
+    // one that fits exactly was asked for 25% more)
+    if (size <= g->max_storage && want > g->max_storage) want = (size_t)g->max_storage;
     *buf = gpu_buffer(g, label, want, usage);
     *cap = want;
     return 1;

@@ -32,6 +32,11 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 // w x h pixels 0xAARRGGBB (app/hud.h makes them) at (x, y); argb = NULL removes it.
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y);
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);
+// 1 if the scene's media (densities, bricks, light grids: mp, or NULL for the path tracer,
+// which has no light grid) fit this GPU's largest storage buffer, or there are none. If not
+// (said once on stderr), the GPU draws no media: gpu_view_present_scene with volumes and the
+// path tracer's start return 0, and the media are to be marched on the CPU.
+int gpu_view_volumes_fit(GpuView *v, const Scene *s, const MarchParams *mp);
 // Anti-aliasing of the rasterized frames shown (and their screenshots): on = FXAA after the
 // composite (gpu/shaders/view/view_fxaa.wgsl), one more full-screen pass; 0 = none (default).
 // Path traced images are left as they are (their samples already cover each pixel).

@@ -828,15 +828,17 @@ static int frame(void){
             RenderParams p = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
             p.mode = shading;
             // the surfaces: by the GPU rasterizer when it is there (at presentation), otherwise here
-            gpu_scene = gview && o.gpu_raster;
+            // (media too big for this GPU's buffers: both here, the surfaces under them)
+            int gvol = gview && gpu_view_volumes_fit(gview, &scene, &o.march);
+            gpu_scene = gview && o.gpu_raster && gvol;
             if (!gpu_scene){
                 fb_clear(fb, rgb8(0, 0, 0));
                 render_scene(fb, &scene, &p);
             }
             // the media: on the GPU when it is there (at presentation), otherwise here
-            if (o.raster_clouds && !gview) raster_draw_volumes(rvol, fb, &scene, &p, &o.march);
+            if (o.raster_clouds && !gvol) raster_draw_volumes(rvol, fb, &scene, &p, &o.march);
             last_rp = p;
-            frame_volumes = o.raster_clouds && gview && scene.nvolumes > 0;
+            frame_volumes = o.raster_clouds && gvol && scene.nvolumes > 0;
             raster_ms = (clock_s() - r0) * 1000.0;
             if (prof_on) prof[PROF_RASTER] += raster_ms / 1000.0;
             raster_dirty = 0;
