@@ -26,6 +26,9 @@ struct TP {
     sky: vec4f,    /* the sky (SKY, SKYC): its scale, cos and sin of its turn, 1 = there is one */
     txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
                       triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
+    ad: vec4u,     /* adaptive sampling (the denoiser's planes on): the error a tile stops at (f32 bits;
+                      0 = off), the samples before a tile may stop, before a sky tile may; and
+                      in a "fill" dispatch (AS3) the most samples a pixel may have to take one (0: not one) */
     mats: array<TMat, 16>,
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -1064,6 +1067,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     if (y >= T.dims.y) { return; }
     let k = y * W + x;
     let acc = accum[k];
+    if (T.f.w > 0.5) {
+        /* adaptive sampling: a pixel whose tile has stopped (adapt) takes no more; in a fill
+           dispatch (AS3) only the pixels with at most T.ad.w samples (this pass's included) */
+        if (accum[W * T.dims.y + k].z > 0.5) { return; }
+        if (T.ad.w > 0u && acc.w > f32(T.ad.w)) { return; }
+    }
     /* seeded from (pixel, sample number): every sample of every pixel is different */
     /* the plain random numbers: from (pixel, sample number), every sample of every pixel differs;
        the sequence's: sample T.cnt.z of the image (all pixels alike, shifted by blue noise) */
@@ -1108,6 +1117,60 @@ fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     accum[2u * N + k] = vec4f(g.n, g.z);
     accum[3u * N + k] = vec4f(g.a, g.kind);
     accum[4u * N + k] = vec4f(g.pos, g.pt);
+}
+
+/* the sRGB curve of a linear value clamped to [0, 1], as the image is shown and saved */
+fn srgb_of(x: f32) -> f32 {
+    let c = clamp(x, 0.0, 1.0);
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
+}
+
+/* Adaptive sampling (T.ad.x > 0, the denoiser's planes on): one thread per 8 x 8 tile. A tile
+   stops (plane 1's z = 1 in each of its pixels; main then leaves them out) once every pixel has
+   T.ad.y samples and its noise as shown is under T.ad.x for all of them: the mean of the
+   pixel's luminance plus and minus its standard error (plane 1: the sums of l and l^2, l over
+   the albedo on a surface, so times the albedo's luminance again), through the sRGB curve,
+   half their difference: an error in the 0..1 of the image shown (1/255 = 0.004), so what
+   is clipped or bright does not ask for samples the eye cannot see, and dark noise does. A
+   stopped tile stays stopped for the image (gbuf and the reprojection clear the mark), so each
+   pixel's samples are the first n of the sequence. */
+@compute @workgroup_size(64)
+fn adapt(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let t = gid.x + gid.y * nw.x * 64u;
+    let W = T.dims.x;
+    let H = T.dims.y;
+    let N = W * H;
+    let tw = (W + 7u) / 8u;
+    if (t >= tw * ((H + 7u) / 8u)) { return; }
+    let x0 = (t % tw) * 8u;
+    let y0 = (t / tw) * 8u;
+    let x1 = min(x0 + 8u, W);
+    let y1 = min(y0 + 8u, H);
+    let thr = bitcast<f32>(T.ad.x);
+    let nmin = f32(T.ad.y);
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            let k = y * W + x;
+            let m = accum[N + k];
+            if (m.z > 0.5) { return; }                  /* stopped already */
+            let n = accum[k].w;
+            if (n < nmin) { return; }
+            let g = accum[3u * N + k];
+            let sc = select(1.0, luma(g.xyz), g.w == 0.0);
+            let mean = m.x / n;
+            let se = sqrt(max(m.y / n - mean * mean, 0.0) / n);
+            /* every pixel (the tile's worst, not its mean: measured, the worst tiles' error at
+               the same time 1.4x lower than with the mean's rule, docs/STATUS.md 1.6) */
+            if (srgb_of(sc * (mean + se)) - srgb_of(sc * (mean - se)) > 2.0 * thr) { return; }
+        }
+    }
+    for (var y = y0; y < y1; y++) {
+        for (var x = x0; x < x1; x++) {
+            let k = y * W + x;
+            let m = accum[N + k];
+            accum[N + k] = vec4f(m.x, m.y, 1.0, m.w);
+        }
+    }
 }
 
 /* ---- light tracing for caustics (light_trace_caustics in rt/tracer.c) ----

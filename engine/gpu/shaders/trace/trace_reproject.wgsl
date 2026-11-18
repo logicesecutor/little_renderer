@@ -74,5 +74,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     }
     let n = min(nsum / wsum, f32(R.dims.z));
     cur[k] = vec4f(acc0.rgb / wsum * n, n);
-    cur[N + k] = acc1 / wsum * n;
+    let m = acc1 / wsum * n;
+    cur[N + k] = vec4f(m.xy, 0.0, 0.0);      /* (z: adaptive sampling's stop mark, not carried over) */
 }

@@ -146,6 +146,8 @@ static int render_gpu(const Options *opt, Scene *scene){
         if (opt->caustics_lt && scene->light >= 0) printf("  caustics: light traced on the GPU, %g light paths per pixel and sample\n", opt->photons);
         gpu_view_trace_wavefront(v, opt->wavefront);
         if (opt->wavefront) printf("  wavefront: one step of all paths at a time\n");
+        gpu_view_trace_adaptive(v, opt->adaptive);
+        if (opt->adaptive > 0) printf("  adaptive sampling: 8x8 tiles stop at a relative noise of %g (at least 16 samples)\n", opt->adaptive);
         if (opt->denoise && !gpu_view_trace_denoise(v, 1))
             printf("  not denoised: this GPU's buffers are too small for the denoiser at %dx%d\n", W, H);
         else if (opt->denoise) printf("  denoised (-denoise off for the unbiased image)\n");

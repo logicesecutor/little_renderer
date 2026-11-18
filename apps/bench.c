@@ -234,6 +234,40 @@ static void case_trace(const Case *c, Res *r, int reps){
     teardown(&o, &s, &SIM);
 }
 
+// A with adaptive sampling (gpu_view_trace_adaptive, c->b / 1000 the noise a tile stops at):
+// ms per pass over the image's first 512 passes (256 in the quick set), the tiles that stopped
+// taking none; against the same scene's case without it, what the stopped tiles saved
+static void case_trace_adaptive(const Case *c, Res *r, int reps){
+    if (!models_there(c->args, r)) return;
+    Gpu *g = gpu_get(0);
+    if (!g){ skip(r, "no GPU"); return; }
+    Options o; static Scene s;
+    if (setup(c->args, &o, &s, &SIM)){ skip(r, "scene not made"); return; }
+    scene_set_accel(&s, ACCEL_BVH, &o.ap);
+    GpuView *v = gpu_view_create(g, o.width, o.height);
+    if (!v){ teardown(&o, &s, &SIM); skip(r, "no view"); return; }
+    gpu_view_trace_denoise(v, 0);
+    gpu_view_trace_adaptive(v, c->b / 1000.0);
+    RenderParams rp = scene_params(&o, &s);
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    const int passes = full ? 512 : 256;
+    for (int k = 0; k < reps; k++){
+        if (!gpu_view_trace_start(v, &s, &tp)){ skip(r, "the GPU cannot hold the scene"); break; }
+        gpu_view_trace_limit(v, passes);
+        trace_until(g, v, &s, &rp, &o.march, 1);      // (the first: pipelines made, caches warm)
+        gpu_view_gpu_ms_reset(v);
+        int p0 = gpu_view_trace_passes(v);
+        double t0 = clock_s();
+        trace_until(g, v, &s, &rp, &o.march, passes);
+        int p1 = gpu_view_trace_passes(v);
+        if (p1 > p0) add(r, (clock_s() - t0) * 1000.0 / (p1 - p0));
+        add_gpu(r, gpu_view_gpu_ms(v, 0));
+    }
+    snprintf(r->note, sizeof(r->note), "%dx%d, adaptive %g, passes 2..%d", o.width, o.height, c->b / 1000.0, passes);
+    gpu_view_destroy(v);
+    teardown(&o, &s, &SIM);
+}
+
 // ---- B: the CPU path tracer --------------------------------------------------------------
 // M paths per second (more is better), 320x320, 2 samples per pixel, c->a threads (0: all)
 static void case_cpu_trace(const Case *c, Res *r, int reps){
@@ -627,6 +661,8 @@ static const Case CASES[] = {
     {"A7", "GPU path tracer: helmet (glTF, textures)",  "ms/pass", 0, case_trace, "-gltf " HELMET " " R640, 0, 0},
     {"A8", "GPU path tracer: sky demo, 3k props",       "ms/pass", 1, case_trace, SKYDEMO(3000), 0, 0},
     {"A9", "GPU path tracer: sky demo, 48k props",      "ms/pass", 0, case_trace, SKYDEMO(48000), 0, 0},
+    {"A10", "GPU path tracer, adaptive 0.008: boxes",   "ms/pass", 0, case_trace_adaptive, "-scene boxes " R640, 0, 8},
+    {"A11", "GPU path tracer, adaptive 0.008: sky 3k",  "ms/pass", 0, case_trace_adaptive, SKYDEMO(3000), 0, 8},
 #ifdef LR_VK
     {"A1c", "GPU path tracer, no hardware rays: boxes",  "ms/pass", 0, case_trace, "-scene boxes " R640, 1, 0},
     {"A3c", "GPU path tracer, no hardware rays: dragon", "ms/pass", 0, case_trace, "-scene mesh -obj " DRAGON " -rot -35 " R640, 1, 0},

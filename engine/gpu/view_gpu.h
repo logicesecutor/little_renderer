@@ -103,6 +103,12 @@ int gpu_view_trace_denoise(GpuView *v, int on);
 // 1-5 (a footprint of 5, 9, 17, 33, 65 pixels); fewer cost less and smooth less. 0 (the
 // default): all 5, as for a still image.
 void gpu_view_trace_denoise_moving(GpuView *v, int passes);
+// Adaptive sampling of a still image (the single kernel, with the denoiser's planes): every 16
+// passes each 8x8 tile whose pixels all have 16 samples and a noise as shown under threshold
+// (the standard error of each pixel's mean through the sRGB curve: 0..1 of the image, 1/255 =
+// 0.004) stops taking samples for the rest of the image. While things move every tile takes
+// them. 0 (the default): off.
+void gpu_view_trace_adaptive(GpuView *v, double threshold);
 // Shows the image so far. During the first pass, pixels with no sample yet show the scene
 // rasterized (with its media if volumes = 1), so the picture is painted over, not blanked.
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);

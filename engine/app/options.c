@@ -72,6 +72,9 @@ void options_usage(Program prog, FILE *f){
         "  -clamp max                 firefly clamp, 0 = off (biased if on)    (0)\n"
         "  -denoise on|off            path tracing on the GPU: denoise the image (%s)\n"
         "  -wavefront on|off          path tracing on the GPU: small kernels, one step of all paths at a time (off)\n"
+        "  -adaptive err              path tracing on the GPU, a still image: each 8x8 tile stops taking\n"
+        "                             samples once every pixel has 16 and its noise as shown (0..1 of\n"
+        "                             the image, sRGB) is under err (0 = off; render 0, view 0.004)\n"
         "  -threads n                 CPU threads, 0 = all cores               (0)\n"
         "  -mis on|off                multiple importance sampling of the lamp (on)\n"
         "  -sampler sobol|random      a path's random numbers: Sobol with blue noise, or plain (sobol)\n"
@@ -226,6 +229,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->vsync = 1;
     o->sim_hz = 60;
     o->denoise_move = 3;
+    o->adaptive = prog == PROG_VIEW ? 0.004 : 0;   // (1/255 of the image shown; render: every pixel its -s)
     o->march = march_default_params();
     o->probe = 1;
     o->probe_res = 0;                      // PROBE_RES in a room, PROBE_RES_OPEN under a sky
@@ -297,6 +301,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-stats")) o->stats = v;
         else if (!strcmp(a, "-simhz")) o->sim_hz = atof(v);
         else if (!strcmp(a, "-denoisemove")) o->denoise_move = atoi(v);
+        else if (!strcmp(a, "-adaptive")) o->adaptive = atof(v);
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
         else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);

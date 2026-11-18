@@ -127,6 +127,7 @@ typedef struct {
     uint32_t ins[4];
     float sky[4];
     uint32_t txl[4];
+    uint32_t ad[4];                    // adaptive sampling: the error a tile stops at (float bits), samples first, (AS2), (AS3)
     float mats[MAX_MATS][16];          // albedo, emission, pbr, tex (uint32 bits)
 } GTP;
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
@@ -158,7 +159,9 @@ struct GpuTrace {
     Gpu *g;
     int w, h;
     WGPUBindGroupLayout bgl, rp_bgl;
-    WGPUComputePipeline pipe, gbuf_pipe, rp_pipe;
+    WGPUComputePipeline pipe, gbuf_pipe, rp_pipe, adapt_pipe;
+    float adapt_thr;                   // gpu_trace_set_adaptive: the error a tile stops at (0: off)
+    int adapt_min;                     // ... and the samples each pixel takes first
     WGPUBuffer params, rp_params, blue;   // parameters (MAX_REPS copies), reprojection's, blue noise
     WGPUBuffer acc[2];       // the image's samples, and (once reprojected) the previous image's
     int cur;                 // which one is the image's
@@ -398,6 +401,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->planes = (uint64_t)width * height * 80 <= g->max_storage ? 5 : 1;
     if (t->planes == 5){
         t->gbuf_pipe = gpu_compute(g, "path tracer: guide", src, "gbuf", t->bgl);
+        t->adapt_pipe = gpu_compute(g, "path tracer: adaptive sampling", src, "adapt", t->bgl);
         t->rp_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
         t->rp_pipe = gpu_compute(g, "path tracer: reprojection", REPROJECT, "main", t->rp_bgl);
         t->rp_params = gpu_buffer(g, "reprojection parameters", 9 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
@@ -1531,6 +1535,10 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
         memcpy(&P.mats[m][12], tx, 16);
     }
     P.txl[0] = t->uvtri_at; P.txl[1] = t->uv_at; P.txl[2] = t->textured ? 1u : 0u;
+    if (t->adapt_thr > 0 && t->planes == 5){
+        memcpy(&P.ad[0], &t->adapt_thr, 4);
+        P.ad[1] = (uint32_t)(t->adapt_min > 1 ? t->adapt_min : 1);
+    }
     *Pp = P;
 }
 
@@ -1551,12 +1559,12 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 
 // `repeats` dispatches, the r-th with the r-th copy of the parameters (light = 1: the light
 // tracer, whose binding 11 takes the place of 9; 3: the path tracer's bindings, timed as the
-// guide): one bind group, the copy chosen by its dynamic offset (it was a bind group per
-// dispatch, each several us of the CPU's time)
+// guide; 4: its bindings, not timed): one bind group, the copy chosen by its dynamic offset
+// (it was a bind group per dispatch, each several us of the CPU's time)
 static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
                         WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
-    const int guide = light == 3;
-    if (guide) light = 0;
+    const int guide = light == 3, untimed = light == 4;
+    if (guide || untimed) light = 0;
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
@@ -1584,7 +1592,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     if (repeats > MAX_REPS) repeats = MAX_REPS;
     // timed: the tracer per full-image pass (1 sample per pixel), the light tracer per pass,
     // the guide per image
-    WGPUComputePassEncoder pass = light == 2 ? wgpuCommandEncoderBeginComputePass(enc, NULL)
+    WGPUComputePassEncoder pass = light == 2 || untimed ? wgpuCommandEncoderBeginComputePass(enc, NULL)
                                 : guide ? timed_pass(t, enc, TS_GUIDE, 1)
                                 : timed_pass(t, enc, light ? TS_LIGHT : TS_TRACE,
                                              light ? repeats : (double)threads * repeats / ((double)t->w * t->h));
@@ -1807,6 +1815,20 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
 }
 
+void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples){
+    if (!t) return;
+    t->adapt_thr = threshold > 0 ? (float)threshold : 0;
+    t->adapt_min = min_samples;
+}
+
+int gpu_trace_adapt(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+    // (after gpu_trace_encode in the same submission: its parameters, the first copy, are the tiles')
+    if (!t || t->adapt_thr <= 0 || t->planes != 5 || !t->adapt_pipe || (t->wavefront && wf_ready(t))) return 0;
+    size_t tiles = (size_t)((t->w + 7) / 8) * ((t->h + 7) / 8);
+    dispatch_ex(t, enc, t->adapt_pipe, tiles, 1, frame_u, dens, bricks, vstat, 4);
+    return 1;
+}
+
 void gpu_trace_light(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                      int passes, int nvolumes, uint32_t index,
                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
@@ -1952,7 +1974,7 @@ void gpu_trace_destroy(GpuTrace *t){
                          t->caus, t->rs_params, t->final, t->lt_params, t->grid, t->dc_params, t->pc_params,
                          t->bd_keys, t->bd_flags, t->bd_boxes, t->bd_par, t->pl_buf, t->pl_args};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
-    WGPUComputePipeline pipes[] = {t->pipe, t->pipe_sky, t->wf_shade_sky, t->gbuf_pipe, t->rp_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
+    WGPUComputePipeline pipes[] = {t->pipe, t->pipe_sky, t->wf_shade_sky, t->gbuf_pipe, t->adapt_pipe, t->rp_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
                                    t->bd_morton, t->bd_sort, t->bd_hier, t->bd_leaves, t->bd_up,
                                    t->pl_init, t->pl_nn, t->pl_mark, t->pl_top, t->pl_scatter, t->pl_small};
     for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) if (pipes[i]) wgpuComputePipelineRelease(pipes[i]);

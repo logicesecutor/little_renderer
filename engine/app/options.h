@@ -111,6 +111,7 @@ typedef struct {
     const char *stats;     // view -autoquit: its frame rate written to this file (bin/bench)
     double sim_hz;         // view -sim on: physics steps per second at most (60); 0 = one every frame
     int denoise_move;      // view, GPU denoiser while things move: a-trous passes, 1-5 (3); 0 = all 5
+    double adaptive;       // GPU path tracing of a still image: the noise as shown an 8x8 tile stops at (0 = off; view 0.004)
 
     // physics (sim, and view -sim on)
     SimOptions sim;

@@ -28,6 +28,7 @@ double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
+void gpu_view_trace_adaptive(GpuView *v, double threshold){ (void)v; (void)threshold; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
 void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
@@ -140,6 +141,7 @@ struct GpuView {
     GpuDenoise *den;
     int den_failed, denoise, den_bands;
     int den_move;               // its a-trous passes while things move (0: all; gpu_view_trace_denoise_moving)
+    double adapt_thr;           // gpu_view_trace_adaptive: the error a tile of a still image stops at (0: off)
     double t_submit_ms, t_pass_t0, t_pass_ms;
     // reading the samples back
     WGPUBuffer t_rb;
@@ -169,6 +171,10 @@ struct GpuView {
 // the views alive: a "work done" callback can arrive after gpu_view_destroy
 // (creation is refused when the list is full: one left out would have its callbacks ignored)
 #define MAX_LIVE_VIEWS 64
+// adaptive sampling (gpu_view_trace_adaptive): the samples every pixel takes before its tile
+// may stop, and how often (in passes) the tiles are decided
+#define ADAPT_MIN 16
+#define ADAPT_EVERY 16
 static GpuView *live_views[MAX_LIVE_VIEWS];
 static int view_is_live(const GpuView *v){
     for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (v && live_views[i] == v) return 1;
@@ -775,6 +781,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
         return 0;
     }
     gpu_trace_set_wavefront(v->trace, v->wavefront);
+    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN);
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
     v->t_prep = 1;
@@ -910,6 +917,13 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     v->t_sub_rows = rows;
     v->t_sub_reps = reps;
     gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+    // adaptive sampling (gpu_view_trace_adaptive): a still image's tiles decided as a pass ends,
+    // every ADAPT_EVERY passes (whatever moves starts the image over with every tile on)
+    if (v->adapt_thr > 0 && !v->t_live && v->t_y + rows >= v->h){
+        const int before = v->t_passes, after = v->t_passes + reps;
+        if (after >= ADAPT_MIN && after / ADAPT_EVERY != before / ADAPT_EVERY)
+            gpu_trace_adapt(v->trace, enc, v->frame_u, v->dens, v->bricks, v->vstat);
+    }
     // the caustics: while things move, one pass of light paths into the photon cache, which
     // fades a little each time (what moved fades out); still, a pass ending with this band
     // brings as many passes of the (exact) light tracer, and while that has few the cache
@@ -1037,6 +1051,12 @@ double gpu_view_bench_denoise(GpuView *v, int n){
 }
 
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ if (v) v->den_move = passes > 0 ? passes : 0; }
+
+void gpu_view_trace_adaptive(GpuView *v, double threshold){
+    if (!v) return;
+    v->adapt_thr = threshold > 0 ? threshold : 0;
+    gpu_trace_set_adaptive(v->trace, v->adapt_thr, ADAPT_MIN);   // (the next image: made when first used)
+}
 
 int gpu_view_trace_denoise(GpuView *v, int on){
     if (!v) return 0;
