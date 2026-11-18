@@ -54,24 +54,63 @@ static void threads_refresh(DWORD self){
     CloseHandle(snap);
 }
 
-// Who called into the system library or the C runtime: the stack searched upwards for the
-// first return address into the program (a value inside it that follows a call
-// instruction). No unwinding: the unwinder's tables are behind a lock the stopped thread
-// may hold. A stale value on the stack can mislead it now and then.
-static ULONG64 caller_in_exe(const CONTEXT *c){
+// ---- who called into a system library or the C runtime ----
+// The stack unwound (the tables every 64-bit Windows module carries) up to the first frame
+// inside the program. The system's own lookup of those tables takes a lock the stopped
+// thread may hold (while a library loads), so the modules' tables are listed beforehand
+// (modules_refresh, with no thread stopped) and searched here; RtlVirtualUnwind itself only
+// reads memory. A frame in a module not listed yet ends the walk (no caller).
+typedef struct { ULONG64 lo, hi; const RUNTIME_FUNCTION *rf; DWORD n; } Mod;
+#define MAX_MODS 256
+static Mod modtab[MAX_MODS];
+static volatile LONG nmods;
+
+static void modules_refresh(void){
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    MODULEENTRY32 me = {.dwSize = sizeof(me)};
+    if (Module32First(snap, &me)) do {
+        ULONG64 lo = (ULONG64)(ULONG_PTR)me.modBaseAddr;
+        int known = 0;
+        for (LONG i = 0; i < nmods && !known; i++) known = modtab[i].lo == lo;
+        if (known || nmods >= MAX_MODS) continue;
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)me.modBaseAddr;
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)dos + dos->e_lfanew);
+        const IMAGE_DATA_DIRECTORY *d = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        Mod *m = &modtab[nmods];
+        m->lo = lo; m->hi = lo + me.modBaseSize;
+        m->rf = d->Size ? (const RUNTIME_FUNCTION *)((const char *)dos + d->VirtualAddress) : NULL;
+        m->n = d->Size / sizeof(RUNTIME_FUNCTION);
+        nmods++;
+    } while (Module32Next(snap, &me));
+    CloseHandle(snap);
+}
+
+static ULONG64 caller_in_exe(CONTEXT *c){
     if (c->Rip >= exe_lo && c->Rip < exe_hi) return 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (c->Rsp < 0x10000 || (c->Rsp & 7) || !VirtualQuery((LPCVOID)(ULONG_PTR)c->Rsp, &mbi, sizeof(mbi))) return 0;
-    const ULONG64 *sp = (const ULONG64 *)(ULONG_PTR)c->Rsp;
-    const ULONG64 *end = (const ULONG64 *)((const char *)mbi.BaseAddress + mbi.RegionSize);
-    if (end - sp > 8192) end = sp + 8192;
-    for (; sp < end; sp++){
-        ULONG64 r = *sp;
-        if (r < exe_lo + 8 || r >= exe_hi) continue;
-        const unsigned char *b = (const unsigned char *)(ULONG_PTR)r;
-        // call rel32 (E8), or an indirect call (FF /2) of 2, 3, 6 or 7 bytes
-        if (b[-5] == 0xE8 || (b[-2] == 0xFF && (b[-1] & 0x38) == 0x10) || (b[-3] == 0xFF && (b[-2] & 0x38) == 0x10) ||
-            (b[-6] == 0xFF && (b[-5] & 0x38) == 0x10) || (b[-7] == 0xFF && (b[-6] & 0x38) == 0x10)) return r - 1;
+    for (int depth = 0; depth < 64; depth++){
+        const Mod *m = NULL;
+        for (LONG i = 0; i < nmods && !m; i++) if (c->Rip >= modtab[i].lo && c->Rip < modtab[i].hi) m = &modtab[i];
+        if (!m) return 0;
+        DWORD rva = (DWORD)(c->Rip - m->lo);
+        const RUNTIME_FUNCTION *f = NULL;
+        for (DWORD lo = 0, hi = m->n; lo < hi; ){
+            DWORD mid = (lo + hi) / 2;
+            if (rva < m->rf[mid].BeginAddress) hi = mid;
+            else if (rva >= m->rf[mid].EndAddress) lo = mid + 1;
+            else { f = &m->rf[mid]; break; }
+        }
+        if (f){
+            ULONG64 establisher = 0;
+            PVOID handler = NULL;
+            RtlVirtualUnwind(0, m->lo, c->Rip, (PRUNTIME_FUNCTION)f, c, &handler, &establisher, NULL);
+        } else {                                         // a leaf: the return address is on top
+            if (c->Rsp < 0x10000 || (c->Rsp & 7)) return 0;
+            c->Rip = *(const ULONG64 *)(ULONG_PTR)c->Rsp;
+            c->Rsp += 8;
+        }
+        if (c->Rip < 0x10000) return 0;
+        if (c->Rip >= exe_lo && c->Rip < exe_hi) return c->Rip - 1;   // (inside the call instruction)
     }
     return 0;
 }
@@ -93,7 +132,7 @@ static DWORD WINAPI prof_main(LPVOID arg){
         min_cycles = (c1 - c0) * 50 / (ULONG64)hz / 16;
     }
     while (!stop){
-        if (ticks % 64 == 0) threads_refresh(self);
+        if (ticks % 64 == 0){ threads_refresh(self); modules_refresh(); }
         ticks++;
         if (timer){ due.QuadPart = -(10000000LL / hz); SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE); WaitForSingleObject(timer, 100); }
         else Sleep(1);

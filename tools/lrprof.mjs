@@ -58,6 +58,14 @@ if (addrs.length){
     }
 }
 
+// functions without debug information (the C library's, wgpu's): their names from the symbol table
+const nm = spawnSync('nm', ['-n', exe], { encoding: 'utf8', maxBuffer: 1 << 30 }).stdout || '';
+const syms = [];
+for (const l of nm.split(/\r?\n/)){ const s = /^([0-9a-f]+) [tT] (\S+)/.exec(l); if (s) syms.push([BigInt('0x' + s[1]) - imageBase, s[2]]); }
+syms.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+const symAt = off => { const a = BigInt('0x' + off); let lo = 0, hi = syms.length - 1; if (hi < 0 || syms[0][0] > a) return '??'; while (lo < hi){ const mid = (lo + hi + 1) >> 1; if (syms[mid][0] <= a) lo = mid; else hi = mid - 1; } return syms[lo][1].slice(0, 60); };
+for (const [off, fr] of sym) for (const f of fr) if (f.fn === '??') f.fn = symAt(off);
+
 const byOuter = new Map(), byInner = new Map(), byLine = new Map(), byMod = new Map(), byCaller = new Map();
 const add = (map, k, n) => map.set(k, (map.get(k) || 0) + n);
 for (const [key, n] of counts){
