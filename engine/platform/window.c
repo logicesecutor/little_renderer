@@ -1,7 +1,7 @@
 // window.c - the window on Linux (and other X11 systems): plain Xlib. On Windows,
 // window_win32.c is compiled instead, in a browser window_web.c (this file is then empty).
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
-#include "platform/window.h"
+#include "platform/window_common.h"
 
 #include <X11/XKBlib.h>
 #include <X11/Xlib.h>
@@ -19,14 +19,8 @@ struct LrWindow {
     int w, h;
     int rshift, gshift, bshift;
     Atom wm_delete;
-    int releasing;           // after a FocusOut: how many of RELEASED are still to be given
+    EventQueue later;        // events made here, given before X's (the releases after a FocusOut)
 };
-
-// Keys released when the window loses the focus: their real releases go to the window that
-// has it (as window_win32.c on WM_KILLFOCUS, window_web.c on blur), so a movement key held
-// then would stay down
-static const int RELEASED[] = {LR_KEY_SHIFT, 'w', 'a', 's', 'd', 'e', 'q', LR_KEY_LEFT, LR_KEY_RIGHT, LR_KEY_UP, LR_KEY_DOWN};
-#define NRELEASED ((int)(sizeof(RELEASED) / sizeof(RELEASED[0])))
 
 // position of the lowest set bit: where a color channel goes in an X pixel
 static int mask_shift(unsigned long m){
@@ -95,12 +89,7 @@ static int translate_key(KeySym k){
 }
 
 int window_poll(LrWindow *w, LrEvent *ev){
-    if (w->releasing > 0){                    // (one event per call)
-        ev->type = LR_KEYUP;
-        ev->key = RELEASED[NRELEASED - w->releasing--];
-        ev->button = ev->x = ev->y = ev->wheel = 0;
-        return 1;
-    }
+    if (queue_pop(&w->later, ev)) return 1;
     while (XPending(w->dpy)){
         XEvent xe;
         XNextEvent(w->dpy, &xe);
@@ -139,8 +128,8 @@ int window_poll(LrWindow *w, LrEvent *ev){
             ev->type = LR_EXPOSE;
             return 1;
         case FocusOut:
-            w->releasing = NRELEASED;
-            return window_poll(w, ev);
+            queue_release_keys(&w->later);
+            return queue_pop(&w->later, ev);
         default:
             continue;
         }

@@ -4,7 +4,7 @@
 // so the program sees the same events as on Linux and Windows. Frames are copied into the
 // canvas with putImageData (the CPU backends; the GPU backend draws on the canvas itself).
 #ifdef __EMSCRIPTEN__
-#include "platform/window.h"
+#include "platform/window_common.h"
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -12,23 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define QUEUE 512
 #define CANVAS "#canvas"
 
 struct LrWindow {
     int w, h;
     uint8_t *rgba;           // the frame as the canvas wants it: R, G, B, A bytes
-    LrEvent q[QUEUE];
-    int head, tail;
+    EventQueue events;       // waiting for window_poll
 };
-
-static void push(LrWindow *w, LrEventType type, int key, int button, int x, int y, int wheel){
-    int next = (w->tail + 1) % QUEUE;
-    if (next == w->head) return;
-    LrEvent *e = &w->q[w->tail];
-    e->type = type; e->key = key; e->button = button; e->x = x; e->y = y; e->wheel = wheel;
-    w->tail = next;
-}
 
 // KeyboardEvent.key -> the engine's key code (printable keys: their lowercase character)
 static int translate_key(const EmscriptenKeyboardEvent *e){
@@ -53,8 +43,8 @@ static EM_BOOL on_key(int type, const EmscriptenKeyboardEvent *e, void *user){
     int k = translate_key(e);
     if (!k) return EM_FALSE;
     if (e->ctrlKey || e->metaKey || e->altKey) return EM_FALSE;   // leave browser shortcuts alone
-    if (type == EMSCRIPTEN_EVENT_KEYDOWN){ if (!e->repeat) push(w, LR_KEYDOWN, k, 0, 0, 0, 0); }
-    else push(w, LR_KEYUP, k, 0, 0, 0, 0);
+    if (type == EMSCRIPTEN_EVENT_KEYDOWN){ if (!e->repeat) queue_push(&w->events, LR_KEYDOWN, k, 0, 0, 0, 0); }
+    else queue_push(&w->events, LR_KEYUP, k, 0, 0, 0, 0);
     return EM_TRUE;                               // handled: no page scrolling on arrows / space
 }
 
@@ -62,28 +52,23 @@ static EM_BOOL on_mouse(int type, const EmscriptenMouseEvent *e, void *user){
     LrWindow *w = user;
     int x = (int)e->targetX, y = (int)e->targetY;
     int b = e->button == 0 ? 1 : (e->button == 1 ? 2 : 3);
-    if (type == EMSCRIPTEN_EVENT_MOUSEDOWN) push(w, LR_BUTTONDOWN, 0, b, x, y, 0);
-    else if (type == EMSCRIPTEN_EVENT_MOUSEUP) push(w, LR_BUTTONUP, 0, b, x, y, 0);
-    else push(w, LR_MOTION, 0, 0, x, y, 0);
+    if (type == EMSCRIPTEN_EVENT_MOUSEDOWN) queue_push(&w->events, LR_BUTTONDOWN, 0, b, x, y, 0);
+    else if (type == EMSCRIPTEN_EVENT_MOUSEUP) queue_push(&w->events, LR_BUTTONUP, 0, b, x, y, 0);
+    else queue_push(&w->events, LR_MOTION, 0, 0, x, y, 0);
     return EM_TRUE;
 }
 
 static EM_BOOL on_wheel(int type, const EmscriptenWheelEvent *e, void *user){
     (void)type;
     LrWindow *w = user;
-    if (e->deltaY != 0) push(w, LR_WHEEL, 0, 0, 0, 0, e->deltaY < 0 ? 1 : -1);
+    if (e->deltaY != 0) queue_push(&w->events, LR_WHEEL, 0, 0, 0, 0, e->deltaY < 0 ? 1 : -1);
     return EM_TRUE;                               // do not scroll the page
 }
 
 static EM_BOOL on_blur(int type, const EmscriptenFocusEvent *e, void *user){
     (void)type; (void)e;
     LrWindow *w = user;                           // keys released elsewhere never arrive: release all
-    push(w, LR_KEYUP, LR_KEY_SHIFT, 0, 0, 0, 0);
-    for (const char *k = "wasdeq"; *k; k++) push(w, LR_KEYUP, *k, 0, 0, 0, 0);
-    push(w, LR_KEYUP, LR_KEY_LEFT, 0, 0, 0, 0);
-    push(w, LR_KEYUP, LR_KEY_RIGHT, 0, 0, 0, 0);
-    push(w, LR_KEYUP, LR_KEY_UP, 0, 0, 0, 0);
-    push(w, LR_KEYUP, LR_KEY_DOWN, 0, 0, 0, 0);
+    queue_release_keys(&w->events);
     return EM_FALSE;
 }
 
@@ -126,10 +111,7 @@ LrWindow *window_open(int width, int height, const char *title){
 }
 
 int window_poll(LrWindow *w, LrEvent *ev){
-    if (w->head == w->tail) return 0;
-    *ev = w->q[w->head];
-    w->head = (w->head + 1) % QUEUE;
-    return 1;
+    return queue_pop(&w->events, ev);
 }
 
 void window_present(LrWindow *w, const Framebuffer *fb){

@@ -3,7 +3,7 @@
 // procedure (a callback); it turns them into LrEvents in a small queue that window_poll
 // empties, so the program sees the same events as on Linux.
 #ifdef _WIN32
-#include "platform/window.h"
+#include "platform/window_common.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -11,24 +11,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define QUEUE 512
-
 struct LrWindow {
     HWND hwnd;
     int w, h;
     BITMAPINFO bmi;          // describes fb->color to GDI: 32-bit, top-down
-    LrEvent q[QUEUE];        // events waiting for window_poll (a ring buffer)
-    int head, tail;
+    EventQueue events;       // waiting for window_poll
     int buttons;             // mouse buttons held (for SetCapture)
 };
-
-static void push(LrWindow *w, LrEventType type, int key, int button, int x, int y, int wheel){
-    int next = (w->tail + 1) % QUEUE;
-    if (next == w->head) return;                  // full: drop the event
-    LrEvent *e = &w->q[w->tail];
-    e->type = type; e->key = key; e->button = button; e->x = x; e->y = y; e->wheel = wheel;
-    w->tail = next;
-}
 
 // virtual key -> the engine's key code: printable keys are their lowercase character,
 // as on X11 (where a key reports its unshifted symbol)
@@ -69,46 +58,41 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp){
     int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
     switch (msg){
     case WM_CLOSE:
-        push(w, LR_CLOSE, 0, 0, 0, 0, 0);         // the program decides; do not destroy yet
+        queue_push(&w->events, LR_CLOSE, 0, 0, 0, 0, 0);         // the program decides; do not destroy yet
         return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         int k = translate_key(wp);
-        if (k && !(lp & (1 << 30))) push(w, LR_KEYDOWN, k, 0, 0, 0, 0);   // bit 30: auto-repeat
+        if (k && !(lp & (1 << 30))) queue_push(&w->events, LR_KEYDOWN, k, 0, 0, 0, 0);   // bit 30: auto-repeat
         if (msg == WM_SYSKEYDOWN) break;          // let Alt+F4 & co. through
         return 0;
     }
     case WM_KEYUP: case WM_SYSKEYUP: {
         int k = translate_key(wp);
-        if (k) push(w, LR_KEYUP, k, 0, 0, 0, 0);
+        if (k) queue_push(&w->events, LR_KEYUP, k, 0, 0, 0, 0);
         if (msg == WM_SYSKEYUP) break;
         return 0;
     }
     case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONDOWN: {
         int b = msg == WM_LBUTTONDOWN ? 1 : (msg == WM_MBUTTONDOWN ? 2 : 3);
         if (!w->buttons++) SetCapture(hwnd);      // keep getting the mouse while dragging out
-        push(w, LR_BUTTONDOWN, 0, b, x, y, 0);
+        queue_push(&w->events, LR_BUTTONDOWN, 0, b, x, y, 0);
         return 0;
     }
     case WM_LBUTTONUP: case WM_MBUTTONUP: case WM_RBUTTONUP: {
         int b = msg == WM_LBUTTONUP ? 1 : (msg == WM_MBUTTONUP ? 2 : 3);
         if (w->buttons > 0 && !--w->buttons) ReleaseCapture();
-        push(w, LR_BUTTONUP, 0, b, x, y, 0);
+        queue_push(&w->events, LR_BUTTONUP, 0, b, x, y, 0);
         return 0;
     }
     case WM_MOUSEMOVE:
-        push(w, LR_MOTION, 0, 0, x, y, 0);
+        queue_push(&w->events, LR_MOTION, 0, 0, x, y, 0);
         return 0;
     case WM_MOUSEWHEEL:                           // its coordinates are on the screen: unused
-        push(w, LR_WHEEL, 0, 0, 0, 0, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1);
+        queue_push(&w->events, LR_WHEEL, 0, 0, 0, 0, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1);
         return 0;
     case WM_KILLFOCUS:
         // keys released while another window has the focus never arrive here: release all
-        push(w, LR_KEYUP, LR_KEY_SHIFT, 0, 0, 0, 0);
-        for (const char *k = "wasdeq"; *k; k++) push(w, LR_KEYUP, *k, 0, 0, 0, 0);
-        push(w, LR_KEYUP, LR_KEY_LEFT, 0, 0, 0, 0);
-        push(w, LR_KEYUP, LR_KEY_RIGHT, 0, 0, 0, 0);
-        push(w, LR_KEYUP, LR_KEY_UP, 0, 0, 0, 0);
-        push(w, LR_KEYUP, LR_KEY_DOWN, 0, 0, 0, 0);
+        queue_release_keys(&w->events);
         return 0;
     case WM_ERASEBKGND:
         return 1;                                 // we paint every pixel: no flicker
@@ -116,7 +100,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp){
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
         EndPaint(hwnd, &ps);
-        push(w, LR_EXPOSE, 0, 0, 0, 0, 0);
+        queue_push(&w->events, LR_EXPOSE, 0, 0, 0, 0, 0);
         return 0;
     }
     default:
@@ -170,14 +154,11 @@ LrWindow *window_open(int width, int height, const char *title){
 int window_poll(LrWindow *w, LrEvent *ev){
     MSG msg;
     // let Windows deliver what it has (into the queue) until there is an event for us
-    while (w->head == w->tail && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)){
+    while (queue_empty(&w->events) && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)){
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
-    if (w->head == w->tail) return 0;
-    *ev = w->q[w->head];
-    w->head = (w->head + 1) % QUEUE;
-    return 1;
+    return queue_pop(&w->events, ev);
 }
 
 void window_present(LrWindow *w, const Framebuffer *fb){
