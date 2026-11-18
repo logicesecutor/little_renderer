@@ -36,6 +36,8 @@ typedef struct Env {
     float *marg;                // h + 1: the rows' cumulative distribution (0 ... 1)
     float *cond;                // h * (w + 1): each row's own, over its pixels
     double sum;                 // the sum of lum * sin(theta) over the pixels
+    float *wmax;                // w * h: the largest luminance of each pixel's 3 x 3 (its weight is that times
+    real *row_sin;              // h: its row's sin(theta)); made once, read by every sample and density
     // the rasterizers
     int lw[ENV_LEVELS], lh[ENV_LEVELS];   // each level's size (lw[k] = 2 lh[k])
     float *level[ENV_LEVELS];   // level k: lw[k] x lh[k] rgb

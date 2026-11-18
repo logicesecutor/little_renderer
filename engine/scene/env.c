@@ -113,15 +113,47 @@ static int upper_bound(const float *c, int n, real x){   // the last i with c[i]
 // a pixel's weight for sampling: the largest luminance around it (3 x 3), so that every
 // pixel the bilinear lookup reaches from a bright one is drawn too
 static real pixel_weight(const Env *e, int x, int y){
-    real m = 0;
-    for (int j = y - 1; j <= y + 1; j++){
-        if (j < 0 || j >= e->h) continue;
-        for (int i = x - 1; i <= x + 1; i++){
-            int ii = i < 0 ? i + e->w : i >= e->w ? i - e->w : i;
-            m = r_fmax(m, lum3(e->rgb + 3 * ((size_t)j * e->w + ii)));
+    return (real)e->wmax[(size_t)y * e->w + x] * e->row_sin[y];
+}
+
+// The table behind pixel_weight: each pixel's luminance once, then the largest of 3 across
+// (the map wraps around) and of 3 down (it stops at the poles), on all cores. The same
+// numbers as the 9 luminances and their maximum taken at every call, which every sample of
+// the sky and every density asked for (and env_prepare and the GPU's copy for every pixel:
+// 90 ms each for a 2048 x 1024 sky on one thread).
+static int make_weights(Env *e){
+    const int w = e->w, h = e->h;
+    free(e->wmax); free(e->row_sin);
+    e->wmax = malloc(sizeof(float) * (size_t)w * h);
+    e->row_sin = malloc(sizeof(real) * (size_t)h);
+    float *lum = malloc(sizeof(float) * (size_t)w * h);
+    if (!e->wmax || !e->row_sin || !lum){ free(lum); return 1; }
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < h; y++){
+        const float *p = e->rgb + 3 * (size_t)y * w;
+        float *l = lum + (size_t)y * w, *o = e->wmax + (size_t)y * w;
+        for (int x = 0; x < w; x++) l[x] = (float)lum3(p + 3 * x);
+        for (int x = 0; x < w; x++){
+            float a = l[x == 0 ? w - 1 : x - 1], b = l[x], c = l[x + 1 == w ? 0 : x + 1];
+            float m = a > b ? a : b;
+            o[x] = m > c ? m : c;
+        }
+        e->row_sin[y] = r_sin((y + 0.5f) * (real)PI / h);
+    }
+    // down: lum is free now, the rows' maxima go through it
+    memcpy(lum, e->wmax, sizeof(float) * (size_t)w * h);
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < h; y++){
+        const float *a = lum + (size_t)(y > 0 ? y - 1 : y) * w, *b = lum + (size_t)y * w, *c = lum + (size_t)(y + 1 < h ? y + 1 : y) * w;
+        float *o = e->wmax + (size_t)y * w;
+        for (int x = 0; x < w; x++){
+            float m = a[x] > b[x] ? a[x] : b[x];
+            m = m > c[x] ? m : c[x];
+            o[x] = m > 0 ? m : 0;                   // (as fmax(0, ...): a NaN or negative pixel weighs nothing)
         }
     }
-    return m * r_sin((y + 0.5f) * (real)PI / e->h);
+    free(lum);
+    return 0;
 }
 
 static real pixel_prob(const Env *e, int x, int y){
@@ -278,7 +310,7 @@ int env_prepare(Env *e){
     e->marg = malloc(sizeof(float) * (size_t)(h + 1));
     e->cond = malloc(sizeof(float) * (size_t)h * (w + 1));
     double *rows = malloc(sizeof(double) * (size_t)h);
-    if (!e->marg || !e->cond || !rows){ free(rows); return 1; }
+    if (!e->marg || !e->cond || !rows || make_weights(e)){ free(rows); return 1; }
     e->sum = 0;
     for (int y = 0; y < h; y++){
         float *c = e->cond + (size_t)y * (w + 1);
@@ -358,7 +390,7 @@ Env *env_from_rgb(float *rgb, int w, int h){
 
 void env_free(Env *e){
     if (!e) return;
-    free(e->rgb); free(e->marg); free(e->cond);
+    free(e->rgb); free(e->marg); free(e->cond); free(e->wmax); free(e->row_sin);
     for (int k = 0; k < ENV_LEVELS; k++) free(e->level[k]);
     free(e);
 }
