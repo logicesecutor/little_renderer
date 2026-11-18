@@ -27,6 +27,7 @@ int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
+void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
 void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
@@ -138,6 +139,7 @@ struct GpuView {
     // the denoiser (created when first used), and the band count of the image it holds
     GpuDenoise *den;
     int den_failed, denoise, den_bands;
+    int den_move;               // its a-trous passes while things move (0: all; gpu_view_trace_denoise_moving)
     double t_submit_ms, t_pass_t0, t_pass_ms;
     // reading the samples back
     WGPUBuffer t_rb;
@@ -717,7 +719,10 @@ static WGPUBuffer traced_image(GpuView *v, WGPUCommandEncoder enc){
         if (!v->den && !(v->den = gpu_denoise_create(v->g, v->w, v->h))) v->den_failed = 1;
         else {
             if (v->den_bands != v->t_bands){
-                gpu_denoise_encode(v->den, enc, samples);
+                // while things move, fewer a-trous passes (gpu_view_trace_denoise_moving): the
+                // image lasts a frame, carries up to 12-32 samples per pixel over, and the
+                // denoiser was a quarter of the GPU's time (4.6 ms a frame at 1080p)
+                gpu_denoise_encode(v->den, enc, samples, v->t_live ? v->den_move : 0);
                 v->den_bands = v->t_bands;
             }
             base = gpu_denoise_output(v->den);
@@ -1021,7 +1026,7 @@ double gpu_view_bench_denoise(GpuView *v, int n){
     gpu_wait(v->g);
     double t0 = clock_s();
     WGPUCommandEncoder enc = gpu_encoder(v->g, v->g->queue);
-    for (int i = 0; i < n; i++) gpu_denoise_encode(v->den, enc, gpu_trace_accum(v->trace));
+    for (int i = 0; i < n; i++) gpu_denoise_encode(v->den, enc, gpu_trace_accum(v->trace), 0);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     gpu_submit(v->g, cb);
     wgpuCommandBufferRelease(cb);
@@ -1030,6 +1035,8 @@ double gpu_view_bench_denoise(GpuView *v, int n){
     v->den_bands = -1;                 // (made again for the image shown)
     return (clock_s() - t0) * 1000.0 / n;
 }
+
+void gpu_view_trace_denoise_moving(GpuView *v, int passes){ if (v) v->den_move = passes > 0 ? passes : 0; }
 
 int gpu_view_trace_denoise(GpuView *v, int on){
     if (!v) return 0;

@@ -99,6 +99,10 @@ void gpu_view_trace_wavefront(GpuView *v, int on);
 // count of each pixel is then 1), 0 the samples as they are. Off by default. Returns 1 if it
 // will be used: 0 when this GPU's buffers are too small for its guide at this image size.
 int gpu_view_trace_denoise(GpuView *v, int on);
+// While things move (a band that follows gpu_view_trace_move): the denoiser's a-trous passes,
+// 1-5 (a footprint of 5, 9, 17, 33, 65 pixels); fewer cost less and smooth less. 0 (the
+// default): all 5, as for a still image.
+void gpu_view_trace_denoise_moving(GpuView *v, int passes);
 // Shows the image so far. During the first pass, pixels with no sample yet show the scene
 // rasterized (with its media if volumes = 1), so the picture is painted over, not blanked.
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);

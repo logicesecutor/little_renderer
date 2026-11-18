@@ -234,7 +234,8 @@ GpuTimer *gpu_trace_timer(GpuTrace *t);   // its timer (NULL: not timed): TS_TRA
 // vec4 (rgb, 1), or (0, 0, 0, 0) where there is no sample yet.
 typedef struct GpuDenoise GpuDenoise;
 GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height);
-void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels);
+// passes: the a-trous passes, 1 to 5 (a footprint of 5, 9, 17, 33, 65 pixels); 0: all 5
+void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels, int passes);
 WGPUBuffer gpu_denoise_output(GpuDenoise *d);
 void gpu_denoise_destroy(GpuDenoise *d);
 

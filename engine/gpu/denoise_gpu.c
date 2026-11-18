@@ -36,9 +36,11 @@ struct GpuDenoise {
     WGPUBindGroupLayout bgl;
     WGPUComputePipeline prep, atrous;
     WGPUBuffer u[PASSES + 1];      // the parameters of each pass
+    WGPUBuffer ul[PASSES];         // ... of pass i (1..PASSES-1) as the last one (fewer passes)
     WGPUBuffer a, b;               // ping-pong (irradiance and variance, packed)
     WGPUBuffer guide, out;         // the guide, packed; the image
     GpuBindCache bc[PASSES + 1];   // each pass's bind group, kept
+    GpuBindCache bcl[PASSES];      // ... and as the last one
 };
 
 GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
@@ -56,26 +58,34 @@ GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
     d->b = gpu_buffer(g, "denoiser B", n * 8, WGPUBufferUsage_Storage);
     d->guide = gpu_buffer(g, "denoiser guide", n * 8, WGPUBufferUsage_Storage);
     d->out = gpu_buffer(g, "denoised image", n * 16, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
+    int ok = 1;
     for (int i = 0; i <= PASSES; i++){
-        struct { uint32_t size[4]; float s[4]; } P = {
-            {(uint32_t)width, (uint32_t)height, i ? 1u << (i - 1) : 0u, i == PASSES ? 1u : 0u},
-            {4.0f, 0.0f, 1.0f, 0.0f}};
-        d->u[i] = gpu_buffer(g, "denoiser parameters", sizeof(P), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-        wgpuQueueWriteBuffer(g->queue, d->u[i], 0, &P, sizeof(P));
+        for (int last = 0; last < 2; last++){
+            if (last ? i == 0 || i == PASSES : 0) continue;      // (u[PASSES] is the last already)
+            struct { uint32_t size[4]; float s[4]; } P = {
+                {(uint32_t)width, (uint32_t)height, i ? 1u << (i - 1) : 0u, i == PASSES || last ? 1u : 0u},
+                {4.0f, 0.0f, 1.0f, 0.0f}};
+            WGPUBuffer *u = last ? &d->ul[i] : &d->u[i];
+            *u = gpu_buffer(g, "denoiser parameters", sizeof(P), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+            if (*u) wgpuQueueWriteBuffer(g->queue, *u, 0, &P, sizeof(P));
+            else ok = 0;
+        }
     }
-    if (!d->prep || !d->atrous || !d->a || !d->b || !d->guide || !d->out){ gpu_denoise_destroy(d); return NULL; }
+    if (!ok || !d->prep || !d->atrous || !d->a || !d->b || !d->guide || !d->out){ gpu_denoise_destroy(d); return NULL; }
     return d;
 }
 
-void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels){
+void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels, int passes){
     Gpu *g = d->g;
+    if (passes < 1 || passes > PASSES) passes = PASSES;
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
-    // prep: pixels -> a (and the guide); then a -> b, b -> a, ...; the last pass (the 5th) -> out
-    for (int i = 0; i <= PASSES; i++){
+    // prep: pixels -> a (and the guide); then a -> b, b -> a, ...; the last pass -> out
+    for (int i = 0; i <= passes; i++){
         WGPUBuffer in = i == 0 ? d->b : (i % 2 ? d->a : d->b);
         WGPUBuffer to = i == 0 ? d->a : (i % 2 ? d->b : d->a);
-        WGPUBuffer bufs[6] = {d->u[i], pixels, in, to, d->guide, d->out};
-        WGPUBindGroup bg = gpu_bind_cached_buffers(g, &d->bc[i], d->bgl, bufs, 6);   // (kept: pixels is one of two or three)
+        const int early_last = i == passes && passes < PASSES;
+        WGPUBuffer bufs[6] = {early_last ? d->ul[i] : d->u[i], pixels, in, to, d->guide, d->out};
+        WGPUBindGroup bg = gpu_bind_cached_buffers(g, early_last ? &d->bcl[i] : &d->bc[i], d->bgl, bufs, 6);   // (kept: pixels is one of two or three)
         wgpuComputePassEncoderSetPipeline(pass, i == 0 ? d->prep : d->atrous);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         gpu_dispatch(pass, (size_t)d->w * d->h);
@@ -89,9 +99,11 @@ WGPUBuffer gpu_denoise_output(GpuDenoise *d){ return d->out; }
 void gpu_denoise_destroy(GpuDenoise *d){
     if (!d) return;
     for (int i = 0; i <= PASSES; i++) gpu_bind_cache_clear(&d->bc[i]);
-    WGPUBuffer bufs[PASSES + 5] = {d->a, d->b, d->guide, d->out};
+    for (int i = 0; i < PASSES; i++) gpu_bind_cache_clear(&d->bcl[i]);
+    WGPUBuffer bufs[2 * PASSES + 5] = {d->a, d->b, d->guide, d->out};
     for (int i = 0; i <= PASSES; i++) bufs[4 + i] = d->u[i];
-    for (int i = 0; i < PASSES + 5; i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
+    for (int i = 0; i < PASSES; i++) bufs[5 + PASSES + i] = d->ul[i];
+    for (int i = 0; i < 2 * PASSES + 5; i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
     if (d->prep) wgpuComputePipelineRelease(d->prep);
     if (d->atrous) wgpuComputePipelineRelease(d->atrous);
     if (d->bgl) wgpuBindGroupLayoutRelease(d->bgl);
