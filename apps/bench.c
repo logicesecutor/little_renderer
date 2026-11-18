@@ -637,13 +637,7 @@ static void case_viewer(const Case *c, Res *r, int reps){
                  "/dev/null"
 #endif
                  );
-#ifdef _WIN32
-        char wrapped[1100];                      // (cmd.exe takes the whole line quoted once more)
-        snprintf(wrapped, sizeof(wrapped), "\"%s\"", cmd);
-        system(wrapped);
-#else
-        if (system(cmd)){}
-#endif
+        if (app_run_command(cmd)){}             // (its answer: the stats file says how it went)
         FILE *f = fopen(stats, "r");
         if (!f){ skip(r, "bin/view gave no -stats"); return; }
         char key[64];

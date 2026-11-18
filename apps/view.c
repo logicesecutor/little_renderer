@@ -469,10 +469,32 @@ static void idle(int ms){
 // waits for the display, not before it (gpu_trace_frame)
 static int trace_overlaps(void){ return o.maxfps && o.vsync && gpu && !gpu_offscreen(gpu); }
 
+// "this view: " and the command that renders what the window shows (key C, autoquit with -orbit)
+static void print_view_command(void){
+    Options cur = o;
+    cur.max_depth = max_depth;
+    printf("this view: ");
+    options_print_command(&cur, view.pos, v_add(view.pos, v_scale(view_forward(&view), 500)), view.fov, stdout);
+    fflush(stdout);
+}
+
+// the GPU path tracer's parameters for this camera, from the options
+static GpuTraceParams trace_params(const Camera *cam, int depth){
+    GpuTraceParams tp = {*cam, depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
+    return tp;
+}
+
+// the rasterizer's view of the camera as it is now (looking at `at`), in the current shading
+static RenderParams raster_params(Vec3 at){
+    RenderParams p = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
+    p.mode = shading;
+    return p;
+}
+
 // A new path traced image on the GPU, for the camera as it is now. 0 = this GPU cannot hold
 // the scene: the CPU path traces from now on.
 static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
-    GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
+    GpuTraceParams tp = trace_params(cam, max_depth);
     scene_trees();               // (the meshes' own trees are copied when the scene is new)
     if (!gpu_view_trace_start(gview, &scene, &tp)){
         o.gpu_trace = 0;
@@ -480,8 +502,7 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
         return 0;
     }
     // what shows through until every pixel has a sample: the rasterized scene, same camera
-    last_rp = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
-    last_rp.mode = shading;
+    last_rp = raster_params(at);
     gpu_tracing = 1;
     gpu_cam = *cam;
     gpu_depth = max_depth;
@@ -508,7 +529,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
     } else if ((gpu_scene_moved || memcmp(cam, &gpu_cam, sizeof(*cam)) != 0) && !gpu_view_trace_busy(gview)){
         // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
         // last image as it is, with the raster of its own camera, not a newer one)
-        GpuTraceParams tp = {*cam, max_depth, o.mis, (real)o.clamp, !o.sampler, o.caustics_lt ? (real)o.photons : 0, o.photon_cache};
+        GpuTraceParams tp = trace_params(cam, max_depth);
         int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
         gpu_scene_moved = 0;
         int moved;
@@ -520,8 +541,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
             return 0;
         }
         // under the pixels that were hidden until now (no sample yet): the scene rasterized
-        last_rp = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
-        last_rp.mode = shading;
+        last_rp = raster_params(at);
         gpu_cam = *cam;
         force_present = 1;
     }
@@ -557,6 +577,21 @@ static void write_stats(double tn){
     fprintf(f, "fps %.3f\nms_per_frame %.4f\npasses_per_s %.3f\nmode %s\nseconds %.2f\n", fps, fps > 0 ? 1000.0 / fps : 0.0,
             (passes_total - stats_passes) / (tn - stats_t0), backend_name(mode), tn - stats_t0);
     fclose(f);
+}
+
+// what -autoquit prints at the end: how long, the mode, the frame rate, then what was showing
+// (on_gpu: the GPU's image, about to be saved)
+static void autoquit_report(double tn, int on_gpu){
+    printf("autoquit after %.1f s (%s, %.0f frames/s): ", tn - t_start, backend_name(mode), frames / (tn - t_start));
+    if (o.sim.on && !sim_paused){
+        char st[200];
+        sim_status(&sim, st, sizeof(st));
+        if (on_gpu) printf("%s\n", st); else printf("%s, last pass %.0f ms\n", st, pass_ms);
+    } else if (showing_raster){
+        if (on_gpu) printf("raster frame on the GPU\n"); else printf("last raster frame %.1f ms\n", raster_ms);
+    } else if (on_gpu) printf("%d samples/pixel on the GPU, last pass %.1f ms\n", gpu_view_trace_passes(gview), pass_ms);
+    else printf("%d samples/pixel, last pass %.0f ms\n", acc.passes, pass_ms);
+    prof_print();
 }
 
 // one iteration: input, camera, physics, render, show. 0 = quit.
@@ -657,14 +692,9 @@ static int frame(void){
 #endif
                 save_view(&acc, fb, showing_raster, shading, o.out, &shot_no);
                 break;
-            case 'c': {
-                Options cur = o;
-                cur.max_depth = max_depth;
-                printf("this view: ");
-                options_print_command(&cur, view.pos, v_add(view.pos, v_scale(view_forward(&view), 500)), view.fov, stdout);
-                fflush(stdout);
+            case 'c':
+                print_view_command();
                 break;
-            }
             case 'm':
                 mode = mode == BACKEND_HYBRID ? BACKEND_RT : (mode == BACKEND_RT ? BACKEND_RASTER : BACKEND_HYBRID);
                 printf("mode: %s\n", backend_name(mode));
@@ -825,8 +855,7 @@ static int frame(void){
     if (use_raster){
         if (raster_dirty || o.maxfps){            // (-maxfps on: drawn again, changed or not)
             double r0 = clock_s();
-            RenderParams p = render_params_camera(view.pos, at, vec3(0, 1, 0), view.fov, W, H);
-            p.mode = shading;
+            RenderParams p = raster_params(at);
             // the surfaces: by the GPU rasterizer when it is there (at presentation), otherwise here
             // (media too big for this GPU's buffers: both here, the surfaces under them)
             int gvol = gview && gpu_view_volumes_fit(gview, &scene, &o.march);
@@ -1023,17 +1052,8 @@ static int frame(void){
         // the GPU's image: ask for it, and quit once it is saved
         if (!shot_started){
             shot_started = 1;
-            printf("autoquit after %.1f s (%s, %.0f frames/s): ", tn - t_start, backend_name(mode), frames / (tn - t_start));
-            if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s\n", st); }
-            else if (showing_raster) printf("raster frame on the GPU\n");
-            else printf("%d samples/pixel on the GPU, last pass %.1f ms\n", gpu_view_trace_passes(gview), pass_ms);
-            prof_print();
-            if (o.orbit != 0){      // the camera of the screenshot, to render it again
-                Options cur = o;
-                cur.max_depth = max_depth;
-                printf("this view: ");
-                options_print_command(&cur, view.pos, v_add(view.pos, v_scale(view_forward(&view), 500)), view.fov, stdout);
-            }
+            autoquit_report(tn, 1);
+            if (o.orbit != 0) print_view_command();   // the camera of the screenshot, to render it again
             gpu_screenshot();
         }
         if (!shot_waiting) running = 0;
@@ -1041,11 +1061,7 @@ static int frame(void){
     }
 #endif
     if (o.autoquit > 0 && tn - t_start > o.autoquit){
-        printf("autoquit after %.1f s (%s, %.0f frames/s): ", tn - t_start, backend_name(mode), frames / (tn - t_start));
-        if (o.sim.on && !sim_paused){ char st[200]; sim_status(&sim, st, sizeof(st)); printf("%s, last pass %.0f ms\n", st, pass_ms); }
-        else if (showing_raster) printf("last raster frame %.1f ms\n", raster_ms);
-        else printf("%d samples/pixel, last pass %.0f ms\n", acc.passes, pass_ms);
-        prof_print();
+        autoquit_report(tn, 0);
         save_view(&acc, fb, showing_raster, shading, o.out, &shot_no);
         running = 0;
     }

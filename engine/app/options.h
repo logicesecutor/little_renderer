@@ -137,5 +137,8 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
 
 const char *backend_name(Backend b);
 void options_usage(Program prog, FILE *f);
+// Runs a command line through the system's shell (system()); on Windows the whole line quoted
+// once more, as cmd.exe drops the first and the last quote. Returns system()'s answer.
+int app_run_command(const char *cmd);
 
 #endif

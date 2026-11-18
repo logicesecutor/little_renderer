@@ -13,6 +13,20 @@
 #include <omp.h>
 #endif
 
+int app_run_command(const char *cmd){
+#ifdef _WIN32
+    size_t n = strlen(cmd) + 3;
+    char *q = malloc(n);
+    if (!q) return -1;
+    snprintf(q, n, "\"%s\"", cmd);
+    int r = system(q);
+    free(q);
+    return r;
+#else
+    return system(cmd);
+#endif
+}
+
 const char *backend_name(Backend b){
     return b == BACKEND_RT ? "rt" : (b == BACKEND_RASTER ? "raster" : "hybrid");
 }

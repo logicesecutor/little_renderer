@@ -162,15 +162,10 @@ int main(int argc, char **argv){
         snprintf(args, sizeof(args), "tools/frames_to_gif.py \"%s\" \"%s.gif\" %g", o.out, o.out, o.sim.fps);
         int done = 0;
         for (size_t k = 0; k < sizeof(runners) / sizeof(runners[0]) && !done; k++){
-#ifdef _WIN32
-            // cmd.exe drops the first and last quote of the line: wrap it in one more pair
-            snprintf(cmd, sizeof(cmd), "\"%s %s\"", runners[k], args);
-#else
             snprintf(cmd, sizeof(cmd), "%s %s", runners[k], args);
-#endif
             printf("%s\n", cmd);
             fflush(stdout);
-            done = system(cmd) == 0;
+            done = app_run_command(cmd) == 0;
         }
         if (!done) fprintf(stderr, "could not make the GIF (needs uv, or python3 with Pillow); the frames are there\n");
     }
