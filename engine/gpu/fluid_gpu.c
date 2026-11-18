@@ -197,19 +197,8 @@ static const char *const FT_NAMES[NFT] = {"obstacles, forces, advection", "press
 #define MAX_INFLIGHT 2
 #define MAX_OWED 0.1f
 
-// the GPU fluids alive: a "work done" callback can arrive after gpu_fluid_destroy
-// (creation is refused when the list is full: one left out would have its callbacks ignored)
-#define MAX_LIVE_FLUID 64
-static GpuFluid *live[MAX_LIVE_FLUID];
-static int is_live(const GpuFluid *gf){
-    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (gf && live[i] == gf) return 1;
-    return 0;
-}
-static int live_slot(void){
-    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (!live[i]) return i;
-    fprintf(stderr, "GPU: %d fluids already: no more\n", MAX_LIVE_FLUID);
-    return -1;
-}
+// (a "work done" callback can arrive after the destroy: the list of the objects alive)
+static int is_live(const GpuFluid *gf){ return gpu_live_has(GPU_LIVE_FLUID, gf); }
 
 static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)status; (void)msg; (void)u2;
@@ -257,10 +246,6 @@ static char *kernel_source(int k){
     if (nd & NEED_VEL) ADD(VEL);
 #undef ADD
     return s;
-}
-
-static WGPUBuffer storage(Gpu *g, const char *label, size_t bytes){
-    return gpu_buffer(g, label, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
 }
 
 static WGPUBuffer uniform(Gpu *g, const char *label, const void *data, size_t bytes){
@@ -379,10 +364,11 @@ static void free_all(GpuFluid *gf){
 static void air_step(void *user, PhysWorld *pw, real dt);
 
 GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
-    if (!g || gpu_state(g) != GPU_READY || !pw || !pw->fluid || live_slot() < 0) return NULL;
+    if (!g || gpu_state(g) != GPU_READY || !pw || !pw->fluid) return NULL;
     Fluid *f = pw->fluid;
     GpuFluid *gf = calloc(1, sizeof(*gf));
     if (!gf) return NULL;
+    if (!gpu_live_add(GPU_LIVE_FLUID, gf)){ free(gf); return NULL; }
     gf->g = g;
     gf->pw = pw;
     gf->f = f;
@@ -396,19 +382,19 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     }
     const size_t n = ncells(f);
     gf->fp = uniform(g, "air parameters", NULL, sizeof(GFP));
-    gf->u = storage(g, "air u", nu(f) * 4); gf->v = storage(g, "air v", nv(f) * 4); gf->w = storage(g, "air w", nw(f) * 4);
-    gf->tu = storage(g, "air tu", nu(f) * 4); gf->tv = storage(g, "air tv", nv(f) * 4); gf->tw = storage(g, "air tw", nw(f) * 4);
-    gf->p = storage(g, "pressure", n * 4);
-    gf->div = storage(g, "divergence", n * 4);
-    gf->solid = storage(g, "obstacles", n * 4);
-    gf->svel = storage(g, "obstacle velocity", n * 16);
-    gf->cvel = storage(g, "cell velocity", n * 16);
-    gf->omg = storage(g, "vorticity", n * 16);
-    gf->frc = storage(g, "vorticity force", n * 16);
+    gf->u = gpu_storage(g, "air u", nu(f) * 4); gf->v = gpu_storage(g, "air v", nv(f) * 4); gf->w = gpu_storage(g, "air w", nw(f) * 4);
+    gf->tu = gpu_storage(g, "air tu", nu(f) * 4); gf->tv = gpu_storage(g, "air tv", nv(f) * 4); gf->tw = gpu_storage(g, "air tw", nw(f) * 4);
+    gf->p = gpu_storage(g, "pressure", n * 4);
+    gf->div = gpu_storage(g, "divergence", n * 4);
+    gf->solid = gpu_storage(g, "obstacles", n * 4);
+    gf->svel = gpu_storage(g, "obstacle velocity", n * 16);
+    gf->cvel = gpu_storage(g, "cell velocity", n * 16);
+    gf->omg = gpu_storage(g, "vorticity", n * 16);
+    gf->frc = gpu_storage(g, "vorticity force", n * 16);
     size_t nd = gf->cloud ? (size_t)gf->cloud->nx * gf->cloud->ny * gf->cloud->nz : 1;
-    gf->dens[0] = storage(g, "cloud", nd * 4);
-    gf->dens[1] = storage(g, "cloud (the other turn)", nd * 4);
-    gf->d1 = storage(g, "cloud d1", nd * 4);
+    gf->dens[0] = gpu_storage(g, "cloud", nd * 4);
+    gf->dens[1] = gpu_storage(g, "cloud (the other turn)", nd * 4);
+    gf->d1 = gpu_storage(g, "cloud d1", nd * 4);
     if (gf->cloud){
         if (!(gf->link = calloc(1, sizeof(*gf->link)))){ free_all(gf); return NULL; }
         gf->link->volume = gf->cloud->id;
@@ -427,17 +413,16 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
         GLevel *l = &gf->lv[k];
         size_t ln = (size_t)pl->nx * pl->ny * pl->nz;
         l->nx = pl->nx; l->ny = pl->ny; l->nz = pl->nz;
-        l->links = storage(g, "pressure links", ln * 4);
-        l->res = storage(g, "pressure residual", ln * 4);
-        l->solid = k ? storage(g, "pressure obstacles", ln * 4) : gf->solid;
-        l->p = k ? storage(g, "pressure correction", ln * 4) : gf->p;
-        l->rhs = k ? storage(g, "pressure rhs", ln * 4) : gf->div;
+        l->links = gpu_storage(g, "pressure links", ln * 4);
+        l->res = gpu_storage(g, "pressure residual", ln * 4);
+        l->solid = k ? gpu_storage(g, "pressure obstacles", ln * 4) : gf->solid;
+        l->p = k ? gpu_storage(g, "pressure correction", ln * 4) : gf->p;
+        l->rhs = k ? gpu_storage(g, "pressure rhs", ln * 4) : gf->div;
         level_params(gf, k);
     }
     make_bind_groups(gf);
     reserve_bodies(gf, &pw->rigid);
     gf->timer = gpu_timing_report(g) ? gpu_timer_create(g, 8, NFT) : NULL;   // (only when its times are asked for)
-    live[live_slot()] = gf;
     pw->air_step = air_step;
     pw->air_user = gf;
     pw->air_around = NULL;
@@ -732,7 +717,7 @@ void gpu_fluid_destroy(GpuFluid *gf){
         gpu_timer_print(gf->timer, title, FT_NAMES);
         gpu_timer_destroy(gf->timer);
     }
-    for (int i = 0; i < MAX_LIVE_FLUID; i++) if (live[i] == gf) live[i] = NULL;
+    gpu_live_remove(GPU_LIVE_FLUID, gf);
     free_all(gf);
 }
 

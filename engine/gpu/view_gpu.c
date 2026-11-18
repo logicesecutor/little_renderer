@@ -179,14 +179,9 @@ struct GpuView {
     uint32_t cap_row;   // bytes per row in cap_buf (a multiple of 256)
 };
 
-// the views alive: a "work done" callback can arrive after gpu_view_destroy
-// (creation is refused when the list is full: one left out would have its callbacks ignored)
-#define MAX_LIVE_VIEWS 64
-static GpuView *live_views[MAX_LIVE_VIEWS];
-static int view_is_live(const GpuView *v){
-    for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (v && live_views[i] == v) return 1;
-    return 0;
-}
+// a "work done" callback can arrive after gpu_view_destroy (creation is refused when the list
+// of the objects alive is full: one left out would have its callbacks ignored)
+static int view_is_live(const GpuView *v){ return gpu_live_has(GPU_LIVE_VIEW, v); }
 
 static void v4(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y; d[2] = (float)a.z; d[3] = w; }
 
@@ -216,15 +211,12 @@ static WGPUPipelineLayout make_pipeline_layout(Gpu *g, WGPUBindGroupLayout bgl){
 
 GpuView *gpu_view_create(Gpu *g, int width, int height){
     if (!g || g->state != GPU_READY || (!g->surface && !g->offscreen)) return NULL;
-    int slot = -1;
-    for (int i = 0; i < MAX_LIVE_VIEWS && slot < 0; i++) if (!live_views[i]) slot = i;
-    if (slot < 0){ fprintf(stderr, "GPU: %d views already: no more\n", MAX_LIVE_VIEWS); return NULL; }
     GpuView *v = calloc(1, sizeof(*v));
     if (!v) return NULL;
+    if (!gpu_live_add(GPU_LIVE_VIEW, v)){ free(v); return NULL; }
     v->g = g;
     v->w = width;
     v->h = height;
-    live_views[slot] = v;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     v->frame_u = gpu_buffer(g, "frame", sizeof(GFrame), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     for (int k = 0; k < GPU_MAX_VOLUMES; k++){
@@ -1198,7 +1190,7 @@ void gpu_view_destroy(GpuView *v){
     gpu_raster_destroy(v->raster);
     gpu_trace_destroy(v->trace);
     gpu_denoise_destroy(v->den);
-    for (int i = 0; i < MAX_LIVE_VIEWS; i++) if (live_views[i] == v) live_views[i] = NULL;
+    gpu_live_remove(GPU_LIVE_VIEW, v);
     if (v->stats_pipe) wgpuComputePipelineRelease(v->stats_pipe);
     if (v->finish_pipe) wgpuComputePipelineRelease(v->finish_pipe);
     WGPUBindGroupLayout bgls[] = {v->light_bgl, v->comp_bgl, v->comp_gpu_bgl, v->stats_bgl, v->finish_bgl};

@@ -84,12 +84,29 @@ static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringVie
             msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
 }
 
-// the GPUs alive: a device-lost callback can arrive after gpu_destroy, and must not touch it
-#define MAX_LIVE 4
-static Gpu *live[MAX_LIVE];
-static int is_live(const Gpu *g){
-    for (int i = 0; i < MAX_LIVE; i++) if (g && live[i] == g) return 1;
+// ---- the objects alive (gpu_internal.h): views, fluids, rigid worlds, timers and the Gpu
+// itself (a device-lost callback can arrive after gpu_destroy) ----
+#define GPU_LIVE_MAX 256
+static struct { int kind; const void *p; } live[GPU_LIVE_MAX];
+
+int gpu_live_add(int kind, const void *p){
+    for (int i = 0; i < GPU_LIVE_MAX; i++)
+        if (!live[i].p){ live[i].kind = kind; live[i].p = p; return 1; }
+    fprintf(stderr, "GPU: %d objects (views, fluids, rigid-body worlds, timers) already: no more\n", GPU_LIVE_MAX);
     return 0;
+}
+void gpu_live_remove(int kind, const void *p){
+    for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) live[i].p = NULL;
+}
+int gpu_live_has(int kind, const void *p){
+    if (!p) return 0;
+    for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) return 1;
+    return 0;
+}
+static int is_live(const Gpu *g){ return gpu_live_has(GPU_LIVE_GPU, g); }
+
+WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes){
+    return gpu_buffer(g, label, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
 }
 
 static void on_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView msg, void *u1, void *u2){
@@ -296,7 +313,7 @@ static Gpu *create(const char *canvas, void *display, uint64_t window, int width
     g->native_display = display;
     g->native_window = window;
     snprintf(g->canvas, sizeof(g->canvas), "%s", canvas ? canvas : "");
-    for (int i = 0; i < MAX_LIVE; i++) if (!live[i]){ live[i] = g; break; }
+    gpu_live_add(GPU_LIVE_GPU, g);
     snprintf(g->message, sizeof(g->message), "starting");
     g->instance = wgpuCreateInstance(NULL);
     if (!g->instance){ snprintf(g->message, sizeof(g->message), "no WebGPU instance"); g->state = GPU_FAILED; return g; }
@@ -438,7 +455,7 @@ int gpu_software(const Gpu *g){ return g && g->software; }
 
 void gpu_destroy(Gpu *g){
     if (!g) return;
-    for (int i = 0; i < MAX_LIVE; i++) if (live[i] == g) live[i] = NULL;
+    gpu_live_remove(GPU_LIVE_GPU, g);
     gpu_atlas_free(g);
     if (g->surface) wgpuSurfaceRelease(g->surface);
     if (g->queue) wgpuQueueRelease(g->queue);
@@ -628,21 +645,15 @@ struct GpuTimer {
     long rounds;
 };
 
-// the timers alive: a readback's callback can arrive (cancelled) after gpu_timer_destroy
-#define MAX_LIVE_TIMERS 32
-static GpuTimer *live_timers[MAX_LIVE_TIMERS];
-static int timer_is_live(const GpuTimer *t){
-    for (int i = 0; i < MAX_LIVE_TIMERS; i++) if (t && live_timers[i] == t) return 1;
-    return 0;
-}
+// (a readback's callback can arrive, cancelled, after gpu_timer_destroy: the list of the
+// objects alive)
+static int timer_is_live(const GpuTimer *t){ return gpu_live_has(GPU_LIVE_TIMER, t); }
 
 GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     if (!g || !g->timestamps || passes <= 0) return NULL;
-    int slot = 0;
-    while (slot < MAX_LIVE_TIMERS && live_timers[slot]) slot++;
-    if (slot == MAX_LIVE_TIMERS) return NULL;           // (no timing: its callbacks would be ignored)
     GpuTimer *t = calloc(1, sizeof(*t));
     if (!t) return NULL;
+    if (!gpu_live_add(GPU_LIVE_TIMER, t)){ free(t); return NULL; }   // (no timing: its callbacks would be ignored)
     t->g = g;
     t->cap = passes;
     t->stages = stages;
@@ -668,7 +679,6 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
         gpu_timer_destroy(t);                           // no memory for it: no timing
         return NULL;
     }
-    live_timers[slot] = t;
     return t;
 }
 
@@ -783,7 +793,7 @@ double gpu_timer_ms_per_round(GpuTimer *t){
 void gpu_timer_destroy(GpuTimer *t){
     if (!t) return;
     for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
-    for (int i = 0; i < MAX_LIVE_TIMERS; i++) if (live_timers[i] == t) live_timers[i] = NULL;
+    gpu_live_remove(GPU_LIVE_TIMER, t);
     if (t->qs) wgpuQuerySetRelease(t->qs);      // (our layer has no wgpuQuerySetDestroy)
     if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
     if (t->readback){ wgpuBufferDestroy(t->readback); wgpuBufferRelease(t->readback); }

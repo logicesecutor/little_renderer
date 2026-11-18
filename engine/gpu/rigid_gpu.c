@@ -264,24 +264,8 @@ static const char *const RK_NAMES[NR] = {"grid: count", "grid: scan", "grid: pla
     "contact lists 1", "contact lists 2", "prepare", "solve and apply (an iteration)", "warm start", "move", "wake", "sleep",
     "relax: targets", "relax: velocities", "sleep: quiet", "swept", "swept: moved"};
 
-// the GPU worlds alive: a "work done" callback can arrive after gpu_rigid_destroy. One left
-// out of the list would have its callbacks ignored (its bodies never back): creation is
-// refused when it is full
-#define MAX_LIVE_RIGID 64
-static GpuRigid *live[MAX_LIVE_RIGID];
-static int is_live(const GpuRigid *gr){
-    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (gr && live[i] == gr) return 1;
-    return 0;
-}
-static int live_slot(void){
-    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (!live[i]) return i;
-    fprintf(stderr, "GPU: %d rigid-body worlds already: no more\n", MAX_LIVE_RIGID);
-    return -1;
-}
-
-static WGPUBuffer storage(Gpu *g, const char *label, size_t bytes){
-    return gpu_buffer(g, label, bytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
-}
+// (a "work done" callback can arrive after the destroy: the list of the objects alive)
+static int is_live(const GpuRigid *gr){ return gpu_live_has(GPU_LIVE_RIGID, gr); }
 
 static void release(WGPUBuffer *b){ if (*b){ wgpuBufferDestroy(*b); wgpuBufferRelease(*b); *b = NULL; } }
 
@@ -360,9 +344,9 @@ static void reserve_mesh_pairs(GpuRigid *gr, int meshes){
     Gpu *g = gr->g;
     size_t pairs = meshes ? gr->cap_pairs : 1;
     release(&gr->tris); release(&gr->store); release(&gr->scount);
-    gr->tris = storage(g, "bodies: triangles to test", 64 * pairs * 8);
-    gr->store = storage(g, "bodies: mesh contacts", 64 * pairs * 32);
-    gr->scount = storage(g, "bodies: mesh contact counts", pairs * 4);
+    gr->tris = gpu_storage(g, "bodies: triangles to test", 64 * pairs * 8);
+    gr->store = gpu_storage(g, "bodies: mesh contacts", 64 * pairs * 32);
+    gr->scount = gpu_storage(g, "bodies: mesh contact counts", pairs * 4);
     gr->meshes = meshes;
 }
 
@@ -384,14 +368,14 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     release_sized(gr);
     gr->cap_bodies = cap;
     gr->cap_contacts = 32 * cap;
-    gr->bodies = storage(g, "bodies", cap * BODY_BYTES);
-    gr->forces = storage(g, "bodies: forces", cap * 32);
-    gr->cnt = storage(g, "bodies: contact counts", (cap + 1) * 4);
-    gr->cursor = storage(g, "bodies: list cursors", cap * 4);
-    gr->wake = storage(g, "bodies: to wake", cap * 4);
-    gr->start = storage(g, "bodies: where the step began", cap * 16);
-    gr->ccd = storage(g, "bodies: where the sweep puts them", cap * 16);
-    gr->anchor = storage(g, "bodies: anchors", cap * 32);       // (zeroed: none)
+    gr->bodies = gpu_storage(g, "bodies", cap * BODY_BYTES);
+    gr->forces = gpu_storage(g, "bodies: forces", cap * 32);
+    gr->cnt = gpu_storage(g, "bodies: contact counts", (cap + 1) * 4);
+    gr->cursor = gpu_storage(g, "bodies: list cursors", cap * 4);
+    gr->wake = gpu_storage(g, "bodies: to wake", cap * 4);
+    gr->start = gpu_storage(g, "bodies: where the step began", cap * 16);
+    gr->ccd = gpu_storage(g, "bodies: where the sweep puts them", cap * 16);
+    gr->anchor = gpu_storage(g, "bodies: anchors", cap * 32);       // (zeroed: none)
     free(gr->zeros);
     gr->zeros = calloc(cap, 32);
     if (!gr->zeros){ perror("calloc"); exit(1); }
@@ -399,20 +383,20 @@ static int reserve(GpuRigid *gr, int nb, int meshes){
     gr->cap_pairs = 32 * cap;
     gr->grid_h = 64;
     while (gr->grid_h < 2 * cap) gr->grid_h *= 2;
-    gr->grid = storage(g, "bodies: grid", ((size_t)gr->grid_h + 2 + 4 * cap) * 4);
-    gr->pairs = storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
-    gr->pc = storage(g, "bodies: pair counts", 32);
+    gr->grid = gpu_storage(g, "bodies: grid", ((size_t)gr->grid_h + 2 + 4 * cap) * 4);
+    gr->pairs = gpu_storage(g, "bodies: candidate pairs", 3 * gr->cap_pairs * 8);
+    gr->pc = gpu_storage(g, "bodies: pair counts", 32);
     gr->args = gpu_buffer(g, "bodies: pair dispatches", 96, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst);
     reserve_mesh_pairs(gr, meshes);
-    gr->memo = storage(g, "bodies: hull pairs remembered", 2 * 13 * (2 * gr->cap_pairs) * 4);   // (zeroed: empty)
+    gr->memo = gpu_storage(g, "bodies: hull pairs remembered", 2 * 13 * (2 * gr->cap_pairs) * 4);   // (zeroed: empty)
     gr->memo_rd = 0;
-    gr->feat = storage(g, "bodies: hull pairs' features, K_HEAVY's queue", 2 * gr->cap_pairs * 16);
+    gr->feat = gpu_storage(g, "bodies: hull pairs' features, K_HEAVY's queue", 2 * gr->cap_pairs * 16);
     for (int p = 0; p < 2; p++){
-        gr->contacts[p] = storage(g, "contacts", gr->cap_contacts * CONTACT_BYTES);
-        gr->lists[p] = storage(g, "contact lists", gr->cap_contacts * 2 * 4);
-        gr->offs[p] = storage(g, "contact list starts", (cap + 1) * 4);
-        gr->vel[p] = storage(g, "bodies: velocities while solving", cap * 32);
-        gr->imps[p] = storage(g, "contacts: impulses while solving", gr->cap_contacts * 16);
+        gr->contacts[p] = gpu_storage(g, "contacts", gr->cap_contacts * CONTACT_BYTES);
+        gr->lists[p] = gpu_storage(g, "contact lists", gr->cap_contacts * 2 * 4);
+        gr->offs[p] = gpu_storage(g, "contact list starts", (cap + 1) * 4);
+        gr->vel[p] = gpu_storage(g, "bodies: velocities while solving", cap * 32);
+        gr->imps[p] = gpu_storage(g, "contacts: impulses while solving", gr->cap_contacts * 16);
     }
     free(gr->staging);
     gr->staging = malloc(cap * BODY_BYTES);
@@ -824,9 +808,10 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
 }
 
 GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
-    if (!g || gpu_state(g) != GPU_READY || !pw || live_slot() < 0) return NULL;
+    if (!g || gpu_state(g) != GPU_READY || !pw) return NULL;
     GpuRigid *gr = calloc(1, sizeof(*gr));
     if (!gr) return NULL;
+    if (!gpu_live_add(GPU_LIVE_RIGID, gr)){ free(gr); return NULL; }
     gr->g = g;
     gr->pw = pw;
     for (int k = 0; k < NR; k++){
@@ -844,7 +829,6 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     upload_shapes(gr, &pw->rigid);
     reserve(gr, pw->rigid.nbodies, has_meshes(&pw->rigid));
     for (int i = 0; i < pw->rigid.nbodies; i++) pw->rigid.bodies[i].dirty = 1;
-    live[live_slot()] = gr;
     pw->rigid_step = rigid_step_gpu;
     pw->rigid_user = gr;
     gr->timer = gpu_timing_report(g) ? gpu_timer_create(g, 512, NR) : NULL;   // (only when its times are asked for)
@@ -871,7 +855,7 @@ void gpu_rigid_destroy(GpuRigid *gr){
         gpu_timer_print(gr->timer, title, RK_NAMES);
         gpu_timer_destroy(gr->timer);
     }
-    for (int i = 0; i < MAX_LIVE_RIGID; i++) if (live[i] == gr) live[i] = NULL;
+    gpu_live_remove(GPU_LIVE_RIGID, gr);
     if (gr->pw && gr->pw->rigid_user == gr){
         gr->pw->rigid_step = NULL;
         gr->pw->rigid_user = NULL;

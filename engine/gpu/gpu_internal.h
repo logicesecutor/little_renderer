@@ -69,6 +69,18 @@ static inline void gpu_ref_view(WGPUTextureView v){ wgpuTextureViewAddRef(v); }
 
 WGPUShaderModule gpu_shader(Gpu *g, const char *label, const char *wgsl);
 WGPUBuffer gpu_buffer(Gpu *g, const char *label, size_t size, WGPUBufferUsage usage);
+// a storage buffer that can be copied to and from (the physics' state)
+WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes);
+
+// The GPU objects alive: a callback (work done, a buffer mapped, a lost device) can arrive
+// after its object was destroyed, and must then not touch it. One list for every kind; an
+// object is looked for with its kind, so that one destroyed and another of another kind made
+// at the same address are not confused.
+enum { GPU_LIVE_GPU, GPU_LIVE_VIEW, GPU_LIVE_FLUID, GPU_LIVE_RIGID, GPU_LIVE_TIMER };
+int gpu_live_add(int kind, const void *p);   // 0 if the list is full (said on stderr): then do not make it
+void gpu_live_remove(int kind, const void *p);
+int gpu_live_has(int kind, const void *p);
+
 // (re)creates *buf if it is missing or smaller than size; returns 1 if it was recreated
 int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBufferUsage usage, const char *label);
 // the window's surface configured (again): its format, size, alpha and present mode. Also
