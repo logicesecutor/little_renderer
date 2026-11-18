@@ -848,9 +848,16 @@ static uint64_t submit_ex(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs, V
         memset(&q->up_refs, 0, sizeof(q->up_refs));
         q->up_open = 0;
     }
-    for (size_t i = 0; i < n && s.ncb < 16; i++){
+    // a Sub holds 16 (with the uploads' and the extra one): past them, an error, not a silent
+    // drop (the ones left are not submitted; released, they go back to the pool)
+    const int room = (int)(sizeof(s.cbs) / sizeof(s.cbs[0])) - (extra ? 1 : 0);
+    for (size_t i = 0; i < n; i++){
         WGPUCommandBuffer c = cbs[i];
         if (!c || c->submitted || !c->cb) continue;
+        if (s.ncb >= room){
+            vk_error(dev, WGPUErrorType_Validation, "wgpuQueueSubmit: more than %d command buffers at once: the rest not submitted", room);
+            break;
+        }
         if (c->queue != q){ vk_error(dev, WGPUErrorType_Validation, "wgpuQueueSubmit: a command buffer encoded for the other queue (LRCommandEncoderQueue)"); continue; }
         s.cbs[s.ncb++] = c->cb;
         for (int k = 0; k < c->refs.n; k++) refs_add(&s.refs, c->refs.v[k]);
@@ -858,7 +865,7 @@ static uint64_t submit_ex(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs, V
         c->cb = NULL;
         c->submitted = 1;
     }
-    if (extra && s.ncb < 16) s.cbs[s.ncb++] = extra;
+    if (extra) s.cbs[s.ncb++] = extra;
     uint64_t value = ++q->submitted;
     // the timeline, and a binary semaphore (a window's image presentable) if asked (its
     // value is not used)
