@@ -640,9 +640,12 @@ static void case_viewer(const Case *c, Res *r, int reps){
         if (app_run_command(cmd)){}             // (its answer: the stats file says how it went)
         FILE *f = fopen(stats, "r");
         if (!f){ skip(r, "bin/view gave no -stats"); return; }
-        char key[64];
+        // line by line, "key value": a line whose value is not a number ("mode rt") is passed
+        // over, not the end of the file
+        char line[160], key[64];
         double val, ms = 0;
-        while (fscanf(f, "%63s %lf", key, &val) == 2){
+        while (fgets(line, sizeof(line), f)){
+            if (sscanf(line, "%63s %lf", key, &val) != 2) continue;
             if (!strcmp(key, "ms_per_frame")) ms = val;
             else if (!strcmp(key, "passes_per_s")) pps = val;
         }
