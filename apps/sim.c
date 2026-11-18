@@ -92,48 +92,52 @@ int main(int argc, char **argv){
 
         char path[600];
         snprintf(path, sizeof(path), "%s/frame_%04d.png", o.out, f);
-        int err = -1;
+        int drawn = 0, write_err = 0;   // the frame made (on the GPU or here); writing it failed
         if (gview){
             // on the GPU; if it cannot draw this scene, the CPU takes over from here on
             if (o.backend == BACKEND_RASTER){
-                if (gpu_frame_raster(gpu, gview, &scene, &rp, &o.march, o.raster_clouds, fb) == 0) err = fb_save_png(fb, path);
+                if (gpu_frame_raster(gpu, gview, &scene, &rp, &o.march, o.raster_clouds, fb) == 0){
+                    drawn = 1;
+                    write_err = fb_save_png(fb, path);
+                }
             } else {
                 // the bodies are instances: the world's structure is built once, the top level each frame
                 if (scene_accel_kind(&scene) != ACCEL_BVH) scene_set_accel(&scene, ACCEL_BVH, &o.ap);
                 else scene_update_instances(&scene, &o.ap);
                 if (gpu_frame_trace(gpu, gview, &scene, &cam, &rp, &o.march, o.spp, o.max_depth, o.mis, (real)o.clamp, o.sampler,
-                                    o.caustics_lt ? (real)o.photons : 0, &img, 0) == 0)
-                    err = image_write_png(&img, path);
+                                    o.caustics_lt ? (real)o.photons : 0, &img, 0) == 0){
+                    drawn = 1;
+                    write_err = image_write_png(&img, path);
+                }
             }
-            if (err < 0){
+            if (!drawn){
                 fprintf(stderr, "\nthe GPU cannot draw this scene: the CPU renders the frames\n");
                 gpu_view_destroy(gview);
                 gview = NULL;
             }
         }
-        if (err >= 0){
-            // drawn on the GPU
-        } else if (gfluid){
-            // the air is on the GPU: the CPU renderers need its cloud back first
-            Volume *cv = sim.pw.fluid->density;
-            uint32_t v0 = cv ? cv->version : 0;
-            gpu_fluid_sync_cloud(gfluid);
-            for (int k = 0; cv && k < 200 && cv->version == v0; k++) gpu_wait(gpu);
+        if (!drawn){
+            if (gfluid){
+                // the air is on the GPU: the CPU renderers need its cloud back first
+                Volume *cv = sim.pw.fluid->density;
+                uint32_t v0 = cv ? cv->version : 0;
+                gpu_fluid_sync_cloud(gfluid);
+                for (int k = 0; cv && k < 200 && cv->version == v0; k++) gpu_wait(gpu);
+            }
+            if (o.backend == BACKEND_RASTER){
+                fb_clear(fb, rgb8(0, 0, 0));
+                render_scene(fb, &scene, &rp);
+                if (o.raster_clouds) raster_draw_volumes(rvol, fb, &scene, &rp, &o.march);
+                write_err = fb_save_png(fb, path);
+            } else {
+                AccelKind ak = options_resolve_accel(&o, &scene);
+                if (!scene.accel || scene_accel_kind(&scene) != ak) scene_set_accel(&scene, ak, &o.ap);
+                else scene_update_instances(&scene, &o.ap);
+                frame_render_rt(&scene, &cam, &img, o.spp, &tp, (real)o.clamp, o.caustics_lt ? o.photons : 0, (uint64_t)f + 1);
+                write_err = image_write_png(&img, path);
+            }
         }
-        if (err >= 0){
-        } else if (o.backend == BACKEND_RASTER){
-            fb_clear(fb, rgb8(0, 0, 0));
-            render_scene(fb, &scene, &rp);
-            if (o.raster_clouds) raster_draw_volumes(rvol, fb, &scene, &rp, &o.march);
-            err = fb_save_png(fb, path);
-        } else {
-            AccelKind ak = options_resolve_accel(&o, &scene);
-            if (!scene.accel || scene_accel_kind(&scene) != ak) scene_set_accel(&scene, ak, &o.ap);
-            else scene_update_instances(&scene, &o.ap);
-            frame_render_rt(&scene, &cam, &img, o.spp, &tp, (real)o.clamp, o.caustics_lt ? o.photons : 0, (uint64_t)f + 1);
-            err = image_write_png(&img, path);
-        }
-        if (err){ fprintf(stderr, "could not write %s\n", path); return 1; }
+        if (write_err){ fprintf(stderr, "could not write %s\n", path); return 1; }
         double c = clock_s();
         render_s += c - b;
         char st[256];
