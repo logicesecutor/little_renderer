@@ -62,7 +62,16 @@ static struct {
     pthread_mutex_t red_mu;           // reductions
 } T = {.mu = PTHREAD_MUTEX_INITIALIZER, .go = PTHREAD_COND_INITIALIZER,
        .task_mu = PTHREAD_MUTEX_INITIALIZER, .red_mu = PTHREAD_MUTEX_INITIALIZER};
-static pthread_mutex_t crit_mu = PTHREAD_MUTEX_INITIALIZER;
+// Each named critical section has a lock of its own (with one for all, two different ones
+// nested would wait for each other for ever): the compiler gives every name a zeroed
+// kmp_critical_name, whose first word keeps the number of the lock it was given, 1 .. NCRIT
+// (more names than that share the last).
+#define NCRIT 16
+#define M_ PTHREAD_MUTEX_INITIALIZER
+static pthread_mutex_t crit_mu[NCRIT] = {M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_, M_};
+#undef M_
+static pthread_mutex_t crit_assign = PTHREAD_MUTEX_INITIALIZER;
+static int crit_used;
 
 static _Thread_local int my_id;              // in the team
 static _Thread_local int in_region;          // inside a parallel region (nested ones: alone)
@@ -335,9 +344,23 @@ kmp_int32 __kmpc_reduce(ident_t *loc, kmp_int32 gtid, kmp_int32 n, size_t size, 
     return __kmpc_reduce_nowait(loc, gtid, n, size, data, fn, lck);
 }
 void __kmpc_end_reduce(ident_t *loc, kmp_int32 gtid, kmp_critical_name *lck){ __kmpc_end_reduce_nowait(loc, gtid, lck); barrier(); }
-void __kmpc_critical(ident_t *loc, kmp_int32 gtid, kmp_critical_name *c){ (void)loc; (void)gtid; (void)c; pthread_mutex_lock(&crit_mu); }
+static pthread_mutex_t *crit_lock(kmp_critical_name *c){
+    kmp_int32 *slot = &(*c)[0];
+    kmp_int32 k = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (!k){
+        pthread_mutex_lock(&crit_assign);
+        k = *slot;
+        if (!k){
+            k = crit_used < NCRIT ? ++crit_used : NCRIT;
+            __atomic_store_n(slot, k, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&crit_assign);
+    }
+    return &crit_mu[k - 1];
+}
+void __kmpc_critical(ident_t *loc, kmp_int32 gtid, kmp_critical_name *c){ (void)loc; (void)gtid; pthread_mutex_lock(crit_lock(c)); }
 void __kmpc_critical_with_hint(ident_t *loc, kmp_int32 gtid, kmp_critical_name *c, uint32_t hint){ (void)hint; __kmpc_critical(loc, gtid, c); }
-void __kmpc_end_critical(ident_t *loc, kmp_int32 gtid, kmp_critical_name *c){ (void)loc; (void)gtid; (void)c; pthread_mutex_unlock(&crit_mu); }
+void __kmpc_end_critical(ident_t *loc, kmp_int32 gtid, kmp_critical_name *c){ (void)loc; (void)gtid; pthread_mutex_unlock(crit_lock(c)); }
 kmp_int32 __kmpc_single(ident_t *loc, kmp_int32 gtid){
     (void)loc; (void)gtid;
     if (alone()) return 1;
