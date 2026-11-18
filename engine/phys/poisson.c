@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _OPENMP
+#include <omp.h>
+#include "base/spin.h"
+#endif
 
 #define BIG_GRID 32768   // fewer cells than this: one thread (thread start-up would dominate)
 
@@ -107,40 +111,31 @@ static inline real neighbors(const PoissonLevel *l, const float *p, size_t i, un
     return s;
 }
 
-// red-black Gauss-Seidel sweeps
-static void smooth(PoissonLevel *l, int sweeps){
-    const int nx = l->nx, ny = l->ny, nz = l->nz;
+// The work on a level, by rows (r = z * ny + y): any split of the rows among threads gives
+// the same numbers (a colour's cells read only the other colour's).
+
+// one colour's red-black Gauss-Seidel sweep over rows [r0, r1)
+static void smooth_rows(PoissonLevel *l, int color, int r0, int r1){
+    const int nx = l->nx, ny = l->ny;
     const real h2 = l->h * l->h;
-    int big = cells(l) >= BIG_GRID;
-    (void)big;
-    for (int it = 0; it < sweeps; it++)
-        for (int color = 0; color < 2; color++){
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) if (big)
-#endif
-            for (int z = 0; z < nz; z++)
-                for (int y = 0; y < ny; y++)
-                    for (int x = (y + z + color) & 1; x < nx; x += 2){
-                        size_t i = ((size_t)z * ny + y) * nx + x;
-                        unsigned m = l->links[i];
-                        if (!m) continue;
-                        int k;
-                        real s = neighbors(l, l->p, i, m, &k);
-                        l->p[i] = (float)((s - h2 * l->rhs[i]) / k);
-                    }
+    for (int r = r0; r < r1; r++){
+        const int z = r / ny, y = r % ny;
+        for (int x = (y + z + color) & 1; x < nx; x += 2){
+            size_t i = ((size_t)z * ny + y) * nx + x;
+            unsigned m = l->links[i];
+            if (!m) continue;
+            int k;
+            real s = neighbors(l, l->p, i, m, &k);
+            l->p[i] = (float)((s - h2 * l->rhs[i]) / k);
         }
+    }
 }
 
-// res = rhs - L p
-static void residual(PoissonLevel *l){
+// res = rhs - L p over rows [r0, r1)
+static void residual_rows(PoissonLevel *l, int r0, int r1){
     const real inv_h2 = 1.0f / (l->h * l->h);
-    const size_t n = cells(l);
-    int big = n >= BIG_GRID;
-    (void)big;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (big)
-#endif
-    for (size_t i = 0; i < n; i++){
+    const size_t i0 = (size_t)r0 * l->nx, i1 = (size_t)r1 * l->nx;
+    for (size_t i = i0; i < i1; i++){
         unsigned m = l->links[i];
         if (!m){ l->res[i] = 0; continue; }
         int k;
@@ -149,14 +144,68 @@ static void residual(PoissonLevel *l){
     }
 }
 
+// prolong over rows [r0, r1): every fine cell takes its coarse cell's correction
+static void prolong_rows(PoissonLevel *l, const PoissonLevel *c, int r0, int r1){
+    const int nx = l->nx, ny = l->ny;
+    for (int r = r0; r < r1; r++){
+        const int z = r / ny, y = r % ny;
+        const float *cp = c->p + ((size_t)(z / 2) * c->ny + y / 2) * c->nx;
+        float *p = l->p + (size_t)r * nx;
+        const uint16_t *links = l->links + (size_t)r * nx;
+        for (int x = 0; x < nx; x++) if (links[x]) p[x] += cp[x / 2];
+    }
+}
+
+static void smooth(PoissonLevel *l, int sweeps){
+    const int rows = l->nz * l->ny;
+    for (int it = 0; it < sweeps; it++)
+        for (int color = 0; color < 2; color++) smooth_rows(l, color, 0, rows);
+}
+
+// A level's half V-cycle: down = the sweeps, then the residual; up (c given) = the coarse
+// correction, then the sweeps. A big level does it all in ONE parallel region: its rows
+// split once among the threads, which meet at a spinning barrier (base/spin.h) between the
+// steps. Each region wakes every thread, and on Windows a wake costs 50-100 us: the 14
+// regions of a V-cycle's finest level (one per colour, sweep, residual and correction) were
+// 39% of the 32^3 air's step (docs/PERF_REVIEW.md, N1); now 2.
+static void half_cycle(PoissonLevel *l, const PoissonLevel *c, int sweeps){
+    const int rows = l->nz * l->ny;
+    if (cells(l) < BIG_GRID){
+        if (c) prolong_rows(l, c, 0, rows);
+        smooth(l, sweeps);
+        if (!c) residual_rows(l, 0, rows);
+        return;
+    }
+#ifdef _OPENMP
+    LrBarrier bar;
+    lr_barrier_init(&bar);
+#pragma omp parallel
+    {
+        const int nt = omp_get_num_threads(), t = omp_get_thread_num();
+        const int r0 = (int)((long long)rows * t / nt), r1 = (int)((long long)rows * (t + 1) / nt);
+        if (c){ prolong_rows(l, c, r0, r1); lr_barrier_wait(&bar, nt); }
+        for (int it = 0; it < sweeps; it++)
+            for (int color = 0; color < 2; color++){
+                smooth_rows(l, color, r0, r1);
+                if (c && it == sweeps - 1 && color == 1) break;   // the region's end is the wait
+                lr_barrier_wait(&bar, nt);
+            }
+        if (!c) residual_rows(l, r0, r1);
+    }
+#else
+    if (c) prolong_rows(l, c, 0, rows);
+    smooth(l, sweeps);
+    if (!c) residual_rows(l, 0, rows);
+#endif
+}
+
 static void vcycle(Poisson *ps, int k){
     PoissonLevel *l = &ps->lv[k];
     if (k == ps->nlevels - 1){          // the coarsest grid: a few cells, just sweep
         smooth(l, 40);
         return;
     }
-    smooth(l, ps->pre);
-    residual(l);
+    half_cycle(l, NULL, ps->pre);       // the sweeps, then the residual
     PoissonLevel *c = &ps->lv[k + 1];
     // restrict: the coarse right-hand side is the mean residual of the fine fluid cells
     for (int z = 0; z < c->nz; z++)
@@ -177,21 +226,7 @@ static void vcycle(Poisson *ps, int k){
                 c->p[ci] = 0;
             }
     vcycle(ps, k + 1);
-    // prolong: every fine cell takes its coarse cell's correction
-    const int nx = l->nx, ny = l->ny, nz = l->nz;
-    int big = cells(l) >= BIG_GRID;
-    (void)big;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) if (big)
-#endif
-    for (int z = 0; z < nz; z++)
-        for (int y = 0; y < ny; y++)
-            for (int x = 0; x < nx; x++){
-                size_t i = ((size_t)z * ny + y) * nx + x;
-                if (!l->links[i]) continue;
-                l->p[i] += c->p[((size_t)(z / 2) * c->ny + y / 2) * c->nx + x / 2];
-            }
-    smooth(l, ps->post);
+    half_cycle(l, c, ps->post);         // the coarse correction, then the sweeps
 }
 
 void poisson_solve(Poisson *ps, float *p, float *rhs, int cycles){
@@ -204,7 +239,7 @@ real poisson_residual(Poisson *ps, float *p, float *rhs){
     PoissonLevel *l = &ps->lv[0];
     l->p = p;
     l->rhs = rhs;
-    residual(l);
+    residual_rows(l, 0, l->nz * l->ny);
     real m = 0;
     for (size_t i = 0; i < cells(l); i++) if (r_fabs(l->res[i]) > m) m = r_fabs(l->res[i]);
     return m;
