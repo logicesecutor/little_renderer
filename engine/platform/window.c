@@ -19,7 +19,14 @@ struct LrWindow {
     int w, h;
     int rshift, gshift, bshift;
     Atom wm_delete;
+    int releasing;           // after a FocusOut: how many of RELEASED are still to be given
 };
+
+// Keys released when the window loses the focus: their real releases go to the window that
+// has it (as window_win32.c on WM_KILLFOCUS, window_web.c on blur), so a movement key held
+// then would stay down
+static const int RELEASED[] = {LR_KEY_SHIFT, 'w', 'a', 's', 'd', 'e', 'q', LR_KEY_LEFT, LR_KEY_RIGHT, LR_KEY_UP, LR_KEY_DOWN};
+#define NRELEASED ((int)(sizeof(RELEASED) / sizeof(RELEASED[0])))
 
 // position of the lowest set bit: where a color channel goes in an X pixel
 static int mask_shift(unsigned long m){
@@ -55,7 +62,7 @@ LrWindow *window_open(int width, int height, const char *title){
     XFree(hints);
     XStoreName(dpy, w->win, title);
     XSelectInput(dpy, w->win, KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
-                              PointerMotionMask | ExposureMask | StructureNotifyMask);
+                              PointerMotionMask | ExposureMask | StructureNotifyMask | FocusChangeMask);
     w->wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(dpy, w->win, &w->wm_delete, 1);
     XkbSetDetectableAutoRepeat(dpy, True, NULL);        // held keys: no fake release events
@@ -88,6 +95,12 @@ static int translate_key(KeySym k){
 }
 
 int window_poll(LrWindow *w, LrEvent *ev){
+    if (w->releasing > 0){                    // (one event per call)
+        ev->type = LR_KEYUP;
+        ev->key = RELEASED[NRELEASED - w->releasing--];
+        ev->button = ev->x = ev->y = ev->wheel = 0;
+        return 1;
+    }
     while (XPending(w->dpy)){
         XEvent xe;
         XNextEvent(w->dpy, &xe);
@@ -125,6 +138,9 @@ int window_poll(LrWindow *w, LrEvent *ev){
         case Expose:
             ev->type = LR_EXPOSE;
             return 1;
+        case FocusOut:
+            w->releasing = NRELEASED;
+            return window_poll(w, ev);
         default:
             continue;
         }
