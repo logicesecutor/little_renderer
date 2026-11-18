@@ -7,7 +7,11 @@
 //   node tools/webbench.mjs [quick|full|check] [-only A,F3] [-tag label] [-o out/perf/x_web.csv]
 //                           [-serve] [-page bench.html] [-url http://127.0.0.1:8000/bench.html]
 //                           [-chrome path] [-q "a=b&c=d"] [-flags "--chrome-switch ..."] [-log file]
+//                           [-shots dir]
 //
+// -shots dir: instead of the cases, the page's images (bench.c -shots: path traced, denoised,
+// rasterized) as PNG files <dir>/<name>_web.png, to compare with bin/bench -shots dir's
+// <name>_wgpu.png (bin/bench -imgdiff a.png b.png).
 // check (make web-check): one round of the cases that make every pipeline the page uses (the
 // path tracer with and without the sky, the guide, the light tracer, the rasterizer, the
 // denoiser, the trees built on the GPU, the bodies, the air), failing on any GPU error or a
@@ -17,7 +21,7 @@
 // --enable-dawn-features=allow_unsafe_apis,disable_robustness); the page never needs them;
 // -log: every console line of the page into a file.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +32,8 @@ const opt = (name, def) => { const i = argv.indexOf(name); return i >= 0 && i + 
 const check = argv.includes('check');
 const set = argv.includes('full') ? 'full' : 'quick';
 const only = opt('-only', check ? 'A1,A4,A5,A7,A8,C1,D1,E5,F3,G1' : ''), tag = opt('-tag', ''), out = opt('-o', '');
-const log = opt('-log', ''), more = opt('-q', '');
+const log = opt('-log', ''), more = opt('-q', ''), shots = opt('-shots', '');
+if (shots) mkdirSync(shots, { recursive: true });
 let base = opt('-url', 'http://127.0.0.1:8000/bench.html');
 const chromes = [opt('-chrome', ''), 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
                  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -48,6 +53,7 @@ const q = [set === 'full' ? 'full' : 'quick'];
 if (only) q.push('only=' + only);
 if (tag) q.push('tag=' + tag);
 if (check) q.push('reps=1');
+if (shots) q.push('shots=page');
 if (more) q.push(more);
 const url = `${base}?${q.join('&')}`;
 const dir = mkdtempSync(join(tmpdir(), 'lrbench-'));
@@ -72,6 +78,12 @@ ws.onmessage = e => {
     const s = m.params.args.map(a => a.value ?? a.description ?? '').join(' ');
     if (log) appendFileSync(log, s + '\n');
     for (const line of s.split('\n')) {
+      if (line.startsWith('PNG ') && shots) {
+        const [, file, b64] = line.split(' ');
+        writeFileSync(join(shots, file), Buffer.from(b64, 'base64'));
+        continue;
+      }
+      if (line.startsWith('SHOT ')) console.log(line);
       if (line.startsWith('CSV ')) {
         if (out) { if (!existsSync(out)) appendFileSync(out, 'tag,backend,gpu,set,case,what,unit,median,min,max,reps,gpu_ms,note\n'); appendFileSync(out, line.slice(4) + '\n'); }
         rows++;

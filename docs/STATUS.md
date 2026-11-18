@@ -240,6 +240,18 @@ suite at this point is `out/webperf/perf/base_table.md`, from the code of 4197a1
 | # | change | page (Chrome) | wgpu natively | our layer |
 |---|---|---|---|---|
 | 1 | the 4-wide walk compiled only with `LR_GPU_WIDE=1` (`WIDE_ON`, a constant of the module: its private arrays and insertion sort were in every kernel) | A4 15.3 -> 14.1, A5 29.3 -> 26.2, A7 8.7 -> 8.3, A8 13.0 -> 12.6; A1, A2, A6, A9 within the noise | A4 10.1 -> 9.06, A5 15.0 -> 12.9; the rest within the noise | the same (its kernels trace with ray queries; A1c 1.94 -> 1.93) |
+| 2 | the walk's stack in workgroup memory in the page (`LR_GPU_STACK=wg`, the page's default; natively `private` stays: no gain there) | A1 3.81 -> 3.16, A2 3.32 -> 2.64, A4 14.1 -> 11.9, A5 26.2 -> 17.6, A6 4.56 -> 3.64, A7 8.30 -> 6.24, A8 12.6 -> 11.0, A9 26.1 -> 23.4 | unchanged (the default); with `wg`: the same within the noise | unchanged |
+
+The images: `bin/bench -shots dir` and `node tools/webbench.mjs -serve -shots dir` make the
+same 8 images natively and in the page (path traced: the boxes, spheres in cloud and fog,
+the helmet, the sky demo; denoised: the boxes, the sky demo; rasterized: the boxes, the sky
+demo), `bin/bench -imgdiff` compares them. After change 2, page against wgpu: the boxes path
+traced RMSE 0.19 levels (mean +0.01), denoised 0.35, the helmet 0.67, rasterized 0.01; the
+spheres in media 8.0 (mean -0.01: the same noise drawn differently, the GPUs' float rounding
+in the media's tracking), the sky demo 7.1 path traced, 7.0 rasterized (mean -0.07: a few
+props stand a little elsewhere: the page's CPU code computes its constants in double, the
+native float build in float, `-fsingle-precision-constant`). The same numbers as with the
+private stack in the page.
 
 ## 2. Performance now
 

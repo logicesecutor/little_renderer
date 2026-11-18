@@ -256,14 +256,14 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
     var best = Found(tmax, NONE, vec2f(0.0), NONE);
     var stack: array<u32, STACK>;
     var sp = 0;
-    if (T.ins.x > 0u) { stack[sp] = T.ins.z; sp++; }
-    if ((T.cnt.x & 0x7fffffffu) > 0u) { stack[sp] = T.ins.w | (T.cnt.x & WIDE); sp++; }
+    if (T.ins.x > 0u) { stack[SI(sp)] = T.ins.z; sp++; }
+    if ((T.cnt.x & 0x7fffffffu) > 0u) { stack[SI(sp)] = T.ins.w | (T.cnt.x & WIDE); sp++; }
     var cur = NONE;
     var ray = r;
     var inv = safe_inv(r.d);
     while (sp > 0) {
         sp--;
-        let ni = stack[sp];
+        let ni = stack[SI(sp)];
         if (ni == EXIT) {
             cur = NONE;
             ray = r;
@@ -292,7 +292,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
             }
             for (var q = 0; q < m; q++) {
                 if (sp >= STACK) { break; }
-                stack[sp] = ce[q];
+                stack[SI(sp)] = ce[q];
                 sp++;
             }
             continue;
@@ -303,8 +303,8 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
                 cur = i;
                 ray = to_object(i, r);
                 inv = safe_inv(ray.d);
-                stack[sp] = EXIT;
-                stack[sp + 1] = bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.x);
+                stack[SI(sp)] = EXIT;
+                stack[SI(sp + 1)] = bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.x);
                 sp += 2;
             }
             continue;
@@ -329,7 +329,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
                         continue;
                     }
                     if (sp < STACK) {
-                        stack[sp] = INST | i;
+                        stack[SI(sp)] = INST | i;
                         sp++;
                     }
                 }
@@ -362,14 +362,14 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
         let tr = box_t(nodes[nd.b].lo, nodes[nd.b].hi, ray.o, inv, tmin, best.t);
         if (tl >= 0.0 && tr >= 0.0 && sp + 2 <= STACK) {
             let left_first = tl <= tr;
-            stack[sp] = select(nd.a, nd.b, left_first);
-            stack[sp + 1] = select(nd.b, nd.a, left_first);
+            stack[SI(sp)] = select(nd.a, nd.b, left_first);
+            stack[SI(sp + 1)] = select(nd.b, nd.a, left_first);
             sp += 2;
         } else if (tl >= 0.0 && sp < STACK) {
-            stack[sp] = nd.a;
+            stack[SI(sp)] = nd.a;
             sp++;
         } else if (tr >= 0.0 && sp < STACK) {
-            stack[sp] = nd.b;
+            stack[SI(sp)] = nd.b;
             sp++;
         }
     }
@@ -1055,7 +1055,8 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
+    tlid = li;
     let id = gid.x + gid.y * nw.x * 64u;
     let W = T.dims.x;
     if (id >= W * T.dims.w) { return; }
@@ -1092,7 +1093,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 /* A new image's start (with T.f.w = 1): no samples, and each pixel's guide. The whole image
    (dims z and w, the band, are not used). */
 @compute @workgroup_size(64)
-fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
+    tlid = li;
     let k = gid.x + gid.y * nw.x * 64u;
     let W = T.dims.x;
     let N = W * T.dims.y;
@@ -1194,7 +1196,8 @@ fn rr_light(beta: ptr<function, vec3f>, thr: ptr<function, vec3f>, depth: i32, r
 }
 
 @compute @workgroup_size(64)
-fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+fn ltrace(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
+    tlid = li;
     let id = gid.x + gid.y * nw.x * 64u;
     if (id >= T.ext.w || T.opt.w == NONE) { return; }
     let W = T.dims.x;

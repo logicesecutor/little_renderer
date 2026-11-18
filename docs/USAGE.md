@@ -163,9 +163,25 @@ source /f/Tools/emsdk/emsdk_env.sh      # once per shell (Linux: ~/emsdk/emsdk_e
 make web                                # -> web/build/
 make serve                              # then open http://localhost:8000
 make webtest                            # the GPU air against the CPU's: web/build/test_gpu_fluid.html
+make web-check                          # every pipeline of the page compiled and run once in a headless Chrome
 ```
 
 The options go in the address: `http://localhost:8000/?scene=cloud&backend=raster`.
+`make serve` (Node: `tools/serve.mjs`) sends the headers that make the page cross-origin
+isolated (COOP/COEP); `node tools/serve.mjs web/build -port 8000 -noisolate` serves without.
+
+The performance suite in a page (`make web-bench`, then `tools/webbench.mjs`, which starts a
+headless Chrome of its own on this machine's GPU):
+
+| command | what |
+|---|---|
+| `node tools/webbench.mjs quick\|full -serve -tag x -o out/perf/x_web.csv` | the suite in the page (served by webbench itself with `-serve`, or at `-url`) |
+| `... -only A1,A8` | some cases |
+| `... -q "env=LR_GPU_STACK=private"` | more of the page's options; `env=NAME=value` sets an environment variable in it (`bin/bench -env NAME=value` natively) |
+| `... -flags "--enable-dawn-features=..."` | switches for Chrome, for measuring only (Dawn's toggles) |
+| `... -log file` | every line the page prints, into a file |
+| `node tools/webbench.mjs -serve -shots dir` | the page's images (`bin/bench -shots dir` makes the same natively) as `dir/<name>_web.png`; `bin/bench -imgdiff a.png b.png` compares two (RMSE, mean difference) |
+| `node tools/webbench.mjs check -serve` | what `make web-check` runs |
 
 ---
 
@@ -364,7 +380,8 @@ Environment variables for measuring (docs/STATUS.md keeps what they showed):
 |---|---|
 | `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
-| `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary) |
+| `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary; without it the 4-wide walk is not compiled in) |
+| `LR_GPU_STACK=wg\|private` | where the GPU path tracer's tree walk keeps its stack: in workgroup memory (the page's default: 1.2-1.5x faster in Chrome) or in each thread's own memory (the native default) |
 | `LR_GPU_TLAS=gpu\|cpu` | `gpu`: the GPU builds the top level over the instances itself every frame (LBVH; `lbvh`, the old name, works too); `cpu`: it takes the CPU's SAH tree. Default: the CPU's below 32768 instances, the GPU's from there |
 | `LR_GPU_TLAS_UPDATE=0` | our Vulkan layer: the hardware top level built again whenever instances moved (default: updated in place while at most a quarter moved, built every 32 updates) |
 | `LR_GPU_LOD=0\|1` | the GPU rasterizer's simpler copies of meshes for instances small on the screen: `0` never, `1` at any instance count (default: from 4096 instances) |

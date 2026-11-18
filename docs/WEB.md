@@ -333,6 +333,26 @@ workgroup memory reads it with `workgroupUniformLoad`; an array or matrix indexe
 variable must be a `var`, not a `let`; and a kernel may bind at most 8 storage buffers, so
 the layouts skip the bindings a kernel does not use (`-` in `gpu_layout`).
 
+### 2.9 How fast the page is, and why (docs/STATUS.md 1.7)
+
+Measured with the performance suite in the page (`tools/webbench.mjs`, USAGE.md 2.3) and
+Chrome's own GPU timers, against wgpu natively on the same GPU. What was found and changed:
+
+- **The path tracer's kernel** was 1.45-1.95x slower in Chrome than natively; the time around
+  a pass (submits, readbacks) was not. Chrome compiles WGSL to HLSL (Tint), then DXIL (DXC) for
+  Direct3D 12. Bounds checks, the limits asked for and the workgroup size were measured and
+  are not the cause.
+- **The tree walk's stack** (40 entries per thread) is the cause: an array in the thread's
+  own memory is slow there. In the page it lives in workgroup memory, the 64 threads' stacks
+  interleaved (`LR_GPU_STACK=wg`, the page's default; 10 KB of the 16 KB every WebGPU device
+  has): 1.2-1.5x faster (the spheres in cloud and fog 26.2 -> 17.6 ms a pass). Natively it
+  stays in private memory (as fast there either way).
+- **The 4-wide tree walk**, off by default, was compiled into every kernel with its own
+  private arrays; it is now left out unless `LR_GPU_WIDE=1` (the media scenes 8-14% faster,
+  natively too).
+- The images stay those of the native build: `bin/bench -shots` and `webbench -shots` make
+  the same images in both, `bin/bench -imgdiff` compares them (STATUS.md 1.7).
+
 ## 3. The GPU natively (Windows, Linux)
 
 The native programs (`bin/view`, `bin/render`, `bin/sim`) run the same GPU code as the

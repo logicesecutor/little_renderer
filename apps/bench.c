@@ -35,6 +35,8 @@
 
 #include "app/options.h"
 #include "app/simdemo.h"
+#include "app/gpu_frame.h"
+#include "formats/png.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
 #include "gpu/rigid_gpu.h"
@@ -804,6 +806,121 @@ static int table(char **files, int nfiles){
     return 0;
 }
 
+// ---- -shots: the same images natively and in a page, to compare (-imgdiff) ----------------
+// Each image is made on the GPU with fixed inputs and saved as <dir>/<name>_<backend>.png;
+// in a page (which has no files) its PNG goes to the console as a line "PNG <file> <base64>",
+// which tools/webbench.mjs -shots <dir> writes out. With them, "SHOT <name> <mean r g b>".
+static void shot_put(const char *dir, const char *name, int w, int h, const uint32_t *px){
+    unsigned char *rgb = malloc((size_t)w * h * 3);
+    if (!rgb) return;
+    double m[3] = {0, 0, 0};
+    for (int i = 0; i < w * h; i++){
+        rgb[3 * i] = (unsigned char)(px[i] >> 16); rgb[3 * i + 1] = (unsigned char)(px[i] >> 8); rgb[3 * i + 2] = (unsigned char)px[i];
+        for (int c = 0; c < 3; c++) m[c] += rgb[3 * i + c];
+    }
+    printf("SHOT %s %.2f %.2f %.2f\n", name, m[0] / (w * h), m[1] / (w * h), m[2] / (w * h));
+    char file[256];
+    snprintf(file, sizeof(file), "%s_%s.png", name, BACKEND);
+#ifdef __EMSCRIPTEN__
+    (void)dir;
+    size_t n = 0;
+    unsigned char *png = png_encode(w, h, 3, rgb, &n);
+    if (png){
+        static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        char *s = malloc((n + 2) / 3 * 4 + 1);
+        size_t k = 0;
+        for (size_t i = 0; s && i < n; i += 3){
+            uint32_t v = (uint32_t)png[i] << 16 | (i + 1 < n ? (uint32_t)png[i + 1] << 8 : 0) | (i + 2 < n ? png[i + 2] : 0);
+            s[k++] = B64[v >> 18 & 63]; s[k++] = B64[v >> 12 & 63];
+            s[k++] = i + 1 < n ? B64[v >> 6 & 63] : '='; s[k++] = i + 2 < n ? B64[v & 63] : '=';
+        }
+        if (s){ s[k] = 0; printf("PNG %s %s\n", file, s); free(s); }
+        free(png);
+    }
+#else
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    if (png_write(path, w, h, 3, rgb)) fprintf(stderr, "cannot write %s\n", path);
+#endif
+    free(rgb);
+}
+
+static void shot_trace(const char *dir, const char *name, const char *args, int spp, int denoise){
+    Gpu *g = gpu_get(0);
+    Options o; static Scene s;
+    if (!g || !models_there(args, &(Res){0}) || setup(args, &o, &s, &SIM)){ printf("SHOT %s skipped\n", name); return; }
+    scene_set_accel(&s, ACCEL_BVH, &o.ap);
+    GpuView *v = gpu_view_create(g, o.width, o.height);
+    Image img = image_create(o.width, o.height);
+    RenderParams rp = scene_params(&o, &s);
+    Camera cam = scene_camera(&s, o.width, o.height);
+    if (v) gpu_view_trace_denoise(v, denoise);
+    if (v && gpu_frame_trace(g, v, &s, &cam, &rp, &o.march, spp, o.max_depth, o.mis, (real)o.clamp, o.sampler, 0, &img, 0) == 0){
+        uint32_t *px = malloc((size_t)o.width * o.height * 4);
+        for (int i = 0; px && i < o.width * o.height; i++) px[i] = image_pack_srgb(img.px[i]);
+        if (px) shot_put(dir, name, o.width, o.height, px);
+        free(px);
+    } else printf("SHOT %s skipped\n", name);
+    image_free(&img);
+    gpu_view_destroy(v);
+    teardown(&o, &s, &SIM);
+}
+
+static void shot_raster(const char *dir, const char *name, const char *args){
+    Gpu *g = gpu_get(0);
+    Options o; static Scene s;
+    if (!g || !models_there(args, &(Res){0}) || setup(args, &o, &s, &SIM)){ printf("SHOT %s skipped\n", name); return; }
+    GpuView *v = gpu_view_create(g, o.width, o.height);
+    Framebuffer *fb = fb_create(o.width, o.height);
+    RenderParams rp = scene_params(&o, &s);
+    if (v && fb && gpu_frame_raster(g, v, &s, &rp, &o.march, 1, fb) == 0) shot_put(dir, name, o.width, o.height, fb->color);
+    else printf("SHOT %s skipped\n", name);
+    fb_destroy(fb);
+    gpu_view_destroy(v);
+    teardown(&o, &s, &SIM);
+}
+
+static int shots(const char *dir){
+    printf("bench: shots, %s (%s)\n", BACKEND, gpu_get(0) ? gpu_message(gpu_get(0)) : "no GPU");
+    double t0 = clock_s();
+    shot_trace(dir, "boxes_pt", "-scene boxes -width 256 -height 256", 64, 0);
+    shot_trace(dir, "spheres_media_pt", "-scene spheres -cloud on -fog 0.0015 -width 256 -height 256", 64, 0);
+    shot_trace(dir, "helmet_pt", "-gltf " HELMET " -width 256 -height 256", 32, 0);
+    shot_trace(dir, "sky_pt", "-sim on -demo sky -bodies 0 -props 3000 -sky " SKY " -width 320 -height 180", 32, 0);
+    shot_trace(dir, "boxes_denoised", "-scene boxes -width 256 -height 256", 8, 1);
+    shot_trace(dir, "sky_denoised", "-sim on -demo sky -bodies 0 -props 3000 -sky " SKY " -width 320 -height 180", 8, 1);
+    shot_raster(dir, "boxes_raster", "-scene boxes -backend raster -width 256 -height 256");
+    shot_raster(dir, "sky_raster", "-sim on -demo sky -bodies 0 -props 3000 -sky " SKY " -width 320 -height 180");
+    printf("bench: done in %.0f s\n", clock_s() - t0);
+    return 0;
+}
+
+// -imgdiff a.png b.png: how far two images are apart (8-bit levels): RMSE, mean difference
+// per channel, the share of pixels more than 8 levels apart
+static int imgdiff(const char *a, const char *b){
+    int wa, ha, ca, wb, hb, cb;
+    unsigned char *pa = png_read(a, &wa, &ha, &ca, 3), *pb = png_read(b, &wb, &hb, &cb, 3);
+    if (!pa || !pb || wa != wb || ha != hb){ fprintf(stderr, "cannot compare %s and %s\n", a, b); free(pa); free(pb); return 1; }
+    double se = 0, d[3] = {0, 0, 0};
+    long far = 0;
+    for (int i = 0; i < wa * ha; i++){
+        int big = 0;
+        for (int c = 0; c < 3; c++){
+            int e = (int)pa[3 * i + c] - (int)pb[3 * i + c];
+            se += (double)e * e;
+            d[c] += e;
+            if (e > 8 || e < -8) big = 1;
+        }
+        far += big;
+    }
+    int n = wa * ha;
+    printf("%s vs %s: RMSE %.2f levels, mean difference %+.2f %+.2f %+.2f, %.2f%% of pixels > 8 levels apart\n",
+           a, b, sqrt(se / (3.0 * n)), d[0] / n, d[1] / n, d[2] / n, 100.0 * far / n);
+    free(pa);
+    free(pb);
+    return 0;
+}
+
 int main(int argc, char **argv){
 #ifdef __EMSCRIPTEN__
     // the page's address: bench.html?full&only=A,F3&tag=x -> -full -only A,F3 -tag x -csv
@@ -828,7 +945,7 @@ int main(int argc, char **argv){
         argv = wargv;
     }
 #endif
-    const char *only = NULL, *out = NULL, *tag = "", *cmp_a = NULL, *cmp_b = NULL;
+    const char *only = NULL, *out = NULL, *tag = "", *cmp_a = NULL, *cmp_b = NULL, *shots_dir = NULL;
     int list = 0, reps = 0;
     for (int i = 1; i < argc; i++){
         if (!strcmp(argv[i], "-full")) full = 1;
@@ -851,6 +968,8 @@ int main(int argc, char **argv){
         }
         else if (!strcmp(argv[i], "-compare") && i + 2 < argc){ cmp_a = argv[i + 1]; cmp_b = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "-table") && i + 1 < argc) return table(argv + i + 1, argc - i - 1);
+        else if (!strcmp(argv[i], "-shots") && i + 1 < argc) shots_dir = argv[++i];
+        else if (!strcmp(argv[i], "-imgdiff") && i + 2 < argc) return imgdiff(argv[i + 1], argv[i + 2]);
         else {
             fprintf(stderr, "usage: %s [-quick|-full] [-only A,F3] [-reps n] [-o file.csv] [-tag label] [-list]\n"
                             "       %s -compare old.csv new.csv\n", argv[0], argv[0]);
@@ -858,6 +977,7 @@ int main(int argc, char **argv){
         }
     }
     if (cmp_a) return compare(cmp_a, cmp_b);
+    if (shots_dir) return shots(shots_dir);
     if (list){
         for (int i = 0; i < NCASES; i++)
             printf("%-4s %-5s %-50s %-10s %s\n", CASES[i].id, CASES[i].quick ? "quick" : "full", CASES[i].what, CASES[i].unit,

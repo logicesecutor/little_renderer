@@ -305,11 +305,30 @@ void gpu_trace_after_submit(GpuTrace *t){
     check_builds(t);
 }
 
+// Where the BVH walk (traverse) keeps its stack of STACK entries: in each thread's own memory,
+// or in workgroup memory, the 64 threads' stacks interleaved (entry i of thread l at i * 64 + l,
+// so a warp's threads touch consecutive words). Measured on an RTX 3070 (docs/STATUS.md 1.4,
+// W4): in Chrome (Direct3D 12) the workgroup stack is 7-32% faster, natively (wgpu, Vulkan)
+// the same within the noise; so it is the browser's default. LR_GPU_STACK=wg|private chooses.
+static int stack_in_workgroup(void){
+    const char *e = getenv("LR_GPU_STACK");
+    if (e && *e) return !strcmp(e, "wg");
+#ifdef __EMSCRIPTEN__
+    return 1;
+#else
+    return 0;
+#endif
+}
+static const char *const STACK_PRIVATE = "var<private> tlid: u32;\nfn SI(i: i32) -> i32 { return i; }\n";
+static const char *const STACK_WG = "var<private> tlid: u32;\nvar<workgroup> stack: array<u32, STACK * 64>;\n"
+                                    "fn SI(i: i32) -> u32 { return u32(i) * 64u + tlid; }\n";
+
 // the path tracer's module: types, media, the BSDF, TRACE (with the sky's code or without),
 // and the wavefront's kernels (wave); free() it
 static char *trace_source(GpuTrace *t, int sky, int wave){
     const char *parts[] = {sky ? "const SKY_ON: bool = true;\n" : "const SKY_ON: bool = false;\n",
                            t->wide_ok ? "const WIDE_ON: bool = true;\n" : "const WIDE_ON: bool = false;\n",
+                           stack_in_workgroup() ? STACK_WG : STACK_PRIVATE,
                            t->types_wgsl, "\n", t->media_wgsl, "\n", GPU_WGSL_BSDF, "\n", GPU_WGSL_TEX, "\n", TRACE, "\n",
                            wave ? WAVE : ""};
     const int n = (int)(sizeof(parts) / sizeof(parts[0]));
@@ -322,6 +341,10 @@ static char *trace_source(GpuTrace *t, int sky, int wave){
     if (!src) return NULL;
     src[0] = 0;
     for (int i = 0; i < n; i++) strcat(src, parts[i]);
+    if (stack_in_workgroup()){           // (traverse's own stack left out: the module's is used)
+        char *d = strstr(src, "var stack: array<u32, STACK>;");
+        if (d) memset(d, ' ', strlen("var stack: array<u32, STACK>;"));
+    }
 #ifdef LR_VK
     if (t->hw){
         char *f = strstr(src, "fn traverse(");

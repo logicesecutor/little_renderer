@@ -69,7 +69,8 @@ fn wf_gen(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
 }
 
 @compute @workgroup_size(64)
-fn wf_ext(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+fn wf_ext(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
+    tlid = li;
     let id = wf_id(gid, nw);
     let c = WF[0];
     if (id >= c.y) { return; }
@@ -293,7 +294,8 @@ fn wf_args() {
 }
 
 @compute @workgroup_size(64)
-fn wf_shadow(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+fn wf_shadow(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
+    tlid = li;
     let id = wf_id(gid, nw);
     if (id >= WF[0].z) { return; }
     let p = q_get(2u, id);
