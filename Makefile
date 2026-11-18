@@ -90,7 +90,7 @@ ifeq ($(OS),Windows_NT)
 LIBS = -lm -lgdi32
 EXE = .exe
 else
-LIBS = -lm -lX11
+LIBS = -lm -lX11 -ldl
 EXE =
 endif
 

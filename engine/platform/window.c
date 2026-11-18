@@ -7,6 +7,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -152,7 +153,84 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     XFlush(w->dpy);
 }
 
-double window_refresh_hz(LrWindow *w){ (void)w; return 60.0; }   // (XRandR would tell)
+// The display's refresh rate from XRandR (1.2: the mode of the monitor under the window's
+// centre), loaded when there (libXrandr.so.2) so that nothing needs it to build or run. Its
+// few types are declared here as Xrandr.h has them (they have not changed since 2007).
+typedef XID LrRRCrtc, LrRRMode, LrRROutput;
+typedef struct {
+    LrRRMode id;
+    unsigned int width, height;
+    unsigned long dotClock;
+    unsigned int hSyncStart, hSyncEnd, hTotal, hSkew;
+    unsigned int vSyncStart, vSyncEnd, vTotal;
+    char *name;
+    unsigned int nameLength;
+    unsigned long modeFlags;
+} LrRRModeInfo;
+typedef struct {
+    Time timestamp, configTimestamp;
+    int ncrtc;
+    LrRRCrtc *crtcs;
+    int noutput;
+    LrRROutput *outputs;
+    int nmode;
+    LrRRModeInfo *modes;
+} LrRRScreenResources;
+typedef struct {
+    Time timestamp;
+    int x, y;
+    unsigned int width, height;
+    LrRRMode mode;
+    unsigned short rotation;
+    int noutput;
+    LrRROutput *outputs;
+    unsigned short rotations;
+    int npossible;
+    LrRROutput *possible;
+} LrRRCrtcInfo;
+enum { LR_RR_INTERLACE = 0x10, LR_RR_DOUBLESCAN = 0x20 };
+
+double window_refresh_hz(LrWindow *w){
+    static void *lib;
+    static int tried;
+    static LrRRScreenResources *(*get_res)(Display *, Window);
+    static void (*free_res)(LrRRScreenResources *);
+    static LrRRCrtcInfo *(*get_crtc)(Display *, LrRRScreenResources *, LrRRCrtc);
+    static void (*free_crtc)(LrRRCrtcInfo *);
+    if (!tried){
+        tried = 1;
+        lib = dlopen("libXrandr.so.2", RTLD_LAZY | RTLD_LOCAL);
+        if (lib){
+            *(void **)&get_res = dlsym(lib, "XRRGetScreenResourcesCurrent");
+            *(void **)&free_res = dlsym(lib, "XRRFreeScreenResources");
+            *(void **)&get_crtc = dlsym(lib, "XRRGetCrtcInfo");
+            *(void **)&free_crtc = dlsym(lib, "XRRFreeCrtcInfo");
+        }
+    }
+    double hz = 0;
+    if (w && get_res && free_res && get_crtc && free_crtc){
+        int cx = 0, cy = 0;
+        Window child;
+        Window root = DefaultRootWindow(w->dpy);
+        XTranslateCoordinates(w->dpy, w->win, root, w->w / 2, w->h / 2, &cx, &cy, &child);
+        LrRRScreenResources *res = get_res(w->dpy, root);
+        for (int i = 0; res && i < res->ncrtc && hz <= 0; i++){
+            LrRRCrtcInfo *c = get_crtc(w->dpy, res, res->crtcs[i]);
+            if (!c) continue;
+            if (c->mode && cx >= c->x && cx < c->x + (int)c->width && cy >= c->y && cy < c->y + (int)c->height)
+                for (int m = 0; m < res->nmode; m++){
+                    const LrRRModeInfo *mi = &res->modes[m];
+                    if (mi->id != c->mode || !mi->hTotal || !mi->vTotal) continue;
+                    hz = (double)mi->dotClock / ((double)mi->hTotal * mi->vTotal);
+                    if (mi->modeFlags & LR_RR_INTERLACE) hz *= 2;
+                    if (mi->modeFlags & LR_RR_DOUBLESCAN) hz /= 2;
+                }
+            free_crtc(c);
+        }
+        if (res) free_res(res);
+    }
+    return hz >= 20 && hz <= 1000 ? hz : 60.0;   // (no XRandR, no monitor there, or nonsense)
+}
 
 int window_native(LrWindow *w, void **display, uintptr_t *window){
     if (!w) return 0;

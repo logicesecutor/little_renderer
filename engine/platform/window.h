@@ -47,7 +47,8 @@ void window_set_title(LrWindow *win, const char *title);
 // (the GPU draws on the canvas there).
 int window_native(LrWindow *win, void **display, uintptr_t *window);
 // How many times a second the display the window is on refreshes (Win32: the monitor's
-// mode; X11 and browsers: 60 for now)
+// mode; X11: the mode of the monitor under the window by XRandR, when it is there, else 60;
+// browsers: 60)
 double window_refresh_hz(LrWindow *win);
 void window_close(LrWindow *win);
 
