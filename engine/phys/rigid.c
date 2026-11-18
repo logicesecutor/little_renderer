@@ -1156,37 +1156,65 @@ static void apply(Body *a, Body *b, Mat3 ia, Mat3 ib, Vec3 ra, Vec3 rb, Vec3 j){
     }
 }
 
-// One contact towards its target speed along the normal (bias), friction after it
-static void solve_contact(RigidWorld *w, const Mat3 *iw, Contact *c, real bias){
-    Mat3 zero = {{{0}}};
-    Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
-    Mat3 ia = iw[c->a], ib = b ? iw[c->b] : zero;
+// A contact's three directions (the normal, two tangents) as the iterations use them, made
+// once per substep (the bodies do not turn within it): the speed of a's point against b's
+// along d is d . (va - vb) + (ra x d) . wa - (rb x d) . wb, and an impulse j d changes the
+// spins by j I^-1 (r x d). So a row is 4 dot products to read and 4 scaled additions to
+// apply, where it was 4 cross products and 2 matrix products at every visit (10 passes and
+// one more in each of 4 substeps).
+typedef struct { Vec3 d, rad, rbd, iad, ibd; } SolveRow;   // d; ra x d, rb x d; Ia^-1 (ra x d), Ib^-1 (rb x d)
+typedef struct { SolveRow n, t1, t2; } SolveRows;
 
-    Vec3 dv = rel_velocity(a, b, c->ra, c->rb);
-    real dj = c->mass_n * (bias - v_dot(dv, c->n));
+static void solve_row_make(SolveRow *r, Vec3 d, Vec3 ra, Vec3 rb, const Mat3 *ia, const Mat3 *ib){
+    r->d = d;
+    r->rad = v_cross(ra, d);
+    r->iad = mat3_mul_vec(*ia, r->rad);
+    r->rbd = ib ? v_cross(rb, d) : vec3(0, 0, 0);
+    r->ibd = ib ? mat3_mul_vec(*ib, r->rbd) : vec3(0, 0, 0);
+}
+static inline real row_speed(const Body *a, const Body *b, const SolveRow *r){
+    real v = v_dot(r->d, a->vel) + v_dot(r->rad, a->angvel);
+    if (b) v -= v_dot(r->d, b->vel) + v_dot(r->rbd, b->angvel);
+    return v;
+}
+// (a fixed or sleeping body, inv_mass 0, is left alone)
+static inline void row_apply(Body *a, Body *b, const SolveRow *r, real j){
+    if (a->inv_mass > 0){
+        a->vel = v_add(a->vel, v_scale(r->d, j * a->inv_mass));
+        a->angvel = v_add(a->angvel, v_scale(r->iad, j));
+    }
+    if (b && b->inv_mass > 0){
+        b->vel = v_sub(b->vel, v_scale(r->d, j * b->inv_mass));
+        b->angvel = v_sub(b->angvel, v_scale(r->ibd, j));
+    }
+}
+
+// One contact towards its target speed along the normal (bias), friction after it
+static void solve_contact(RigidWorld *w, const SolveRows *rows, Contact *c, real bias){
+    Body *a = &w->bodies[c->a], *b = c->b >= 0 ? &w->bodies[c->b] : NULL;
+
+    real dj = c->mass_n * (bias - row_speed(a, b, &rows->n));
     real jn = r_fmax(c->jn + dj, 0);
     dj = jn - c->jn;
     c->jn = jn;
-    if (dj != 0) apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->n, dj));
+    if (dj != 0) row_apply(a, b, &rows->n, dj);
     // no push, no friction: nothing more to do (a gap, most of the time)
     if (c->jn == 0 && c->jt1 == 0 && c->jt2 == 0) return;
 
-    dv = rel_velocity(a, b, c->ra, c->rb);
     real lim = c->mu * c->jn;
-    real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * v_dot(dv, c->t1)));
-    apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t1, jt - c->jt1));
+    real jt = r_fmax(-lim, r_fmin(lim, c->jt1 - c->mass_t1 * row_speed(a, b, &rows->t1)));
+    row_apply(a, b, &rows->t1, jt - c->jt1);
     c->jt1 = jt;
-    dv = rel_velocity(a, b, c->ra, c->rb);
-    jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * v_dot(dv, c->t2)));
-    apply(a, b, ia, ib, c->ra, c->rb, v_scale(c->t2, jt - c->jt2));
+    jt = r_fmax(-lim, r_fmin(lim, c->jt2 - c->mass_t2 * row_speed(a, b, &rows->t2)));
+    row_apply(a, b, &rows->t2, jt - c->jt2);
     c->jt2 = jt;
 }
 
 // one pass over the active contacts (act), each towards c->bias, or (bias) bias[k]
-static void solve_pass(RigidWorld *w, const Mat3 *iw, const int *act, int nact, const real *bias){
+static void solve_pass(RigidWorld *w, const SolveRows *rows, const int *act, int nact, const real *bias){
     for (int q = 0; q < nact; q++){
         Contact *c = &w->contacts[act[q]];
-        solve_contact(w, iw, c, bias ? bias[act[q]] : c->bias);
+        solve_contact(w, &rows[act[q]], c, bias ? bias[act[q]] : c->bias);
     }
 }
 
@@ -1416,7 +1444,8 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     int *act = malloc(nc * sizeof(int));
     char *bouncing = malloc(nc), *on = malloc(nc);
     real *relax = malloc(nc * sizeof(real));   // step 5
-    if (!iw || !act || !bouncing || !on || !relax){ perror("malloc"); exit(1); }
+    SolveRows *rows = malloc(nc * sizeof(SolveRows));
+    if (!iw || !act || !bouncing || !on || !relax || !rows){ perror("malloc"); exit(1); }
     Mat3 zero = {{{0}}};
     // The bodies' and the contacts' own work on all the CPU's cores (OpenMP), when there is
     // enough of it; the iterations stay on one: each contact needs the ones before it (a
@@ -1457,6 +1486,9 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             c->mass_n = eff_mass(a, b, ia, ib, c->ra, c->rb, c->n);
             c->mass_t1 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t1);
             c->mass_t2 = eff_mass(a, b, ia, ib, c->ra, c->rb, c->t2);
+            solve_row_make(&rows[k].n, c->n, c->ra, c->rb, &iw[c->a], b ? &iw[c->b] : NULL);
+            solve_row_make(&rows[k].t1, c->t1, c->ra, c->rb, &iw[c->a], b ? &iw[c->b] : NULL);
+            solve_row_make(&rows[k].t2, c->t2, c->ra, c->rb, &iw[c->a], b ? &iw[c->b] : NULL);
             real vn = v_dot(rel_velocity(a, b, c->ra, c->rb), c->n);
             if (s == 0) c->vn0 = r_fmin(c->vn0, vn);
             // Apart (a speculative contact): they may approach until they touch, no closer.
@@ -1490,7 +1522,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
                   v_add(v_scale(c->n, c->jn), v_add(v_scale(c->t1, c->jt1), v_scale(c->t2, c->jt2))));
         }
         // 3. iterate
-        for (int it = 0; it < w->iterations; it++) solve_pass(w, iw, act, nact, NULL);
+        for (int it = 0; it < w->iterations; it++) solve_pass(w, rows, act, nact, NULL);
 
         // 4. velocities -> positions
         #pragma omp parallel for if (par_bodies)
@@ -1515,7 +1547,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             real depth = c->depth0 - v_dot(v_sub(pa, pb), c->n);   // now
             relax[k] = bouncing[k] ? c->bias : (depth < 0 ? depth / h : 0);
         }
-        solve_pass(w, iw, act, nact, relax);
+        solve_pass(w, rows, act, nact, relax);
     }
 
     if (start) rigid_ccd(w, start);       // (the sleeping still fixed: inv_mass 0)
@@ -1527,6 +1559,7 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
     if (sleep_m){ for (int i = 0; i < w->nbodies; i++) w->bodies[i].inv_mass = sleep_m[i]; free(sleep_m); }
     if (w->sleep) fall_asleep(w, dt, forces);
     free(iw);
+    free(rows);
     free(act);
     for (int i = 0; i < w->nbodies; i++) w->bodies[i].force = w->bodies[i].torque = vec3(0, 0, 0);
 }
