@@ -23,7 +23,7 @@ void gpu_view_trace_limit(GpuView *v, int spp){ (void)v; (void)spp; }
 void gpu_view_trace_budget(GpuView *v, double ms){ (void)v; (void)ms; }
 void gpu_view_trace_budget_pass(GpuView *v, double max_ms){ (void)v; (void)max_ms; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
-void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; }
+int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; return 0; }
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
@@ -942,14 +942,15 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     }
 }
 
-void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){
+int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){
     // one band in flight at most (also for a new image's start: on a slow GPU, frames go on
     // showing the last image until the band ends, rather than piling work up on the queue)
-    if (!v || !v->trace || v->t_inflight) return;
-    if (v->t_limit > 0 && v->t_passes >= v->t_limit) return;   // the image has all its samples
-    int ready = gpu_trace_ready(v->trace, s);                  // (in a browser: still compiling?)
-    if (ready < 0){ v->trace_failed = 1; return; }
-    if (!ready) return;
+    if (!v || v->trace_failed) return 0;
+    if (!v->trace || v->t_inflight) return 1;
+    if (v->t_limit > 0 && v->t_passes >= v->t_limit) return 1;   // the image has all its samples
+    int ready = gpu_trace_ready(v->trace, s);                    // (in a browser: still compiling?)
+    if (ready < 0){ v->trace_failed = 1; return 0; }
+    if (!ready) return 1;
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
@@ -1021,6 +1022,7 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
         v->t_pass_t0 = now;
     }
     v->t_done_next = v->t_passes;
+    return 1;
 }
 
 void gpu_view_trace_limit(GpuView *v, int spp){ if (v) v->t_limit = spp > 0 ? spp : 0; }

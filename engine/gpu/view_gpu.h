@@ -75,8 +75,9 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
 // and more: the GPU builds its own): moving instances then need no tree on the CPU at all.
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s);
 // Call every frame: unless the previous band is still running, submits the next one (p and mp
-// as in gpu_view_present: the media are made ready the same way).
-void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp);
+// as in gpu_view_present: the media are made ready the same way). Returns 0 when the path
+// tracer cannot run (its pipelines failed): no pass will ever come, path trace on the CPU.
+int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp);
 // No image gets more than spp samples per pixel (0, the default: no limit; a fast GPU is
 // given several passes per submission, as many as its speed allows, so an image asked for
 // until gpu_view_trace_passes reaches n could end with a few more, a different number from

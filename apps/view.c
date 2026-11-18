@@ -526,8 +526,14 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
         force_present = 1;
     }
     reset = 0;
-    if (gpu_view_trace_passes(gview) < o.spp) PROF(PROF_MORE, gpu_view_trace_more(gview, &scene, &last_rp, &o.march));
+    int more = 1;
+    if (gpu_view_trace_passes(gview) < o.spp) PROF(PROF_MORE, more = gpu_view_trace_more(gview, &scene, &last_rp, &o.march));
     else if (!o.maxfps) idle(10);             // (-maxfps on: the image shown again, as many times as can be)
+    if (!more){                               // its pipelines failed: the CPU path traces
+        o.gpu_trace = 0;
+        gpu_tracing = 0;
+        return 0;
+    }
     // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
     // nap would not do: on Windows the shortest one lasts ~15 ms, longer than a band. With
     // -maxfps on in a window in step with the display, not: the band runs while the frame

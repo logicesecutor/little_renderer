@@ -57,7 +57,10 @@ int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, 
     while (gpu_view_trace_passes(view) < spp && gpu_state(gpu) == GPU_READY){
         // one band (or, once the GPU proves fast, several whole passes) at a time; the
         // last submission as many passes as are left (gpu_view_trace_limit)
-        gpu_view_trace_more(view, s, rp, mp);
+        if (!gpu_view_trace_more(view, s, rp, mp)){   // its pipelines failed: on the CPU
+            if (progress) fprintf(stderr, "\n");
+            return 1;
+        }
         gpu_wait(gpu);
         if (p1 < 0){ p1 = gpu_view_trace_passes(view); t1 = clock_s(); }   // after the first: pipelines made, caches warm
         int p = gpu_view_trace_passes(view) * 100 / (spp > 0 ? spp : 1);
