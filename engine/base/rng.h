@@ -36,6 +36,18 @@ static inline real rng_real(Rng *r){
 #endif
 }
 
+// uniform in [lo, hi)
+static inline real rng_range(Rng *r, real lo, real hi){ return lo + (hi - lo) * rng_real(r); }
+
+// A random rotation for things thrown about (the physics demos): about an axis from the cube
+// [-1, 1]^3, by 0..pi; not uniform over the rotations. (The numbers drawn z, y, x, then the
+// angle: the order the demos' first version had.)
+static inline Quat rng_rotation(Rng *r){
+    real z = rng_range(r, -1, 1), y = rng_range(r, -1, 1), x = rng_range(r, -1, 1);
+    Vec3 axis = v_norm(vec3(x, y, z));
+    return quat_axis_angle(axis, rng_range(r, 0, (real)PI));
+}
+
 // Builds two tangents t, b so that (t, b, n) is an orthonormal basis.
 // Branchless method from Duff et al. 2017, "Building an Orthonormal Basis, Revisited".
 static inline void onb_from_normal(Vec3 n, Vec3 *t, Vec3 *b){

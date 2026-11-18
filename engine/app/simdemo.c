@@ -17,7 +17,7 @@ static int add_mat(Scene *s, MatType t, Vec3 albedo, real ior){
     return scene_add_material(s, m);
 }
 
-static real rnd(Sim *sim, real lo, real hi){ return lo + (hi - lo) * rng_real(&sim->rng); }
+static real rnd(Sim *sim, real lo, real hi){ return rng_range(&sim->rng, lo, hi); }
 
 static Spawn *new_spawn(Sim *sim, double t, BodyShape shape, Vec3 pos, Vec3 half, real density, int material){
     if (sim->nspawns >= SIM_MAX_SPAWNS) return NULL;
@@ -40,11 +40,6 @@ static void sort_spawns(Sim *sim){
 // a random spot over the floor, away from the walls
 static Vec3 spot(Sim *sim, real margin, real y){
     return vec3(rnd(sim, margin, ROOM - margin), y, rnd(sim, margin + 40, ROOM - margin));
-}
-
-static Quat random_rot(Sim *sim){
-    Vec3 axis = v_norm(vec3(rnd(sim, -1, 1), rnd(sim, -1, 1), rnd(sim, -1, 1)));
-    return quat_axis_angle(axis, rnd(sim, 0, (real)PI));
 }
 
 // ---- SIM_SKY: a floor under the sky, a rain of bodies onto its middle among still props ----
@@ -135,7 +130,7 @@ static int field_setup(Sim *sim, const Options *o, Scene *s){
             if (p){ p->geom = geom[j]; p->mesh = mesh[j]; }
         }
         if (!p) break;
-        p->rot = random_rot(sim);
+        p->rot = rng_rotation(&sim->rng);
         p->vel = vec3(rnd(sim, -40, 40), rnd(sim, -200, 0), rnd(sim, -40, 40));
         p->restitution = FIELD_MATS[mi].trans > 0 ? 0.5f : 0.3f;
     }
@@ -282,7 +277,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
             if (want_box){
                 Vec3 half = vec3(rnd(sim, 22, 38), rnd(sim, 22, 38), rnd(sim, 22, 38));
                 Spawn *p = new_spawn(sim, t, BODY_BOX, spot(sim, 90, 470), half, 0.7f, box_cols[nx % 2]);
-                if (p){ p->rot = random_rot(sim); p->vel = vec3(rnd(sim, -60, 60), 0, rnd(sim, -60, 60)); }
+                if (p){ p->rot = rng_rotation(&sim->rng); p->vel = vec3(rnd(sim, -60, 60), 0, rnd(sim, -60, 60)); }
                 nx++;
             } else {
                 real r = rnd(sim, 26, 42);
@@ -353,7 +348,7 @@ int sim_setup(Sim *sim, const Options *o, Scene *s){
                 if (!p) break;
                 p->geom = g;
                 p->mesh = mesh;
-                p->rot = drop ? random_rot(sim) : quat_axis_angle(vec3(0, 1, 0), rnd(sim, 0, (real)PI));
+                p->rot = drop ? rng_rotation(&sim->rng) : quat_axis_angle(vec3(0, 1, 0), rnd(sim, 0, (real)PI));
                 if (drop) p->vel = vec3(rnd(sim, -60, 60), 0, rnd(sim, -60, 60));
             }
         }

@@ -35,12 +35,7 @@
 typedef struct { int mesh, geom; const char *name; } Model;
 
 static Rng rng;
-static real rnd(real lo, real hi){ return lo + (hi - lo) * rng_real(&rng); }
-
-static Quat random_rot(void){
-    Vec3 axis = v_norm(vec3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)));
-    return quat_axis_angle(axis, rnd(0, (real)PI));
-}
+static real rnd(real lo, real hi){ return rng_range(&rng, lo, hi); }
 
 // a spot under the ceiling, away from the walls and in front of the lamp
 static Vec3 drop_spot(real size){
@@ -196,7 +191,7 @@ int main(int argc, char **argv){
                 spawn_debt -= 1;
                 const Model *m = &models[(int)(rng_real(&rng) * nmodels) % nmodels];
                 Vec3 at = drop_spot(size);
-                Quat q = random_rot();
+                Quat q = rng_rotation(&rng);
                 Vec3 vel = vec3(rnd(-80, 80), rnd(-150, 0), rnd(-80, 80));
                 Vec3 spin = vec3(rnd(-3, 3), rnd(-3, 3), rnd(-3, 3));
                 int b;
