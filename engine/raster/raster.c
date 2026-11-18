@@ -44,12 +44,19 @@ void draw_triangle(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, co
 
 void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, const ScreenVert *c,
                         FragShader shader, const void *ctx, int cull_backfaces, int row_lo, int row_hi){
+    (void)draw_triangle_rows_pass(fb, a, b, c, shader, ctx, cull_backfaces, row_lo, row_hi, RASTER_DIRECT, NULL, 0);
+}
+
+int draw_triangle_rows_pass(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, const ScreenVert *c,
+                            FragShader shader, const void *ctx, int cull_backfaces, int row_lo, int row_hi,
+                            int pass, int *ids, int id){
+    int written = 0;
     real area = edge(a->x, a->y, b->x, b->y, c->x, c->y);
-    if (r_fabs(area) < 1e-8f) return;              // degenerate (edge-on) triangle
+    if (r_fabs(area) < 1e-8f) return 0;              // degenerate (edge-on) triangle
 
     // Screen y points down, so a counter-clockwise triangle has NEGATIVE area here.
     if (area > 0){
-        if (cull_backfaces) return;               // back face
+        if (cull_backfaces) return 0;               // back face
         const ScreenVert *t = b; b = c; c = t;    // flip it so the math below stays the same
         area = -area;
     }
@@ -65,14 +72,14 @@ void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *
     if (c->y < fminy) fminy = c->y;
     if (c->y > fmaxy) fmaxy = c->y;
     // entirely off screen (or NaN): no pixel center can be inside
-    if (!(fmaxx >= 0 && fmaxy >= 0 && fminx <= fb->w && fminy <= fb->h)) return;
+    if (!(fmaxx >= 0 && fmaxy >= 0 && fminx <= fb->w && fminy <= fb->h)) return 0;
     int minx = fminx < 0 ? 0 : (int)fminx;                 // = floor, since fminx >= 0
     int miny = fminy < 0 ? 0 : (int)fminy;
     int maxx = fmaxx > fb->w - 1 ? fb->w - 1 : (int)fmaxx + ((real)(int)fmaxx < fmaxx);   // = ceil
     int maxy = fmaxy > fb->h - 1 ? fb->h - 1 : (int)fmaxy + ((real)(int)fmaxy < fmaxy);
     if (miny < row_lo) miny = row_lo;             // only the rows we were asked to fill
     if (maxy > row_hi) maxy = row_hi;
-    if (miny > maxy) return;
+    if (miny > maxy) return 0;
 
     // Pre-multiply the varyings by 1/w once per vertex: perspective-correct interpolation
     // interpolates (attr / w) and (1 / w) linearly in screen space and divides at the end.
@@ -104,7 +111,10 @@ void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *
 
             real z = w0 * a->z + w1 * b->z + w2 * c->z;
             size_t idx = (size_t)y * fb->w + x;
-            if (z >= fb->depth[idx]) continue;       // something nearer is already here
+            if (pass == RASTER_SHADE){
+                if (ids[idx] != id) continue;        // another triangle is the one seen here
+            } else if (z >= fb->depth[idx]) continue;   // something nearer is already here
+            if (pass == RASTER_DEPTH){ fb->depth[idx] = z; ids[idx] = id; written++; continue; }
 
             real iw = w0 * a->inv_w + w1 * b->inv_w + w2 * c->inv_w;
             real w = 1.0f / iw;
@@ -116,8 +126,9 @@ void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *
             vary[V_DUDY] = (du_y - vary[V_U] * diw_y) * w;
             vary[V_DVDY] = (dv_y - vary[V_V] * diw_y) * w;
 
-            fb->depth[idx] = z;
+            if (pass == RASTER_DIRECT) fb->depth[idx] = z;   // (RASTER_SHADE: it is there already)
             fb->color[idx] = shader(vary, ctx);
         }
     }
+    return written;
 }

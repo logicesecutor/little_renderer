@@ -37,5 +37,14 @@ void draw_triangle(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, co
 void draw_line_rows(Framebuffer *fb, int x0, int y0, int x1, int y1, uint32_t color, int row_lo, int row_hi);
 void draw_triangle_rows(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, const ScreenVert *c,
                         FragShader shader, const void *ctx, int cull_backfaces, int row_lo, int row_hi);
+// The same triangle in one of two passes, to shade each pixel once (render.c): RASTER_DEPTH
+// writes the depth and ids[pixel] = id where the triangle is nearer than what is there (no
+// colour, no shader); RASTER_SHADE then shades only the pixels whose ids[] is id (the depth
+// is already right). The same pixels and values as RASTER_DIRECT (draw_triangle_rows).
+enum { RASTER_DIRECT, RASTER_DEPTH, RASTER_SHADE };
+// Returns how many pixels RASTER_DEPTH wrote (0: hidden or off screen so far).
+int draw_triangle_rows_pass(Framebuffer *fb, const ScreenVert *a, const ScreenVert *b, const ScreenVert *c,
+                            FragShader shader, const void *ctx, int cull_backfaces, int row_lo, int row_hi,
+                            int pass, int *ids, int id);
 
 #endif

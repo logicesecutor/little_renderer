@@ -145,15 +145,18 @@ static int poly_area_ok(const ScreenVert *sv, int np, int cull){
     return !(cull && area >= 0);
 }
 
-static void draw_clip_triangle(Framebuffer *fb, const ClipVert *cv, RenderMode mode, int cull,
-                               FragShader shader, const void *ctx, uint32_t wire_color,
-                               int row_lo, int row_hi){
+// pass, ids, id: draw_triangle_rows_pass's (RASTER_DIRECT: as one pass, ids unused); the
+// clipped polygon's fan triangle k - 1 gets the id id + k - 1 (at most CLIP_MAX - 2 of them).
+// Returns the pixels a RASTER_DEPTH pass wrote.
+static int draw_clip_triangle(Framebuffer *fb, const ClipVert *cv, RenderMode mode, int cull,
+                              FragShader shader, const void *ctx, uint32_t wire_color,
+                              int row_lo, int row_hi, int pass, int *ids, int id){
     // 3. clip against the near plane and the guard band (when a corner needs it)
     ClipVert poly[CLIP_MAX];
     int np = 3;
     if (clip_needed(cv[0].clip) || clip_needed(cv[1].clip) || clip_needed(cv[2].clip)){
         np = clip_triangle(cv, poly);
-        if (np < 3) return;
+        if (np < 3) return 0;
     } else memcpy(poly, cv, sizeof(ClipVert) * 3);
 
     // 4. divide by w, map to pixels
@@ -161,9 +164,10 @@ static void draw_clip_triangle(Framebuffer *fb, const ClipVert *cv, RenderMode m
     for (int k = 0; k < np; k++) sv[k] = to_screen(&poly[k], fb);
 
     // 5. back-face culling
-    if (!poly_area_ok(sv, np, cull)) return;
+    if (!poly_area_ok(sv, np, cull)) return 0;
 
     // 6. rasterize
+    int written = 0;
     if (mode == MODE_WIREFRAME){
         for (int k = 0; k < np; k++){
             const ScreenVert *a = &sv[k], *b = &sv[(k + 1) % np];
@@ -172,8 +176,10 @@ static void draw_clip_triangle(Framebuffer *fb, const ClipVert *cv, RenderMode m
         }
     } else {
         for (int k = 1; k + 1 < np; k++)
-            draw_triangle_rows(fb, &sv[0], &sv[k], &sv[k + 1], shader, ctx, 0, row_lo, row_hi);
+            written += draw_triangle_rows_pass(fb, &sv[0], &sv[k], &sv[k + 1], shader, ctx, 0, row_lo, row_hi,
+                                               pass, ids, id + k - 1);
     }
+    return written;
 }
 
 // ---- drawing many triangles on many cores ---------------------------------------------
@@ -288,6 +294,19 @@ static int triangle_rows(const TriJob *j, const Framebuffer *fb, int i, int *r0,
     return 1;
 }
 
+// The depth pass of triangle i from its corners alone: the clip and screen positions are the
+// full vertex stage's to the bit (both are view_proj times the same world corners, and
+// clipping interpolates the positions on their own), without its normals, texture
+// coordinates and lighting.
+static int depth_triangle(Framebuffer *fb, const TriJob *j, int i, int row_lo, int row_hi, int *ids, int id){
+    Vec3 wp[3];
+    j->corners(j, i, wp);
+    ClipVert cv[3];
+    memset(cv, 0, sizeof(cv));
+    for (int k = 0; k < 3; k++) cv[k].clip = mat4_mul_vec4(j->view_proj, (Vec4){wp[k].x, wp[k].y, wp[k].z, 1.0f});
+    return draw_clip_triangle(fb, cv, j->mode, j->cull, NULL, NULL, 0, row_lo, row_hi, RASTER_DEPTH, ids, id);
+}
+
 static void draw_triangles(Framebuffer *fb, const TriJob *j){
     if (j->ntri <= 0 || fb->w <= 0 || fb->h <= 0) return;
     const int nbands = (fb->h + RASTER_BAND_ROWS - 1) / RASTER_BAND_ROWS;
@@ -339,7 +358,16 @@ static void draw_triangles(Framebuffer *fb, const TriJob *j){
         bins[c].off = off;
     }
 
-    // ---- pass 2: every band is drawn by one thread
+    // ---- pass 2: every band is drawn by one thread, in two passes over its triangles (filled
+    // triangles; lines in one): (a) the depth alone, from the corners, noting which triangle
+    // is nearest at each pixel (ids: the band's n-th triangle, CLIP_MAX ids each); (b) the
+    // full vertex stage, then each pixel shaded once, by the triangle (a) left there. Shading
+    // in one pass shaded every fragment nearer than what was there yet, and most were drawn
+    // over again (the CPU rasterizer's time was 75% shading: docs/PERF_REVIEW.md, N3). The
+    // same image: (a) keeps the same fragment as one pass would (nearer only, the first of a
+    // tie), and (b) computes it as one pass did. A triangle that won no pixel in (a) is hidden
+    // and skips (b).
+    int *ids = j->mode != MODE_WIREFRAME ? xmalloc((size_t)fb->w * fb->h * sizeof(int)) : NULL;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
@@ -347,17 +375,33 @@ static void draw_triangles(Framebuffer *fb, const TriJob *j){
         int row_lo = b * RASTER_BAND_ROWS;
         int row_hi = row_lo + RASTER_BAND_ROWS - 1;
         if (row_hi > fb->h - 1) row_hi = fb->h - 1;
+        int count = 0;
+        for (int c = 0; c < nchunks; c++) count += bins[c].off[b + 1] - bins[c].off[b];
+        unsigned char *won = NULL;
+        if (ids && count > 0){
+            won = xmalloc((size_t)count);
+            for (int y = row_lo; y <= row_hi; y++) memset(ids + (size_t)y * fb->w, 0xff, (size_t)fb->w * sizeof(int));
+            int n = 0;
+            for (int c = 0; c < nchunks; c++)
+                for (int k = bins[c].off[b]; k < bins[c].off[b + 1]; k++, n++)
+                    won[n] = depth_triangle(fb, j, bins[c].tri[k], row_lo, row_hi, ids, n * CLIP_MAX) > 0;
+        }
+        int n = 0;
         for (int c = 0; c < nchunks; c++){
-            for (int k = bins[c].off[b]; k < bins[c].off[b + 1]; k++){
+            for (int k = bins[c].off[b]; k < bins[c].off[b + 1]; k++, n++){
+                if (won && !won[n]) continue;                // nearest nowhere: hidden
                 ClipVert cv[3];
                 FragShader shader;
                 const void *ctx;
                 uint32_t wire;
                 j->vertices(j, bins[c].tri[k], cv, &shader, &ctx, &wire);
-                draw_clip_triangle(fb, cv, j->mode, j->cull, shader, ctx, wire, row_lo, row_hi);
+                draw_clip_triangle(fb, cv, j->mode, j->cull, shader, ctx, wire, row_lo, row_hi,
+                                   ids ? RASTER_SHADE : RASTER_DIRECT, ids, n * CLIP_MAX);
             }
         }
+        free(won);
     }
+    free(ids);
 
     for (int c = 0; c < nchunks; c++){ free(bins[c].tri); free(bins[c].off); }
     free(bins);
