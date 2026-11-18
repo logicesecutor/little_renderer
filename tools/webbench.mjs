@@ -21,7 +21,7 @@
 // --enable-dawn-features=allow_unsafe_apis,disable_robustness); the page never needs them;
 // -log: every console line of the page into a file.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, appendFileSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,14 +60,17 @@ if (shots) q.push('shots=page');
 if (more) q.push(more);
 const url = `${base}?${q.join('&')}`;
 const dir = mkdtempSync(join(tmpdir(), 'lrbench-'));
-const port = 9334;
+// the debugging port: Chrome picks a free one (0) and writes it into DevToolsActivePort in its
+// profile, so two runs at once (a perf run and make web-check) do not collide
+let port = 0;
 const extra = opt('-flags', '').split(' ').filter(s => s);
-const chrome = spawn(exe, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${dir}`, '--no-first-run',
+const chrome = spawn(exe, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${dir}`, '--no-first-run',
                            '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu', ...extra, 'about:blank'], { stdio: 'ignore' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws;
 for (let k = 0; k < 100 && !ws; k++) {
-  try { const t = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); const p = t.find(x => x.type === 'page'); if (p) ws = new WebSocket(p.webSocketDebuggerUrl); } catch {}
+  if (!port) try { port = parseInt(readFileSync(join(dir, 'DevToolsActivePort'), 'utf8').split('\n')[0], 10) || 0; } catch {}
+  if (port) try { const t = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); const p = t.find(x => x.type === 'page'); if (p) ws = new WebSocket(p.webSocketDebuggerUrl); } catch {}
   if (!ws) await sleep(200);
 }
 if (!ws) { console.error('Chrome did not start'); chrome.kill(); if (server) server.close(); process.exit(1); }
