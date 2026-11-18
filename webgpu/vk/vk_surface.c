@@ -1,4 +1,4 @@
-// vk_surface.c - a window's surface (vk_impl.h): a Win32 surface and its swapchain.
+// vk_surface.c - a window's surface (vk_impl.h): a Win32 or X11 surface and its swapchain.
 //
 // The images keep to the layer's rule while the engine has them: wgpuSurfaceGetCurrentTexture
 // acquires one, waits on the CPU until it is free (a fence: so the GPU's queue never stalls
@@ -49,6 +49,9 @@ static void surface_free(Obj *o){
     free(s);
 }
 
+// The window: a Win32 HWND (VK_KHR_win32_surface) or an X11 window (VK_KHR_xlib_surface, on the
+// Display the engine's window.c opened). Without the extension: NULL, and the engine draws
+// offscreen (into a texture read back to the window).
 WGPUSurface wgpuInstanceCreateSurface(WGPUInstance instance, WGPUSurfaceDescriptor const *d){
 #ifdef _WIN32
     const WGPUSurfaceSourceWindowsHWND *src = NULL;
@@ -56,30 +59,41 @@ WGPUSurface wgpuInstanceCreateSurface(WGPUInstance instance, WGPUSurfaceDescript
         if (c->sType == WGPUSType_SurfaceSourceWindowsHWND) src = (const WGPUSurfaceSourceWindowsHWND *)c;
     if (!src || !src->hwnd){ say_once("a surface needs a window (WGPUSurfaceSourceWindowsHWND)"); return NULL; }
     if (!vk.vkCreateWin32SurfaceKHR || !vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR){ say_once("no window surfaces (VK_KHR_win32_surface)"); return NULL; }
+    VkWin32SurfaceCreateInfoKHR ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    ci.hinstance = src->hinstance ? src->hinstance : (void *)GetModuleHandleA(NULL);
+    ci.hwnd = src->hwnd;
+#else
+    const WGPUSurfaceSourceXlibWindow *src = NULL;
+    for (const WGPUChainedStruct *c = d->nextInChain; c; c = c->next)
+        if (c->sType == WGPUSType_SurfaceSourceXlibWindow) src = (const WGPUSurfaceSourceXlibWindow *)c;
+    if (!src || !src->display || !src->window){ say_once("a surface needs an X11 window (WGPUSurfaceSourceXlibWindow)"); return NULL; }
+    if (!vk.vkCreateXlibSurfaceKHR || !vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR){ say_once("no window surfaces (VK_KHR_xlib_surface): drawing offscreen"); return NULL; }
+    VkXlibSurfaceCreateInfoKHR ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    ci.dpy = src->display;
+    ci.window = (unsigned long)src->window;
+#endif
     WGPUSurface s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     obj_init(&s->o, surface_free);
     s->inst = instance;
     obj_ref(&instance->o);
     s->cur = -1;
-    VkWin32SurfaceCreateInfoKHR ci;
-    memset(&ci, 0, sizeof(ci));
-    ci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    ci.hinstance = src->hinstance ? src->hinstance : (void *)GetModuleHandleA(NULL);
-    ci.hwnd = src->hwnd;
+#ifdef _WIN32
     VkResult r = vk.vkCreateWin32SurfaceKHR(instance->vk, &ci, NULL, &s->vk);
+#else
+    VkResult r = vk.vkCreateXlibSurfaceKHR(instance->vk, &ci, NULL, &s->vk);
+#endif
     if (r != VK_SUCCESS){
-        fprintf(stderr, "Vulkan layer: vkCreateWin32SurfaceKHR failed (%d)\n", r);
+        fprintf(stderr, "Vulkan layer: creating the window's surface failed (%d)\n", r);
         s->vk = 0;
         surface_free(&s->o);
         return NULL;
     }
     return s;
-#else
-    (void)instance; (void)d;
-    say_once("window surfaces are Windows only for now: drawing offscreen");
-    return NULL;
-#endif
 }
 
 void wgpuSurfaceRelease(WGPUSurface s){ if (s) obj_unref(&s->o); }

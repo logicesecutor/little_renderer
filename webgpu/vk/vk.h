@@ -775,7 +775,8 @@ typedef struct VkWriteDescriptorSetAccelerationStructureKHR {
 
 typedef struct VkFenceCreateInfo { VkStructureType sType; const void *pNext; VkFlags flags; } VkFenceCreateInfo;
 
-// ---- window surfaces and swapchains (VK_KHR_surface, VK_KHR_win32_surface, VK_KHR_swapchain) ----
+// ---- window surfaces and swapchains (VK_KHR_surface, VK_KHR_win32_surface, VK_KHR_xlib_surface,
+// VK_KHR_swapchain) ----
 typedef struct VkSurfaceCapabilitiesKHR {
     uint32_t minImageCount, maxImageCount;
     VkExtent2D currentExtent, minImageExtent, maxImageExtent;
@@ -798,6 +799,11 @@ typedef struct VkWin32SurfaceCreateInfoKHR {
     VkStructureType sType; const void *pNext; VkFlags flags;
     void *hinstance; void *hwnd;
 } VkWin32SurfaceCreateInfoKHR;
+typedef struct VkXlibSurfaceCreateInfoKHR {
+    VkStructureType sType; const void *pNext; VkFlags flags;
+    void *dpy;                      // Display *
+    unsigned long window;           // Window (an XID)
+} VkXlibSurfaceCreateInfoKHR;
 
 typedef struct VkSwapchainCreateInfoKHR {
     VkStructureType sType; const void *pNext; VkFlags flags;
@@ -916,6 +922,7 @@ typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)(VkPh
 typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)(VkPhysicalDevice, VkSurfaceKHR, uint32_t *, VkSurfaceFormatKHR *);
 typedef VkResult (VKAPI_PTR *PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)(VkPhysicalDevice, VkSurfaceKHR, uint32_t *, uint32_t *);
 typedef VkResult (VKAPI_PTR *PFN_vkCreateWin32SurfaceKHR)(VkInstance, const VkWin32SurfaceCreateInfoKHR *, const void *, VkSurfaceKHR *);
+typedef VkResult (VKAPI_PTR *PFN_vkCreateXlibSurfaceKHR)(VkInstance, const VkXlibSurfaceCreateInfoKHR *, const void *, VkSurfaceKHR *);
 typedef VkResult (VKAPI_PTR *PFN_vkCreateSwapchainKHR)(VkDevice, const VkSwapchainCreateInfoKHR *, const void *, VkSwapchainKHR *);
 typedef void (VKAPI_PTR *PFN_vkDestroySwapchainKHR)(VkDevice, VkSwapchainKHR, const void *);
 typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainImagesKHR)(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);

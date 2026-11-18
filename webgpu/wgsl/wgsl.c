@@ -46,7 +46,7 @@ int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords,
     w.err = err; w.errlen = errlen;
     *words = NULL;
     *nwords = 0;
-    int failed = 0;
+    volatile int failed = 0;         // (volatile: set after the longjmp)
     if (setjmp(w.fail)) failed = 1;
     else {
         wgsl_lex(&w);
