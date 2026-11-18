@@ -185,22 +185,6 @@ static int view_is_live(const GpuView *v){ return gpu_live_has(GPU_LIVE_VIEW, v)
 
 static void v4(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y; d[2] = (float)a.z; d[3] = w; }
 
-// a bind group layout of n buffers, binding i of type types[i], seen by the given stage
-static WGPUBindGroupLayout make_layout(Gpu *g, WGPUShaderStage stage, const WGPUBufferBindingType *types, int n){
-    WGPUBindGroupLayoutEntry e[8];
-    memset(e, 0, sizeof(e));
-    for (int i = 0; i < n; i++){
-        e[i].binding = (uint32_t)i;
-        e[i].visibility = stage;
-        e[i].buffer.type = types[i];
-    }
-    WGPUBindGroupLayoutDescriptor d;
-    memset(&d, 0, sizeof(d));
-    d.entryCount = (size_t)n;
-    d.entries = e;
-    return wgpuDeviceCreateBindGroupLayout(g->device, &d);
-}
-
 static WGPUPipelineLayout make_pipeline_layout(Gpu *g, WGPUBindGroupLayout bgl){
     WGPUPipelineLayoutDescriptor d;
     memset(&d, 0, sizeof(d));
@@ -250,14 +234,8 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     }
     WGPUShaderModule ml = mm[0], mc = mm[1], mcg = mm[2], ms = mm[3], mf = mm[4];
 
-    const WGPUBufferBindingType U = WGPUBufferBindingType_Uniform, R = WGPUBufferBindingType_ReadOnlyStorage,
-                                W = WGPUBufferBindingType_Storage;
-    const WGPUBufferBindingType light_b[6] = {U, R, R, W, U, R};
-    const WGPUBufferBindingType comp_b[7] = {U, R, R, R, R, R, R};
-    const WGPUBufferBindingType stats_b[5] = {U, R, W, W, U};
-    const WGPUBufferBindingType finish_b[4] = {U, R, W, U};
-    v->light_bgl = make_layout(g, WGPUShaderStage_Compute, light_b, 6);
-    v->comp_bgl = make_layout(g, WGPUShaderStage_Fragment, comp_b, 7);
+    v->light_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWUR");
+    v->comp_bgl = gpu_layout(g, WGPUShaderStage_Fragment, "URRRRRR");
     {   // the same, with bindings 4 and 5 as the rasterizer's color and depth textures
         WGPUBindGroupLayoutEntry e[8];
         memset(e, 0, sizeof(e));
@@ -267,7 +245,8 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
             if (i == 4 || i == 5){
                 e[i].texture.sampleType = i == 4 ? WGPUTextureSampleType_Float : WGPUTextureSampleType_Depth;
                 e[i].texture.viewDimension = WGPUTextureViewDimension_2D;
-            } else e[i].buffer.type = i < 7 ? comp_b[i] : R;      // 7: the path tracer's samples
+            } else e[i].buffer.type = i == 0 ? WGPUBufferBindingType_Uniform   // (as comp_bgl; 7: the path tracer's samples)
+                                             : WGPUBufferBindingType_ReadOnlyStorage;
         }
         WGPUBindGroupLayoutDescriptor d;
         memset(&d, 0, sizeof(d));
@@ -276,8 +255,8 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         v->comp_gpu_bgl = wgpuDeviceCreateBindGroupLayout(g->device, &d);
     }
     WGPUPipelineLayout comp_gpu_pl = make_pipeline_layout(g, v->comp_gpu_bgl);
-    v->stats_bgl = make_layout(g, WGPUShaderStage_Compute, stats_b, 5);
-    v->finish_bgl = make_layout(g, WGPUShaderStage_Compute, finish_b, 4);
+    v->stats_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URWWU");
+    v->finish_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URWU");
     WGPUPipelineLayout light_pl = make_pipeline_layout(g, v->light_bgl);
     WGPUPipelineLayout comp_pl = make_pipeline_layout(g, v->comp_bgl);
     WGPUPipelineLayout stats_pl = make_pipeline_layout(g, v->stats_bgl);
@@ -534,7 +513,7 @@ static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, voi
     if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
         if (status == WGPUMapAsyncStatus_Error)
             fprintf(stderr, "GPU: reading the frame back failed: %.*s\n",
-                    msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+                    gpu_sv_len(msg), msg.data ? msg.data : "");
         // whoever waits for the frame is told (the device is still ready: it would wait for ever)
         if (v->cap_fn) v->cap_fn(v->cap_user, NULL, v->w, v->h);
         return;
@@ -1064,7 +1043,7 @@ static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void 
     if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
         if (status == WGPUMapAsyncStatus_Error)
             fprintf(stderr, "GPU: reading the path traced image back failed: %.*s\n",
-                    msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+                    gpu_sv_len(msg), msg.data ? msg.data : "");
         // whoever waits for the image is told (the device is still ready: it would wait for ever)
         if (v->t_read_fn) v->t_read_fn(v->t_read_user, NULL, v->w, v->h);
         return;

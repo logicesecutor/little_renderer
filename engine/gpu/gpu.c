@@ -73,7 +73,7 @@ void gpu_set_vsync(int on){ no_vsync = !on; }
 
 static void fail(Gpu *g, const char *what, WGPUStringView msg){
     g->state = GPU_FAILED;
-    snprintf(g->message, sizeof(g->message), "%s: %.*s", what, msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0,
+    snprintf(g->message, sizeof(g->message), "%s: %.*s", what, gpu_sv_len(msg),
              msg.data ? msg.data : "");
     fprintf(stderr, "GPU: %s\n", g->message);
 }
@@ -81,7 +81,7 @@ static void fail(Gpu *g, const char *what, WGPUStringView msg){
 static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView msg, void *u1, void *u2){
     (void)device; (void)u1; (void)u2;
     fprintf(stderr, "GPU error %d: %.*s\n", (int)type,
-            msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+            gpu_sv_len(msg), msg.data ? msg.data : "");
 }
 
 // ---- the objects alive (gpu_internal.h): views, fluids, rigid worlds, timers and the Gpu
@@ -211,7 +211,7 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
         g->message[0] = 0;
         for (int k = 0; k < 4; k++){
             WGPUStringView p = parts[k];
-            size_t n = p.data ? (p.length == WGPU_STRLEN ? strlen(p.data) : p.length) : 0;
+            size_t n = (size_t)gpu_sv_len(p);
             while (n && p.data[n - 1] == ' ') n--;
             if (!n || at + n + 2 >= sizeof(g->message)) continue;
             if (at){ memcpy(g->message + at, k == 3 ? ", " : " ", k == 3 ? 2 : 1); at += k == 3 ? 2 : 1; }
@@ -549,19 +549,26 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
     return wgpuDeviceCreateBindGroupLayout(g->device, &d);
 }
 
-WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl){
-    WGPUShaderModule m = gpu_shader(g, label, wgsl);
+// a compute pipeline's descriptor (its layout of the one group bgl, made here: release it)
+static WGPUComputePipelineDescriptor compute_desc(Gpu *g, const char *label, WGPUShaderModule m, const char *entry,
+                                                  WGPUBindGroupLayout bgl){
     WGPUPipelineLayoutDescriptor ld;
     memset(&ld, 0, sizeof(ld));
     ld.bindGroupLayoutCount = 1;
     ld.bindGroupLayouts = &bgl;
-    WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(g->device, &ld);
     WGPUComputePipelineDescriptor cd;
     memset(&cd, 0, sizeof(cd));
     cd.label = gpu_str(label);
-    cd.layout = pl;
+    cd.layout = wgpuDeviceCreatePipelineLayout(g->device, &ld);
     cd.compute.module = m;
     cd.compute.entryPoint = gpu_str(entry);
+    return cd;
+}
+
+WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl){
+    WGPUShaderModule m = gpu_shader(g, label, wgsl);
+    WGPUComputePipelineDescriptor cd = compute_desc(g, label, m, entry, bgl);
+    WGPUPipelineLayout pl = cd.layout;
     WGPUComputePipeline p = wgpuDeviceCreateComputePipeline(g->device, &cd);
     wgpuPipelineLayoutRelease(pl);
     wgpuShaderModuleRelease(m);
@@ -587,7 +594,7 @@ static void on_pipeline(WGPUCreatePipelineAsyncStatus status, WGPUComputePipelin
     GpuPipeReq *r = u1;
     if (status != WGPUCreatePipelineAsyncStatus_Success){
         fprintf(stderr, "GPU error: pipeline %s: %.*s\n", r->label,
-                msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+                gpu_sv_len(msg), msg.data ? msg.data : "");
         if (r->slot) *r->state = -1;
         if (p) wgpuComputePipelineRelease(p);
     } else if (r->slot){
@@ -608,17 +615,8 @@ GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const
         r->state = state;
         snprintf(r->label, sizeof(r->label), "%s", label);
         WGPUShaderModule m = gpu_shader(g, label, wgsl);
-        WGPUPipelineLayoutDescriptor ld;
-        memset(&ld, 0, sizeof(ld));
-        ld.bindGroupLayoutCount = 1;
-        ld.bindGroupLayouts = &bgl;
-        WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(g->device, &ld);
-        WGPUComputePipelineDescriptor cd;
-        memset(&cd, 0, sizeof(cd));
-        cd.label = gpu_str(label);
-        cd.layout = pl;
-        cd.compute.module = m;
-        cd.compute.entryPoint = gpu_str(entry);
+        WGPUComputePipelineDescriptor cd = compute_desc(g, label, m, entry, bgl);
+        WGPUPipelineLayout pl = cd.layout;
         WGPUCreateComputePipelineAsyncCallbackInfo ci;
         memset(&ci, 0, sizeof(ci));
         ci.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -663,6 +661,8 @@ struct GpuTimer {
 // (a readback's callback can arrive, cancelled, after gpu_timer_destroy: the list of the
 // objects alive)
 static int timer_is_live(const GpuTimer *t){ return gpu_live_has(GPU_LIVE_TIMER, t); }
+// a readback on its way waited for (at most 400 waits: a device that stopped answering)
+static void timer_settle(GpuTimer *t){ for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g); }
 
 GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     if (!g || !g->timestamps || passes <= 0) return NULL;
@@ -759,7 +759,7 @@ void gpu_timer_units(GpuTimer *t, double units){
 
 double gpu_timer_ms_per_unit(GpuTimer *t, int stage){
     if (!t || stage < 0 || stage >= t->stages) return 0;
-    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    timer_settle(t);
     return t->units[stage] > 0 ? t->ns[stage] / t->units[stage] / 1e6 : 0;
 }
 
@@ -769,7 +769,7 @@ void gpu_timer_submitted(GpuTimer *t){
 
 void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
     if (!t) return;
-    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    timer_settle(t);
     if (t->rounds == 0) return;
     double total = 0;
     for (int s = 0; s < t->stages; s++) total += t->ns[s];
@@ -782,7 +782,7 @@ void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names){
 
 void gpu_timer_reset(GpuTimer *t){
     if (!t) return;
-    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    timer_settle(t);
     for (int s = 0; s < t->stages; s++){ t->ns[s] = 0; t->units[s] = 0; t->calls[s] = 0; t->ns_seen[s] = 0; t->units_seen[s] = 0; }
     t->span_ns = 0;
     t->rounds = 0;
@@ -799,7 +799,7 @@ double gpu_timer_recent_ms_per_unit(GpuTimer *t, int stage){
 
 double gpu_timer_ms_per_round(GpuTimer *t){
     if (!t) return 0;
-    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    timer_settle(t);
     double total = 0;
     for (int s = 0; s < t->stages; s++) total += t->ns[s];
     return t->rounds > 0 ? total / t->rounds / 1e6 : 0;
@@ -807,7 +807,7 @@ double gpu_timer_ms_per_round(GpuTimer *t){
 
 void gpu_timer_destroy(GpuTimer *t){
     if (!t) return;
-    for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g);
+    timer_settle(t);
     gpu_live_remove(GPU_LIVE_TIMER, t);
     if (t->qs) wgpuQuerySetRelease(t->qs);      // (our layer has no wgpuQuerySetDestroy)
     if (t->resolve){ wgpuBufferDestroy(t->resolve); wgpuBufferRelease(t->resolve); }
@@ -843,17 +843,24 @@ WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channel
     return tex;
 }
 
-WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){
-    WGPUBindGroupEntry e[16];
-    memset(e, 0, sizeof(e));
+// the entries of n buffers (binding i: bufs[i], whole; NULL = a number the layout skips, '-');
+// the count of them
+static int fill_entries(WGPUBindGroupEntry e[16], const WGPUBuffer *bufs, int n){
+    memset(e, 0, 16 * sizeof(e[0]));
     int m = 0;
     for (int i = 0; i < n && i < 16; i++){
-        if (!bufs[i]) continue;                  // a number the layout skips ('-')
+        if (!bufs[i]) continue;
         e[m].binding = (uint32_t)i;
         e[m].buffer = bufs[i];
         e[m].size = WGPU_WHOLE_SIZE;
         m++;
     }
+    return m;
+}
+
+WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){
+    WGPUBindGroupEntry e[16];
+    int m = fill_entries(e, bufs, n);
     WGPUBindGroupDescriptor d;
     memset(&d, 0, sizeof(d));
     d.layout = bgl;
@@ -916,15 +923,7 @@ WGPUBindGroup gpu_bind_cached(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, 
 
 WGPUBindGroup gpu_bind_cached_buffers(Gpu *g, GpuBindCache *c, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n){
     WGPUBindGroupEntry e[16];
-    memset(e, 0, sizeof(e));
-    int m = 0;
-    for (int i = 0; i < n && i < 16; i++){
-        if (!bufs[i]) continue;                  // a number the layout skips ('-')
-        e[m].binding = (uint32_t)i;
-        e[m].buffer = bufs[i];
-        e[m].size = WGPU_WHOLE_SIZE;
-        m++;
-    }
+    int m = fill_entries(e, bufs, n);
     return gpu_bind_cached(g, c, bgl, e, m, NULL);
 }
 

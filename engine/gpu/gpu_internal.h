@@ -6,6 +6,7 @@
 #ifdef LR_GPU
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <webgpu/webgpu.h>
 #ifdef LR_VK
 #include "vk/webgpu_rt.h"     // hardware ray tracing: our Vulkan layer's extension
@@ -50,6 +51,8 @@ struct Gpu {
 #define GPU_WGSL_EXPORT(name, file) extern const char lr_wgsl_##file[]; const char *const name = lr_wgsl_##file
 
 static inline WGPUStringView gpu_str(const char *s){ WGPUStringView v = {s, WGPU_STRLEN}; return v; }
+// a string view's length (for "%.*s"): WGPU_STRLEN means up to its 0
+static inline int gpu_sv_len(WGPUStringView s){ return s.data ? (int)(s.length == WGPU_STRLEN ? strlen(s.data) : s.length) : 0; }
 
 // One more reference to a buffer, a texture or a view (the bind groups kept by
 // gpu_bind_cached, the shared atlas). The webgpu.h of today names it wgpu...AddRef: our copy
