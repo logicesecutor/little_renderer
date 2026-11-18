@@ -203,6 +203,10 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
 // the sky or a lamp after min_sky (0: min_samples). gpu_trace_adapt, after a gpu_trace_encode
 // in the same submission, decides it for every tile; 0 if it did nothing (off, no planes).
 void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples, int min_sky);
+// AS3: the bands gpu_trace_encode makes from now on (until set to 0) add, after their passes,
+// one more sample to each pixel that then has at most `fill` (the single kernel, with the
+// guide's planes; not when a band has MAX_REPS passes)
+void gpu_trace_set_fill(GpuTrace *t, int fill);
 int gpu_trace_adapt(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
 // Before the first band of an image: each pixel's guide for the denoiser (with no samples),
 // and with history > 0 the samples of the previous image reprojected (at most history each).

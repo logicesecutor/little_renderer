@@ -29,6 +29,7 @@ double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
 void gpu_view_trace_adaptive(GpuView *v, double threshold){ (void)v; (void)threshold; }
+void gpu_view_trace_fill(GpuView *v, int fill){ (void)v; (void)fill; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
 void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
@@ -142,6 +143,8 @@ struct GpuView {
     int den_failed, denoise, den_bands;
     int den_move;               // its a-trous passes while things move (0: all; gpu_view_trace_denoise_moving)
     double adapt_thr;           // gpu_view_trace_adaptive: the error a tile of a still image stops at (0: off)
+    int fill;                   // gpu_view_trace_fill: a second sample for pixels with fewer than this many (AS3; 0: off)
+    int t_reproj;               // the image was carried over from the last one (gpu_view_trace_move)
     double t_submit_ms, t_pass_t0, t_pass_ms;
     // reading the samples back
     WGPUBuffer t_rb;
@@ -787,6 +790,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     v->tparams = *tp;
     v->t_prep = 1;
     v->t_hist = 0;
+    v->t_reproj = 0;
     v->t_y = 0;
     // a new image starts its samples at a multiple of 2^16: the first n of them are then as
     // evenly spread as the sequence allows (while things move, the count just goes on, so
@@ -807,7 +811,7 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
     if (v->trace_failed) return 0;
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
-    if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; }   // (an image not begun yet has nothing to keep)
+    if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; v->t_reproj = 1; }   // (an image not begun yet has nothing to keep)
     // the bands go on where they were: on a slow GPU (a band per frame) every row gets its turn
     v->t_passes = v->t_done = v->t_done_next = 0;
     v->t_bands = 0;
@@ -917,6 +921,9 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     }
     v->t_sub_rows = rows;
     v->t_sub_reps = reps;
+    // AS3 (gpu_view_trace_fill): an image carried over, until its first whole pass: the pixels
+    // the reprojection found little for (uncovered by what moved) take a second sample
+    gpu_trace_set_fill(v->trace, v->fill > 0 && v->t_reproj && v->t_passes == 0 ? v->fill - 1 + reps : 0);
     gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
     // adaptive sampling (gpu_view_trace_adaptive): a still image's tiles decided as a pass ends,
     // every ADAPT_EVERY passes (whatever moves starts the image over with every tile on)
@@ -1052,6 +1059,8 @@ double gpu_view_bench_denoise(GpuView *v, int n){
 }
 
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ if (v) v->den_move = passes > 0 ? passes : 0; }
+
+void gpu_view_trace_fill(GpuView *v, int fill){ if (v) v->fill = fill > 0 ? fill : 0; }
 
 void gpu_view_trace_adaptive(GpuView *v, double threshold){
     if (!v) return;

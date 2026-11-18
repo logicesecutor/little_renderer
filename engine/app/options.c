@@ -162,7 +162,9 @@ void options_usage(Program prog, FILE *f){
         "  -simhz n                   with -sim on: physics steps per second at most; frames between\n"
         "                             steps refine the same image (60; 0: a step every frame)\n"
         "  -denoisemove n             GPU denoiser while things move: its passes, 1-5 (a footprint of\n"
-        "                             5 to 65 pixels), cheaper and less smooth (3; 0: all 5, as still)\n");
+        "                             5 to 65 pixels), cheaper and less smooth (3; 0: all 5, as still)\n"
+        "  -fill n                    GPU path tracing while moving: pixels the reprojection left with\n"
+        "                             fewer than n samples (uncovered) take a second one (0: off)\n");
     fprintf(f, "\n  -h, --help                 this text\n");
 }
 
@@ -230,6 +232,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     o->sim_hz = 60;
     o->denoise_move = 3;
     o->adaptive = prog == PROG_VIEW ? 0.004 : 0;   // (1/255 of the image shown; render: every pixel its -s)
+    o->fill = 0;                           // (measured: a second sample there costs 16% of the frames in the sky demo)
     o->march = march_default_params();
     o->probe = 1;
     o->probe_res = 0;                      // PROBE_RES in a room, PROBE_RES_OPEN under a sky
@@ -302,6 +305,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-simhz")) o->sim_hz = atof(v);
         else if (!strcmp(a, "-denoisemove")) o->denoise_move = atoi(v);
         else if (!strcmp(a, "-adaptive")) o->adaptive = atof(v);
+        else if (!strcmp(a, "-fill")) o->fill = atoi(v);
         else if (!strcmp(a, "-history")) o->history = atoi(v);
         else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
         else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);

@@ -109,6 +109,11 @@ void gpu_view_trace_denoise_moving(GpuView *v, int passes);
 // 0.004) stops taking samples for the rest of the image. While things move every tile takes
 // them. 0 (the default): off.
 void gpu_view_trace_adaptive(GpuView *v, double threshold);
+// AS3: an image carried over from the last one (gpu_view_trace_move), until its first whole
+// pass: each pixel with fewer than `fill` samples before the pass (the reprojection found
+// little for it: uncovered by what moved) takes a second one in the same band. 0 (the
+// default): off.
+void gpu_view_trace_fill(GpuView *v, int fill);
 // Shows the image so far. During the first pass, pixels with no sample yet show the scene
 // rasterized (with its media if volumes = 1), so the picture is painted over, not blanked.
 int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes);

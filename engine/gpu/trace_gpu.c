@@ -163,6 +163,7 @@ struct GpuTrace {
     float adapt_thr;                   // gpu_trace_set_adaptive: the error a tile stops at (0: off)
     int adapt_min;                     // ... and the samples each pixel takes first
     int adapt_sky;                     // ... in a tile of sky or lamp only (AS2; 0: as the others)
+    int fill;                          // gpu_trace_set_fill: a second sample for pixels with at most this many (AS3; 0: none)
     WGPUBuffer params, rp_params, blue;   // parameters (MAX_REPS copies), reprojection's, blue noise
     WGPUBuffer acc[2];       // the image's samples, and (once reprojected) the previous image's
     int cur;                 // which one is the image's
@@ -1559,12 +1560,33 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
     wgpuQueueWriteBuffer(g->queue, dst, 0, buf, (size_t)(reps - 1) * GTP_STRIDE + sizeof(P));
 }
 
+// as write_params, and with fill > 0 (reps < MAX_REPS) one more copy after them for the fill
+// dispatch (AS3): only the pixels with at most `fill` samples take one, number index + reps
+// moved far along the sequence (a point of it none of them took)
+static void write_params_fill(GpuTrace *t, const Scene *s, const GpuTraceParams *tp, int y0, int rows,
+                              int nvolumes, uint32_t index, int reps, int fill){
+    Gpu *g = t->g;
+    GTP P;
+    fill_params(t, &P, s, tp, y0, rows, nvolumes, 0);
+    if (reps < 1) reps = 1;
+    if (reps > MAX_REPS) reps = MAX_REPS;
+    const int n = fill > 0 && reps < MAX_REPS ? reps + 1 : reps;
+    unsigned char buf[GTP_STRIDE * MAX_REPS];
+    for (int r = 0; r < n; r++){
+        P.cnt[2] = r < reps ? index + (uint32_t)r : (index + (uint32_t)r) ^ 0x40000000u;
+        P.ad[3] = r < reps ? 0u : (uint32_t)fill;
+        memcpy(buf + (size_t)r * GTP_STRIDE, &P, sizeof(P));
+    }
+    wgpuQueueWriteBuffer(g->queue, t->params, 0, buf, (size_t)(n - 1) * GTP_STRIDE + sizeof(P));
+}
+
 // `repeats` dispatches, the r-th with the r-th copy of the parameters (light = 1: the light
 // tracer, whose binding 11 takes the place of 9; 3: the path tracer's bindings, timed as the
 // guide; 4: its bindings, not timed): one bind group, the copy chosen by its dynamic offset
-// (it was a bind group per dispatch, each several us of the CPU's time)
-static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
-                        WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
+// (it was a bind group per dispatch, each several us of the CPU's time); dispatch_at: from the
+// first-th copy on
+static void dispatch_at(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
+                        WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light, int first){
     const int guide = light == 3, untimed = light == 4;
     if (guide || untimed) light = 0;
     WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
@@ -1605,12 +1627,17 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
 #endif
     WGPUBindGroup bg = gpu_bind_cached(t->g, &t->bc_trace[light], light ? t->lt_bgl : t->bgl, e, nent, chain);
     for (int r = 0; r < repeats; r++){
-        uint32_t off = (uint32_t)(r * GTP_STRIDE);
+        uint32_t off = (uint32_t)((first + r) * GTP_STRIDE);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
         gpu_dispatch(pass, threads);
     }
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
+}
+
+static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
+                        WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
+    dispatch_at(t, enc, pipe, threads, repeats, frame_u, dens, bricks, vstat, light, 0);
 }
 
 static void dispatch(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
@@ -1813,9 +1840,16 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
         wf_encode(t, enc, s, tp, y0, rows, repeats, nvolumes, index, frame_u, dens, bricks, vstat);
         return;
     }
-    write_params(t, t->params, s, tp, y0, rows, nvolumes, index, repeats, 0);
-    dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
+    // AS3 (gpu_trace_set_fill): after the band's passes, a second sample for the pixels that
+    // still have few (an image carried over: those the reprojection found nothing for)
+    const int fill = t->fill > 0 && t->planes == 5 && repeats < MAX_REPS ? t->fill : 0;
+    write_params_fill(t, s, tp, y0, rows, nvolumes, index, repeats, fill);
+    WGPUComputePipeline pipe = sky_kernels(t, s) ? t->pipe_sky : t->pipe;
+    dispatch(t, enc, pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
+    if (fill) dispatch_at(t, enc, pipe, (size_t)t->w * rows, 1, frame_u, dens, bricks, vstat, 4, repeats < 1 ? 1 : repeats);
 }
+
+void gpu_trace_set_fill(GpuTrace *t, int fill){ if (t) t->fill = fill > 0 ? fill : 0; }
 
 void gpu_trace_set_adaptive(GpuTrace *t, double threshold, int min_samples, int min_sky){
     if (!t) return;
