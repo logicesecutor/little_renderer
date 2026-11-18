@@ -493,8 +493,8 @@ static RenderParams raster_params(Vec3 at){
 
 // A new path traced image on the GPU, for the camera as it is now. 0 = this GPU cannot hold
 // the scene: the CPU path traces from now on.
-static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
-    GpuTraceParams tp = trace_params(cam, max_depth);
+static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
+    GpuTraceParams tp = trace_params(cam, depth);
     scene_trees();               // (the meshes' own trees are copied when the scene is new)
     if (!gpu_view_trace_start(gview, &scene, &tp)){
         o.gpu_trace = 0;
@@ -505,7 +505,7 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
     last_rp = raster_params(at);
     gpu_tracing = 1;
     gpu_cam = *cam;
-    gpu_depth = max_depth;
+    gpu_depth = depth;
     gpu_shown_passes = -1;
     force_present = 1;
     return 1;
@@ -521,15 +521,15 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int max_depth){
 // physics' new state carry the image over (each pixel keeps the samples of its surface,
 // then the denoiser smooths what is new); other changes (bounces, a reset) start over.
 // 0 = this GPU cannot hold the scene: the CPU path traces from now on.
-static int gpu_trace_frame(const Camera *cam, Vec3 at, int max_depth){
+static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
     gpu_scene_moved |= sim_moved;
-    if (!gpu_tracing || reset || max_depth != gpu_depth){
-        if (!gpu_trace_begin(cam, at, max_depth)) return 0;
+    if (!gpu_tracing || reset || depth != gpu_depth){
+        if (!gpu_trace_begin(cam, at, depth)) return 0;
         gpu_scene_moved = 0;
     } else if ((gpu_scene_moved || memcmp(cam, &gpu_cam, sizeof(*cam)) != 0) && !gpu_view_trace_busy(gview)){
         // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
         // last image as it is, with the raster of its own camera, not a newer one)
-        GpuTraceParams tp = trace_params(cam, max_depth);
+        GpuTraceParams tp = trace_params(cam, depth);
         int keep = gpu_scene_moved && o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : o.history;
         gpu_scene_moved = 0;
         int moved;

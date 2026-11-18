@@ -456,19 +456,19 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                 const Material *m = hit_shading(s, &hit, v_neg(ray.d), &mtex);
                 if (m->type == MAT_LIGHT) break;
 
-                Bsdf b = bsdf_make(m, hit.front_face);
+                Bsdf bsdf = bsdf_make(m, hit.front_face);
                 Vec3 wi = v_neg(ray.d);                   // towards where the light came from
                 real cg = r_fabs(v_dot(hit.ng, wi)), cs = r_fabs(v_dot(hit.n, wi));
                 real corr = cg > 0 ? cs / cg : 0;         // smooth normals (adjoint BSDF)
                 // 1. connect the BSDF's rough part to the camera (not at the first vertex:
                 //    lamp -> rough surface is the path tracer's, by NEE)
-                if (depth > 0 && bsdf_rough_part(&b)){
+                if (depth > 0 && bsdf_rough_part(&bsdf)){
                     Vec3 to_cam = v_sub(cam->origin, hit.p);
                     real dist2 = v_dot(to_cam, to_cam), dist = r_sqrt(dist2);
                     Vec3 wo = v_scale(to_cam, 1.0 / dist);
                     real cos_o = v_dot(hit.ng, wo);           // > 0: the camera on the light's side
                     // the BSDF seen from the camera (v = wo, l = wi): its side's normal and index
-                    Bsdf bc = cos_o > 0 ? b : bsdf_make(m, !hit.front_face);
+                    Bsdf bc = cos_o > 0 ? bsdf : bsdf_make(m, !hit.front_face);
                     Vec3 nc = cos_o > 0 ? hit.n : v_neg(hit.n);
                     real pdf;
                     Vec3 f = cos_o != 0 && v_dot(nc, wo) > 0 ? bsdf_eval(&bc, nc, wo, wi, &pdf) : vec3(0, 0, 0);
@@ -501,13 +501,13 @@ void light_trace_caustics(const Scene *s, const Camera *cam, int w, int h, long 
                 //    radiance's (eta_to / eta_from)^2.
                 BsdfSample bs;
                 real ul = rng_real(&rng), u1 = rng_real(&rng), u2 = rng_real(&rng);
-                if (!bsdf_sample(&b, hit.n, wi, ul, u1, u2, &bs)) break;
+                if (!bsdf_sample(&bsdf, hit.n, wi, ul, u1, u2, &bs)) break;
                 if (depth == 0 && !bs.delta) break;           // lamp -> rough: the path tracer's
                 real og = v_dot(hit.ng, bs.l), os = v_dot(hit.n, bs.l);
                 if (!bs.delta && (bs.through ? og >= 0 : og <= 0)) break;   // (only with smooth normals)
                 Vec3 f = bs.w;
                 if (!bs.delta) f = v_scale(f, os != 0 ? corr * r_fabs(og / os) : 0);
-                if (bs.through) f = v_scale(f, b.eta * b.eta);
+                if (bs.through) f = v_scale(f, bsdf.eta * bsdf.eta);
                 beta = v_mul(beta, f);
                 thr = v_mul(thr, f);
                 if (depth >= RR_START){

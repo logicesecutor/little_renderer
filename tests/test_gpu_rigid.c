@@ -127,9 +127,9 @@ static void test_meshes(void){
     world_init(&w, 1);
     rigid_set_room(&w.pw.rigid, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     int n = box_tris(tri, vec3(50, 20, 35), turn, vec3(10, 30, -5));
-    int g = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
+    int geom = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
     Xform place = xform_make(vec3(278, 300, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0.3, 0.5), 0.9)).m, 1);
-    int b = rigid_add_hull_body(&w.pw.rigid, g, place, 1);
+    int b = rigid_add_hull_body(&w.pw.rigid, geom, place, 1);
     world_start(&w, 1);
     world_run(&w, 3.0);
     real y = w.pw.rigid.bodies[b].pos.y;
@@ -137,7 +137,7 @@ static void test_meshes(void){
     Vec3 top = w.pw.rigid.bodies[b].pos;
     Xform on = body_mesh_xform(&w.pw.rigid.bodies[b]);
     on.m[1][3] += 2 * y + 1;
-    int b2 = rigid_add_hull_body(&w.pw.rigid, g, on, 1);
+    int b2 = rigid_add_hull_body(&w.pw.rigid, geom, on, 1);
     world_run(&w, 3.0);
     check_near("second hull on the first: height difference", w.pw.rigid.bodies[b2].pos.y - w.pw.rigid.bodies[b].pos.y, 2 * y, 1.5);
     check_near("second hull drift sideways", r_fabs(w.pw.rigid.bodies[b2].pos.x - top.x) + r_fabs(w.pw.rigid.bodies[b2].pos.z - top.z), 0, 2);
@@ -147,8 +147,8 @@ static void test_meshes(void){
     world_init(&w, 1);
     rigid_set_room(&w.pw.rigid, (Aabb){vec3(0, 0, 0), vec3(555, 555, 555)});
     n = torus_tris(tri, 60, 20, 32, 16);
-    g = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
-    b = rigid_add_hull_body(&w.pw.rigid, g, xform_make(vec3(278, 200, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0, 0.3), 0.5)).m, 1), 1);
+    geom = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
+    b = rigid_add_hull_body(&w.pw.rigid, geom, xform_make(vec3(278, 200, 278), quat_to_mat3(quat_axis_angle(vec3(1, 0, 0.3), 0.5)).m, 1), 1);
     world_start(&w, 1);
     world_run(&w, 4.0);
     check_near("torus hull lands flat: centre height", w.pw.rigid.bodies[b].pos.y, 20, 1.5);
@@ -161,8 +161,8 @@ static void test_meshes(void){
     rigid_add_mesh_collider(&w.pw.rigid, gm, xform_make(vec3(278, 0, 278), mat3_identity().m, 1));
     int s = rigid_add_sphere(&w.pw.rigid, vec3(220, 300, 278), 25, 1);
     n = box_tris(tri, vec3(30, 20, 30), mat3_identity(), vec3(0, 0, 0));
-    g = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
-    int hb = rigid_add_hull_body(&w.pw.rigid, g, xform_make(vec3(330, 250, 300), quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), 0.4)).m, 1), 1);
+    geom = rigid_geom_hull(&w.pw.rigid, tri, n, 0);
+    int hb = rigid_add_hull_body(&w.pw.rigid, geom, xform_make(vec3(330, 250, 300), quat_to_mat3(quat_axis_angle(vec3(0, 1, 0), 0.4)).m, 1), 1);
     int bx = rigid_add_box(&w.pw.rigid, vec3(278, 400, 220), vec3(20, 20, 20), quat_identity(), 1);
     world_start(&w, 1);
     world_run(&w, 4.0);

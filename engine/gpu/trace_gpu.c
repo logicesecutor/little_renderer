@@ -1112,25 +1112,25 @@ static int upload_world(GpuTrace *t, const Scene *s){
         float *bx = pr;
         for (int i = 0; i < s->nprims; i++){
             const Primitive *p = &s->prims[i];
-            Aabb b;
+            Aabb pb;
             if (p->type == PRIM_QUAD){
-                b.lo = b.hi = p->q;
+                pb.lo = pb.hi = p->q;
                 Vec3 c[3] = {v_add(p->q, p->u), v_add(p->q, p->v), v_add(v_add(p->q, p->u), p->v)};
                 for (int k = 0; k < 3; k++){
-                    b.lo = vec3(r_fmin(b.lo.x, c[k].x), r_fmin(b.lo.y, c[k].y), r_fmin(b.lo.z, c[k].z));
-                    b.hi = vec3(r_fmax(b.hi.x, c[k].x), r_fmax(b.hi.y, c[k].y), r_fmax(b.hi.z, c[k].z));
+                    pb.lo = vec3(r_fmin(pb.lo.x, c[k].x), r_fmin(pb.lo.y, c[k].y), r_fmin(pb.lo.z, c[k].z));
+                    pb.hi = vec3(r_fmax(pb.hi.x, c[k].x), r_fmax(pb.hi.y, c[k].y), r_fmax(pb.hi.z, c[k].z));
                 }
             } else {
                 Vec3 r = vec3(p->radius, p->radius, p->radius);
-                b.lo = v_sub(p->center, r); b.hi = v_add(p->center, r);
+                pb.lo = v_sub(p->center, r); pb.hi = v_add(p->center, r);
             }
-            Vec3 d = v_sub(b.hi, b.lo);
+            Vec3 d = v_sub(pb.hi, pb.lo);
             real pad = 1e-4 * (d.x + d.y + d.z) + 1e-4;
             Vec3 pv = vec3(pad, pad, pad);
-            b.lo = v_sub(b.lo, pv); b.hi = v_add(b.hi, pv);
+            pb.lo = v_sub(pb.lo, pv); pb.hi = v_add(pb.hi, pv);
             float *o = bx + 6 * (size_t)i;
-            o[0] = (float)b.lo.x; o[1] = (float)b.lo.y; o[2] = (float)b.lo.z;
-            o[3] = (float)b.hi.x; o[4] = (float)b.hi.y; o[5] = (float)b.hi.z;
+            o[0] = (float)pb.lo.x; o[1] = (float)pb.lo.y; o[2] = (float)pb.lo.z;
+            o[3] = (float)pb.hi.x; o[4] = (float)pb.hi.y; o[5] = (float)pb.hi.z;
         }
         gpu_buffer_reserve(g, &t->hw_boxes, &t->hw_boxes_cap, (size_t)(s->nprims + 1) * 24, st, "spheres' and quads' boxes");
         if (s->nprims) wgpuQueueWriteBuffer(g->queue, t->hw_boxes, 0, bx, (size_t)s->nprims * 24);

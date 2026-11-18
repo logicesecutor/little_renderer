@@ -486,18 +486,17 @@ static void collide_walls(RigidWorld *w, int ia, real m){
             }
     } else if (b->shape == BODY_HULL){
         // the hull's corners below each wall (or within the margin), at most 4 per wall
-        const real mg = m;
         Placed pl, *p = &pl;         // (on the stack: a few KB, not a malloc per body and step)
         place(b, p);
         for (int k = 0; k < 6; k++){
             ConvexContact c[MAX_HULL_VERTS];
-            int m = 0;
+            int nc = 0;
             for (int i = 0; i < p->wc.c->nv; i++){
                 real d = v_dot(n[k], p->v[i]) - off[k];
-                if (d < mg){ c[m].p = p->v[i]; c[m].n = n[k]; c[m].depth = -d; m++; }
+                if (d < m){ c[nc].p = p->v[i]; c[nc].n = n[k]; c[nc].depth = -d; nc++; }
             }
-            m = convex_reduce(c, m, 4);
-            for (int i = 0; i < m; i++) add_contact(w, ia, -1, c[i].p, c[i].n, c[i].depth);
+            nc = convex_reduce(c, nc, 4);
+            for (int i = 0; i < nc; i++) add_contact(w, ia, -1, c[i].p, c[i].n, c[i].depth);
         }
     }
 }
@@ -568,14 +567,13 @@ static void collide_mesh(RigidWorld *w, int ia, int im, real mg){
     Mat3 r = quat_to_mat3(m->rot), rt = mat3_transpose(r);
     // the body's box in the mesh's frame: a sphere's, or around its corners there
     Aabb q;
-    Placed *p = NULL;
+    Placed pl, *p = NULL;        // (a hull's corners: on the stack, not a malloc per pair and step)
     if (a->shape == BODY_SPHERE){
         real rad = a->half.x + mg;
         Vec3 c = mat3_mul_vec(rt, v_sub(a->pos, m->pos));
         q = (Aabb){v_sub(c, vec3(rad, rad, rad)), v_add(c, vec3(rad, rad, rad))};
     } else {
-        p = malloc(sizeof(Placed));
-        if (!p) return;
+        p = &pl;
         place(a, p);
         q.lo = vec3(1e30f, 1e30f, 1e30f);
         q.hi = vec3(-1e30f, -1e30f, -1e30f);
@@ -588,7 +586,7 @@ static void collide_mesh(RigidWorld *w, int ia, int im, real mg){
     if (a->shape != BODY_SPHERE){ q.lo = v_sub(q.lo, vec3(mg, mg, mg)); q.hi = v_add(q.hi, vec3(mg, mg, mg)); }   // (a sphere's: in rad)
     TriList list = {NULL, 0, 0};
     mesh_tree_query(&g->tree, q, tri_list_add, &list);
-    if (list.n == 0){ free(list.tri); free(p); return; }
+    if (list.n == 0){ free(list.tri); return; }
     ConvexContact *all = malloc(MESH_CONTACTS * sizeof(ConvexContact));
     int n = 0;
     for (int k = 0; all && k < list.n && n + CONVEX_MAX_CONTACTS <= MESH_CONTACTS; k++){
@@ -603,7 +601,6 @@ static void collide_mesh(RigidWorld *w, int ia, int im, real mg){
         for (int k = 0; k < n; k++) add_contact(w, ia, im, all[k].p, all[k].n, all[k].depth);
     }
     free(all);
-    free(p);
     free(list.tri);
 }
 

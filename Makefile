@@ -19,7 +19,7 @@
 # Every kind of build has folders of its own (build/<kind>/, bin/<kind>/), so switching
 # between them never links one kind's library into another's programs, nor keeps them.
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g
+CFLAGS = -Wall -Wextra -Wshadow -O2 -g
 # "make SAN=1": address + undefined-behaviour sanitizers (catches bad memory access)
 SANFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer
 CFLAGS += $(if $(SAN),$(SANFLAGS))
