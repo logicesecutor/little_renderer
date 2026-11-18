@@ -16,6 +16,7 @@
 // generator (PCG with a 32-bit state: WGSL has no 64-bit integers). So the two images are
 // not equal sample by sample; they converge to the same picture.
 #include "gpu/gpu_internal.h"
+#include "base/envvar.h"
 
 #ifdef LR_GPU
 
@@ -317,8 +318,8 @@ void gpu_trace_after_submit(GpuTrace *t){
 // W4): in Chrome (Direct3D 12) the workgroup stack is 7-32% faster, natively (wgpu, Vulkan)
 // the same within the noise; so it is the browser's default. LR_GPU_STACK=wg|private chooses.
 static int stack_in_workgroup(void){
-    const char *e = getenv("LR_GPU_STACK");
-    if (e && *e) return !strcmp(e, "wg");
+    const char *e = lr_env("LR_GPU_STACK");
+    if (e) return !strcmp(e, "wg");
 #ifdef __EMSCRIPTEN__
     return 1;
 #else
@@ -406,8 +407,7 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
 #ifdef LR_VK
     t->hw = g->rt;
 #endif
-    const char *wide_env = getenv("LR_GPU_WIDE");
-    t->wide_ok = wide_env && atoi(wide_env) > 0;   // (before the source: without it the 4-wide walk is left out)
+    t->wide_ok = lr_env_int("LR_GPU_WIDE", 0) > 0;   // (before the source: without it the 4-wide walk is left out)
     char *src = trace_source(t, 0, 0);
     char lt[32];
     if (!src){ free(t); return NULL; }
@@ -415,14 +415,12 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     // blue noise
     t->bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRRWU-----TTTU", lt, sizeof(lt)));
     t->timer = gpu_timer_create(g, 1024, NTS);
-    const char *tlas_env = getenv("LR_GPU_TLAS");
+    const char *tlas_env = lr_env("LR_GPU_TLAS");
     t->tlas_mode = !tlas_env ? 2 : !strcmp(tlas_env, "gpu") || !strcmp(tlas_env, "lbvh") ? 0 : !strcmp(tlas_env, "cpu") ? 1 : 2;
-    const char *bvh_env = getenv("LR_GPU_BVH");
+    const char *bvh_env = lr_env("LR_GPU_BVH");
     t->builder = !bvh_env ? -1 : !strcmp(bvh_env, "lbvh") ? 0 : !strcmp(bvh_env, "ploc") ? 1 : -1;
-    const char *blas_env = getenv("LR_GPU_BLAS");
-    t->blas_gpu = blas_env && !strcmp(blas_env, "gpu");
-    const char *check_env = getenv("LR_GPU_BVH_CHECK");
-    t->check = check_env && atoi(check_env) > 0;
+    t->blas_gpu = lr_env_is("LR_GPU_BLAS", "gpu");
+    t->check = lr_env_int("LR_GPU_BVH_CHECK", 0) > 0;
     t->planes = (uint64_t)width * height * 80 <= g->max_storage ? 5 : 1;
     if (t->planes == 5){
         t->rp_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
@@ -444,8 +442,8 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->pl_top = gpu_compute(g, "BVH builder (PLOC): sums", PLOC, "top", t->pl_bgl_args);
     t->pl_scatter = gpu_compute(g, "BVH builder (PLOC): merge", PLOC, "scatter", t->pl_bgl);
     t->pl_small = gpu_compute(g, "BVH builder (PLOC): one workgroup", PLOC, "small", t->pl_bgl);
-    const char *small_env = getenv("LR_GPU_PLOC_SMALL");
-    t->ploc_small = small_env && atoi(small_env) > 0 ? atoi(small_env) : 1024;
+    const int small = lr_env_int("LR_GPU_PLOC_SMALL", 0);
+    t->ploc_small = small > 0 ? small : 1024;
     t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
     t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRR-UW------TU", lt, sizeof(lt)));
@@ -1258,9 +1256,8 @@ static int hw_records(GpuTrace *t, const Scene *s, int some, unsigned since, int
                                  (size_t)(last + 1 - first) * sizeof(*r));
             i = last + 1;
         }
-        static int upd_env = -1;          // LR_GPU_TLAS_UPDATE=0: always built (to measure)
-        if (upd_env < 0){ const char *e = getenv("LR_GPU_TLAS_UPDATE"); upd_env = !e || atoi(e) != 0; }
-        t->hw_tlas_update = upd_env && moved <= s->ninsts / 4 && t->hw_updates < HW_UPDATES && now == t->hw_ninst;
+        // (LR_GPU_TLAS_UPDATE=0: always built, to measure)
+        t->hw_tlas_update = lr_env_int("LR_GPU_TLAS_UPDATE", 1) != 0 && moved <= s->ninsts / 4 && t->hw_updates < HW_UPDATES && now == t->hw_ninst;
         t->hw_ninst = now;
         t->hw_tlas_dirty = 1;
         return 1;
@@ -1806,8 +1803,7 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
     free(buf);
     const int iters = (tp->max_depth > 0 ? (tp->max_depth < 4096 ? tp->max_depth : 4096) : 0) + 1;
     WGPUComputePipeline shade_sky = sky_kernels(t, s) ? t->wf_shade_sky : NULL;
-    static int prof = -1;
-    if (prof < 0){ const char *e = getenv("LR_WF_PROFILE"); prof = e && atoi(e) > 0; }
+    const int prof = lr_env_int("LR_WF_PROFILE", 0) > 0;
     const double units = (double)t->w * rows * repeats / ((double)t->w * t->h);
     WGPUComputePassEncoder pass = prof ? NULL : timed_pass(t, enc, TS_TRACE, units);
     // (LR_WF_PROFILE=1: every dispatch in a pass of its own, timed by kernel)

@@ -1,4 +1,5 @@
 #include "rt/accel.h"
+#include "base/envvar.h"
 #include "base/clock.h"
 
 #include <stdio.h>
@@ -155,9 +156,7 @@ static int intersect_instances(const Scene *s, const Ray *ray, real tmin, real t
 // rebuild is the default (docs/STATUS.md).
 #define TLAS_REFIT_GROWTH 1.1
 static void build_tlas(RtAccel *a, const Scene *s, const AccelParams *p){
-    static int refit_env = -1;
-    if (refit_env < 0){ const char *e = getenv("LR_TLAS_REFIT"); refit_env = e && atoi(e) > 0; }
-    int same = refit_env && a->tlas.nnodes > 0 && a->tlas_n == s->ninsts && s->ninsts > 0;
+    int same = lr_env_int("LR_TLAS_REFIT", 0) > 0 && a->tlas.nnodes > 0 && a->tlas_n == s->ninsts && s->ninsts > 0;
     a->tlas_n = s->ninsts;
     a->tlas_version = s->inst_version;
     if (s->ninsts <= 0){ bvh_free(&a->tlas); return; }

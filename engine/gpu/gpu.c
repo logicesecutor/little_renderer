@@ -32,6 +32,7 @@ void gpu_set_vsync(int on){ (void)on; }
 
 #else
 #include "gpu/gpu_internal.h"
+#include "base/envvar.h"
 #if defined(__EMSCRIPTEN__) && defined(LR_WEB_WAIT)
 #include <emscripten.h>
 // A page built with -sJSPI can wait (bin/bench): it gives the browser a turn (its callbacks
@@ -261,15 +262,14 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
         feats[nfeats++] = WGPUFeatureName_TimestampQuery;
         g->timestamps = 1;
     }
-    g->timing_report = g->timestamps && (timing_wanted || getenv("LR_GPU_TIMING"));
+    g->timing_report = g->timestamps && (timing_wanted || lr_env("LR_GPU_TIMING"));
 #ifdef __EMSCRIPTEN__
     g->rt_offered = lr_web_adapter_offers(adapter, GPU_RT_FEATURE);   // (not asked for: see above)
 #endif
 #ifdef LR_VK
     // hardware ray queries: our Vulkan layer's (webgpu/vk/webgpu_rt.h), when the GPU has them;
     // LR_GPU_HWRT=0 leaves them off (the compute BVH everywhere)
-    const char *hw = getenv("LR_GPU_HWRT");
-    if (!(hw && *hw == '0') && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)LRFeatureName_RayQuery)){
+    if (lr_env_int("LR_GPU_HWRT", 1) != 0 && wgpuAdapterHasFeature(adapter, (WGPUFeatureName)LRFeatureName_RayQuery)){
         feats[nfeats++] = (WGPUFeatureName)LRFeatureName_RayQuery;
         g->rt = 1;
     }
@@ -608,8 +608,8 @@ static void on_pipeline(WGPUCreatePipelineAsyncStatus status, WGPUComputePipelin
 GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl,
                               WGPUComputePipeline *slot, int *state){
 #ifdef __EMSCRIPTEN__
-    const char *e = getenv("LR_GPU_ASYNC");               // =0: made at once, as before (to compare)
-    GpuPipeReq *r = e && *e == '0' ? NULL : calloc(1, sizeof(*r));
+    // LR_GPU_ASYNC=0: made at once, as before (to compare)
+    GpuPipeReq *r = lr_env_int("LR_GPU_ASYNC", 1) == 0 ? NULL : calloc(1, sizeof(*r));
     if (r){
         r->slot = slot;
         r->state = state;

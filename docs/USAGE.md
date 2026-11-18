@@ -390,7 +390,8 @@ CPU nothing: `bin/view -sim on -backend raster -balls 400 -boxes 200 -balloons 0
 screen's frame rate (164 frames/s on an RTX 3070; 142 with `-gpurigid off`). Set
 `LR_GPU_TIMING=1` to have the GPU passes timed (WEB.md 3).
 
-Environment variables for measuring (docs/STATUS.md keeps what they showed):
+Environment variables for measuring and debugging, all of them (docs/STATUS.md keeps what they showed; the
+engine reads them through base/envvar.h, where they are used):
 
 | variable | effect |
 |---|---|
@@ -403,6 +404,9 @@ Environment variables for measuring (docs/STATUS.md keeps what they showed):
 | `LR_GPU_TLAS=gpu\|cpu` | `gpu`: the GPU builds the top level over the instances itself every frame (LBVH; `lbvh`, the old name, works too); `cpu`: it takes the CPU's SAH tree. Default: the CPU's below 32768 instances, the GPU's from there |
 | `LR_GPU_TLAS_UPDATE=0` | our Vulkan layer: the hardware top level built again whenever instances moved (default: updated in place while at most a quarter moved, built every 32 updates) |
 | `LR_GPU_LOD=0\|1` | the GPU rasterizer's simpler copies of meshes for instances small on the screen: `0` never, `1` at any instance count (default: from 4096 instances) |
+| `LR_GPU_HWRT=0` | our Vulkan layer: no hardware ray queries, the compute BVH everywhere (VULKAN.md) |
+| `LR_VK_QUEUES=2\|same` | our Vulkan layer: a second queue for the physics, of a compute family (`2`) or of the main one (`same`); off by default (VULKAN.md) |
+| `LR_VK_VALIDATE=1\|sync` | our Vulkan layer: the Khronos validation layer if installed; `sync` adds its synchronization checks |
 | `LR_VK_LOSE_AFTER=n` | our Vulkan layer: the n-th submission fails as on a lost device (to test what follows: VULKAN.md) |
 | `LR_VK_FAIL_MAP=n` | our Vulkan layer: the n-th buffer read back fails, the device staying ready (to test what waits for an image: `render`, a screenshot) |
 | `LR_GPU_BVH=ploc\|lbvh` | the GPU's tree builder for everything it builds (default: PLOC for meshes' trees, the LBVH for the top level) |

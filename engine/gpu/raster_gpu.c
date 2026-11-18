@@ -15,6 +15,7 @@
 // flat_flag says where flat shading is evaluated: 0 the centroid, 1 / 2 the middle of the
 // edge v0-v2 / v0-v1 (a quad's center, for its two halves: both get one color).
 #include "gpu/gpu_internal.h"
+#include "base/envvar.h"
 
 #ifdef LR_GPU
 
@@ -492,9 +493,8 @@ static int order_instances(GpuRaster *r, const Scene *s, const RenderParams *p, 
         pl[3][k] = vp.m[3][k] - vp.m[1][k];
         pl[4][k] = vp.m[3][k];
     }
-    static int lod_env = -2;               // LR_GPU_LOD=0: never, =1: whatever the count
-    if (lod_env == -2){ const char *e = getenv("LR_GPU_LOD"); lod_env = e ? atoi(e) != 0 : -1; }
-    const int lod = lod_env >= 0 ? lod_env : s->ninsts >= LOD_MIN_INSTANCES;
+    const int lod_env = lr_env_int("LR_GPU_LOD", -1);   // =0: never, =1: whatever the count
+    const int lod = lod_env >= 0 ? lod_env != 0 : s->ninsts >= LOD_MIN_INSTANCES;
     const real px_per = r_fabs(p->proj.m[1][1]) * (real)r->h * (real)0.5;   // pixels per unit at depth 1
     int *cnt = r->bucket;
     memset(cnt, 0, ((size_t)nk + 1) * sizeof(int));

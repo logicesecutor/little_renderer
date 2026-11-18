@@ -1,4 +1,5 @@
 #include "raster/render.h"
+#include "base/envvar.h"
 
 #include "raster/raster.h"
 #include "scene/brdf.h"
@@ -1087,8 +1088,7 @@ Vec3 render_scene_light(const Scene *s){
 RenderLamp render_scene_lamp(const Scene *s){
     RenderLamp L;
     memset(&L, 0, sizeof(L));
-    const char *amb = getenv("LR_RASTER_AMBIENT");
-    real k = amb ? (real)atof(amb) : 1;
+    real k = (real)lr_env_real("LR_RASTER_AMBIENT", 1);
     L.ambient = RENDER_SCENE_AMBIENT * k;
     L.fill = RENDER_SCENE_FILL * k;
     L.env = k > 0 ? (s->probe ? s->probe : s->env) : NULL;
