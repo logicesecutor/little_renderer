@@ -60,7 +60,7 @@ The same Makefile builds on Linux (gcc, make, libX11) and on Windows (section 2.
 | command | what it does |
 |---|---|
 | `make` or `make all` | the library, the three apps, all examples and tests |
-| `make lib` | only `build/float/liblr.a` |
+| `make lib` | only `build/float-vk/liblr.a` |
 | `make apps` / `make examples` / `make tests` | only the three programs / only the examples / only the tests |
 | `make bin/render` (or any `bin/...`) | just that one program (and the library); on Windows `make bin/render.exe` |
 | `make check-layers` | checks the layers: `base` includes nothing else, `formats` only `base`, `scene` only those two, `raster`, `rt`, `phys`, `platform` only those three, and `webgpu/` nothing of the engine |
@@ -92,14 +92,16 @@ Build flags, combinable with any target:
 
 | flag | effect |
 |---|---|
-| `make DOUBLE=1` | double precision everywhere: `build/double/liblr.a` and `bin/double/...` (the float build stays in `bin/`) |
-| `make SINGLE=1` | no OpenMP: both backends run on one thread (easier to debug) |
+| `make DOUBLE=1` | double precision everywhere: `build/double-vk/liblr.a` and `bin/double/...` (the float build stays in `bin/`) |
+| `make SINGLE=1` | no OpenMP: both backends run on one thread (easier to debug), into `build/*-single` and `bin/single/` |
 | `make NATIVE=1` | faster on the CPU: `-O3 -march=x86-64-v3 -ffp-contract=off` (AVX2, a CPU from 2013 on), into `build/*-native` and `bin/native/`; the same images to the bit as the default build. 9-15% on the CPU rasterizer, air and trees, 5% on the CPU path tracer (docs/PERF_REVIEW.md, N8) |
-| `make SAN=1` | address + undefined-behaviour sanitizers: catches bad memory access; ~10× slower |
+| `make SAN=1` | address + undefined-behaviour sanitizers: catches bad memory access; ~10× slower, into `build/*-san` and `bin/san/` |
 | `make CFLAGS="-O2 -DOCT_LEAF_SIZE=8"` | your own flags, e.g. to change a compile-time constant |
 
-Run `make clean` first when you change `SINGLE`, `SAN` or `CFLAGS` (`DOUBLE` has its own
-folders and needs no clean).
+Run `make clean` first when you change `CFLAGS`. Every other flag (`DOUBLE`, `NOGPU`,
+`SINGLE`, `SAN`, `NATIVE`) has folders of its own, their names combined (`make NOGPU=1
+NATIVE=1`: `build/float-cpu-native/`, `bin/cpu-native/`), so switching needs no clean and
+keeps every kind built.
 
 **float or double?** float (the default) is 15–25% faster for the path tracer and matches
 double up to noise. In double the three acceleration structures give bit-identical
@@ -110,7 +112,7 @@ What gets built:
 
 | output | from |
 |---|---|
-| `build/float/liblr.a` | `engine/*/*.c` (headers next to them; include `engine/lr.h`) |
+| `build/float-vk/liblr.a` | `engine/*/*.c` (headers next to them; include `engine/lr.h`) |
 | `bin/render`, `bin/view`, `bin/sim` | `apps/*.c` + the library |
 | `bin/hello_raster`, `bin/hello_rt`, `bin/custom_scene`, `bin/raster_milestones`, `bin/hello_physics`, `bin/mesh_rain` | `examples/*.c` + the library |
 | `bin/test_*` | `tests/*.c` + the library |
@@ -148,7 +150,7 @@ and gcc builtins.
 
 ```sh
 make           # the GPU through our own WebGPU on Vulkan (webgpu/vk): nothing to install
-make NOGPU=1   # a CPU-only build (objects in build/float/, not build/float-vk/)
+make NOGPU=1   # a CPU-only build: objects in build/float-cpu/, programs in bin/cpu/
 ```
 
 Every build has the GPU unless `NOGPU=1`: `bin/view`, `bin/render` and `bin/sim`

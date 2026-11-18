@@ -13,8 +13,11 @@
 # Linux: gcc + make + libX11. Windows: the same Makefile in an MSYS2 UCRT64 (or MINGW64)
 # shell, with MSYS2's gcc and make (docs/USAGE.md, "Windows"); programs get a .exe.
 #
-#   make NOGPU=1    without the GPU (CPU only). With it (the default) a machine without
-#                   Vulkan 1.3 still runs everything, on the CPU.
+#   make NOGPU=1    without the GPU (CPU only), into bin/cpu/. With it (the default) a machine
+#                   without Vulkan 1.3 still runs everything, on the CPU.
+#
+# Every kind of build has folders of its own (build/<kind>/, bin/<kind>/), so switching
+# between them never links one kind's library into another's programs, nor keeps them.
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -g
 # "make SAN=1": address + undefined-behaviour sanitizers (catches bad memory access)
@@ -25,9 +28,9 @@ OMP = $(if $(SINGLE),,-fopenmp)
 # "make NATIVE=1": -O3 and the instructions of x86-64 CPUs from 2013 on (AVX2:
 # -march=x86-64-v3; other CPUs: -march=native), into folders of its own (build/*-native,
 # bin/native). Faster on the CPU (docs/PERF_REVIEW.md, N8), and the same images to the bit as
-# the default build's: multiplies and adds are not fused (-ffp-contract=off). Fused (FMA) it
-# was faster still but rounded otherwise, and with gcc 13 two hulls colliding in test_physics
-# blew up (its momentum check: 31164 for 0.001). Not the default: it needs such a CPU.
+# the default build's: multiplies and adds are not fused (-ffp-contract=off). Fused (FMA) it is
+# faster still (C5 13.9 ms against 15.7) and passes the tests, but rounds otherwise: images that
+# differ from the default build's in their last bits. Not the default: it needs such a CPU.
 ARCHFLAGS = $(if $(findstring x86_64,$(shell $(CC) -dumpmachine)),-march=x86-64-v3,-march=native)
 CFLAGS += $(if $(NATIVE),-O3 $(ARCHFLAGS) -ffp-contract=off)
 
@@ -56,12 +59,18 @@ endif
 ifeq ($(NOGPU),)
 GPUFLAGS = -DLR_GPU -DLR_VK -Iwebgpu/include
 GPULIBS = $(if $(filter Windows_NT,$(OS)),,-ldl)
-GPUDIR = -vk
 GPUSRC = $(wildcard webgpu/vk/*.c webgpu/wgsl/*.c)
 endif
 
-BUILD = build/$(PREC)$(GPUDIR)$(if $(NATIVE),-native)
-BIN := $(BIN)$(if $(NATIVE),/native)
+# The kind of build names its folders: the objects in build/float-vk (the default),
+# build/float-cpu (NOGPU=1), build/float-vk-native, build/double-cpu-single ...; the programs in
+# bin/, bin/cpu/, bin/native/, bin/double/cpu-single/ ... Before, NOGPU, SINGLE and SAN shared
+# bin/ (and SINGLE, SAN the objects) with the default build: after "make NOGPU=1" a plain "make"
+# found bin/ newer than its library and kept the CPU-only programs (REVIEW.md, B4).
+KIND = $(if $(NOGPU),-cpu,-vk)$(if $(SINGLE),-single)$(if $(SAN),-san)$(if $(NATIVE),-native)
+BINKIND = $(patsubst -%,%,$(patsubst -vk%,%,$(KIND)))
+BUILD = build/$(PREC)$(KIND)
+BIN := $(BIN)$(if $(BINKIND),/$(BINKIND))
 INC = -Iengine -Iwebgpu
 HDR = $(wildcard engine/*.h engine/*/*.h webgpu/*/*.h webgpu/include/webgpu/*.h)
 SRC = $(wildcard engine/*/*.c)

@@ -445,7 +445,7 @@ loader, opened at run time; nothing gets installed and no library is linked. (Un
 ```sh
 make           # every build has the GPU (objects in build/float-vk/)
 bin/view       # the window is drawn by the GPU; bin/render and bin/sim render on it too
-make NOGPU=1   # a CPU-only build
+make NOGPU=1   # a CPU-only build, into bin/cpu/
 ```
 
 | program | on the GPU | measured (RTX 3070, Windows) |

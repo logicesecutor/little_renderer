@@ -31,7 +31,7 @@ onto the floor).
 Run these from the top folder of the repository:
 
 ```sh
-make                  # build/float/liblr.a, bin/render, bin/view, the examples (gcc -O2, OpenMP)
+make                  # build/float-vk/liblr.a, bin/render, bin/view, the examples (gcc -O2, OpenMP)
 make DOUBLE=1         # the same in double precision, into bin/double/
 bin/view              # the real-time window (section 5.13)
 make run              # quick previews: out/cornell_boxes.png, _spheres.png, _mesh.png (+ _raster)

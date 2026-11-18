@@ -6,8 +6,9 @@ and links `liblr.a`; that is all. The two apps in `apps/` and the four programs 
 
 | build | library | binaries | `real` is |
 |---|---|---|---|
-| `make` | `build/float/liblr.a` | `bin/` | `float` (default: faster, half the memory) |
-| `make DOUBLE=1` | `build/double/liblr.a` | `bin/double/` | `double` (compiled with `-DLR_DOUBLE`) |
+| `make` | `build/float-vk/liblr.a` | `bin/` | `float` (default: faster, half the memory) |
+| `make DOUBLE=1` | `build/double-vk/liblr.a` | `bin/double/` | `double` (compiled with `-DLR_DOUBLE`) |
+| `make NOGPU=1` | `build/float-cpu/liblr.a` | `bin/cpu/` | `float`, without the GPU |
 
 Include path `-Iengine`, header `lr.h`, link `-lm -lX11` on Linux, `-lm -lgdi32` on
 Windows (MSYS2) (X11 only matters if you open a
@@ -20,14 +21,14 @@ linked, unless the library was built with `make SINGLE=1`.
 ## 1. Build and link
 
 ```sh
-make lib                       # build/float/liblr.a
+make lib                       # build/float-vk/liblr.a
 ```
 
 Compile your own program against it (from the top folder):
 
 ```sh
-gcc -O2 -fopenmp -fsingle-precision-constant -Iengine my_app.c build/float/liblr.a -lm -lX11 -o my_app
-gcc -O2 -fopenmp -DLR_DOUBLE                 -Iengine my_app.c build/double/liblr.a -lm -lX11 -o my_app
+gcc -O2 -fopenmp -fsingle-precision-constant -Iengine my_app.c build/float-vk/liblr.a -lm -lX11 -o my_app
+gcc -O2 -fopenmp -DLR_DOUBLE                 -Iengine my_app.c build/double-vk/liblr.a -lm -lX11 -o my_app
 ```
 
 Or drop your file into `examples/`: the `Makefile` builds every `examples/NAME.c` into
