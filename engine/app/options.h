@@ -105,8 +105,9 @@ typedef struct {
     int maxfps;            // view: a frame rendered and shown every time round (1, default); 0 = only
                            // when something changed (and the path tracer stops at -s: less power)
     int vsync;             // view: frames shown in step with the display (1, default); 0 = at once
-    double band_ms;        // view, GPU path tracer: its GPU time per frame (0 = 60% of the display's
-                           // refresh period with -maxfps on; with it off, bands of 12-45 ms)
+    double band_ms;        // view, GPU path tracer: its GPU time per frame (0 = with -maxfps on, 85%
+                           // of the display's period in step with it, else 60% but at least a pass,
+                           // up to 33 ms; with it off, bands of 12-45 ms)
     const char *stats;     // view -autoquit: its frame rate written to this file (bin/bench)
     double sim_hz;         // view -sim on: physics steps per second at most (60); 0 = one every frame
     int denoise_move;      // view, GPU denoiser while things move: a-trous passes, 1-5 (3); 0 = all 5
