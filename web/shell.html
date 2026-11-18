@@ -50,7 +50,13 @@
     const lrArgs = [];
     for (const [k, v] of new URLSearchParams(location.search)) { lrArgs.push('-' + k); if (v !== '') lrArgs.push(v); }
     const lrLog = document.getElementById('log');
-    const lrPrint = (t) => { lrLog.textContent += t + '\n'; lrLog.scrollTop = lrLog.scrollHeight; console.log(t); };
+    // the last 500 lines, each a text node of its own (adding to textContent copied it all)
+    const lrPrint = (t) => {
+      lrLog.appendChild(document.createTextNode(t + '\n'));
+      while (lrLog.childNodes.length > 500) lrLog.removeChild(lrLog.firstChild);
+      lrLog.scrollTop = lrLog.scrollHeight;
+      console.log(t);
+    };
     return {
       arguments: lrArgs,
       canvas: document.getElementById('canvas'),
