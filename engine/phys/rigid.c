@@ -494,8 +494,7 @@ static void collide_walls(RigidWorld *w, int ia, real m){
     } else if (b->shape == BODY_HULL){
         // the hull's corners below each wall (or within the margin), at most 4 per wall
         const real mg = m;
-        Placed *p = malloc(sizeof(Placed));
-        if (!p) return;
+        Placed pl, *p = &pl;         // (on the stack: a few KB, not a malloc per body and step)
         place(b, p);
         for (int k = 0; k < 6; k++){
             ConvexContact c[MAX_HULL_VERTS];
@@ -507,7 +506,6 @@ static void collide_walls(RigidWorld *w, int ia, real m){
             m = convex_reduce(c, m, 4);
             for (int i = 0; i < m; i++) add_contact(w, ia, -1, c[i].p, c[i].n, c[i].depth);
         }
-        free(p);
     }
 }
 
@@ -521,21 +519,18 @@ static void flip_contacts(RigidWorld *w, int first, int a, int b){
 
 // a sphere (ia) against a box or hull (ib)
 static void collide_sphere_convex(RigidWorld *w, int ia, int ib, real m){
-    Placed *p = malloc(sizeof(Placed));
-    if (!p) return;
+    Placed pl, *p = &pl;
     place(&w->bodies[ib], p);
     ConvexContact c;
     const Body *s = &w->bodies[ia];
     if (convex_collide_sphere(s->pos, s->half.x, &p->wc, m, &c)) add_contact(w, ia, ib, c.p, c.n, c.depth);
-    free(p);
 }
 
 // boxes and hulls
 static real body_radius(const Body *b);
 
 static void collide_convex(RigidWorld *w, int ia, int ib, real mg){
-    Placed *p = malloc(2 * sizeof(Placed));
-    if (!p) return;
+    Placed p[2];                 // (on the stack: 2 x a few KB, not a malloc per pair and step)
     const Body *a = &w->bodies[ia], *b = &w->bodies[ib];
     place(a, &p[0]);
     place(b, &p[1]);
@@ -555,7 +550,6 @@ static void collide_convex(RigidWorld *w, int ia, int ib, real mg){
     if (memo.ft.full){ memo.t = t; memo.q = q; }
     if (mm) memo_write(mm, &memo);
     for (int k = 0; k < m; k++) add_contact(w, ia, ib, c[k].p, c[k].n, c[k].depth);
-    free(p);
 }
 
 // a body (ia) against a fixed mesh (im): the mesh's triangles near the body, each
@@ -1458,10 +1452,13 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
         #pragma omp parallel for if (par_bodies)
         for (int i = 0; i < w->nbodies; i++){
             Body *b = &w->bodies[i];
+            // the world inverse inertia, from the rotation this substep starts with: made once
+            // here for the torque and for the contacts below (2. and the iterations)
+            iw[i] = b->inv_mass > 0 ? body_inv_inertia_world(b) : zero;
             if (b->inv_mass == 0) continue;
             Vec3 f = forces ? v_add(b->force, forces[i]) : b->force;
             b->vel = v_add(b->vel, v_scale(v_add(w->gravity, v_scale(f, b->inv_mass)), h));
-            b->angvel = v_add(b->angvel, mat3_mul_vec(body_inv_inertia_world(b), v_scale(b->torque, h)));
+            b->angvel = v_add(b->angvel, mat3_mul_vec(iw[i], v_scale(b->torque, h)));
             // A slow body resting on something loses its speed a little faster: the jitter of a
             // pile, a hull rocking on its rim for ever, die out instead of keeping it awake
             // (as Bullet's "additional damping")
@@ -1469,9 +1466,6 @@ void rigid_steps(RigidWorld *w, real dt, int substeps, const Vec3 *forces){
             b->vel = v_scale(b->vel, 1.0f / (1.0f + (w->linear_damping + settle) * h));
             b->angvel = v_scale(b->angvel, 1.0f / (1.0f + (w->angular_damping + settle) * h));
         }
-        #pragma omp parallel for if (par_bodies)
-        for (int i = 0; i < w->nbodies; i++) iw[i] = w->bodies[i].inv_mass > 0 ? body_inv_inertia_world(&w->bodies[i]) : zero;
-
         // 2. each contact where its bodies are now: arms, depth, effective masses, target
         // (on all threads: each contact alone); then, on one, the warm start applied
         #pragma omp parallel for if (par_contacts)

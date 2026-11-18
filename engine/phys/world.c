@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 void phys_init(PhysWorld *pw){
     memset(pw, 0, sizeof(*pw));
@@ -75,37 +78,49 @@ Vec3 phys_air_force(const PhysWorld *pw, int i){
     return v_add(drag_force(pw, i, 1.0f / 60), buoyancy_force(pw, i));
 }
 
-// the cells inside each body become obstacles moving with it
+// the cells inside each body become obstacles moving with it. One parallel region for all
+// the bodies (a region per body woke every thread once per body: N1, docs/PERF_REVIEW.md):
+// each thread owns a slice of the grid's z planes and goes through every body in order, so
+// where bodies overlap the later one wins, as when they were done one after the other.
 static void mark_solids(PhysWorld *pw){
     Fluid *f = pw->fluid;
     fluid_clear_solids(f);
-    for (int i = 0; i < pw->rigid.nbodies; i++){
-        const Body *b = &pw->rigid.bodies[i];
-        real r = bound_radius(b);
-        int x0 = (int)r_floor((b->pos.x - r - f->bounds.lo.x) / f->h), x1 = (int)r_floor((b->pos.x + r - f->bounds.lo.x) / f->h);
-        int y0 = (int)r_floor((b->pos.y - r - f->bounds.lo.y) / f->h), y1 = (int)r_floor((b->pos.y + r - f->bounds.lo.y) / f->h);
-        int z0 = (int)r_floor((b->pos.z - r - f->bounds.lo.z) / f->h), z1 = (int)r_floor((b->pos.z + r - f->bounds.lo.z) / f->h);
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (z0 < 0) z0 = 0;
-        if (x1 >= f->nx) x1 = f->nx - 1;
-        if (y1 >= f->ny) y1 = f->ny - 1;
-        if (z1 >= f->nz) z1 = f->nz - 1;
+    const int nb = pw->rigid.nbodies;
+    if (nb <= 0) return;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel if (nb * f->nx * f->ny >= 65536)
 #endif
-        for (int z = z0; z <= z1; z++)
-            for (int y = y0; y <= y1; y++)
-                for (int x = x0; x <= x1; x++){
-                    Vec3 c = fluid_cell_center(f, x, y, z);
-                    if (!body_contains(b, c)) continue;
-                    size_t k = fluid_idx(f, x, y, z);
-                    Vec3 v = body_point_velocity(b, c);
-                    f->solid[k] = 1;
-                    f->su[k] = (float)v.x;
-                    f->sv[k] = (float)v.y;
-                    f->sw[k] = (float)v.z;
-                }
+    {
+        int t = 0, nt = 1;
+#ifdef _OPENMP
+        t = omp_get_thread_num(); nt = omp_get_num_threads();
+#endif
+        const int zs = (int)((long long)f->nz * t / nt), ze = (int)((long long)f->nz * (t + 1) / nt) - 1;
+        for (int i = 0; i < nb; i++){
+            const Body *b = &pw->rigid.bodies[i];
+            real r = bound_radius(b);
+            int x0 = (int)r_floor((b->pos.x - r - f->bounds.lo.x) / f->h), x1 = (int)r_floor((b->pos.x + r - f->bounds.lo.x) / f->h);
+            int y0 = (int)r_floor((b->pos.y - r - f->bounds.lo.y) / f->h), y1 = (int)r_floor((b->pos.y + r - f->bounds.lo.y) / f->h);
+            int z0 = (int)r_floor((b->pos.z - r - f->bounds.lo.z) / f->h), z1 = (int)r_floor((b->pos.z + r - f->bounds.lo.z) / f->h);
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (z0 < zs) z0 = zs;
+            if (x1 >= f->nx) x1 = f->nx - 1;
+            if (y1 >= f->ny) y1 = f->ny - 1;
+            if (z1 > ze) z1 = ze;
+            for (int z = z0; z <= z1; z++)
+                for (int y = y0; y <= y1; y++)
+                    for (int x = x0; x <= x1; x++){
+                        Vec3 c = fluid_cell_center(f, x, y, z);
+                        if (!body_contains(b, c)) continue;
+                        size_t k = fluid_idx(f, x, y, z);
+                        Vec3 v = body_point_velocity(b, c);
+                        f->solid[k] = 1;
+                        f->su[k] = (float)v.x;
+                        f->sv[k] = (float)v.y;
+                        f->sw[k] = (float)v.z;
+                    }
+        }
     }
 }
 
