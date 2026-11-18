@@ -230,16 +230,20 @@ int gpu_trace_sync(GpuTrace *t, const Scene *s);
 int gpu_trace_ready(GpuTrace *t, const Scene *s);
 int gpu_trace_reads_tlas(const GpuTrace *t, const Scene *s);   // 1 = gpu_trace_sync copies the CPU's top level (scene_tlas)
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
+// The media the path tracer's kernels read, as the view keeps them: the frame's uniforms, the
+// densities, the majorant bricks, the media's boxes and maxima (view_gpu.c)
+typedef struct { WGPUBuffer frame_u, dens, bricks, vstat; } GpuMedia;
+
 // `repeats` more samples for every pixel of rows [y0, y0 + rows), samples number index,
 // index + 1, ... of the sequence (base/sampler.h)
 void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                       int y0, int rows, int repeats, int nvolumes, uint32_t index,
-                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
+                      const GpuMedia *m);
 // Before the first band of an image: each pixel's guide for the denoiser (with no samples),
 // and with history > 0 the samples of the previous image reprojected (at most history each).
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                            int history, int nvolumes,
-                           WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
+                           const GpuMedia *m);
 WGPUBuffer gpu_trace_accum(GpuTrace *t);   // the image's samples (4 planes when guided)
 // Light-traced caustics (tp->photons > 0 and the scene has a mirror or glass): `passes` more
 // passes of light paths added into the caustic sums; clear them for a new image; resolve: the
@@ -251,15 +255,14 @@ void gpu_trace_before_submit(GpuTrace *t, WGPUCommandEncoder enc);
 void gpu_trace_after_submit(GpuTrace *t);
 void gpu_trace_light(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                      int passes, int nvolumes, uint32_t index,
-                     WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat);
+                     const GpuMedia *m);
 void gpu_trace_caustics_clear(GpuTrace *t, WGPUCommandEncoder enc);
 int gpu_trace_caustic_passes(const GpuTrace *t);
 // cache = 1: blend in the photon cache (the viewer) while the light tracer has few passes
 WGPUBuffer gpu_trace_resolve(GpuTrace *t, WGPUCommandEncoder enc, WGPUBuffer base, int cache);
 // The photon cache: fade it (fade < 1: times fade), then add one pass of light paths
 void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp, int nvolumes,
-                       uint32_t index, double fade, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks,
-                       WGPUBuffer vstat);
+                       uint32_t index, double fade, const GpuMedia *m);
 void gpu_trace_photons_clear(GpuTrace *t, WGPUCommandEncoder enc);
 double gpu_trace_photon_paths(const GpuTrace *t);
 int gpu_trace_guided(const GpuTrace *t);    // 1 = the denoiser's planes follow the samples

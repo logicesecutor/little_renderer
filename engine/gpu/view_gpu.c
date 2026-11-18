@@ -956,11 +956,12 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
+    const GpuMedia media = {v->frame_u, v->dens, v->bricks, v->vstat};   // (as frame_begin left them)
     const int nvol = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
     v->t_sub_prep = v->t_prep != 0;
     if (v->t_prep){
         gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0, nvol,
-                              v->frame_u, v->dens, v->bricks, v->vstat);
+                              &media);
         gpu_trace_caustics_clear(v->trace, enc);
         if (v->t_prep == 1) gpu_trace_photons_clear(v->trace, enc);   // a new scene or view: the cache too
         v->t_prep = 0;
@@ -982,7 +983,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     }
     v->t_sub_rows = rows;
     v->t_sub_reps = reps;
-    gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+    gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, &media);
     // the caustics: while things move, one pass of light paths into the photon cache, which
     // fades a little each time (what moved fades out); still, a pass ending with this band
     // brings as many passes of the (exact) light tracer, and while that has few the cache
@@ -993,11 +994,11 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     if (v->t_live) ltp.photons *= 0.25;
     if (gpu_trace_caustics_on(v->trace, &ltp)){
         if (v->t_live && ltp.photon_cache){
-            gpu_trace_photons(v->trace, enc, s, &ltp, nvol, v->t_index, 0.9, v->frame_u, v->dens, v->bricks, v->vstat);
+            gpu_trace_photons(v->trace, enc, s, &ltp, nvol, v->t_index, 0.9, &media);
         } else if (v->t_y + rows >= v->h){
-            gpu_trace_light(v->trace, enc, s, &ltp, reps, nvol, v->t_index, v->frame_u, v->dens, v->bricks, v->vstat);
+            gpu_trace_light(v->trace, enc, s, &ltp, reps, nvol, v->t_index, &media);
             if (v->tparams.photon_cache && gpu_trace_caustic_passes(v->trace) < 32)
-                gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 1.0, v->frame_u, v->dens, v->bricks, v->vstat);
+                gpu_trace_photons(v->trace, enc, s, &v->tparams, nvol, v->t_index, 1.0, &media);
         }
     }
     gpu_trace_before_submit(v->trace, enc);

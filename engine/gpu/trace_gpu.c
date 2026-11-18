@@ -1583,10 +1583,10 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 // guide): one bind group, the copy chosen by its dynamic offset (it was a bind group per
 // dispatch, each several us of the CPU's time)
 static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
-                        WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat, int light){
+                        const GpuMedia *m, int light){
     const int guide = light == 3;
     if (guide) light = 0;
-    WGPUBuffer b[11] = {frame_u, dens, bricks, vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
+    WGPUBuffer b[11] = {m->frame_u, m->dens, m->bricks, m->vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
     WGPUBindGroupEntry e[16];
@@ -1633,8 +1633,8 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
 }
 
 static void dispatch(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
-                     WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
-    dispatch_ex(t, enc, pipe, threads, repeats, frame_u, dens, bricks, vstat, 0);
+                     const GpuMedia *m){
+    dispatch_ex(t, enc, pipe, threads, repeats, m, 0);
 }
 
 // ---- the wavefront tracer --------------------------------------------------------------
@@ -1712,8 +1712,8 @@ static int wf_ready(GpuTrace *t){
 // kernel k's bind group, kept (gpu_bind_cached): the same for every wave and pass, whose
 // parameters are chosen by the dynamic offset of binding 4 (it was a group per kernel, wave
 // and pass, made every frame)
-static WGPUBindGroup wf_bind(GpuTrace *t, int k, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
-    WGPUBuffer b[20] = {frame_u, dens, bricks, vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
+static WGPUBindGroup wf_bind(GpuTrace *t, int k, const GpuMedia *m){
+    WGPUBuffer b[20] = {m->frame_u, m->dens, m->bricks, m->vstat, t->wf_params, t->nodes, t->aux, t->prims, t->tris,
                         t->acc[t->cur], t->blue, NULL, t->wf, t->wfc, t->wfa, NULL, NULL, NULL, NULL, t->txt};
     WGPUBindGroupEntry e[21];
     memset(e, 0, sizeof(e));
@@ -1783,7 +1783,7 @@ static void fill_params(GpuTrace *t, GTP *P, const Scene *s, const GpuTraceParam
 // rays, then the image; all in one compute pass
 static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                       int y0, int rows, int repeats, int nvolumes, uint32_t index,
-                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+                      const GpuMedia *m){
     const int waves = (rows + t->wf_rows - 1) / t->wf_rows;
     if (repeats < 1) repeats = 1;
     if (repeats > MAX_REPS) repeats = MAX_REPS;
@@ -1815,7 +1815,7 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
         if (prof){ wgpuComputePassEncoderEnd(pass); wgpuComputePassEncoderRelease(pass); } \
     } while (0)
     WGPUBindGroup bg[NWF];
-    for (int k = 0; k < NWF; k++) bg[k] = wf_bind(t, k, frame_u, dens, bricks, vstat);
+    for (int k = 0; k < NWF; k++) bg[k] = wf_bind(t, k, m);
     for (int r = 0; r < repeats; r++)
         for (int w = 0; w < waves; w++){
             uint32_t toff = (uint32_t)(((size_t)r * waves + w) * GTP_STRIDE);
@@ -1838,22 +1838,22 @@ static void wf_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
 
 void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                       int y0, int rows, int repeats, int nvolumes, uint32_t index,
-                      WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+                      const GpuMedia *m){
     gpu_trace_build(t, enc);
     if (t->wavefront && wf_ready(t)){
-        wf_encode(t, enc, s, tp, y0, rows, repeats, nvolumes, index, frame_u, dens, bricks, vstat);
+        wf_encode(t, enc, s, tp, y0, rows, repeats, nvolumes, index, m);
         return;
     }
     write_params(t, t->params, s, tp, y0, rows, nvolumes, index, repeats, 0);
-    dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, frame_u, dens, bricks, vstat);
+    dispatch(t, enc, sky_kernels(t, s) ? t->pipe_sky : t->pipe, (size_t)t->w * rows, repeats, m);
 }
 
 void gpu_trace_light(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                      int passes, int nvolumes, uint32_t index,
-                     WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+                     const GpuMedia *m){
     if (!gpu_trace_caustics_on(t, tp) || passes < 1) return;
     write_params(t, t->lt_params, s, tp, 0, t->h, nvolumes, index, passes, 0);
-    dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), passes, frame_u, dens, bricks, vstat, 1);
+    dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), passes, m, 1);
     t->caus_passes += passes;
 }
 
@@ -1866,8 +1866,7 @@ int gpu_trace_caustic_passes(const GpuTrace *t){ return t->caus_passes; }
 
 #define PC_CELLS (1u << 20)
 void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp, int nvolumes,
-                       uint32_t index, double fade, WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks,
-                       WGPUBuffer vstat){
+                       uint32_t index, double fade, const GpuMedia *m){
     if (!gpu_trace_caustics_on(t, tp) || t->planes != 5) return;
     Gpu *g = t->g;
     if (!t->grid){
@@ -1889,7 +1888,7 @@ void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, cons
         t->pc_paths *= fade;
     }
     write_params(t, t->pc_params, s, tp, 0, t->h, nvolumes, index ^ 0x5bd1e995u, 1, 1.0f);
-    dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), 1, frame_u, dens, bricks, vstat, 2);
+    dispatch_ex(t, enc, t->lt_pipe, light_paths(t, tp), 1, m, 2);
     t->pc_paths += light_paths(t, tp);
 }
 
@@ -1924,7 +1923,7 @@ static void put_cam(float *d, const Camera *c){
 
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                            int history, int nvolumes,
-                           WGPUBuffer frame_u, WGPUBuffer dens, WGPUBuffer bricks, WGPUBuffer vstat){
+                           const GpuMedia *m){
     Gpu *g = t->g;
     gpu_trace_build(t, enc);         // the top level over the instances (they may have moved)
     if (t->planes != 5){             // no guide on this GPU: no reprojection either
@@ -1939,7 +1938,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
                                         WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc);
     if (reproject) t->cur = 1 - t->cur;
     write_params(t, t->params, s, tp, 0, t->h, nvolumes, 0, 1, 0);
-    dispatch_ex(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, frame_u, dens, bricks, vstat, 3);
+    dispatch_ex(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, m, 3);
     if (reproject){
         struct { float cams[8][4]; uint32_t dims[4]; } R;
         memset(&R, 0, sizeof(R));
