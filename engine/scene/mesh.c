@@ -1,6 +1,7 @@
 #include "scene/mesh.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +114,83 @@ static int read_obj(FILE *fp, Mesh *m, Caps *cap){
     return 0;
 }
 
+// ---- a text's numbers, fast ---------------------------------------------------------
+
+// the rest of a file in memory, a 0 after it (NULL: no memory)
+static char *read_rest(FILE *f, size_t *len){
+    size_t cap = (size_t)1 << 20, n = 0;
+    char *buf = malloc(cap + 1);
+    while (buf){
+        n += fread(buf + n, 1, cap - n, f);
+        if (n < cap) break;
+        char *t = realloc(buf, cap * 2 + 1);
+        if (!t){ free(buf); return NULL; }
+        buf = t;
+        cap *= 2;
+    }
+    if (buf) buf[n] = 0;
+    *len = n;
+    return buf;
+}
+
+// the next line of a text in memory (a 0 put at its end); NULL after the last
+static char *next_line(char **at, char *end){
+    char *s = *at;
+    if (s >= end) return NULL;
+    char *e = memchr(s, '\n', (size_t)(end - s));
+    if (e){ *e = 0; *at = e + 1; } else *at = end;
+    return s;
+}
+
+// The number at *p (moved past it), as strtod gives it: its digits as one integer and a
+// power of ten; with at most 15 digits and a power within 10^+-22 both are exact in a
+// double, so the one multiplication or division rounds once, to the same double a correct
+// strtod returns (Clinger 1990). Anything else (more digits, inf, nan, hexadecimal) is
+// strtod's.
+static double parse_num(char **pp){
+    static const double p10[23] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+                                   1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+    char *start = *pp, *s = start;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n' || *s == '\v' || *s == '\f') s++;
+    int neg = 0, nd = 0, e = 0, any = 0;
+    if (*s == '-'){ neg = 1; s++; } else if (*s == '+') s++;
+    uint64_t mant = 0;
+    for (; *s >= '0' && *s <= '9'; s++, any = 1){
+        if (nd < 19){ mant = mant * 10 + (uint64_t)(*s - '0'); nd += mant != 0; } else { e++; nd++; }
+    }
+    if (*s == '.'){
+        for (s++; *s >= '0' && *s <= '9'; s++, any = 1){
+            if (nd < 19){ mant = mant * 10 + (uint64_t)(*s - '0'); nd += mant != 0; e--; } else nd++;
+        }
+    }
+    if (!any || *s == 'x' || *s == 'X') return strtod(start, pp);
+    if (*s == 'e' || *s == 'E'){
+        char *t = s + 1;
+        int es = 1, ev = 0, digits = 0;
+        if (*t == '-'){ es = -1; t++; } else if (*t == '+') t++;
+        for (; *t >= '0' && *t <= '9'; t++, digits = 1) if (ev < 10000) ev = ev * 10 + (*t - '0');
+        if (digits){ e += es * ev; s = t; }
+    }
+    if (nd > 15 || e < -22 || e > 22) return strtod(start, pp);
+    double v = (double)mant;
+    v = e < 0 ? v / p10[-e] : v * p10[e];
+    *pp = s;
+    return neg ? -v : v;
+}
+
+// the integer at *p (moved past it; not moved, and 0, where there is none), as strtol in base 10
+static long parse_int(char **pp){
+    char *s = *pp;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n' || *s == '\v' || *s == '\f') s++;
+    int neg = 0;
+    if (*s == '-'){ neg = 1; s++; } else if (*s == '+') s++;
+    if (*s < '0' || *s > '9') return 0;
+    long v = 0;
+    for (; *s >= '0' && *s <= '9'; s++) if (v < 100000000L) v = v * 10 + (*s - '0');
+    *pp = s;
+    return neg ? -v : v;
+}
+
 // ---- .ply (ASCII only) --------------------------------------------------------------
 //
 //   ply
@@ -156,29 +234,37 @@ static int read_ply(FILE *f, Mesh *m, Caps *cap){
         return -1;
     }
 
-    for (long i = 0; i < nverts && read_line(&line, &linecap, f) > 0; i++){
+    // The numbers: the rest of the file read at once and its lines taken from memory, the
+    // numbers by parse_num and parse_int. (A line at a time through fgets, strtod and strtol
+    // was 300 of the 590 ms the full dragon takes to load: 1.3 million lines, 4.8 million
+    // numbers, each call with the stream's lock and the locale.)
+    free(line);
+    size_t len = 0;
+    char *text = read_rest(f, &len), *at = text, *end = text ? text + len : NULL;
+    if (!text) return -1;
+    for (long i = 0; i < nverts && (line = next_line(&at, end)) != NULL; i++){
         double val[3] = {0, 0, 0};
         char *p = line;
         for (int k = 0; k < nprops; k++){
-            double d = strtod(p, &p);
+            double d = parse_num(&p);
             if (k == ix) val[0] = d;
             if (k == iy) val[1] = d;
             if (k == iz) val[2] = d;
         }
         PUSH(m->v, m->nv, cap->v, vec3(val[0], val[1], val[2]));
     }
-    for (long i = 0; i < nfaces && read_line(&line, &linecap, f) > 0; i++){
+    for (long i = 0; i < nfaces && (line = next_line(&at, end)) != NULL; i++){
         char *p = line;
-        long n = strtol(p, &p, 10);
+        long n = parse_int(&p);
         if (n < 3 || n > 64) continue;
         int corners[64][3];
         for (int k = 0; k < n; k++){
-            corners[k][0] = (int)strtol(p, &p, 10);
+            corners[k][0] = (int)parse_int(&p);
             corners[k][1] = corners[k][2] = -1;
         }
         add_polygon(m, cap, corners, (int)n);
     }
-    free(line);
+    free(text);
     return 0;
 }
 
