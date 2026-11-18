@@ -4,6 +4,9 @@
 #include "rt/probe.h"
 #include "scene/env.h"
 
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _OPENMP
@@ -194,6 +197,29 @@ static Vec3 parse_vec3(Program prog, const char *s){
     return vec3(x, y, z);
 }
 
+// The number after an option, all of it: "12x", "" or "1e" are refused (atoi and atof took
+// "12x" as 12, and anything as 0)
+static void bad_number(Program prog, const char *opt, const char *v){
+    char msg[80];
+    snprintf(msg, sizeof(msg), "expected a number after %s, got", opt);
+    fail(prog, msg, v);
+}
+
+static int to_int(Program prog, const char *opt, const char *v){
+    char *end;
+    errno = 0;
+    long x = strtol(v, &end, 10);
+    if (end == v || *end || errno || x < INT_MIN || x > INT_MAX) bad_number(prog, opt, v);
+    return (int)x;
+}
+
+static double to_real(Program prog, const char *opt, const char *v){
+    char *end;
+    double x = strtod(v, &end);
+    if (end == v || *end || !isfinite(x)) bad_number(prog, opt, v);
+    return x;
+}
+
 static int on_off(Program prog, const char *opt, const char *v){
     if (!strcmp(v, "on")) return 1;
     if (strcmp(v, "off")){
@@ -274,70 +300,73 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         if (i + 1 >= argc) fail(prog, "missing value after", a);
         const char *v = argv[++i];
 
-        if      (!strcmp(a, "-n"))       o->width = o->height = atoi(v);
-        else if (!strcmp(a, "-width"))   o->width = atoi(v);
-        else if (!strcmp(a, "-height"))  o->height = atoi(v);
-        else if (!strcmp(a, "-s"))       o->spp = atoi(v);
-        else if (!strcmp(a, "-d"))       o->max_depth = atoi(v);
-        else if (!strcmp(a, "-clamp"))   o->clamp = atof(v);
-        else if (!strcmp(a, "-threads")) o->threads = atoi(v);
+        if      (!strcmp(a, "-n"))       o->width = o->height = to_int(prog, a, v);
+        else if (!strcmp(a, "-width"))   o->width = to_int(prog, a, v);
+        else if (!strcmp(a, "-height"))  o->height = to_int(prog, a, v);
+        else if (!strcmp(a, "-s"))       o->spp = to_int(prog, a, v);
+        else if (!strcmp(a, "-d"))       o->max_depth = to_int(prog, a, v);
+        else if (!strcmp(a, "-clamp"))   o->clamp = to_real(prog, a, v);
+        else if (!strcmp(a, "-threads")) o->threads = to_int(prog, a, v);
         else if (!strcmp(a, "-o"))       o->out = v;
         else if (!strcmp(a, "-obj"))     o->scene.obj_path = v;
         else if (!strcmp(a, "-gltf"))    o->scene.gltf_path = v;
-        else if (!strcmp(a, "-rot"))     o->scene.rot_deg = atof(v);
+        else if (!strcmp(a, "-rot"))     o->scene.rot_deg = to_real(prog, a, v);
         else if (!strcmp(a, "-base"))    { o->scene.mesh_base = parse_color(prog, v); o->scene.mesh_set |= MESH_SET_BASE; }
-        else if (!strcmp(a, "-metal"))   { o->scene.mesh_metal = atof(v); o->scene.mesh_set |= MESH_SET_METAL; }
-        else if (!strcmp(a, "-rough"))   { o->scene.mesh_rough = atof(v); o->scene.mesh_set |= MESH_SET_ROUGH; }
-        else if (!strcmp(a, "-ior"))     { o->scene.mesh_ior = atof(v); o->scene.mesh_set |= MESH_SET_IOR; }
-        else if (!strcmp(a, "-transmission")) { o->scene.mesh_trans = atof(v); o->scene.mesh_set |= MESH_SET_TRANS; }
+        else if (!strcmp(a, "-metal"))   { o->scene.mesh_metal = to_real(prog, a, v); o->scene.mesh_set |= MESH_SET_METAL; }
+        else if (!strcmp(a, "-rough"))   { o->scene.mesh_rough = to_real(prog, a, v); o->scene.mesh_set |= MESH_SET_ROUGH; }
+        else if (!strcmp(a, "-ior"))     { o->scene.mesh_ior = to_real(prog, a, v); o->scene.mesh_set |= MESH_SET_IOR; }
+        else if (!strcmp(a, "-transmission")) { o->scene.mesh_trans = to_real(prog, a, v); o->scene.mesh_set |= MESH_SET_TRANS; }
         else if (!strcmp(a, "-cam"))     { o->cam = parse_vec3(prog, v); o->set_cam = 1; }
         else if (!strcmp(a, "-look"))    { o->look = parse_vec3(prog, v); o->set_look = 1; }
-        else if (!strcmp(a, "-fov"))     { o->fov = atof(v); o->set_fov = 1; }
-        else if (!strcmp(a, "-octdepth")) o->ap.oct_depth = atoi(v);
-        else if (!strcmp(a, "-bvhleaf")) o->ap.bvh_leaf = atoi(v);
-        else if (!strcmp(a, "-bvhbins")) o->ap.bvh_bins = atoi(v);
-        else if (!strcmp(a, "-bvhwidth")) o->ap.bvh_width = atoi(v);
-        else if (!strcmp(a, "-preview")){ o->preview = atoi(v); preview_set = 1; }
-        else if (!strcmp(a, "-movespp")) o->move_spp = atoi(v);
-        else if (!strcmp(a, "-speed"))   o->speed = atof(v);
-        else if (!strcmp(a, "-autoquit")) o->autoquit = atof(v);
-        else if (!strcmp(a, "-orbit")) o->orbit = atof(v);
+        else if (!strcmp(a, "-fov"))     { o->fov = to_real(prog, a, v); o->set_fov = 1;
+                                           if (o->fov <= 0 || o->fov >= 180) fail(prog, "field of view must be between 0 and 180 degrees, got", v); }
+        else if (!strcmp(a, "-octdepth")) o->ap.oct_depth = to_int(prog, a, v);
+        else if (!strcmp(a, "-bvhleaf")) o->ap.bvh_leaf = to_int(prog, a, v);
+        else if (!strcmp(a, "-bvhbins")) o->ap.bvh_bins = to_int(prog, a, v);
+        else if (!strcmp(a, "-bvhwidth")) o->ap.bvh_width = to_int(prog, a, v);
+        else if (!strcmp(a, "-preview")){ o->preview = to_int(prog, a, v); preview_set = 1; }
+        else if (!strcmp(a, "-movespp")) o->move_spp = to_int(prog, a, v);
+        else if (!strcmp(a, "-speed"))   o->speed = to_real(prog, a, v);
+        else if (!strcmp(a, "-autoquit")) o->autoquit = to_real(prog, a, v);
+        else if (!strcmp(a, "-orbit")) o->orbit = to_real(prog, a, v);
         else if (!strcmp(a, "-maxfps")) o->maxfps = on_off(prog, a, v);
         else if (!strcmp(a, "-vsync")) o->vsync = on_off(prog, a, v);
-        else if (!strcmp(a, "-band")) o->band_ms = atof(v);
+        else if (!strcmp(a, "-band")) o->band_ms = to_real(prog, a, v);
         else if (!strcmp(a, "-stats")) o->stats = v;
-        else if (!strcmp(a, "-simhz")) o->sim_hz = atof(v);
-        else if (!strcmp(a, "-denoisemove")) o->denoise_move = atoi(v);
+        else if (!strcmp(a, "-simhz")) o->sim_hz = to_real(prog, a, v);
+        else if (!strcmp(a, "-denoisemove")) o->denoise_move = to_int(prog, a, v);
         else if (!strcmp(a, "-aa")){
             if (!strcmp(v, "fxaa")) o->aa = 1;
             else if (!strcmp(v, "off")) o->aa = 0;
             else fail(prog, "expected fxaa or off for -aa, got", v);
         }
-        else if (!strcmp(a, "-history")) o->history = atoi(v);
-        else if (!strcmp(a, "-instances")) o->scene.instances = atoi(v);
+        else if (!strcmp(a, "-history")) o->history = to_int(prog, a, v);
+        else if (!strcmp(a, "-instances")) o->scene.instances = to_int(prog, a, v);
         else if (!strcmp(a, "-photoncache")) o->photon_cache = on_off(prog, a, v);
-        else if (!strcmp(a, "-density")) o->cloud.sigma_t = atof(v);
+        else if (!strcmp(a, "-density")) o->cloud.sigma_t = to_real(prog, a, v);
         else if (!strcmp(a, "-albedo"))  o->cloud.albedo = parse_color(prog, v);
-        else if (!strcmp(a, "-g"))       o->cloud.g = atof(v);
-        else if (!strcmp(a, "-detail"))  o->cloud.detail = atof(v);
+        else if (!strcmp(a, "-g"))       o->cloud.g = to_real(prog, a, v);
+        else if (!strcmp(a, "-detail"))  o->cloud.detail = to_real(prog, a, v);
         else if (!strcmp(a, "-seed"))    o->cloud.seed = (uint32_t)strtoul(v, NULL, 10);
-        else if (!strcmp(a, "-time"))    o->cloud.time = atof(v);
-        else if (!strcmp(a, "-cloudres")){ o->cloud.resolution = atoi(v); cloudres_set = 1; }
-        else if (!strcmp(a, "-fog"))     o->scene.fog = atof(v);
+        else if (!strcmp(a, "-time"))    o->cloud.time = to_real(prog, a, v);
+        else if (!strcmp(a, "-cloudres")){ o->cloud.resolution = to_int(prog, a, v); cloudres_set = 1; }
+        else if (!strcmp(a, "-fog"))     o->scene.fog = to_real(prog, a, v);
         else if (!strcmp(a, "-sky"))     o->scene.sky = v;
         else if (!strcmp(a, "-tex"))     o->scene.mesh_tex = v;
         else if (!strcmp(a, "-mrmap"))   o->scene.mesh_mr = v;
         else if (!strcmp(a, "-normalmap")) o->scene.mesh_normal = v;
-        else if (!strcmp(a, "-uvscale")) o->scene.mesh_uv_scale = (real)atof(v);
-        else if (!strcmp(a, "-skyscale")) o->scene.sky_scale = (real)atof(v);
-        else if (!strcmp(a, "-skyrot"))  o->scene.sky_rot = (real)atof(v);
-        else if (!strcmp(a, "-proberes")) o->probe_res = atoi(v);
-        else if (!strcmp(a, "-probespp")) o->probe_spp = atoi(v);
+        else if (!strcmp(a, "-uvscale")){ o->scene.mesh_uv_scale = (real)to_real(prog, a, v);
+                                          if (o->scene.mesh_uv_scale <= 0) fail(prog, "-uvscale must be > 0, got", v); }
+        else if (!strcmp(a, "-skyscale")){ o->scene.sky_scale = (real)to_real(prog, a, v);
+                                           if (o->scene.sky_scale <= 0) fail(prog, "-skyscale must be > 0, got", v); }
+        else if (!strcmp(a, "-skyrot"))  o->scene.sky_rot = (real)to_real(prog, a, v);
+        else if (!strcmp(a, "-proberes")) o->probe_res = to_int(prog, a, v);
+        else if (!strcmp(a, "-probespp")) o->probe_spp = to_int(prog, a, v);
         else if (!strcmp(a, "-probe")) o->probe = on_off(prog, a, v);
-        else if (!strcmp(a, "-photons")) o->photons = atof(v);
-        else if (!strcmp(a, "-march"))   o->march.max_steps = atoi(v);
-        else if (!strcmp(a, "-lightres")) o->march.light_res = atoi(v);
-        else if (!strcmp(a, "-marchscale")){ o->march.scale = atoi(v); march_scale_set = 1; }
+        else if (!strcmp(a, "-photons")) o->photons = to_real(prog, a, v);
+        else if (!strcmp(a, "-march"))   o->march.max_steps = to_int(prog, a, v);
+        else if (!strcmp(a, "-lightres")) o->march.light_res = to_int(prog, a, v);
+        else if (!strcmp(a, "-marchscale")){ o->march.scale = to_int(prog, a, v); march_scale_set = 1; }
         else if (!strcmp(a, "-gpu")){
             if (!strcmp(v, "on")) o->gpu = 1;
             else if (!strcmp(v, "off")) o->gpu = 0;
@@ -351,19 +380,19 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         else if (!strcmp(a, "-wavefront")) o->wavefront = on_off(prog, a, v);
         else if (!strcmp(a, "-denoise")) o->denoise = on_off(prog, a, v);
         else if (!strcmp(a, "-rastercloud")) o->raster_clouds = on_off(prog, a, v);
-        else if (!strcmp(a, "-frames"))  o->sim.frames = atoi(v);
-        else if (!strcmp(a, "-fps"))     o->sim.fps = atof(v);
-        else if (!strcmp(a, "-balls"))   o->sim.balls = atoi(v);
-        else if (!strcmp(a, "-boxes"))   o->sim.boxes = atoi(v);
-        else if (!strcmp(a, "-balloons")) o->sim.balloons = atoi(v);
+        else if (!strcmp(a, "-frames"))  o->sim.frames = to_int(prog, a, v);
+        else if (!strcmp(a, "-fps"))     o->sim.fps = to_real(prog, a, v);
+        else if (!strcmp(a, "-balls"))   o->sim.balls = to_int(prog, a, v);
+        else if (!strcmp(a, "-boxes"))   o->sim.boxes = to_int(prog, a, v);
+        else if (!strcmp(a, "-balloons")) o->sim.balloons = to_int(prog, a, v);
         else if (!strcmp(a, "-wind"))    o->sim.wind = parse_vec3(prog, v);
-        else if (!strcmp(a, "-fluidres")){ o->sim.fluid_res = atoi(v); fluidres_set = 1; }
-        else if (!strcmp(a, "-buoyancy")) o->sim.buoyancy = atof(v);
-        else if (!strcmp(a, "-vorticity")) o->sim.vorticity = atof(v);
-        else if (!strcmp(a, "-physseed")) o->sim.seed = atoi(v);
-        else if (!strcmp(a, "-meshes"))  o->sim.meshes = atoi(v);
-        else if (!strcmp(a, "-bodies"))  o->sim.bodies = atoi(v);
-        else if (!strcmp(a, "-props"))   o->sim.props = atoi(v);
+        else if (!strcmp(a, "-fluidres")){ o->sim.fluid_res = to_int(prog, a, v); fluidres_set = 1; }
+        else if (!strcmp(a, "-buoyancy")) o->sim.buoyancy = to_real(prog, a, v);
+        else if (!strcmp(a, "-vorticity")) o->sim.vorticity = to_real(prog, a, v);
+        else if (!strcmp(a, "-physseed")) o->sim.seed = to_int(prog, a, v);
+        else if (!strcmp(a, "-meshes"))  o->sim.meshes = to_int(prog, a, v);
+        else if (!strcmp(a, "-bodies"))  o->sim.bodies = to_int(prog, a, v);
+        else if (!strcmp(a, "-props"))   o->sim.props = to_int(prog, a, v);
         else if (!strcmp(a, "-collider")){
             if (!strcmp(v, "on")) o->sim.collider = 1;
             else if (!strcmp(v, "off")) o->sim.collider = 0;
@@ -409,6 +438,18 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->spp <= 0) fail(prog, "samples must be positive", "-s");
     if (o->max_depth <= 0) fail(prog, "bounces must be positive", "-d");
     if (o->clamp < 0) fail(prog, "clamp must be >= 0", "-clamp");
+    if (o->threads < 0) fail(prog, "threads must be >= 0 (0 = all cores)", "-threads");
+    if (o->ap.oct_depth < 0) fail(prog, "octree depth must be >= 0 (0 = automatic)", "-octdepth");
+    if (o->scene.instances < 0) fail(prog, "instances must be >= 0", "-instances");
+    if (o->probe_res != 0 && (o->probe_res < 4 || o->probe_res > 2048)) fail(prog, "probe width must be 4..2048 (0 = automatic)", "-proberes");
+    if (o->probe_spp < 1) fail(prog, "probe paths per texel must be >= 1", "-probespp");
+    if (o->history < 0) fail(prog, "history must be >= 0", "-history");
+    if (o->speed <= 0) fail(prog, "speed must be > 0", "-speed");
+    if (o->sim_hz < 0) fail(prog, "physics steps per second must be >= 0 (0 = every frame)", "-simhz");
+    if (o->autoquit < 0) fail(prog, "autoquit must be >= 0 (0 = never)", "-autoquit");
+    if (o->band_ms < 0) fail(prog, "band must be >= 0 ms (0 = automatic)", "-band");
+    if (o->denoise_move < 0 || o->denoise_move > 5) fail(prog, "denoiser passes while moving must be 0..5", "-denoisemove");
+    if (o->sim.bodies < 0 || o->sim.bodies > 4096) fail(prog, "-bodies must be 0..4096 (SIM_MAX_SPAWNS)", "-bodies");
     if (o->ap.bvh_leaf < 1 || o->ap.bvh_bins < 2) fail(prog, "need -bvhleaf >= 1 and -bvhbins >= 2", "");
     if (o->ap.bvh_width != 2 && o->ap.bvh_width != 4) fail(prog, "-bvhwidth is 2 or 4", "");
     if (o->preview < 1) o->preview = 1;
@@ -427,7 +468,6 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
         if (o->sim.fluid_res < 8 || o->sim.fluid_res > 256) fail(prog, "fluid resolution must be 8..256", "-fluidres");
         if (o->sim.balls < 0 || o->sim.boxes < 0 || o->sim.balloons < 0 || o->sim.meshes < 0 || o->sim.props < 0)
             fail(prog, "counts must be >= 0", "-balls/-boxes/-balloons/-meshes/-props");
-        if (o->sim.bodies < 0 || o->sim.bodies > 4096) fail(prog, "-bodies must be 0..4096 (SIM_MAX_SPAWNS)", "-bodies");
         (void)backend_set;   // view -sim: hybrid (raster + raymarched cloud while it runs)
         // live: coarser air and cloud, so that a physics step fits in a frame
         if (prog == PROG_VIEW && !fluidres_set) o->sim.fluid_res = 32;
