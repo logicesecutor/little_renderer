@@ -9,7 +9,7 @@
 //   Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp
 import { createServer } from 'node:http';
 import { createReadStream, statSync } from 'node:fs';
-import { join, normalize, extname, resolve } from 'node:path';
+import { join, normalize, extname, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
@@ -18,9 +18,12 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/ja
 export function serve(folder, port = 8000, host = '127.0.0.1', isolate = true) {
   const root = resolve(folder);
   const server = createServer((req, res) => {
-    const path = decodeURIComponent((req.url || '/').split('?')[0]);
+    let path;
+    try { path = decodeURIComponent((req.url || '/').split('?')[0]); }
+    catch { res.writeHead(400); res.end('bad request'); return; }   // a malformed escape ("/%")
     let file = normalize(join(root, path));
-    if (!file.startsWith(root)) { res.writeHead(403); res.end(); return; }
+    // inside the folder: root itself or below it (not a sibling whose name begins the same)
+    if (file !== root && !file.startsWith(root + sep)) { res.writeHead(403); res.end(); return; }
     try { if (statSync(file).isDirectory()) file = join(file, 'index.html'); } catch {}
     let size = 0;
     try { size = statSync(file).size; } catch { res.writeHead(404); res.end('not found'); return; }
