@@ -16,6 +16,11 @@ const char *backend_name(Backend b){
 
 void options_usage(Program prog, FILE *f){
     int view = prog == PROG_VIEW, sim = prog == PROG_SIM;
+    // the defaults printed from where they are set, not typed again here (they drifted:
+    // -density was shown as 0.05, -g as 0.6)
+    const CloudParams cd = cloud_default_params();
+    const MarchParams md = march_default_params();
+    const AccelParams ad = accel_default_params();
     fprintf(f, "usage: %s [options]\n\n", view ? "view" : (sim ? "sim" : "render"));
     if (sim) fprintf(f,
         "physics simulation: renders every frame with the path tracer into <-o>/frame_NNNN.png\n\n"
@@ -47,12 +52,12 @@ void options_usage(Program prog, FILE *f){
         "%s"
         "  -shading phong|gouraud|flat|wireframe   rasterizer shading       (phong)\n"
         "  -rastercloud on|off        rasterizer: draw %s by raymarching (on)\n"
-        "  -march n / -lightres n     raymarching: max steps per ray / light grid size (128 / 48)\n"
+        "  -march n / -lightres n     raymarching: max steps per ray / light grid size (%d / %d)\n"
         "  -marchscale 1|2            raymarching at full or half resolution   (%s)\n%s",
         view ? "  -backend hybrid|rt|raster  hybrid = rasterizer while moving, path tracer when still (hybrid)\n"
              : sim ? "  -backend rt|raster         path tracer, or rasterizer (raymarched cloud: fast) (rt)\n"
              : "  -backend rt|raster         path tracer or rasterizer                (rt)\n",
-        sim ? "the cloud" : "clouds and fog", view ? "2" : "1", !view ? "" :
+        sim ? "the cloud" : "clouds and fog", md.max_steps, md.light_res, view ? "2" : "1", !view ? "" :
         "  -gpu on|off|offscreen      render (rasterizer, path tracer, clouds) and simulate the air on the GPU\n"
         "                             (WebGPU; on when the build has it: make web, or natively unless NOGPU=1);\n"
         "                             offscreen: the GPU draws into a texture read back to the canvas\n"
@@ -108,14 +113,14 @@ void options_usage(Program prog, FILE *f){
         "\n"
         "cloud (path tracer; -scene cloud, or -cloud on to add it to any scene)\n"
         "  -cloud on|off              a volumetric cloud floating in the box   (off)\n"
-        "  -density sigma             extinction at full density, per unit     (0.05)\n"
-        "  -albedo a | r,g,b          fraction scattered (rest absorbed)       (0.99)\n"
-        "  -g value                   anisotropy: 0 uniform, > 0 forward       (0.6)\n"
-        "  -detail value              0 smooth .. 1 wispy, eroded edges        (0.6)\n"
-        "  -seed n                    which cloud                              (1)\n"
+        "  -density sigma             extinction at full density, per unit     (%g)\n"
+        "  -albedo a | r,g,b          fraction scattered (rest absorbed)       (%g)\n"
+        "  -g value                   anisotropy: 0 uniform, > 0 forward       (%g)\n"
+        "  -detail value              0 smooth .. 1 wispy, eroded edges        (%g)\n"
+        "  -seed n                    which cloud                              (%u)\n"
         "  -time seconds              animation time: the detail drifts with the wind (0)\n"
         "  -wind x,y,z                (render, view without -sim) the cloud leans downwind, units / s (0,0,0)\n"
-        "  -cloudres n                voxels along the longest side            (128)\n"
+        "  -cloudres n                voxels along the longest side            (%d; view -sim on: 96)\n"
         "  -fog sigma                 fill the room with a uniform haze, 0 = off (0)\n"
         "\n"
         "camera (default: the classic Cornell view)\n"
@@ -126,9 +131,9 @@ void options_usage(Program prog, FILE *f){
         "acceleration structure (path tracer)\n"
         "  -accel auto|none|octree|bvh  auto = bvh from %d primitives up, else none   (auto)\n"
         "  -octdepth n                octree max depth, 0 = automatic          (0)\n"
-        "  -bvhleaf n                 BVH: max primitives per leaf             (4)\n"
-        "  -bvhbins n                 BVH: SAH buckets per axis                (16)\n"
-        "  -bvhwidth 2|4              BVH: children per node (4: half as deep, 4 boxes per step) (4)\n"
+        "  -bvhleaf n                 BVH: max primitives per leaf             (%d)\n"
+        "  -bvhbins n                 BVH: SAH buckets per axis                (%d)\n"
+        "  -bvhwidth 2|4              BVH: children per node (4: half as deep, 4 boxes per step) (%d)\n"
         "  -bvhsplit sah|middle       BVH: how nodes are split                 (sah)\n",
         view ? "640" : (sim ? "320" : "400"),
         view ? "stop refining after this many samples per pixel" : "samples (light paths) per pixel  ",
@@ -137,7 +142,8 @@ void options_usage(Program prog, FILE *f){
         view ? "lt; on the CPU: pt" : (sim ? "pt" : "lt"),
         view ? "screenshot prefix (key P)  " : (sim ? "folder for the frames      " : "output PNG file            "),
         view ? "out/view" : (sim ? "out/sim" : "out/cornell_<scene>[_raster].png"),
-        AUTO_ACCEL_MIN_PRIMS);
+        (double)cd.sigma_t, (double)cd.albedo.x, (double)cd.g, (double)cd.detail, (unsigned)cd.seed, cd.resolution,
+        AUTO_ACCEL_MIN_PRIMS, ad.bvh_leaf, ad.bvh_bins, ad.bvh_width);
     if (view) fprintf(f,
         "\n"
         "real-time viewer\n"
