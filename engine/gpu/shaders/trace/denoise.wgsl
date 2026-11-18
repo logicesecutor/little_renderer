@@ -159,6 +159,7 @@ fn atrous(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
        holes would print a grid on smooth walls */
     var seed = hash32((k * 0x9e3779b9u) ^ (u32(st) * 0x85ebca6bu));
     let jit = st / 2;
+    let jn = u32(2 * jit + 1);
     var sum = vec3f(0.0);
     var vsum = 0.0;
     var wsum = 0.0;
@@ -167,9 +168,11 @@ fn atrous(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
             var ox = (i - 2) * st;
             var oy = (j - 2) * st;
             if (jit > 0 && (i != 2 || j != 2)) {
+                /* 0 .. 2 jit from 16 random bits each by a product and a shift (a remainder
+                   is a division: 48 of them a pixel were a good part of a pass) */
                 seed = hash32(seed);
-                ox += i32(seed % u32(2 * jit + 1)) - jit;
-                oy += i32((seed >> 16u) % u32(2 * jit + 1)) - jit;
+                ox += i32(((seed & 0xffffu) * jn) >> 16u) - jit;
+                oy += i32(((seed >> 16u) * jn) >> 16u) - jit;
             }
             let qx = x + ox;
             let qy = y + oy;
