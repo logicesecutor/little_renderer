@@ -335,7 +335,7 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-movespp n` | samples per pixel of each low-resolution frame while moving | 1 |
 | `-speed units` | movement speed in scene units per second | 300 |
 | `-autoquit seconds` | quit after this time and save a screenshot (scripts, benchmarks); prints the frame rate, and with `-orbit` the `render` command of the screenshot's camera | 0 = never |
-| `-photoncache on\|off` | GPU light-traced caustics while moving: from a world-space photon cache (on), or traced exactly every frame (off) | on |
+| `-photoncache on\|off` | GPU light-traced caustics while moving: from a world-space photon cache (on), or traced exactly every frame (off) | off |
 | `-orbit deg/s` | the camera swings by itself, ±25° around the point it looks at, at this speed: benchmarks and tests of the image while moving | 0 = off |
 | `-maxfps on\|off` | on: a frame rendered and shown every time round, as many as the machine can, still or moving (the path tracer's work per frame kept within the display's period, `-band`); off: a frame only when something changed, and the path tracer stops at `-s` samples (less power, the image clean sooner) | on |
 | `-vsync on\|off` | on: frames in step with the display; off: shown as soon as ready (Mailbox, else Immediate: it may tear), the machine's own rate | on |

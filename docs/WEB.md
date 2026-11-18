@@ -279,10 +279,10 @@ the camera moves, and the path tracer takes over once it settles.
   light traced on the GPU 5.0 (the CPU's 5.0), for 0.32 s instead of 0.24 s. The mean is
   within 0.1%. `render`, `view` (and `bin/sim -caustics lt`) light-trace them by default
   on the GPU; the CPU viewer still path traces them.
-- **The photon cache** (`view`, while moving): light paths leave their power at every
-  diffuse surface they reach, in a world-space hash grid. Each slot holds 3 × 64-bit sums,
-  a photon count and its cell's key. Cells are claimed with an atomic compare-exchange and
-  linear probing, so two places never share a slot.
+- **The photon cache** (`view -photoncache on`, while moving; off by default): light paths
+  leave their power at every diffuse surface they reach, in a world-space hash grid. Each
+  slot holds 3 × 64-bit sums, a photon count and its cell's key. Cells are claimed with an
+  atomic compare-exchange and linear probing, so two places never share a slot.
 - **Cell sizes:** cells are the scene's size / 256, ×4 and ×16, per main normal axis. A
   pixel that sees a diffuse surface directly reads, bilinearly along that surface, the
   finest size holding at least 16 photons (adaptive density estimation). The grid fades by
@@ -293,8 +293,8 @@ the camera moves, and the path tracer takes over once it settles.
   tracer each frame 9.0 / 8.9, path traced caustics (`-caustics pt`) 8.8 / 6.0. The cache
   gives by far the best raw frame; once denoised, path traced caustics come out ~10% ahead,
   because the denoiser smooths them, while the cache's cells keep a little bias (a few %
-  near the lamp, a slightly blurred caustic). `-photoncache off` traces the exact caustics
-  every frame instead.
+  near the lamp, a slightly blurred caustic). Without it (`-photoncache off`, the default)
+  the exact caustics are traced every frame.
 
 ### 2.7 Instances: meshes that move (`-instances n`)
 

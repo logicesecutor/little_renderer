@@ -77,6 +77,8 @@ void options_usage(Program prog, FILE *f){
         "  -sampler sobol|random      a path's random numbers: Sobol with blue noise, or plain (sobol)\n"
         "  -caustics lt|pt            caustics by light tracing or by path tracing (%s)\n"
         "  -photons x                 light paths per camera path for -caustics lt (1)\n"
+        "  -photoncache on|off        view, -caustics lt on the GPU: while moving, the caustics from a\n"
+        "                             photon cache instead of traced again each frame (off)\n"
         "  -o file                    %s (%s)\n"
         "\n"
         "scene\n"
