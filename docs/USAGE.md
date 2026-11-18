@@ -310,6 +310,8 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-vsync on\|off` | on: frames in step with the display; off: shown as soon as ready (Mailbox, else Immediate: it may tear), the machine's own rate | on |
 | `-band ms` | GPU path tracer: its GPU time per frame. 0 = 85% of the display's refresh period in a window in step with the display (where it runs while the frame waits); otherwise (`-vsync off`, offscreen) 60% of it but at least a whole pass, up to 33 ms; bigger: fewer frames, the image cleaner sooner | 0 |
 | `-stats file` | with `-autoquit`: the frames per second and the path tracer's passes per second (the first 2 s left out) written to `file` (bin/bench's group I) | none |
+| `-simhz n` | with `-sim on`: physics steps per second at most; faster frames step every few and those between refine the same image (each step takes all the time since the last, so slower frames step every frame); 0 = a step every frame | 60 |
+| `-denoisemove n` | GPU denoiser while things move: its a-trous passes, 1-5 (a footprint of 5, 9, 17, 33, 65 pixels), fewer cost less and smooth less; still images keep 5; 0 = 5 | 3 |
 | `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); 12 at most while the physics runs; 0 = start over on every move | 32 |
 | `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, or natively after `make deps`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
