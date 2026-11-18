@@ -25,7 +25,8 @@ pays) · `later` / `last` · `idea` (not yet discussed) · `stopped` · `done` �
 | 9 | **The browser build again**: the sky scene, the denoiser and the fast physics in a browser (without hardware ray tracing) | W2 (its tools) and W4, W6 done on branch `webgpu-perf` (1.7); W3, W5, W7, W8 next | WEB.md |
 | 10 | **The GPU's load**: what the GPU's time goes to in the path traced viewer, and more of it to path tracing | G1-G4, G6 done (branches `gpu-load`, `gpu-load-2`); G5 proposed | 1.5 |
 | 11 | **Adaptive sampling**: the samples where the image is still noisy, not one per pixel per pass everywhere | proposed 2026-11-18, plan in 1.6 | R9 |
-| 12 | **One native GPU**: wgpu-native removed, our Vulkan layer the default build, its X11 window | done on branch `vk-only` (2026-11-18) | 1.8; VULKAN.md |
+| 12 | **One native GPU**: wgpu-native removed, our Vulkan layer the default build, its X11 window | done (branch `vk-only`, merged 2026-11-18) | 1.8; VULKAN.md |
+| 13 | **The performance review's speedups**: P1 (the bodies' broad phase in 3D: F1 21.7 -> 12.1 ms), P2 (the sky's weights in a table: H3 721 -> 569), P4 (min and max inline), P5 (the solver's rows once per substep; the bodies' rounding changes), P6 (the hulls' edge tables), P7 (the denoiser's taps without remainders; its pattern changes), P8 (PLY parsed in memory: H4 562 -> 331), P9 (SAH binning in one pass); all together F1 21.6 -> 7.6 ms natively, 46 -> 9.8 in the threaded page. P3 (wgpu-native only) not taken | done (branch `development`, 2026-11-18) | [PERF_REVIEW.md](PERF_REVIEW.md); its N1-N8 still to decide |
 
 `next` merged into `main` on 2026-11-17 (877237c, with the user's removal of the dragon
 from the repository; the dragon stays on disk, untracked: `make dragon-download`).

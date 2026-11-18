@@ -58,7 +58,7 @@ if (addrs.length){
     }
 }
 
-// functions without debug information (the C library's, wgpu's): their names from the symbol table
+// functions without debug information (the C library's, the GPU driver's): their names from the symbol table
 const nm = spawnSync('nm', ['-n', exe], { encoding: 'utf8', maxBuffer: 1 << 30 }).stdout || '';
 const syms = [];
 for (const l of nm.split(/\r?\n/)){ const s = /^([0-9a-f]+) [tT] (\S+)/.exec(l); if (s) syms.push([BigInt('0x' + s[1]) - imageBase, s[2]]); }

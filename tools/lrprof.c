@@ -1,7 +1,7 @@
 // lrprof.c - a tiny sampling profiler for Windows (docs/PERF_REVIEW.md), linked into a
 // program when it is to be profiled; nothing of the engine includes it.
 //
-//   gcc ... apps/bench.c tools/lrprof.c build/float-gpu/liblr.a ... -o out/perf/bench_prof.exe
+//   gcc ... apps/bench.c tools/lrprof.c build/float-vk/liblr.a ... -o out/perf/bench_prof.exe
 //   set LRPROF=out/perf/b2.prof     (where the samples go; without it nothing runs)
 //   set LRPROF_HZ=2000              (samples a second, default 1000)
 //   out/perf/bench_prof.exe -only B2

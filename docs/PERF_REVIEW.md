@@ -2,8 +2,14 @@
 
 What is slow, why, and what to do about it: a ranked list of findings, each with its
 evidence (a profile or a measurement), a fix, the gain measured with a prototype on this
-branch or estimated, and the risk. **Nothing here is merged**: every prototype is one commit
-on `perf` (from `main` at 37b805c), to take or leave one by one.
+branch or estimated, and the risk. Every prototype was one commit on `perf` (from `main` at
+37b805c), to take or leave one by one.
+
+**Taken on 2026-11-18** (branch `development`, merged into `main`): P1, P2, P4, P5, P6, P7, P8,
+P9, the profiler (`tools/lrprof`) and the `bench -compare` fix. **Not taken: P3**, which only
+concerned wgpu-native, removed from the engine the same day (docs/STATUS.md 1.8: the native
+GPU is our Vulkan layer alone). The wgpu columns below were measured before that and stay as
+they were; the N items are still to decide.
 
 Machine: i5-10600K (6 cores, 12 threads), RTX 3070, Windows, MSYS2 gcc 16.2, a 60 Hz display
 that day. Numbers are medians of `bin/bench` cases (docs/STATUS.md 1.3), the two builds run
