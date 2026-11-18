@@ -497,6 +497,79 @@ WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, con
     return p;
 }
 
+// ---- pipelines made asynchronously ----
+// In a browser createComputePipeline returns at once, but the GPU process compiles the
+// pipeline there and then and the device's work after it waits: the path tracer's pipelines
+// held the first frame for 10 s in Chrome (docs/STATUS.md 1.7). Made with
+// createComputePipelineAsync they compile on the browser's worker threads, side by side,
+// while the page goes on drawing. Natively they are made at once (wgpu-native has no
+// asynchronous creation; the driver's cache makes them fast there).
+struct GpuPipeReq {
+    WGPUComputePipeline *slot;   // NULL: cancelled (its owner went away)
+    int *state;
+    char label[64];
+};
+
+#ifdef __EMSCRIPTEN__
+static void on_pipeline(WGPUCreatePipelineAsyncStatus status, WGPUComputePipeline p, WGPUStringView msg, void *u1, void *u2){
+    (void)u2;
+    GpuPipeReq *r = u1;
+    if (status != WGPUCreatePipelineAsyncStatus_Success){
+        fprintf(stderr, "GPU error: pipeline %s: %.*s\n", r->label,
+                msg.data ? (int)(msg.length == WGPU_STRLEN ? strlen(msg.data) : msg.length) : 0, msg.data ? msg.data : "");
+        if (r->slot) *r->state = -1;
+        if (p) wgpuComputePipelineRelease(p);
+    } else if (r->slot){
+        *r->slot = p;
+        *r->state = 1;
+    } else if (p) wgpuComputePipelineRelease(p);
+    free(r);
+}
+#endif
+
+GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl,
+                              WGPUComputePipeline *slot, int *state){
+#ifdef __EMSCRIPTEN__
+    const char *e = getenv("LR_GPU_ASYNC");               // =0: made at once, as before (to compare)
+    GpuPipeReq *r = e && *e == '0' ? NULL : calloc(1, sizeof(*r));
+    if (r){
+        r->slot = slot;
+        r->state = state;
+        snprintf(r->label, sizeof(r->label), "%s", label);
+        WGPUShaderModule m = gpu_shader(g, label, wgsl);
+        WGPUPipelineLayoutDescriptor ld;
+        memset(&ld, 0, sizeof(ld));
+        ld.bindGroupLayoutCount = 1;
+        ld.bindGroupLayouts = &bgl;
+        WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(g->device, &ld);
+        WGPUComputePipelineDescriptor cd;
+        memset(&cd, 0, sizeof(cd));
+        cd.label = gpu_str(label);
+        cd.layout = pl;
+        cd.compute.module = m;
+        cd.compute.entryPoint = gpu_str(entry);
+        WGPUCreateComputePipelineAsyncCallbackInfo ci;
+        memset(&ci, 0, sizeof(ci));
+        ci.mode = WGPUCallbackMode_AllowSpontaneous;
+        ci.callback = on_pipeline;
+        ci.userdata1 = r;
+        *slot = NULL;
+        *state = 0;
+        wgpuDeviceCreateComputePipelineAsync(g->device, &cd, ci);
+        wgpuPipelineLayoutRelease(pl);
+        wgpuShaderModuleRelease(m);
+        return r;
+    }
+#endif
+    *slot = gpu_compute(g, label, wgsl, entry, bgl);
+    *state = *slot ? 1 : -1;
+    return NULL;
+}
+
+void gpu_compute_async_cancel(GpuPipeReq *r, const int *state){
+    if (r && state && *state == 0){ r->slot = NULL; r->state = NULL; }   // (done ones are freed already)
+}
+
 // ---- GPU time per stage ----
 struct GpuTimer {
     Gpu *g;

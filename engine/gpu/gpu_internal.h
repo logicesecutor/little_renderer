@@ -77,6 +77,15 @@ WGPUBindGroupLayout gpu_layout(Gpu *g, WGPUShaderStage stage, const char *types)
 // data (rows top to bottom) if not NULL
 WGPUTexture gpu_texture_f32(Gpu *g, const char *label, int w, int h, int channels, const float *data);
 WGPUComputePipeline gpu_compute(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl);
+// The same, made asynchronously in a browser (createComputePipelineAsync: compiled on its
+// worker threads while frames go on): *slot is NULL and *state 0 until it is ready, then the
+// pipeline and 1 (-1: it failed). Natively it is made at once (*state 1 or -1, returns NULL).
+// An owner that goes away before then calls gpu_compute_async_cancel (with its state, so a
+// request already done is not touched); the pipeline is then released when it comes.
+typedef struct GpuPipeReq GpuPipeReq;
+GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl,
+                              WGPUComputePipeline *slot, int *state);
+void gpu_compute_async_cancel(GpuPipeReq *r, const int *state);
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n);
 // A bind group that is asked for every frame, made once: the last few (GPU_BIND_WAYS) sets of
 // entries a call site used are kept with their groups (a tracer's two sample buffers taking
@@ -190,6 +199,9 @@ void gpu_tex_pack(const Material *m, int ntex, uint32_t out[4]);
 GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl, const char *media_wgsl);
 // the scene's geometry and BVH onto the GPU if they changed; 0 = this GPU cannot hold them
 int gpu_trace_sync(GpuTrace *t, const Scene *s);
+// 1 = the kernels the scene needs are made (in a browser they compile asynchronously; the
+// one with the sky is asked for here once the scene has one), 0 = not yet, -1 = they failed
+int gpu_trace_ready(GpuTrace *t, const Scene *s);
 int gpu_trace_reads_tlas(const GpuTrace *t, const Scene *s);   // 1 = gpu_trace_sync copies the CPU's top level (scene_tlas)
 void gpu_trace_clear(GpuTrace *t, WGPUCommandEncoder enc);
 // `repeats` more samples for every pixel of rows [y0, y0 + rows), samples number index,

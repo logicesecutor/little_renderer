@@ -553,6 +553,48 @@ static void case_first_frame(const Case *c, Res *r, int reps){
     }
 }
 
+// A viewer's start: a new GPU, the path tracer's kernels asked for (gpu_view_trace_prepare),
+// then frames rasterized one after another, as the viewer does, until the first path traced
+// pass is done: the longest frame (ms). In a browser the kernels compile for seconds the
+// first time; made at once (LR_GPU_ASYNC=0) they hold up every frame behind them. Once: the
+// browser keeps what it compiled (the later runs of a page find it).
+static void case_compile_frames(const Case *c, Res *r, int reps){
+    (void)reps;
+    if (!gpu_available()){ skip(r, "no GPU"); return; }
+    Options o; static Scene s;
+    if (setup(c->args, &o, &s, &SIM)){ skip(r, "scene not made"); return; }
+    scene_set_accel(&s, ACCEL_BVH, &o.ap);
+    Gpu *g = gpu_create(NULL, o.width, o.height);
+    gpu_ready_wait(g);
+    GpuView *v = g && gpu_state(g) == GPU_READY ? gpu_view_create(g, o.width, o.height) : NULL;
+    RenderParams rp = scene_params(&o, &s);
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    double t0 = clock_s(), worst = 0;
+    int frames = 0;
+    if (v){
+        gpu_view_trace_prepare(v);
+        gpu_view_trace_start(v, &s, &tp);
+        gpu_view_trace_limit(v, 1);
+        while (gpu_view_trace_passes(v) < 1 && gpu_state(g) == GPU_READY && clock_s() - t0 < 60){
+            double f0 = clock_s();
+            gpu_view_present_scene(v, &s, &rp, &o.march, 0);
+            gpu_view_trace_more(v, &s, &rp, &o.march);
+            gpu_wait(g);
+            double ms = (clock_s() - f0) * 1000.0;
+            if (ms > worst) worst = ms;
+            frames++;
+        }
+    }
+    int ok = v && gpu_view_trace_passes(v) >= 1;
+    double total = (clock_s() - t0) * 1000.0;
+    gpu_view_destroy(v);
+    gpu_destroy(g);
+    teardown(&o, &s, &SIM);
+    if (!ok){ skip(r, "no GPU"); return; }
+    add(r, worst);
+    snprintf(r->note, sizeof(r->note), "%d frames rasterized in the %.0f ms until the first path traced pass", frames, total);
+}
+
 // a scene made: loading its models, its trees, the sky demo's props and light probe
 static void case_setup(const Case *c, Res *r, int reps){
     if (!models_there(c->args, r)) return;
@@ -668,6 +710,7 @@ static const Case CASES[] = {
     {"H3", "start: the sky demo made (props, light probe)", "ms", 1, case_setup, SKYDEMO(3000), 0, 0},
     {"H4", "start: the dragon loaded, its tree built",     "ms", 0, case_setup, "-scene mesh -obj " DRAGON " -rot -35 " R640, 0, 0},
     {"H5", "start: the helmet loaded (glTF)",              "ms", 0, case_setup, "-gltf " HELMET " " R640, 0, 0},
+    {"H6", "start: the longest frame until path traced",   "ms", 0, case_compile_frames, "-scene boxes -width 640 -height 640", 0, 0},
     {"I1", "viewer: rasterized, still",                    "ms/frame", 1, case_viewer, "-backend raster " R720, 0, 0},
     {"I2", "viewer: rasterized, moving",                   "ms/frame", 0, case_viewer, "-backend raster -orbit 15 " R720, 0, 0},
     {"I3", "viewer: path traced, still",                   "ms/frame", 1, case_viewer, "-backend rt " R720, 0, 0},
@@ -1019,7 +1062,7 @@ int main(int argc, char **argv){
         if (!selected(c, only)) continue;
         Res r;
         memset(&r, 0, sizeof(r));
-        int nreps = c->fn == case_pile && !full ? 2 : c->fn == case_pile ? 3 : c->fn == case_viewer ? 2 : reps;
+        int nreps = c->fn == case_pile && !full ? 2 : c->fn == case_pile ? 3 : c->fn == case_viewer ? 2 : c->fn == case_compile_frames ? 1 : reps;
         double t0 = clock_s();
         c->fn(c, &r, nreps);
         double secs = clock_s() - t0;

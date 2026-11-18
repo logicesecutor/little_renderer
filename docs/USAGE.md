@@ -381,6 +381,7 @@ Environment variables for measuring (docs/STATUS.md keeps what they showed):
 | `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
 | `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary; without it the 4-wide walk is not compiled in) |
+| `LR_GPU_ASYNC=0` | in a page: the path tracer's pipelines made at once instead of asynchronously (the frames wait for their compile; to compare: bench case H6) |
 | `LR_GPU_STACK=wg\|private` | where the GPU path tracer's tree walk keeps its stack: in workgroup memory (the page's default: 1.2-1.5x faster in Chrome) or in each thread's own memory (the native default) |
 | `LR_GPU_TLAS=gpu\|cpu` | `gpu`: the GPU builds the top level over the instances itself every frame (LBVH; `lbvh`, the old name, works too); `cpu`: it takes the CPU's SAH tree. Default: the CPU's below 32768 instances, the GPU's from there |
 | `LR_GPU_TLAS_UPDATE=0` | our Vulkan layer: the hardware top level built again whenever instances moved (default: updated in place while at most a quarter moved, built every 32 updates) |

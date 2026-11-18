@@ -51,6 +51,11 @@ typedef struct {
 // own BVH is used when it has one, so call scene_set_accel after changing geometry). Returns 0
 // if this GPU cannot hold the scene: then path trace on the CPU.
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp);
+// The path tracer's kernels asked for now, before the first image (a viewer that will path
+// trace calls it once its view is made): in a browser they compile asynchronously, side by
+// side, while frames go on (rasterized); natively they are made at once. Until they are ready
+// gpu_view_trace_more does nothing (no passes: what is drawn is the rasterized scene).
+void gpu_view_trace_prepare(GpuView *v);
 // Goes on after something changed (the camera moved, the bodies, the media): a new image,
 // whose pixels keep the samples their surface had in the last one (reprojected into the new
 // camera; through mirrors and glass too), at most `history` each, so that a change of light

@@ -582,6 +582,9 @@ static int frame(void){
                 o.gpu_trace = !gpu_software(gpu);
                 if (!o.gpu_trace) printf("GPU: a software GPU: the CPU path traces (faster here; -gputrace on to try it anyway)\n");
             }
+            // the path tracer's kernels asked for now: in a browser they compile in the
+            // background (seconds, the first time) while the rasterized scene is shown
+            if (o.gpu_trace && mode != BACKEND_RASTER) gpu_view_trace_prepare(gview);
             gpu_sim_start();
             if (gfluid) printf("GPU: the air (%dx%dx%d cells) and the cloud are simulated there\n",
                                sim.pw.fluid->nx, sim.pw.fluid->ny, sim.pw.fluid->nz);

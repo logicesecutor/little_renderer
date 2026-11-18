@@ -264,6 +264,30 @@ none kept: no gain):
 | the prefix sums (the bodies' grid and contact lists) and the media's box reductions by subgroup operations | not built: 0.005-0.023 ms a pass (F3: grid scan 0.017, contact lists 0.005 + 0.023) | nothing to gain |
 | the denoiser's neighbour weights (the normal's power 128, the luminance's exp) in f16 (`enable f16;`) | D1 1.70 -> 1.75-1.77 ms, D2 1.13 -> 1.17 | slower; the passes are memory bound (their inputs are already half floats), and the page's denoiser is already as fast as natively (D1 1.58-1.70 against 1.82) |
 
+**Step 3, the start.** The path tracer's three big pipelines (the kernel, the guide, the light
+tracer; and the kernel with the sky when a scene has one) are made with
+`createComputePipelineAsync` (`gpu_compute_async`), asked for as soon as the viewer has its GPU
+view (`gpu_view_trace_prepare`), after every small pipeline (the rasterizer's first: in Chrome
+a pipeline made at once while the big ones compile waits for them, and the frames with it);
+until they are ready the viewer shows the rasterized scene. Natively nothing changes (made at
+once, from the driver's cache). Measured in a new headless Chrome each time (nothing
+compiled before; `LR_GPU_ASYNC=0` makes them at once as before, to compare):
+
+| case (first run of a page) | before (made at once) | after (asynchronous) |
+|---|---|---|
+| H6: a new GPU to the first path traced pass of the boxes, frames rasterized meanwhile | 10.3 s, 8 frames, the longest 10.2 s | 9.0 s, 495 frames, the longest 4.8 s |
+| H2: a new GPU to the first frames (rasterized and path traced), its first run | 10.3 s | 8.6 s |
+
+What is left: after ~4 s of frames one frame still waits 4.8 s. The compile to DXIL runs on
+Chrome's worker threads; the rest (seen as one frame held while the pipelines arrive, most
+likely the driver's own compile of the big kernel) is outside the page's reach. The later
+runs of a page find the pipelines in Chrome's cache (H2's next runs: 74-90 ms).
+
+**The light probe on the GPU (H3) was assessed and not built:** its kernel would be the path
+tracer's (the probe is path traced from one point), so on a page's first run it would wait
+for that same 5-9 s compile, against 4.2 s for the CPU's bake on one thread; the CPU's bake
+on the page's threads (step 4) is the way taken.
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`

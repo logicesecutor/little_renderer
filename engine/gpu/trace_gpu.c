@@ -198,6 +198,12 @@ struct GpuTrace {
     // the kernels compiled with the sky (SKY_ON), made when a scene first has one
     WGPUComputePipeline pipe_sky, wf_shade_sky;
     int pipe_sky_failed, wf_sky_failed;
+    // the four big pipelines (pipe, gbuf_pipe, lt_pipe, pipe_sky) are made asynchronously
+    // (gpu_compute_async: in a browser they compile side by side, while frames go on): their
+    // requests and states (0 coming, 1 ready, -1 failed); gpu_trace_ready
+    GpuPipeReq *preq[4];
+    int pst[4];
+    int sky_asked;
     size_t nodes_cap, aux_cap, prims_cap, tris_cap;
     uint32_t nnodes, normals_at;   // (nnodes: the world's, in slots)
     int world_wide;
@@ -418,10 +424,8 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->blas_gpu = blas_env && !strcmp(blas_env, "gpu");
     const char *check_env = getenv("LR_GPU_BVH_CHECK");
     t->check = check_env && atoi(check_env) > 0;
-    t->pipe = gpu_compute(g, "path tracer", src, "main", t->bgl);
     t->planes = (uint64_t)width * height * 80 <= g->max_storage ? 5 : 1;
     if (t->planes == 5){
-        t->gbuf_pipe = gpu_compute(g, "path tracer: guide", src, "gbuf", t->bgl);
         t->rp_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
         t->rp_pipe = gpu_compute(g, "path tracer: reprojection", REPROJECT, "main", t->rp_bgl);
         t->rp_params = gpu_buffer(g, "reprojection parameters", 9 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
@@ -446,7 +450,6 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->pl_args = gpu_buffer(g, "BVH builder (PLOC): dispatch sizes", 32, WGPUBufferUsage_Storage | WGPUBufferUsage_Indirect);
     // the light tracer: the same bindings, its sums (11) instead of the samples (9)
     t->lt_bgl = gpu_layout(g, WGPUShaderStage_Compute, layout_types(t, "URRRDRRRR-UW------TU", lt, sizeof(lt)));
-    t->lt_pipe = gpu_compute(g, "light tracer", src, "ltrace", t->lt_bgl);
     t->rs_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URRWRR");
     t->dc_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UW");
     t->dc_pipe = gpu_compute(g, "photon cache: fade", DECAY, "main", t->dc_bgl);
@@ -454,6 +457,12 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->pc_params = gpu_buffer(g, "photon cache: light paths' parameters", GTP_STRIDE * MAX_REPS,
                               WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     t->rs_pipe = gpu_compute(g, "caustics: resolve", RESOLVE, "main", t->rs_bgl);
+    // the big ones last, asynchronously: in Chrome a pipeline made at once while these compile
+    // waits for them (seen: a frame held 5 s), so every small one is asked for before
+    t->preq[0] = gpu_compute_async(g, "path tracer", src, "main", t->bgl, &t->pipe, &t->pst[0]);
+    t->pst[1] = 1;
+    if (t->planes == 5) t->preq[1] = gpu_compute_async(g, "path tracer: guide", src, "gbuf", t->bgl, &t->gbuf_pipe, &t->pst[1]);
+    t->preq[2] = gpu_compute_async(g, "light tracer", src, "ltrace", t->lt_bgl, &t->lt_pipe, &t->pst[2]);
     t->rs_params = gpu_buffer(g, "caustics: resolve parameters", 32, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     t->lt_params = gpu_buffer(g, "light tracer parameters", GTP_STRIDE * MAX_REPS, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     t->caus = gpu_buffer(g, "caustics", (size_t)width * height * 24, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
@@ -1739,11 +1748,16 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 // they cannot be made (then the sky is left out)
 static int sky_kernels(GpuTrace *t, const Scene *s){
     if (!s->env || t->sky_id != s->env->id) return 0;
-    if (!t->pipe_sky && !t->pipe_sky_failed){
+    if (!t->sky_asked){                       // (asynchronously: gpu_trace_ready waits for it)
+        t->sky_asked = 1;
         char *src = trace_source(t, 1, 0);
-        if (src) t->pipe_sky = gpu_compute(t->g, "path tracer (sky)", src, "main", t->bgl);
+        if (src) t->preq[3] = gpu_compute_async(t->g, "path tracer (sky)", src, "main", t->bgl, &t->pipe_sky, &t->pst[3]);
+        else t->pst[3] = -1;
         free(src);
-        if (!t->pipe_sky){ t->pipe_sky_failed = 1; fprintf(stderr, "GPU: the path tracer with a sky could not be made\n"); }
+    }
+    if (!t->pipe_sky && t->pst[3] < 0 && !t->pipe_sky_failed){
+        t->pipe_sky_failed = 1;
+        fprintf(stderr, "GPU: the path tracer with a sky could not be made\n");
     }
     if (t->wf_made && !t->wf_shade_sky && !t->wf_sky_failed){
         char *src = trace_source(t, 1, 1);
@@ -1756,6 +1770,14 @@ static int sky_kernels(GpuTrace *t, const Scene *s){
         if (!t->wf_shade_sky) t->wf_sky_failed = 1;
     }
     return t->pipe_sky != NULL && (!t->wf_made || t->wf_shade_sky != NULL);
+}
+
+int gpu_trace_ready(GpuTrace *t, const Scene *s){
+    if (!t) return 0;
+    for (int k = 0; k < 3; k++) if (t->pst[k] < 0) return -1;
+    if (!t->pst[0] || !t->pst[1] || !t->pst[2]) return 0;
+    sky_kernels(t, s);                        // (asks for the sky's kernel when the scene has one)
+    return t->sky_id && s->env && t->sky_id == s->env->id && !t->pipe_sky && !t->pipe_sky_failed ? 0 : 1;
 }
 
 static void fill_params(GpuTrace *t, GTP *P, const Scene *s, const GpuTraceParams *tp, int y0, int rows,
@@ -1947,6 +1969,7 @@ GpuTimer *gpu_trace_timer(GpuTrace *t){ return t ? t->timer : NULL; }
 
 void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;
+    for (int k = 0; k < 4; k++) gpu_compute_async_cancel(t->preq[k], &t->pst[k]);   // (still coming: dropped when they do)
     if (t->check){
         for (int i = 0; i < 8; i++)
             if (t->ck_builds[i]) printf("GPU BVH check, build %d: %d items, cost %.3f (mean of %ld), depth %d\n", i, t->ck_n[i], t->ck_cost[i] / t->ck_builds[i], t->ck_builds[i], t->ck_depth[i]);

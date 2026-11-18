@@ -15,6 +15,7 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
     return 0;
 }
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ (void)v; (void)s; (void)tp; return 0; }
+void gpu_view_trace_prepare(GpuView *v){ (void)v; }
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ (void)v; (void)s; return 0; }
@@ -768,6 +769,14 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
 
 // ---- path tracing ----------------------------------------------------------------------------
 
+void gpu_view_trace_prepare(GpuView *v){
+    if (!v || v->trace || v->trace_failed) return;
+    // the rasterizer's pipelines first: in Chrome one made while the path tracer's compile
+    // would wait for them, and with it the frames that show the scene meanwhile
+    if (!v->raster && !v->raster_failed && !(v->raster = gpu_raster_create(v->g, v->w, v->h))) v->raster_failed = 1;
+    if (!(v->trace = gpu_trace_create(v->g, v->w, v->h, GPU_WGSL_TYPES, GPU_WGSL_MEDIA))) v->trace_failed = 1;
+}
+
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     if (!v || v->trace_failed) return 0;
     if (!v->trace && !(v->trace = gpu_trace_create(v->g, v->w, v->h, GPU_WGSL_TYPES, GPU_WGSL_MEDIA))){
@@ -880,6 +889,9 @@ void gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, cons
     // showing the last image until the band ends, rather than piling work up on the queue)
     if (!v || !v->trace || v->t_inflight) return;
     if (v->t_limit > 0 && v->t_passes >= v->t_limit) return;   // the image has all its samples
+    int ready = gpu_trace_ready(v->trace, s);                  // (in a browser: still compiling?)
+    if (ready < 0){ v->trace_failed = 1; return; }
+    if (!ready) return;
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date

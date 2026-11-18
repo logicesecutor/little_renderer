@@ -350,6 +350,14 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
 - **The 4-wide tree walk**, off by default, was compiled into every kernel with its own
   private arrays; it is now left out unless `LR_GPU_WIDE=1` (the media scenes 8-14% faster,
   natively too).
+- **The start.** The path tracer's big pipelines take seconds to compile in Chrome the first
+  time (10 s on this machine before the first path traced pass). They are now made
+  asynchronously (`createComputePipelineAsync`), asked for as soon as the viewer has its GPU
+  view and after every small pipeline, and the viewer shows the rasterized scene until they
+  are ready: 495 frames instead of 8 in that time, the first pass after 9.0 s instead of 10.3.
+  The later visits find them in Chrome's cache (under 0.1 s).
+- **Subgroups and f16** (`subgroups`, `shader-f16`: Chrome has both here) were tried in the
+  tree walk and the denoiser and gave nothing (STATUS.md 1.7); the kernels stay plain WGSL.
 - The images stay those of the native build: `bin/bench -shots` and `webbench -shots` make
   the same images in both, `bin/bench -imgdiff` compares them (STATUS.md 1.7).
 
