@@ -41,12 +41,19 @@ typedef struct {
     Vec3 *centroid;    // center of each of those bounds: what we sort / bin by
 } BuildInfo;
 
+// room for `need` nodes in b->nodes (a tree of n primitives has at most 2n - 1: the
+// builders reserve that once, so new_node does not grow the array node by node)
+static void reserve_nodes(Bvh *b, int need){
+    if (need <= b->cap) return;
+    int cap = b->cap ? 2 * b->cap : need;     // (the first time: exactly what was asked)
+    if (cap < need) cap = need;
+    b->nodes = realloc(b->nodes, (size_t)cap * sizeof(BvhNode));
+    if (!b->nodes){ perror("realloc"); exit(1); }
+    b->cap = cap;
+}
+
 static int new_node(Bvh *b){
-    if (b->nnodes >= b->cap){
-        b->cap = b->cap ? b->cap * 2 : 1024;
-        b->nodes = realloc(b->nodes, (size_t)b->cap * sizeof(BvhNode));
-        if (!b->nodes){ perror("realloc"); exit(1); }
-    }
+    if (b->nnodes >= b->cap) reserve_nodes(b, b->nnodes + 1);
     memset(&b->nodes[b->nnodes], 0, sizeof(BvhNode));
     return b->nnodes++;
 }
@@ -58,6 +65,27 @@ static int partition(int *refs, int start, int count, const BuildInfo *bi, int a
         if (comp(bi->centroid[refs[i]], axis) < split_pos) i++;
         else { int t = refs[i]; refs[i] = refs[j]; refs[j] = t; j--; }
     }
+    return i - start;
+}
+
+// partition, and the two sides' bounds on the way (kids: left box, left centroid box, right
+// box, right centroid box): each primitive is added once, when its side is final, so the
+// children need no pass of their own for their bounds (smallest and largest do not depend on
+// the order: the same boxes as that pass)
+static int partition_bounds(int *refs, int start, int count, const BuildInfo *bi, int axis, real split_pos, Aabb kids[4]){
+    Aabb lb = box_empty(), lc = box_empty(), rb = box_empty(), rc = box_empty();
+    int i = start, j = start + count - 1;
+    while (i <= j){
+        const int p = refs[i];
+        if (comp(bi->centroid[p], axis) < split_pos){
+            box_add_box(&lb, &bi->box[p]); box_add_point(&lc, bi->centroid[p]);
+            i++;
+        } else {
+            refs[i] = refs[j]; refs[j] = p; j--;          // p is now right for good
+            box_add_box(&rb, &bi->box[p]); box_add_point(&rc, bi->centroid[p]);
+        }
+    }
+    kids[0] = lb; kids[1] = lc; kids[2] = rb; kids[3] = rc;
     return i - start;
 }
 
@@ -201,10 +229,14 @@ static real sah_split(const Bvh *b, const BuildInfo *bi, int start, int count,
 // The box of refs[start, start+count) and how to split it: returns how many go to the left
 // child (0 = make a leaf). Partitions refs in place. The same decisions whether the tree is
 // built by one thread or many.
-static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count, int depth, Aabb *box_out, int par){
+// have: the node's box and centroid box when its parent already knows them (NULL: a pass
+// here); kids (not NULL): filled with the children's (as partition_bounds) when it splits.
+static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count, int depth, Aabb *box_out, int par,
+                        const Aabb *have, Aabb *kids){
     Aabb box = box_empty(), cbox = box_empty();
-    const int nch = chunks_of(count, par);
-    if (nch > 1){
+    const int nch = have ? 1 : chunks_of(count, par);
+    if (have){ box = have[0]; cbox = have[1]; }
+    else if (nch > 1){
         Aabb pb[BVH_CHUNKS_MAX], pc[BVH_CHUNKS_MAX];
         for (int c = 0; c < nch; c++){
             const int s0 = start + (int)((long long)count * c / nch), s1 = start + (int)((long long)count * (c + 1) / nch);
@@ -221,38 +253,47 @@ static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count,
     } else range_bounds(b, bi, start, count, &box, &cbox);
     *box_out = box;
 
-    int nleft = 0;
+    int nleft = 0, kids_done = 0;
     if (count > 1 && depth < BVH_MAX_DEPTH){
+        int axis = -1;
+        real pos = 0;
         if (b->split == BVH_SPLIT_SAH){
-            int axis;
             real cost;
-            real pos = sah_split(b, bi, start, count, &box, &cbox, &axis, &cost, par);
+            pos = sah_split(b, bi, start, count, &box, &cbox, &axis, &cost, par);
             // Leaf if not splitting is cheaper (cost of a leaf = count tests), unless the
             // leaf would be too big.
-            int want_split = axis >= 0 && (cost < count || count > b->max_leaf);
-            if (want_split) nleft = partition(b->refs, start, count, bi, axis, pos);
+            if (!(axis >= 0 && (cost < count || count > b->max_leaf))) axis = -1;
         } else if (count > b->max_leaf){
             // middle split: longest axis of the centroid box, cut at its center
             Vec3 ext = v_sub(cbox.hi, cbox.lo);
-            int axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z ? 1 : 2);
-            real mid = 0.5 * (comp(cbox.lo, axis) + comp(cbox.hi, axis));
-            if (comp(ext, axis) > 1e-12) nleft = partition(b->refs, start, count, bi, axis, mid);
+            axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z ? 1 : 2);
+            pos = 0.5 * (comp(cbox.lo, axis) + comp(cbox.hi, axis));
+            if (!(comp(ext, axis) > 1e-12)) axis = -1;
+        }
+        if (axis >= 0){
+            if (kids){ nleft = partition_bounds(b->refs, start, count, bi, axis, pos, kids); kids_done = 1; }
+            else nleft = partition(b->refs, start, count, bi, axis, pos);
         }
         // Everything ended up on one side (e.g. identical centroids) but the node is too
         // big: split the list in half, in whatever order it is. Still a valid tree.
-        if ((nleft == 0 || nleft == count) && count > b->max_leaf) nleft = count / 2;
+        if ((nleft == 0 || nleft == count) && count > b->max_leaf){ nleft = count / 2; kids_done = 0; }
         if (nleft == count) nleft = 0;
+    }
+    if (kids && nleft > 0 && !kids_done){                 // (the halves: a pass each, rare)
+        range_bounds(b, bi, start, nleft, &kids[0], &kids[1]);
+        range_bounds(b, bi, start + nleft, count - nleft, &kids[2], &kids[3]);
     }
     return nleft;
 }
 
 // Serial build of a subtree into b->nodes, in preorder (a node, then its whole left
 // subtree, then its right subtree). Returns the node's index.
-static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth){
+// have: the node's box and centroid box, from its parent's partition (NULL at the top).
+static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth, const Aabb *have){
     int node = new_node(b);
     if (depth > b->depth) b->depth = depth;
-    Aabb box;
-    int nleft = choose_split(b, bi, start, count, depth, &box, 0);
+    Aabb box, kids[4];
+    int nleft = choose_split(b, bi, start, count, depth, &box, 0, have, kids);
     b->nodes[node].box = box;
 
     if (nleft == 0){                                      // leaf
@@ -261,8 +302,8 @@ static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth){
         b->leaves++;
         return node;
     }
-    int l = build(b, bi, start, nleft, depth + 1);        // (indices, not pointers: the
-    int r = build(b, bi, start + nleft, count - nleft, depth + 1);   // array may move)
+    int l = build(b, bi, start, nleft, depth + 1, kids);          // (indices, not pointers:
+    int r = build(b, bi, start + nleft, count - nleft, depth + 1, kids + 2);   // the array may move)
     b->nodes[node].left = l;
     b->nodes[node].right = r;
     b->nodes[node].count = 0;
@@ -277,8 +318,12 @@ static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth){
 // array. A final pass copies everything, in preorder, into one array: the layout comes out
 // exactly as if one thread had built the whole tree, so the tree, the statistics and the
 // images do not depend on the number of threads.
+// The subtrees are small (128) so the threads stay busy to the end (1024 left them waiting
+// at the joins: E1 12.7 -> 9.7 ms with 128, with each subtree's nodes reserved at once; 64 was
+// no faster). A whole tree of up to 128 primitives is built on one thread; above that the
+// parallel build was faster even for a few hundred (measured with E1, E2).
 
-#define BVH_PAR_MIN 1024
+#define BVH_PAR_MIN 128
 
 typedef struct Sub Sub;
 struct Sub {
@@ -293,13 +338,14 @@ static Sub *build_par(const Bvh *b, const BuildInfo *bi, int start, int count, i
     if (!sb){ perror("calloc"); exit(1); }
     if (count <= BVH_PAR_MIN || depth >= BVH_MAX_DEPTH){
         sb->part = *b;                                    // same parameters and refs...
-        sb->part.nodes = NULL;                            // ...but its own nodes
-        sb->part.nnodes = sb->part.cap = sb->part.leaves = sb->part.depth = 0;
-        build(&sb->part, bi, start, count, depth);
+        sb->part.nodes = NULL;                            // ...but its own nodes, room for
+        sb->part.nnodes = sb->part.cap = sb->part.leaves = sb->part.depth = 0;   // all at once
+        reserve_nodes(&sb->part, 2 * count - 1);
+        build(&sb->part, bi, start, count, depth, NULL);
         return sb;
     }
     Aabb box;
-    int nleft = choose_split(b, bi, start, count, depth, &box, 1);
+    int nleft = choose_split(b, bi, start, count, depth, &box, 1, NULL, NULL);
     if (nleft == 0){                                      // (a huge leaf: only with odd parameters)
         sb->part = *b;
         sb->part.nodes = NULL;
@@ -343,14 +389,15 @@ static int flatten(Bvh *b, Sub *sb, int depth){
     } else {
         // a serial part: its nodes are already in preorder with local indices
         root = b->nnodes;
-        for (int i = 0; i < sb->part.nnodes; i++){
-            int k = new_node(b);
-            b->nodes[k] = sb->part.nodes[i];
+        const int n = sb->part.nnodes;
+        reserve_nodes(b, root + n);
+        memcpy(&b->nodes[root], sb->part.nodes, (size_t)n * sizeof(BvhNode));
+        for (int k = root; k < root + n; k++)
             if (b->nodes[k].count == 0){                  // inner node: shift its children
                 b->nodes[k].left += root;
                 b->nodes[k].right += root;
             }
-        }
+        b->nnodes += n;
         b->leaves += sb->part.leaves;
         if (sb->part.depth > b->depth) b->depth = sb->part.depth;
         free(sb->part.nodes);
@@ -381,8 +428,9 @@ static void build_over(Bvh *b, const Scene *s, const Aabb *boxes, int nprims, in
     }
     b->nrefs = nprims;
 
+    reserve_nodes(b, 2 * nprims - 1);                     // the most a tree of them has
     if (nprims <= BVH_PAR_MIN){
-        build(b, &bi, 0, nprims, 0);                       // small: no threads needed
+        build(b, &bi, 0, nprims, 0, NULL);                 // small: no threads needed
     } else {
         Sub *root = NULL;
 #ifdef _OPENMP
@@ -391,6 +439,10 @@ static void build_over(Bvh *b, const Scene *s, const Aabb *boxes, int nprims, in
 #endif
         root = build_par(b, &bi, 0, nprims, 0);
         flatten(b, root, 0);
+    }
+    if (b->nnodes < b->cap / 2){                          // (leaves of several: give back the rest)
+        BvhNode *fit = realloc(b->nodes, (size_t)b->nnodes * sizeof(BvhNode));
+        if (fit){ b->nodes = fit; b->cap = b->nnodes; }
     }
     free(bi.box);
     free(bi.centroid);
