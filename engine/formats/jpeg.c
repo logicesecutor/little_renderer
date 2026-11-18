@@ -4,6 +4,7 @@
 // and the inverse DCT (libjpeg's accurate integer one, jidctint.c), chroma upsampling and
 // colour conversion.
 #include "formats/jpeg.h"
+#include "base/file.h"
 #include "formats/limits.h"
 
 #include <stdint.h>
@@ -661,20 +662,9 @@ unsigned char *jpeg_decode(const unsigned char *data, size_t size, int *w, int *
 }
 
 unsigned char *jpeg_read(const char *path, int *w, int *h, int *channels, int want){
-    FILE *f = fopen(path, "rb");
-    if (!f){ fprintf(stderr, "jpeg: cannot open %s\n", path); return NULL; }
-    size_t cap = 1 << 16, n = 0, k;
-    unsigned char *buf = malloc(cap);
-    while (buf && (k = fread(buf + n, 1, cap - n, f)) > 0){
-        n += k;
-        if (n == cap){
-            unsigned char *q = realloc(buf, cap * 2);
-            if (!q){ free(buf); buf = NULL; break; }
-            buf = q; cap *= 2;
-        }
-    }
-    fclose(f);
-    if (!buf){ fprintf(stderr, "jpeg: out of memory\n"); return NULL; }
+    size_t n;
+    unsigned char *buf = file_read_all(path, &n);
+    if (!buf){ fprintf(stderr, "jpeg: cannot read %s\n", path); return NULL; }
     unsigned char *px = jpeg_decode(buf, n, w, h, channels, want);
     free(buf);
     return px;

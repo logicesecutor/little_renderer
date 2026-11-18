@@ -1,4 +1,5 @@
 #include "formats/png.h"
+#include "base/file.h"
 #include "formats/limits.h"
 
 #include <stdint.h>
@@ -803,15 +804,10 @@ unsigned char *png_decode(const unsigned char *data, size_t size, int *pw, int *
 }
 
 unsigned char *png_read(const char *path, int *w, int *h, int *channels, int want){
-    FILE *f = fopen(path, "rb");
-    if (!f){ fprintf(stderr, "png: cannot open %s\n", path); return NULL; }
-    Buf b = {0};
-    unsigned char tmp[65536];
-    size_t k;
-    while ((k = fread(tmp, 1, sizeof(tmp), f)) > 0) buf_put(&b, tmp, k);
-    fclose(f);
-    if (b.bad){ free(b.p); return fail("out of memory"); }
-    unsigned char *px = png_decode(b.p, b.n, w, h, channels, want);
-    free(b.p);
+    size_t n;
+    unsigned char *d = file_read_all(path, &n);
+    if (!d){ fprintf(stderr, "png: cannot read %s\n", path); return NULL; }
+    unsigned char *px = png_decode(d, n, w, h, channels, want);
+    free(d);
     return px;
 }

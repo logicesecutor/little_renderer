@@ -1,5 +1,6 @@
 // hdr.c - Radiance .hdr (RGBE) reading and writing (see hdr.h)
 #include "formats/hdr.h"
+#include "base/file.h"
 #include "formats/limits.h"
 
 #include <math.h>
@@ -126,19 +127,10 @@ float *hdr_decode(const unsigned char *d, long n, int *pw, int *ph){
 }
 
 float *hdr_load(const char *path, int *w, int *h){
-    FILE *f = fopen(path, "rb");
-    if (!f){ fprintf(stderr, "hdr: cannot open %s\n", path); return NULL; }
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    unsigned char *d = n > 0 ? malloc((size_t)n) : NULL;
-    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n){
-        fclose(f); free(d);
-        fprintf(stderr, "hdr: cannot read %s\n", path);
-        return NULL;
-    }
-    fclose(f);
-    float *img = hdr_decode(d, n, w, h);
+    size_t n;
+    unsigned char *d = file_read_all(path, &n);
+    if (!d){ fprintf(stderr, "hdr: cannot read %s\n", path); return NULL; }
+    float *img = hdr_decode(d, (long)n, w, h);
     free(d);
     if (!img) fprintf(stderr, "hdr: (in %s)\n", path);
     return img;

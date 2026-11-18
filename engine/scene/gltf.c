@@ -1,6 +1,7 @@
 // gltf.c - see gltf.h. The file's JSON (formats/json.c) is read once into a tree; buffers are
 // kept as they are (or decoded from base64) and accessors read straight out of them.
 #include "scene/gltf.h"
+#include "base/file.h"
 #include "formats/json.h"
 #include "scene/texture.h"
 
@@ -33,24 +34,6 @@ typedef struct {
 static int fail(const char *path, const char *why){
     fprintf(stderr, "gltf: %s: %s\n", path, why);
     return -1;
-}
-
-static uint8_t *read_file(const char *path, size_t *n){
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    size_t cap = 1 << 16, k;
-    uint8_t *b = malloc(cap);
-    *n = 0;
-    while (b && (k = fread(b + *n, 1, cap - *n, f)) > 0){
-        *n += k;
-        if (*n == cap){
-            uint8_t *q = realloc(b, cap * 2);
-            if (!q){ free(b); b = NULL; break; }
-            b = q; cap *= 2;
-        }
-    }
-    fclose(f);
-    return b;
 }
 
 // a size or an offset from the JSON (absent: def): a whole number from 0 up; anything else
@@ -109,7 +92,7 @@ static uint8_t *uri_bytes(G *g, const char *uri, size_t *n){
         } else path[k++] = *p;
     }
     path[k] = 0;
-    uint8_t *b = read_file(path, n);
+    uint8_t *b = file_read_all(path, n);
     if (!b) fprintf(stderr, "gltf: cannot read %s\n", path);
     return b;
 }
@@ -549,7 +532,7 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
     const char *slash = strrchr(path, '/'), *bs = strrchr(path, '\\');
     if (bs && (!slash || bs > slash)) slash = bs;
     if (slash && (size_t)(slash - path) + 2 < sizeof(g->dir)){ memcpy(g->dir, path, (size_t)(slash - path) + 1); g->dir[slash - path + 1] = 0; }
-    g->file = read_file(path, &g->file_n);
+    g->file = file_read_all(path, &g->file_n);
     if (!g->file) return fail(path, "cannot read the file");
     // a .glb: a 12-byte header, then chunks (JSON first, then BIN)
     if (g->file_n >= 12 && le32(g->file) == 0x46546C67u){

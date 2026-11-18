@@ -1,4 +1,5 @@
 #include "scene/texture.h"
+#include "base/file.h"
 
 #include "scene/image.h"   // rgb8
 #include "formats/png.h"
@@ -212,20 +213,9 @@ int texmap_decode(TexMap *t, const unsigned char *data, size_t size, int srgb){
 }
 
 int texmap_load(TexMap *t, const char *path, int srgb){
-    FILE *f = fopen(path, "rb");
-    if (!f){ fprintf(stderr, "texture: cannot open %s\n", path); return 1; }
-    size_t cap = 1 << 16, n = 0, k;
-    unsigned char *buf = malloc(cap);
-    while (buf && (k = fread(buf + n, 1, cap - n, f)) > 0){
-        n += k;
-        if (n == cap){
-            unsigned char *q = realloc(buf, cap * 2);
-            if (!q){ free(buf); buf = NULL; break; }
-            buf = q; cap *= 2;
-        }
-    }
-    fclose(f);
-    if (!buf) return 1;
+    size_t n;
+    unsigned char *buf = file_read_all(path, &n);
+    if (!buf){ fprintf(stderr, "texture: cannot read %s\n", path); return 1; }
     int r = texmap_decode(t, buf, n, srgb);
     free(buf);
     if (r) fprintf(stderr, "texture: cannot read %s\n", path);
