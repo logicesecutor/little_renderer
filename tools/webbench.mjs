@@ -33,6 +33,9 @@ const check = argv.includes('check');
 const set = argv.includes('full') ? 'full' : 'quick';
 const only = opt('-only', check ? 'A1,A4,A5,A7,A8,C1,D1,E5,F3,G1' : ''), tag = opt('-tag', ''), out = opt('-o', '');
 const log = opt('-log', ''), more = opt('-q', ''), shots = opt('-shots', '');
+// -until text: any page (the viewer: -page index.html -q "sim=on&autoquit=8"): every line it
+// prints is shown, and the run ends at the first line holding text
+const until = opt('-until', '');
 if (shots) mkdirSync(shots, { recursive: true });
 let base = opt('-url', 'http://127.0.0.1:8000/bench.html');
 const chromes = [opt('-chrome', ''), 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -45,11 +48,11 @@ let server = null;
 if (argv.includes('-serve')) {
   const folder = join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'build');
   const port = 8400 + Math.floor(Math.random() * 400);
-  server = await serve(folder, port, '127.0.0.1', true);
+  server = await serve(folder, port, '127.0.0.1', !argv.includes('-noisolate'));   // (-noisolate: as a static host without the headers)
   base = `http://127.0.0.1:${port}/${opt('-page', 'bench.html')}`;
 }
 
-const q = [set === 'full' ? 'full' : 'quick'];
+const q = until ? [] : [set === 'full' ? 'full' : 'quick'];   // (another page: only -q's options)
 if (only) q.push('only=' + only);
 if (tag) q.push('tag=' + tag);
 if (check) q.push('reps=1');
@@ -89,6 +92,7 @@ ws.onmessage = e => {
         rows++;
       } else if (line.startsWith('RESULT ') || line.startsWith('bench:') || (check && bad(line))) console.log(line);
       if (bad(line)) errors++;
+      if (until){ console.log(line); if (line.includes(until)) finished = true; }
       if (line.startsWith('bench: done')) finished = true;
     }
   }

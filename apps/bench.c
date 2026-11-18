@@ -51,6 +51,8 @@
 
 #ifdef LR_VK
 static const char *BACKEND = "vk";
+#elif defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__)
+static const char *BACKEND = "web-mt";      // (make web-bench THREADS=1: bench_mt.html)
 #elif defined(__EMSCRIPTEN__)
 static const char *BACKEND = "web";
 #else
@@ -923,9 +925,53 @@ static void shot_raster(const char *dir, const char *name, const char *args){
     teardown(&o, &s, &SIM);
 }
 
+// the CPU's path tracer (all threads; each pixel's samples seeded by the pixel, so the image
+// does not depend on how many threads ran) and the CPU's rasterizer
+static void shot_cpu(const char *dir, const char *name, const char *args, int spp){
+    Options o; static Scene s;
+    if (!models_there(args, &(Res){0}) || setup(args, &o, &s, &SIM)){ printf("SHOT %s skipped\n", name); return; }
+    const int W = o.width, H = o.height;
+    uint32_t *px = malloc((size_t)W * H * 4);
+    if (!px){ teardown(&o, &s, &SIM); return; }
+    if (o.backend == BACKEND_RASTER){
+        Framebuffer *fb = fb_create(W, H);
+        RenderParams rp = scene_params(&o, &s);
+        if (fb){ fb_clear(fb, rgb8(0, 0, 0)); render_scene(fb, &s, &rp); memcpy(px, fb->color, (size_t)W * H * 4); }
+        fb_destroy(fb);
+    } else {
+        Camera cam = scene_camera(&s, W, H);
+        TraceParams tp = trace_default_params();
+        tp.max_depth = o.max_depth;
+        tp.mis = o.mis;
+        tp.sampler = o.sampler;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++){
+                uint64_t pixel = (uint64_t)y * W + x;
+                Rng rng;
+                rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL), pixel);
+                Vec3 sum = vec3(0, 0, 0);
+                for (int sp = 0; sp < spp; sp++){
+                    Sampler sm = sampler_make(&rng, x, y, (uint32_t)sp, 0, tp.sampler);
+                    real jx, jy;
+                    sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
+                    sum = v_add(sum, trace_path_sampled(&s, camera_ray(&cam, (x + jx) / W, (y + jy) / H), &sm, &tp));
+                }
+                px[pixel] = image_pack_srgb(v_scale(sum, (real)1 / spp));
+            }
+    }
+    shot_put(dir, name, W, H, px);
+    free(px);
+    teardown(&o, &s, &SIM);
+}
+
 static int shots(const char *dir){
     printf("bench: shots, %s (%s)\n", BACKEND, gpu_get(0) ? gpu_message(gpu_get(0)) : "no GPU");
     double t0 = clock_s();
+    shot_cpu(dir, "cpu_boxes_pt", "-scene boxes -width 160 -height 160", 16);
+    shot_cpu(dir, "cpu_boxes_raster", "-scene boxes -backend raster -width 256 -height 256", 0);
     shot_trace(dir, "boxes_pt", "-scene boxes -width 256 -height 256", 64, 0);
     shot_trace(dir, "spheres_media_pt", "-scene spheres -cloud on -fog 0.0015 -width 256 -height 256", 64, 0);
     shot_trace(dir, "helmet_pt", "-gltf " HELMET " -width 256 -height 256", 32, 0);

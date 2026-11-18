@@ -11,7 +11,7 @@ the cloud), and whatever it does not do yet (the rigid bodies) stays on the CPU.
 | build | `make` (gcc) | `make web` (Emscripten's `emcc`) |
 | window | X11 / Win32 (`platform/window.c`, `window_win32.c`) | the `<canvas id="canvas">` (`platform/window_web.c`) |
 | main loop | `while (frame())` | `emscripten_set_main_loop`: the browser calls `frame()` once per display refresh |
-| threads | OpenMP | one thread (the CPU paths are slower than native) |
+| threads | OpenMP | one thread; or, in a cross-origin isolated page, one per hardware thread (`make web THREADS=1`, section 1.1) |
 | GPU | WebGPU through wgpu-native after `make deps` (section 3), otherwise the CPU | WebGPU (`gpu/`), on by default |
 
 ## 1. Building and running
@@ -29,12 +29,43 @@ Every new shell:
 source /f/Tools/emsdk/emsdk_env.sh        # Linux: source ~/emsdk/emsdk_env.sh
 cd /f/Projects/little_renderer
 make web                                  # -> web/build/index.html, .js, .wasm, .data (the models)
-make serve                                # http://localhost:8000 (python3, or uv)
+make serve                                # http://localhost:8000 (Node: tools/serve.mjs; else python3, or uv)
 ```
 
 Open **http://localhost:8000** in Chrome or Edge (WebGPU is on by default there; Firefox
 and Safari have it in recent versions). Browsers do not run WebAssembly from `file://`:
 use the server. `make web WEB_DRAGON=1` also packs the full 870k-triangle dragon.
+
+### 1.1 The threaded page (`make web THREADS=1`)
+
+```sh
+make web THREADS=1        # index.html, index.js (one thread) and index_mt.js (threads)
+make serve                # sends Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy
+```
+
+The CPU's work (the CPU path tracer and rasterizer, the bodies and the air on the CPU, the
+trees, the light probe's bake) then runs on all the machine's hardware threads, as natively:
+the scene with the sky demo is made in 0.8 s instead of 4.1, the CPU path tracer traces
+3.6 M paths/s instead of 0.45 (docs/STATUS.md 1.7). How:
+
+- WebAssembly threads are Web Workers sharing the module's memory (a SharedArrayBuffer),
+  which a browser gives only to a **cross-origin isolated** page: one served with
+  `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
+  require-corp`. `make serve` (`tools/serve.mjs`) sends both; any server that can set
+  headers will do.
+- The page (`web/shell.html`) loads `index_mt.js` when it is isolated (`crossOriginIsolated`)
+  and the file is there, and the single-threaded `index.js` otherwise: on a static host that
+  cannot send the headers (GitHub Pages), or when `index_mt.js` was not built, or with
+  `?threads=1`. The console's first line says which: `CPU: 12 threads (the threaded page...)`.
+  `?threads=n` (bin/view's `-threads`) runs the threaded page on n of them.
+- The engine's parallel loops are its OpenMP pragmas, unchanged: compiled with
+  `-Xclang -fopenmp` they call LLVM's OpenMP runtime, which Emscripten does not have;
+  `engine/base/omp_web.c` is the part of one they need (parallel loops, reductions,
+  critical sections, tasks; on pthreads), `web/include/omp.h` its header. A worker per
+  hardware thread is started with the page (`-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency`).
+- The GPU is used from the page's main thread only, as before.
+- To check that a static host still works: `node tools/serve.mjs web/build -noisolate` (the
+  page then loads `index.js`).
 
 Click the image, then the keys of `bin/view` work (USAGE.md section 4). The page's links
 are presets; **any option of `bin/view` goes in the address**, `-name value` becoming
@@ -356,6 +387,9 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
   view and after every small pipeline, and the viewer shows the rasterized scene until they
   are ready: 495 frames instead of 8 in that time, the first pass after 9.0 s instead of 10.3.
   The later visits find them in Chrome's cache (under 0.1 s).
+- **The CPU's code**: WebAssembly SIMD (`-msimd128`) in every web build (the CPU's trees
+  1.5x faster, its rasterizer 1.15x), and the threaded page (section 1.1): the CPU's loops on
+  all hardware threads.
 - **Subgroups and f16** (`subgroups`, `shader-f16`: Chrome has both here) were tried in the
   tree walk and the denoiser and gave nothing (STATUS.md 1.7); the kernels stay plain WGSL.
 - The images stay those of the native build: `bin/bench -shots` and `webbench -shots` make

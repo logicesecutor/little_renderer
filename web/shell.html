@@ -61,7 +61,23 @@
     };
   })();
   window.onerror = (m) => { document.getElementById('status').textContent = 'error: ' + m; };
+  // The threaded build (index_mt.js, make web THREADS=1: the CPU's loops on all the machine's
+  // threads) needs SharedArrayBuffer, which only a cross-origin isolated page has (make serve
+  // sends the headers). Taken when the page is isolated and the file is there, unless
+  // ?threads=1; otherwise (a static host that cannot send them) the single-threaded index.js.
+  (() => {
+    const one = (() => { const t = new URLSearchParams(location.search).get('threads'); return t === '1'; })();
+    const load = (src, fallback) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      if (fallback) s.onerror = () => { s.remove(); load(fallback, null); };
+      document.body.appendChild(s);
+    };
+    if (self.crossOriginIsolated && !one) load('index_mt.js', 'index.js'); else load('index.js', null);
+  })();
 </script>
-{{{ SCRIPT }}}
+<!-- (the script tag Emscripten writes here stays inert: the loader above chooses the build) -->
+<template>{{{ SCRIPT }}}</template>
 </body>
 </html>

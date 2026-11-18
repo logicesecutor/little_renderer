@@ -165,7 +165,12 @@ make serve                              # then open http://localhost:8000
 make webtest                            # the GPU air against the CPU's: web/build/test_gpu_fluid.html
 make web-check                          # every pipeline of the page compiled and run once in a headless Chrome
 make web NOSIMD=1                       # without WebAssembly SIMD (-msimd128, on by default)
+make web THREADS=1                      # also the threaded page, index_mt.js (WEB.md 1.1)
+make web-bench THREADS=1                # also the threaded bench page, bench_mt.html (webbench -page bench_mt.html)
 ```
+
+In the address, `threads=1` makes a cross-origin isolated page load the single-threaded
+build anyway; `threads=n` (bin/view's `-threads`) runs the threaded one on n threads.
 
 The options go in the address: `http://localhost:8000/?scene=cloud&backend=raster`.
 `make serve` (Node: `tools/serve.mjs`) sends the headers that make the page cross-origin
@@ -183,6 +188,8 @@ headless Chrome of its own on this machine's GPU):
 | `... -log file` | every line the page prints, into a file |
 | `node tools/webbench.mjs -serve -shots dir` | the page's images (`bin/bench -shots dir` makes the same natively) as `dir/<name>_web.png`; `bin/bench -imgdiff a.png b.png` compares two (RMSE, mean difference) |
 | `node tools/webbench.mjs check -serve` | what `make web-check` runs |
+| `... -page bench_mt.html` | the threaded bench page (`make web-bench THREADS=1`; its backend column is `web-mt`) |
+| `node tools/webbench.mjs -serve -page index.html -q "sim=on&autoquit=10" -until "autoquit after"` | any page, the viewer here: every line it prints, until one holds the text; `-noisolate` serves it without the headers |
 
 ---
 

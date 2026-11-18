@@ -349,16 +349,31 @@ WEBFLAGS = $(WEBBASE) --shell-file web/shell.html $(foreach m,$(wildcard $(WEB_M
 # (dragon_vrip_res4: the sky demo's props, so its cases are the scene measured natively)
 WEB_BENCH_MODELS = models/torus.obj models/dragon_recon/dragon_vrip_res2.ply models/dragon_recon/dragon_vrip_res4.ply \
                    models/skies/kloofendal_48d_partly_cloudy_2k.hdr models/gltf/DamagedHelmet.glb
-web-bench: $(WEB)/bench.html
+web-bench: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
 $(WEB)/bench.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR)
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) -DLR_WEB_WAIT -sJSPI $(SRC) $(WGSL_C) apps/bench.c -o $@ \
 	    $(foreach m,$(wildcard $(WEB_BENCH_MODELS)),--preload-file $(m)@$(m))
+$(WEB)/bench_mt.html: $(SRC) $(WGSL_C) apps/bench.c $(HDR) web/include/omp.h
+	@mkdir -p $(WEB)
+	$(EMCC) $(WEBBASE) $(WEBMT) -DLR_WEB_WAIT -sJSPI $(SRC) $(WGSL_C) apps/bench.c -o $@ \
+	    $(foreach m,$(wildcard $(WEB_BENCH_MODELS)),--preload-file $(m)@$(m))
 
-web: $(WEB)/index.html
+# THREADS=1: also the threaded page, index_mt.js beside index.js: the CPU's loops (the
+# engine's OpenMP pragmas) on WebAssembly threads (Emscripten's pthreads; the part of an
+# OpenMP runtime they need is engine/base/omp_web.c, its header web/include/omp.h), one per
+# hardware thread. Threads need SharedArrayBuffer, so a cross-origin isolated page (make
+# serve sends the headers); the page (web/shell.html) loads index_mt.js when it is isolated
+# and index.js otherwise (a static host that cannot send them; ?threads=1 forces it).
+WEBMT = -pthread -Xclang -fopenmp -Iweb/include -sENVIRONMENT=web,worker \
+        -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency -sDEFAULT_PTHREAD_STACK_SIZE=2MB
+web: $(WEB)/index.html $(if $(THREADS),$(WEB)/index_mt.js)
 $(WEB)/index.html: $(WEB_SRC) $(HDR) web/shell.html
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBFLAGS) $(WEB_SRC) -o $@
+$(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h
+	@mkdir -p $(WEB)
+	$(EMCC) $(WEBBASE) $(WEBMT) $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m)) $(WEB_SRC) -o $@
 
 # a local web server for the page (the browser will not run WebAssembly from file://)
 # the GPU air against the CPU air in a browser (open web/build/test_gpu_fluid.html, or see
@@ -375,8 +390,9 @@ serve:
 
 # every pipeline of the page compiled and run once in a headless Chrome on this GPU (the bench
 # page's cases that make them), failing on any GPU error (tools/webbench.mjs check)
-web-check: $(WEB)/bench.html
+web-check: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
 	node tools/webbench.mjs check -serve
+	$(if $(THREADS),node tools/webbench.mjs check -serve -page bench_mt.html)
 
 # ---- the native GPU's library ------------------------------------------------------------
 # make deps: wgpu-native $(WGPU_VERSION), the build for this system, into third_party/wgpu

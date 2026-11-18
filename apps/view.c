@@ -41,6 +41,9 @@
 #include "gpu/rigid_gpu.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#if defined(__EMSCRIPTEN_PTHREADS__) && defined(_OPENMP)
+#include <omp.h>
+#endif
 #endif
 
 static const char *CONTROLS =
@@ -1130,6 +1133,11 @@ int main(int argc, char **argv){
     if (o.sim.on && o.preview == 4){ preview = 2; }   // -sim: 1/2 resolution by default
 
 #ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN_PTHREADS__) && defined(_OPENMP)
+    printf("CPU: %d threads (the threaded page: cross-origin isolated)\n", omp_get_max_threads());
+#else
+    printf("CPU: 1 thread (the single-threaded page)\n");
+#endif
     emscripten_set_main_loop(frame_web, 0, 1);      // the browser calls frame_web; never returns
 #else
     while (frame()){}

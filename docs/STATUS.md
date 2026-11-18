@@ -307,6 +307,36 @@ Kept: all of it (the SLP vectorizer makes the top level's build 1.5x faster and 
 step 8% slower; the loop vectorizer the rasterizer 15% faster); the bodies' contacts did not
 vectorize by themselves (F2 the same): that would take written SIMD.
 
+(b) Threads: the threaded page (`make web THREADS=1`: `index_mt.js`; `make web-bench
+THREADS=1`: `bench_mt.html`), Emscripten's pthreads, one per hardware thread (12 here). The
+engine's ~50 OpenMP pragmas stay as they are: the compiler turns them into calls of LLVM's
+OpenMP runtime (`-Xclang -fopenmp`), and `engine/base/omp_web.c` (~390 lines, empty
+otherwise) is the part of such a runtime they need, on pthreads: parallel regions (with
+`if`, nested ones alone), static and dynamic loops, reductions, `critical`, `single`,
+barriers, tasks and `taskwait` (the BVH builder), `omp_*` (its header `web/include/omp.h`).
+It needs a cross-origin isolated page (SharedArrayBuffer): `make serve` and `webbench
+-serve` send the headers; the page (`web/shell.html`) loads `index_mt.js` when it is
+isolated and the file is there, `index.js` otherwise (a static host without the headers, or
+`?threads=1`). The single-threaded page is built and works as before. Page with SIMD, one
+thread -> threaded (native, 12 threads, for comparison):
+
+| case | one thread | threaded | native |
+|---|---|---|---|
+| B1 CPU path tracer, all threads (M paths/s) | 0.446 | 3.56 | 3.56-3.84 |
+| C5 CPU rasterizer (ms/frame) | 146 | 21.5 | 22.2 |
+| E1 CPU top level, 48k (ms/build) | 52.6 | 11.4 | 10.6 |
+| E2 CPU top level, 18k (ms/build) | 18.6 | 4.39 | 4.03 |
+| F1 bodies on the CPU, all threads (ms/step) | 70.9 | 45.9 | 21.6 |
+| G3 air and cloud on the CPU (ms/step) | 34.8 | 17.5 | 15.7 |
+| H3 the sky demo made: props, light probe (ms) | 4131 | 794 | 728 |
+| the viewer, `?sim=on&gpurigid=off&gpufluid=off&backend=raster&balls=300&boxes=300` | 3 frames/s (physics 182 ms a frame) | 8 frames/s (79 ms) | |
+
+The bodies on the CPU (F1) keep half their native speed: their iterations stay on one thread
+(7: colours lost to barriers natively too), and one thread of the page runs them 1.6x slower
+than natively (F2 71 against 44). The images: the same as natively and as the
+single-threaded page (`-shots`, both pages: the CPU's path traced and rasterized boxes, and
+the GPU's 8, the same RMSE to the last digit as the single-threaded page's).
+
 ## 2. Performance now
 
 The full suite (1.3) of 2026-11-17 at 6fe55ba (the code of ef130cf, measured again on `main`
