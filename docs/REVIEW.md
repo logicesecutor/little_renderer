@@ -10,7 +10,8 @@ section 0 are now one, `make`) and the performance review's speedups went in
 `denoise.wgsl`, `gpu.c`, `vk_surface.c`, `wgsl.c` changed), so some line numbers have moved; each
 item is checked against the code as it is before it is applied. The fixes are made in
 `development`. Fixed: **B1-B16** (STATUS.md step 15; B1 by the docs: `-photoncache` stays off by
-default).
+default), then **D1-D14** and **S1-S19** (step 16; D13 by `rng_range` / `rng_rotation` in
+`base/rng.h`, S17 by XRandR loaded when it is there).
 
 - Categories: **bug**, **dead** (dead code), **useless**, **dup** (duplication), **smell**, **design**.
 - Status of a bug: **CONFIRMED** (reproduced by a run, or proven by reading every path / by
