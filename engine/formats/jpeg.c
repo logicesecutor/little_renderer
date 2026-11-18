@@ -344,6 +344,8 @@ static const uint8_t *scan(Jpeg *j, const uint8_t *p, int len){
 
 static inline uint8_t clamp8(int v){ return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
+#define JPEG_ROWS 64             // rows per task after the scans (a multiple of 8: whole blocks)
+
 static void idct_block(const int16_t *in, const uint16_t *q, uint8_t *out, int stride){
     int32_t ws[64];
     for (int c = 0; c < 8; c++){
@@ -412,12 +414,13 @@ static void idct_block(const int16_t *in, const uint16_t *q, uint8_t *out, int s
 
 // ---- upsampling (libjpeg's jdsample.c) and colour --------------------------------------------
 
-// component c's samples at full size: w x h
-static void upsample(const Comp *c, int hmax, int vmax, int w, int h, uint8_t *out){
+// component c's samples at full size: w x h; rows [y0, y1) of them (each row reads the
+// component's rows only: any rows, in any order, on any thread)
+static void upsample(const Comp *c, int hmax, int vmax, int w, int y0, int y1, uint8_t *out){
     int pw = c->bw * 8, cw = c->cw, ch = c->ch;
     int fx = hmax / c->h, fy = vmax / c->v;
     int exact = hmax % c->h == 0 && vmax % c->v == 0;
-    for (int y = 0; y < h; y++){
+    for (int y = y0; y < y1; y++){
         uint8_t *o = out + (size_t)y * w;
         if (exact && fx == 1 && fy == 1){ memcpy(o, c->pix + (size_t)y * pw, (size_t)w); continue; }
         if (exact && (fx == 2 || fx == 1) && (fy == 2 || fy == 1) && (fx == 1 || cw > 2)){
@@ -584,25 +587,41 @@ unsigned char *jpeg_decode(const unsigned char *data, size_t size, int *w, int *
         p += len;
     }
     if (!j->frame) return fail(j, "no image");
+    // After the scans (the Huffman stream: one thread), every step is rows that do not depend
+    // on each other: the blocks to samples, the upsampling, the colours. Inside a parallel
+    // region (glTF's textures are decoded side by side: gltf.c) they are tasks of JPEG_ROWS
+    // rows, which the region's idle threads take; elsewhere they run in turn, here. The
+    // same bytes either way.
     // the blocks to samples
     for (int i = 0; i < j->ncomp; i++){
         Comp *c = &j->comp[i];
         size_t pw = (size_t)c->bw * 8;
         c->pix = malloc(pw * c->bh * 8);
         if (!c->pix) return fail(j, "out of memory");
-        const uint16_t *q = j->q[c->tq];
-        for (int by = 0; by < c->bh; by++)
-            for (int bx = 0; bx < c->bw; bx++)
-                idct_block(c->coef + ((size_t)by * c->bw + bx) * 64, q, c->pix + (size_t)by * 8 * pw + (size_t)bx * 8, (int)pw);
-        free(c->coef);
-        c->coef = NULL;
     }
+    for (int i = 0; i < j->ncomp; i++){
+        Comp *c = &j->comp[i];
+        const size_t pw = (size_t)c->bw * 8;
+        const uint16_t *q = j->q[c->tq];
+        for (int b0 = 0; b0 < c->bh; b0 += JPEG_ROWS / 8){
+            const int b1 = b0 + JPEG_ROWS / 8 < c->bh ? b0 + JPEG_ROWS / 8 : c->bh;
+#ifdef _OPENMP
+#pragma omp task firstprivate(c, q, b0, b1)
+#endif
+            for (int by = b0; by < b1; by++)
+                for (int bx = 0; bx < c->bw; bx++)
+                    idct_block(c->coef + ((size_t)by * c->bw + bx) * 64, q, c->pix + (size_t)by * 8 * pw + (size_t)bx * 8, (int)pw);
+        }
+    }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
+    for (int i = 0; i < j->ncomp; i++){ free(j->comp[i].coef); j->comp[i].coef = NULL; }
     int W = j->w, H = j->h;
     uint8_t *plane[3] = {NULL, NULL, NULL};
     for (int i = 0; i < j->ncomp; i++){
         plane[i] = malloc((size_t)W * H);
         if (!plane[i]){ for (int k = 0; k < i; k++) free(plane[k]); return fail(j, "out of memory"); }
-        upsample(&j->comp[i], j->hmax, j->vmax, W, H, plane[i]);
     }
     int own = j->ncomp == 1 ? 1 : 3;
     int nc = want >= 1 && want <= 4 ? want : own;
@@ -611,16 +630,29 @@ unsigned char *jpeg_decode(const unsigned char *data, size_t size, int *w, int *
     // RGB: Adobe's transform 0, or components named R, G, B; else YCbCr (JFIF)
     int rgb = j->ncomp == 3 && ((j->adobe && j->transform == 0) ||
               (j->comp[0].id == 'R' && j->comp[1].id == 'G' && j->comp[2].id == 'B'));
-    for (size_t i = 0; i < (size_t)W * H; i++){
-        uint8_t c[3];
-        if (own == 1) c[0] = c[1] = c[2] = plane[0][i];
-        else if (rgb){ c[0] = plane[0][i]; c[1] = plane[1][i]; c[2] = plane[2][i]; }
-        else ycc_to_rgb(plane[0][i], plane[1][i], plane[2][i], c);
-        unsigned char *o = out + i * nc;
-        if (nc == 1) o[0] = own == 1 ? c[0] : (uint8_t)((c[0] * 77 + c[1] * 150 + c[2] * 29 + 128) >> 8);
-        else if (nc == 2){ o[0] = own == 1 ? c[0] : (uint8_t)((c[0] * 77 + c[1] * 150 + c[2] * 29 + 128) >> 8); o[1] = 255; }
-        else { o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; if (nc == 4) o[3] = 255; }
+    for (int y0 = 0; y0 < H; y0 += JPEG_ROWS){
+        const int y1 = y0 + JPEG_ROWS < H ? y0 + JPEG_ROWS : H;
+#ifdef _OPENMP
+#pragma omp task firstprivate(y0, y1)
+#endif
+        {
+            // the rows' samples of each component, then their colours
+            for (int k = 0; k < j->ncomp; k++) upsample(&j->comp[k], j->hmax, j->vmax, W, y0, y1, plane[k]);
+            for (size_t i = (size_t)y0 * W; i < (size_t)y1 * W; i++){
+                uint8_t c[3];
+                if (own == 1) c[0] = c[1] = c[2] = plane[0][i];
+                else if (rgb){ c[0] = plane[0][i]; c[1] = plane[1][i]; c[2] = plane[2][i]; }
+                else ycc_to_rgb(plane[0][i], plane[1][i], plane[2][i], c);
+                unsigned char *o = out + i * nc;
+                if (nc == 1) o[0] = own == 1 ? c[0] : (uint8_t)((c[0] * 77 + c[1] * 150 + c[2] * 29 + 128) >> 8);
+                else if (nc == 2){ o[0] = own == 1 ? c[0] : (uint8_t)((c[0] * 77 + c[1] * 150 + c[2] * 29 + 128) >> 8); o[1] = 255; }
+                else { o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; if (nc == 4) o[3] = 255; }
+            }
+        }
     }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
     for (int k = 0; k < j->ncomp; k++){ free(plane[k]); free(j->comp[k].pix); }
     *w = W; *h = H; *channels = nc;
     return out;

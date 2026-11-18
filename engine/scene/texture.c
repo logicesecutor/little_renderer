@@ -115,6 +115,8 @@ static unsigned srgb8_fast(double c){
     return lo;
 }
 
+#define TEX_ROWS 64
+
 int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb){
     memset(t, 0, sizeof(*t));
     if (w <= 0 || h <= 0) return 1;
@@ -134,14 +136,31 @@ int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb){
     t->levels = n;
     t->px = malloc(total * 4);
     if (!t->px) return 1;
-    for (size_t i = 0; i < (size_t)w * h; i++)
-        t->px[i] = (uint32_t)rgba[4 * i] | (uint32_t)rgba[4 * i + 1] << 8 | (uint32_t)rgba[4 * i + 2] << 16 | (uint32_t)rgba[4 * i + 3] << 24;
+    // Rows that do not depend on each other: inside a parallel region (glTF's textures made
+    // side by side, gltf.c) tasks of TEX_ROWS rows the region's idle threads take; elsewhere
+    // in turn, here. The same texels either way.
+    for (int y0 = 0; y0 < h; y0 += TEX_ROWS){
+        const int y1 = y0 + TEX_ROWS < h ? y0 + TEX_ROWS : h;
+#ifdef _OPENMP
+#pragma omp task firstprivate(y0, y1)
+#endif
+        for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++)
+            t->px[i] = (uint32_t)rgba[4 * i] | (uint32_t)rgba[4 * i + 1] << 8 | (uint32_t)rgba[4 * i + 2] << 16 | (uint32_t)rgba[4 * i + 3] << 24;
+    }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
     // each level: 2 x 2 averages of the one above (a side of 1, or odd: its last texel twice)
     for (int k = 1; k < n; k++){
         const uint32_t *src = t->px + t->at[k - 1];
         uint32_t *dst = t->px + t->at[k];
         int sw = t->lw[k - 1], sh = t->lh[k - 1];
-        for (int y = 0; y < t->lh[k]; y++)
+        for (int r0 = 0; r0 < t->lh[k]; r0 += TEX_ROWS){
+          const int r1 = r0 + TEX_ROWS < t->lh[k] ? r0 + TEX_ROWS : t->lh[k];
+#ifdef _OPENMP
+#pragma omp task firstprivate(r0, r1, src, dst, sw, sh, k) if (t->lw[k] * (r1 - r0) >= 4096)
+#endif
+          for (int y = r0; y < r1; y++)
             for (int x = 0; x < t->lw[k]; x++){
                 int x0 = 2 * x < sw ? 2 * x : sw - 1, x1 = 2 * x + 1 < sw ? 2 * x + 1 : sw - 1;
                 int y0 = 2 * y < sh ? 2 * y : sh - 1, y1 = 2 * y + 1 < sh ? 2 * y + 1 : sh - 1;
@@ -162,6 +181,10 @@ int texmap_make(TexMap *t, const unsigned char *rgba, int w, int h, int srgb){
                 }
                 dst[y * t->lw[k] + x] = out;
             }
+        }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
     }
     return 0;
 }
