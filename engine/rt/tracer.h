@@ -42,6 +42,14 @@ Vec3 trace_path(const Scene *s, Ray ray, Rng *rng, int max_depth);
 // ray's jitter from it too: sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy).
 Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *p);
 
+// A whole image: spp paths per pixel through cam into px (w * h, rows top to bottom; the
+// mean of each pixel's samples), in parallel over rows. Every pixel's numbers come from
+// (pixel, seed): an animation gives each frame its own seed. Samples that are not numbers
+// (NaN) are left out; clamp > 0 caps a sample's brightness (biased). row_done (or NULL) is
+// called after each row, from the thread that traced it (a progress line).
+void trace_image(const Scene *s, const Camera *cam, const TraceParams *p, int w, int h, int spp, uint64_t seed,
+                 real clamp, Vec3 *px, void (*row_done)(void *user), void *user);
+
 // The sky (Scene.env) is a light like the lamp: next event estimation draws a direction by
 // its luminance (env_sample) at every rough vertex, and a path leaving the scene sees it,
 // the two weighted by MIS. Light tracing covers only the lamp's caustics: the sky's are path

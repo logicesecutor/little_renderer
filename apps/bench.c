@@ -252,31 +252,16 @@ static void case_cpu_trace(const Case *c, Res *r, int reps){
     tp.max_depth = o.max_depth;
     tp.mis = o.mis;
     tp.sampler = o.sampler;
+    Vec3 *img = malloc((size_t)W * H * sizeof(Vec3));
+    if (!img){ teardown(&o, &s, &SIM); skip(r, "out of memory"); return; }
     set_threads(c->a);
     for (int k = 0; k < reps; k++){
         double t0 = clock_s();
-        double sink = 0;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) reduction(+:sink)
-#endif
-        for (int y = 0; y < H; y++)
-            for (int x = 0; x < W; x++){
-                uint64_t pixel = (uint64_t)y * W + x;
-                Rng rng;
-                rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL), pixel);
-                for (int sp = 0; sp < spp; sp++){
-                    Sampler sm = sampler_make(&rng, x, y, (uint32_t)sp, 0, tp.sampler);
-                    real jx, jy;
-                    sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
-                    Vec3 col = trace_path_sampled(&s, camera_ray(&cam, (x + jx) / W, (y + jy) / H), &sm, &tp);
-                    sink += col.x;
-                }
-            }
-        double secs = clock_s() - t0;
-        if (sink != sink) sink = 0;      // (the sum is kept so the work is not left out)
-        add(r, (double)W * H * spp / secs / 1e6);
+        trace_image(&s, &cam, &tp, W, H, spp, 0, 0, img, NULL, NULL);   // (render's loop)
+        add(r, (double)W * H * spp / (clock_s() - t0) / 1e6);
     }
     set_threads(0);
+    free(img);
     snprintf(r->note, sizeof(r->note), "%dx%d, %d spp, %d thread(s)", W, H, spp, c->a ? c->a : max_threads());
     teardown(&o, &s, &SIM);
 }
@@ -943,23 +928,12 @@ static void shot_cpu(const char *dir, const char *name, const char *args, int sp
         tp.max_depth = o.max_depth;
         tp.mis = o.mis;
         tp.sampler = o.sampler;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1)
-#endif
-        for (int y = 0; y < H; y++)
-            for (int x = 0; x < W; x++){
-                uint64_t pixel = (uint64_t)y * W + x;
-                Rng rng;
-                rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL), pixel);
-                Vec3 sum = vec3(0, 0, 0);
-                for (int sp = 0; sp < spp; sp++){
-                    Sampler sm = sampler_make(&rng, x, y, (uint32_t)sp, 0, tp.sampler);
-                    real jx, jy;
-                    sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
-                    sum = v_add(sum, trace_path_sampled(&s, camera_ray(&cam, (x + jx) / W, (y + jy) / H), &sm, &tp));
-                }
-                px[pixel] = image_pack_srgb(v_scale(sum, (real)1 / spp));
-            }
+        Vec3 *img = malloc((size_t)W * H * sizeof(Vec3));
+        if (img){
+            trace_image(&s, &cam, &tp, W, H, spp, 0, 0, img, NULL, NULL);
+            for (int i = 0; i < W * H; i++) px[i] = image_pack_srgb(img[i]);
+            free(img);
+        }
     }
     shot_put(dir, name, W, H, px);
     free(px);

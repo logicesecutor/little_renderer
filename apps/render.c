@@ -10,6 +10,21 @@
 #include "app/options.h"
 #include "lr.h"
 
+// the path tracer's progress line: rows done of all, from whichever thread finished one
+typedef struct { int done, rows; } Progress;
+static void row_done(void *user){
+    Progress *p = user;
+    int done;
+#ifdef _OPENMP
+#pragma omp atomic capture
+#endif
+    done = ++p->done;
+    if (done % 8 == 0 || done == p->rows){
+        fprintf(stderr, "\r  %3d%%", done * 100 / p->rows);
+        fflush(stderr);
+    }
+}
+
 static int render_raster(const Options *opt, const Scene *scene){
     Framebuffer *fb = fb_create(opt->width, opt->height);
     if (!fb){ fprintf(stderr, "out of memory\n"); return 1; }
@@ -59,47 +74,10 @@ static int render_rt(const Options *opt, const Scene *scene){
            opt->mis ? ", MIS" : "", opt->caustics_lt ? ", caustics by light tracing" : "");
 
     double t0 = clock_s();
-    int rows_done = 0;
-    const real clamp = (real)opt->clamp;
-
-    // Every row is independent, so rows are handed out to threads one at a time.
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1)
-#endif
-    for (int y = 0; y < H; y++){
-        for (int x = 0; x < W; x++){
-            uint64_t pixel = (uint64_t)y * W + x;
-            Rng rng;
-            rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL), pixel);
-
-            Vec3 sum = vec3(0, 0, 0);
-            for (int s = 0; s < spp; s++){
-                // a random point inside the pixel: averaging them gives anti-aliasing for free
-                Sampler sm = sampler_make(&rng, x, y, (uint32_t)s, 0, tp.sampler);
-                real jx, jy;
-                sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
-                real u = (x + jx) / W;
-                real v = (y + jy) / H;
-                Vec3 c = trace_path_sampled(scene, camera_ray(&cam, u, v), &sm, &tp);
-                if (!(c.x == c.x && c.y == c.y && c.z == c.z)) continue;   // skip NaNs
-                // optional firefly clamp: caps one sample's brightness. Removes speckles
-                // but also removes some real energy (biased), so it is off by default.
-                if (clamp > 0 && v_max(c) > clamp) c = v_scale(c, clamp / v_max(c));
-                sum = v_add(sum, c);
-            }
-            img.px[pixel] = v_scale(sum, 1.0 / spp);
-        }
-
-        int done;
-#ifdef _OPENMP
-#pragma omp atomic capture
-#endif
-        done = ++rows_done;
-        if (done % 8 == 0 || done == H){
-            fprintf(stderr, "\r  %3d%%", done * 100 / H);
-            fflush(stderr);
-        }
-    }
+    // (the optional firefly clamp caps one sample's brightness: it removes speckles but also
+    // some real energy, biased, so it is off by default)
+    Progress pr = {0, H};
+    trace_image(scene, &cam, &tp, W, H, spp, 0, (real)opt->clamp, img.px, row_done, &pr);
 
     fprintf(stderr, "\n");
     if (opt->caustics_lt){

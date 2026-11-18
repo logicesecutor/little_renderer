@@ -214,6 +214,35 @@ Vec3 trace_path_ex(const Scene *s, Ray ray, Rng *rng, const TraceParams *tp){
     return trace_path_sampled(s, ray, &sm, tp);
 }
 
+void trace_image(const Scene *s, const Camera *cam, const TraceParams *tp, int W, int H, int spp, uint64_t seed,
+                 real clamp, Vec3 *px, void (*row_done)(void *user), void *user){
+    // rows are independent: handed out to the threads one at a time
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+    for (int y = 0; y < H; y++){
+        for (int x = 0; x < W; x++){
+            uint64_t pixel = (uint64_t)y * W + x;
+            Rng rng;
+            rng_seed(&rng, 0x853c49e6748fea9bULL ^ (pixel * 0x9E3779B97F4A7C15ULL) ^ (seed * 0xD1B54A32D192ED03ULL), pixel);
+            Vec3 sum = vec3(0, 0, 0);
+            for (int k = 0; k < spp; k++){
+                // a random point inside the pixel: averaging them gives anti-aliasing for free
+                Sampler sm = sampler_make(&rng, x, y, (uint32_t)k, (uint32_t)seed * 0x9e3779b9u, tp->sampler);
+                real jx, jy;
+                sampler_2d(&sm, SAMPLE_CAMERA, &jx, &jy);
+                real u = (x + jx) / W, v = (y + jy) / H;
+                Vec3 c = trace_path_sampled(s, camera_ray(cam, u, v), &sm, tp);
+                if (!(c.x == c.x && c.y == c.y && c.z == c.z)) continue;   // skip NaNs
+                if (clamp > 0 && v_max(c) > clamp) c = v_scale(c, clamp / v_max(c));
+                sum = v_add(sum, c);
+            }
+            px[pixel] = v_scale(sum, (real)1 / spp);
+        }
+        if (row_done) row_done(user);
+    }
+}
+
 Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *tp){
     Rng *rng = sm->rng;
     const int max_depth = tp->max_depth, mis = tp->mis;
