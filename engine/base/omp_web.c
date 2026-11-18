@@ -176,8 +176,12 @@ static void make_team(void){
     if (T.made) return;
     T.made = 1;
     int n = procs();
-    for (int i = 1; i < n; i++)
-        if (pthread_create(&T.tid[i], NULL, worker, (void *)(intptr_t)i) == 0) T.made = i + 1;
+    // threads 1 .. made-1, every one of them: a region waits at its barrier for each, so the
+    // team stops at the first that cannot be made (a later one made would count it too)
+    for (int i = 1; i < n; i++){
+        if (pthread_create(&T.tid[i], NULL, worker, (void *)(intptr_t)i) != 0) break;
+        T.made = i + 1;
+    }
     T.size = T.made;
 }
 
