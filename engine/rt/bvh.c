@@ -61,36 +61,113 @@ static int partition(int *refs, int start, int count, const BuildInfo *bi, int a
     return i - start;
 }
 
+// ---- a node's primitives, in chunks on several threads ------------------------------------
+//
+// The top of a big tree is a few nodes with very many primitives each: their bounds and
+// their bins are a pass over all of them, which one thread did while the others waited
+// (the full dragon: the thread that builds busy all the time, the others a third of it).
+// Inside the parallel build those passes are cut into chunks, each a task; the chunks'
+// boxes and counts are then put together, which gives what one pass gives (smallest,
+// largest and sums do not depend on the order).
+
+enum { MAX_BINS = 256 };
+#define BVH_CHUNK 4096           // primitives per chunk
+#define BVH_CHUNKS_MAX 64
+
+typedef struct { int n[3][MAX_BINS]; Aabb box[3][MAX_BINS]; } Bins;
+typedef struct { int nb, use[3]; real lo[3], scale[3]; } BinAxes;
+
+static void range_bounds(const Bvh *b, const BuildInfo *bi, int start, int count, Aabb *box_out, Aabb *cbox_out){
+    Aabb box = box_empty(), cbox = box_empty();
+    for (int i = start; i < start + count; i++){
+        box_add_box(&box, &bi->box[b->refs[i]]);
+        box_add_point(&cbox, bi->centroid[b->refs[i]]);
+    }
+    *box_out = box;
+    *cbox_out = cbox;
+}
+
+// The bins of the three axes filled in one pass over the primitives (each one's centre and
+// box are somewhere else in memory: read once, not once per axis)
+static void range_bins(const Bvh *b, const BuildInfo *bi, int start, int count, const BinAxes *ax, Bins *B){
+    for (int axis = 0; axis < 3; axis++)
+        for (int k = 0; k < ax->nb; k++){ B->n[axis][k] = 0; B->box[axis][k] = box_empty(); }
+    for (int i = start; i < start + count; i++){
+        int p = b->refs[i];
+        const Aabb *pb = &bi->box[p];
+        const real c[3] = {bi->centroid[p].x, bi->centroid[p].y, bi->centroid[p].z};
+        for (int axis = 0; axis < 3; axis++){
+            if (!ax->use[axis]) continue;
+            real f = (c[axis] - ax->lo[axis]) * ax->scale[axis];
+            int k = f > 0 ? (f < ax->nb ? (int)f : ax->nb - 1) : 0;   // (a NaN box, a body gone wild: bin 0, not a crash)
+            B->n[axis][k]++;
+            box_add_box(&B->box[axis][k], pb);
+        }
+    }
+}
+
+// how many chunks a node of `count` primitives is cut into (1: one pass, here)
+static int chunks_of(int count, int par){
+    if (!par || count < 2 * BVH_CHUNK) return 1;
+    int k = count / BVH_CHUNK;
+    return k > BVH_CHUNKS_MAX ? BVH_CHUNKS_MAX : k;
+}
+
 // Binned SAH. The expected cost of a node is
 //   cost = C_trav + (A_left / A_node) * N_left * C_isect + (A_right / A_node) * N_right * C_isect
 // because a random ray that hits the node hits a child with probability ~ (child area /
 // node area). We try `bins - 1` split planes per axis, using buckets of centroids, and keep
 // the cheapest. Returns the split position (or a NaN-free "no split" via *ok = 0).
+// par: inside the parallel build (the bins of a big node in chunks, as tasks).
 static real sah_split(const Bvh *b, const BuildInfo *bi, int start, int count,
-                        const Aabb *node_box, const Aabb *cbox, int *best_axis, real *best_cost){
-    enum { MAX_BINS = 256 };
+                        const Aabb *node_box, const Aabb *cbox, int *best_axis, real *best_cost, int par){
     int nb = b->bins < 2 ? 2 : (b->bins > MAX_BINS ? MAX_BINS : b->bins);
     real parent_area = box_area(node_box);
     real best_pos = 0;
     *best_cost = REAL_MAX;
     *best_axis = -1;
 
+    BinAxes ax;
+    ax.nb = nb;
     for (int axis = 0; axis < 3; axis++){
-        real lo = comp(cbox->lo, axis), hi = comp(cbox->hi, axis);
-        real extent = hi - lo;
-        if (extent <= 1e-12) continue;   // all centroids in one plane: nothing to split here
-
-        int bin_n[MAX_BINS] = {0};
-        Aabb bin_box[MAX_BINS];
-        for (int k = 0; k < nb; k++) bin_box[k] = box_empty();
-        const real scale = nb / extent;
-        for (int i = start; i < start + count; i++){
-            int p = b->refs[i];
-            real f = (comp(bi->centroid[p], axis) - lo) * scale;
-            int k = f > 0 ? (f < nb ? (int)f : nb - 1) : 0;   // (a NaN box, a body gone wild: bin 0, not a crash)
-            bin_n[k]++;
-            box_add_box(&bin_box[k], &bi->box[p]);
+        real lo = comp(cbox->lo, axis), extent = comp(cbox->hi, axis) - lo;
+        ax.use[axis] = extent > 1e-12;      // (else all centroids in one plane: nothing to split here)
+        ax.lo[axis] = lo;
+        ax.scale[axis] = ax.use[axis] ? nb / extent : 0;
+    }
+    Bins all;
+    const int nch = chunks_of(count, par);
+    Bins *part = nch > 1 ? malloc((size_t)nch * sizeof(Bins)) : NULL;
+    if (part){
+        for (int c = 0; c < nch; c++){
+            const int s0 = start + (int)((long long)count * c / nch), s1 = start + (int)((long long)count * (c + 1) / nch);
+            Bins *to = &part[c];
+#ifdef _OPENMP
+#pragma omp task firstprivate(to, s0, s1, ax)
+#endif
+            range_bins(b, bi, s0, s1 - s0, &ax, to);
         }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
+        for (int axis = 0; axis < 3; axis++)
+            for (int k = 0; k < nb; k++){
+                all.n[axis][k] = 0;
+                all.box[axis][k] = box_empty();
+                for (int c = 0; c < nch; c++){ all.n[axis][k] += part[c].n[axis][k]; box_add_box(&all.box[axis][k], &part[c].box[axis][k]); }
+            }
+        free(part);
+    } else range_bins(b, bi, start, count, &ax, &all);
+    const int *use = ax.use;
+    const real *los = ax.lo;
+    int (*bins_n)[MAX_BINS] = all.n;
+    Aabb (*bins_box)[MAX_BINS] = all.box;
+
+    for (int axis = 0; axis < 3; axis++){
+        if (!use[axis]) continue;
+        const real lo = los[axis], extent = comp(cbox->hi, axis) - lo;
+        const int *bin_n = bins_n[axis];
+        const Aabb *bin_box = bins_box[axis];
 
         // sweep from the right to get the area/count of everything right of each plane
         real right_area[MAX_BINS];
@@ -124,12 +201,24 @@ static real sah_split(const Bvh *b, const BuildInfo *bi, int start, int count,
 // The box of refs[start, start+count) and how to split it: returns how many go to the left
 // child (0 = make a leaf). Partitions refs in place. The same decisions whether the tree is
 // built by one thread or many.
-static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count, int depth, Aabb *box_out){
+static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count, int depth, Aabb *box_out, int par){
     Aabb box = box_empty(), cbox = box_empty();
-    for (int i = start; i < start + count; i++){
-        box_add_box(&box, &bi->box[b->refs[i]]);
-        box_add_point(&cbox, bi->centroid[b->refs[i]]);
-    }
+    const int nch = chunks_of(count, par);
+    if (nch > 1){
+        Aabb pb[BVH_CHUNKS_MAX], pc[BVH_CHUNKS_MAX];
+        for (int c = 0; c < nch; c++){
+            const int s0 = start + (int)((long long)count * c / nch), s1 = start + (int)((long long)count * (c + 1) / nch);
+            Aabb *tb = &pb[c], *tc = &pc[c];
+#ifdef _OPENMP
+#pragma omp task firstprivate(tb, tc, s0, s1)
+#endif
+            range_bounds(b, bi, s0, s1 - s0, tb, tc);
+        }
+#ifdef _OPENMP
+#pragma omp taskwait
+#endif
+        for (int c = 0; c < nch; c++){ box_add_box(&box, &pb[c]); box_add_box(&cbox, &pc[c]); }
+    } else range_bounds(b, bi, start, count, &box, &cbox);
     *box_out = box;
 
     int nleft = 0;
@@ -137,7 +226,7 @@ static int choose_split(const Bvh *b, const BuildInfo *bi, int start, int count,
         if (b->split == BVH_SPLIT_SAH){
             int axis;
             real cost;
-            real pos = sah_split(b, bi, start, count, &box, &cbox, &axis, &cost);
+            real pos = sah_split(b, bi, start, count, &box, &cbox, &axis, &cost, par);
             // Leaf if not splitting is cheaper (cost of a leaf = count tests), unless the
             // leaf would be too big.
             int want_split = axis >= 0 && (cost < count || count > b->max_leaf);
@@ -163,7 +252,7 @@ static int build(Bvh *b, const BuildInfo *bi, int start, int count, int depth){
     int node = new_node(b);
     if (depth > b->depth) b->depth = depth;
     Aabb box;
-    int nleft = choose_split(b, bi, start, count, depth, &box);
+    int nleft = choose_split(b, bi, start, count, depth, &box, 0);
     b->nodes[node].box = box;
 
     if (nleft == 0){                                      // leaf
@@ -210,7 +299,7 @@ static Sub *build_par(const Bvh *b, const BuildInfo *bi, int start, int count, i
         return sb;
     }
     Aabb box;
-    int nleft = choose_split(b, bi, start, count, depth, &box);
+    int nleft = choose_split(b, bi, start, count, depth, &box, 1);
     if (nleft == 0){                                      // (a huge leaf: only with odd parameters)
         sb->part = *b;
         sb->part.nodes = NULL;
