@@ -50,6 +50,13 @@ int window_native(LrWindow *win, void **display, uintptr_t *window);
 // mode; X11: the mode of the monitor under the window by XRandR, when it is there, else 60;
 // browsers: 60)
 double window_refresh_hz(LrWindow *win);
+// A new size for the window (a canvas: its pixels); the next window_present must have it.
+// 0 = done, 1 = out of memory (the window keeps its size)
+int window_resize(LrWindow *win, int width, int height);
+// Whether the window takes the keyboard and the mouse (1, as it opens). In a page, 0 leaves
+// them to the page's own elements (a program with an HTML interface of its own: its fields
+// get their keys); natively the events still arrive, for the program to use or not.
+void window_set_input(LrWindow *win, int on);
 void window_close(LrWindow *win);
 
 #endif

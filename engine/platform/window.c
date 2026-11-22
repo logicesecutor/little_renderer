@@ -243,6 +243,33 @@ void window_set_title(LrWindow *w, const char *title){
     XStoreName(w->dpy, w->win, title);
 }
 
+int window_resize(LrWindow *w, int width, int height){
+    if (width == w->w && height == w->h) return 0;
+    int scr = DefaultScreen(w->dpy);
+    uint32_t *pix = calloc((size_t)width * height, sizeof(uint32_t));
+    XImage *img = pix ? XCreateImage(w->dpy, DefaultVisual(w->dpy, scr), DefaultDepth(w->dpy, scr), ZPixmap, 0,
+                                     (char *)pix, width, height, 32, 0) : NULL;
+    if (!img){ free(pix); return 1; }
+    w->ximg->data = NULL;                               // (the pixels are ours)
+    XDestroyImage(w->ximg);
+    free(w->pix);
+    w->ximg = img;
+    w->pix = pix;
+    w->w = width;
+    w->h = height;
+    XSizeHints *hints = XAllocSizeHints();             // still a fixed size, the new one
+    hints->flags = PMinSize | PMaxSize;
+    hints->min_width = hints->max_width = width;
+    hints->min_height = hints->max_height = height;
+    XSetWMNormalHints(w->dpy, w->win, hints);
+    XFree(hints);
+    XResizeWindow(w->dpy, w->win, width, height);
+    XFlush(w->dpy);
+    return 0;
+}
+
+void window_set_input(LrWindow *w, int on){ (void)w; (void)on; }   // (natively the program decides)
+
 void window_close(LrWindow *w){
     if (!w) return;
     if (w->ximg){ w->ximg->data = NULL; XDestroyImage(w->ximg); }   // the pixels are ours

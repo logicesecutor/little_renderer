@@ -18,6 +18,7 @@ struct LrWindow {
     int w, h;
     uint8_t *rgba;           // the frame as the canvas wants it: R, G, B, A bytes
     EventQueue events;       // waiting for window_poll
+    int input;               // the keyboard and the mouse are listened to (window_set_input)
 };
 
 // KeyboardEvent.key -> the engine's key code (printable keys: their lowercase character)
@@ -99,15 +100,35 @@ LrWindow *window_open(int width, int height, const char *title){
     w->rgba = malloc((size_t)width * height * 4);
     if (!w->rgba){ free(w); return NULL; }
     emscripten_set_canvas_element_size(CANVAS, width, height);
-    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, w, 1, on_key);
-    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, w, 1, on_key);
-    emscripten_set_mousedown_callback(CANVAS, w, 1, on_mouse);
-    emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, w, 1, on_mouse);   // also outside
-    emscripten_set_mousemove_callback(CANVAS, w, 1, on_mouse);
-    emscripten_set_wheel_callback(CANVAS, w, 1, on_wheel);
-    emscripten_set_blur_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, w, 1, on_blur);
+    window_set_input(w, 1);
     js_set_title(title);
     return w;
+}
+
+void window_set_input(LrWindow *w, int on){
+    if (!w || (on != 0) == w->input) return;
+    w->input = on != 0;
+    void *u = on ? w : NULL;                      // (no callback: the listener is removed)
+    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, u, 1, on ? on_key : NULL);
+    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, u, 1, on ? on_key : NULL);
+    emscripten_set_mousedown_callback(CANVAS, u, 1, on ? on_mouse : NULL);
+    emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, u, 1, on ? on_mouse : NULL);   // also outside
+    emscripten_set_mousemove_callback(CANVAS, u, 1, on ? on_mouse : NULL);
+    emscripten_set_wheel_callback(CANVAS, u, 1, on ? on_wheel : NULL);
+    emscripten_set_blur_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, u, 1, on ? on_blur : NULL);
+    if (!on) queue_release_keys(&w->events);
+}
+
+int window_resize(LrWindow *w, int width, int height){
+    if (width == w->w && height == w->h) return 0;
+    uint8_t *rgba = malloc((size_t)width * height * 4);
+    if (!rgba) return 1;
+    free(w->rgba);
+    w->rgba = rgba;
+    w->w = width;
+    w->h = height;
+    emscripten_set_canvas_element_size(CANVAS, width, height);
+    return 0;
 }
 
 int window_poll(LrWindow *w, LrEvent *ev){

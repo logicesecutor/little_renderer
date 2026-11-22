@@ -60,5 +60,8 @@ int gpu_timing(const Gpu *g);
 // as they are ready (0: Mailbox where the window system has it, else Immediate, which may
 // tear). Set before gpu_create_window. In a browser the page is always in step.
 void gpu_set_vsync(int on);
+// The window's (or canvas's) new size: its surface made again at it (after window_resize).
+// What was made for the old size (a GpuView) is made again by its owner.
+void gpu_resize(Gpu *g, int width, int height);
 
 #endif

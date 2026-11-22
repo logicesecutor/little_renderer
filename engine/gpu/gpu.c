@@ -29,6 +29,7 @@ void gpu_destroy(Gpu *g){ free(g); }
 void gpu_set_timing(int on){ (void)on; }
 int gpu_timing(const Gpu *g){ (void)g; return 0; }
 void gpu_set_vsync(int on){ (void)on; }
+void gpu_resize(Gpu *g, int width, int height){ (void)g; (void)width; (void)height; }
 
 #else
 #include "gpu/gpu_internal.h"
@@ -189,6 +190,13 @@ void gpu_surface_reconfigure(Gpu *g){
     cfg.alphaMode = alpha;
     cfg.presentMode = present;
     wgpuSurfaceConfigure(g->surface, &cfg);
+}
+
+void gpu_resize(Gpu *g, int width, int height){
+    if (!g || (g->width == width && g->height == height)) return;
+    g->width = width;
+    g->height = height;
+    if (g->device) gpu_surface_reconfigure(g);   // (a GPU still starting configures it when ready)
 }
 
 static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView msg, void *u1, void *u2){

@@ -186,6 +186,20 @@ void window_set_title(LrWindow *w, const char *title){
     SetWindowTextA(w->hwnd, title);
 }
 
+int window_resize(LrWindow *w, int width, int height){
+    if (width == w->w && height == w->h) return 0;
+    w->w = width;
+    w->h = height;
+    w->bmi.bmiHeader.biWidth = width;
+    w->bmi.bmiHeader.biHeight = -height;
+    RECT r = {0, 0, width, height};                   // the inside exactly width x height again
+    AdjustWindowRect(&r, (DWORD)GetWindowLongPtrA(w->hwnd, GWL_STYLE), FALSE);
+    SetWindowPos(w->hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return 0;
+}
+
+void window_set_input(LrWindow *w, int on){ (void)w; (void)on; }   // (natively the program decides)
+
 void window_close(LrWindow *w){
     if (!w) return;
     SetWindowLongPtrA(w->hwnd, GWLP_USERDATA, 0);
