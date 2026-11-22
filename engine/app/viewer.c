@@ -255,6 +255,13 @@ typedef struct {
 
     // the loop
     int running, shot_no;
+    // what a program driving the viewer changes (viewer.h; the defaults are bin/view's)
+    int input_off;             // the window's keys and mouse are not the viewer's (the program's own UI)
+    int title_off;             // the window's title is not written
+    double settle;             // hybrid: path tracing once still this long (s); 0 = HYBRID_SETTLE_S
+    int keep_trace;            // hybrid: the path traced image carried over a move, not started over
+    int ext_changed;           // the program moved the camera or changed the scene since the last frame
+    double fps;                // frames shown per second (at the last title)
     int band;                  // CPU path tracer: rows per step while refining
     int force_present;         // show a frame now
     int reset;                 // path tracer: start over at full resolution
@@ -677,7 +684,9 @@ static int viewer_gpu(void){
 // 0: quit at once (the physics could not start again).
 static int viewer_input(Frame *fr){
     LrEvent ev;
+    if (V.ext_changed){ fr->changed = 1; V.ext_changed = 0; }
     while (window_poll(V.win, &ev)){
+        if (V.input_off && ev.type != LR_CLOSE && ev.type != LR_EXPOSE) continue;   // (the program's)
         if (ev.type == LR_KEYDOWN || ev.type == LR_KEYUP){
             int down = ev.type == LR_KEYDOWN;
             switch (ev.key){
@@ -872,7 +881,7 @@ static void viewer_update(Frame *fr){
 static void viewer_render(Frame *fr){
     // hybrid: rasterize while the camera moves, path trace once it has settled
     fr->use_raster = V.mode == BACKEND_RASTER ||
-                     (V.mode == BACKEND_HYBRID && (fr->changed || fr->t - V.last_change < HYBRID_SETTLE_S ||
+                     (V.mode == BACKEND_HYBRID && (fr->changed || fr->t - V.last_change < (V.settle > 0 ? V.settle : HYBRID_SETTLE_S) ||
                                                  (V.o.sim.on && !V.sim_paused)));
     // the CPU path tracer reads the cloud on the CPU: bring the GPU's back (it lands a frame later)
     // (the GPU path tracer takes it straight from the GPU)
@@ -900,10 +909,13 @@ static void viewer_render(Frame *fr){
         } else {
             idle(5);                                     // nothing new to draw
         }
-        // the path tracer starts over when it takes back over
+        // the path tracer starts over when it takes back over (the GPU's, with keep_trace:
+        // carries its image over the move, each pixel keeping the samples of its surface)
         if (V.acc.passes || V.acc.band_y || V.acc.scale != 1) accum_reset(&V.acc, 1);
-        V.gpu_tracing = 0;
-        V.reset = 0;
+        if (!V.keep_trace){
+            V.gpu_tracing = 0;
+            V.reset = 0;
+        }
         V.pass_t0 = clock_s();
     } else if (V.gview && V.o.gpu_trace > 0 && gpu_trace_frame(&fr->cam, fr->at, V.max_depth)){
         // done: the GPU path traces (every frame, the camera or the bodies moving or not)
@@ -1066,7 +1078,8 @@ static int viewer_report(const Frame *fr){
         if (!fr->use_raster) snprintf(work, sizeof(work), ", %.0f passes/s", pps);   // (the path tracer's work)
         snprintf(shown, sizeof(shown), "view | %.0f fps (%.1f ms%s)%s", fps, fps > 0 ? 1000.0 / fps : 0.0, work,
                  strncmp(title, "view", 4) == 0 ? title + 4 : title);
-        window_set_title(V.win, shown);
+        if (!V.title_off) window_set_title(V.win, shown);
+        V.fps = fps;
         hud_update(fps);
         V.title_frames = V.frames;
         V.title_passes = V.passes_total;
@@ -1218,4 +1231,98 @@ void viewer_run(void){
     while (viewer_frame()){}
     viewer_close();
 #endif
+}
+
+// ---- driven by a program (viewer.h) ---------------------------------------------------------
+
+void viewer_set_input(int on){
+    V.input_off = !on;
+    memset(&V.in, 0, sizeof(V.in));
+    if (V.win) window_set_input(V.win, on);
+}
+void viewer_set_title(int on){ V.title_off = !on; }
+void viewer_set_hud(int on){
+    V.hud_on = on != 0;
+    if (V.gview) gpu_view_hud(V.gview, V.hud_on ? V.hud_px : NULL, V.hud_w, V.hud_h, HUD_X, HUD_Y);
+    V.raster_dirty = V.force_present = 1;
+}
+void viewer_set_settle(double seconds){ V.settle = seconds; }
+void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
+
+void viewer_set_backend(Backend b){
+    if (b == V.mode) return;
+    V.mode = b;
+    if (b != BACKEND_RASTER) V.reset = 1;      // the path traced image starts over
+    V.ext_changed = 1;
+}
+Backend viewer_backend(void){ return V.mode; }
+
+View viewer_view(void){ return V.view; }
+void viewer_set_view(const View *v){
+    V.view = *v;
+    V.view.pitch = fmax(-1.55, fmin(1.55, V.view.pitch));
+    V.ext_changed = 1;
+}
+void viewer_set_home(const View *v){ V.home = *v; }
+
+void viewer_scene_changed(int restart){
+    if (restart) V.reset = 1;                  // the path traced image starts over
+    else V.gpu_scene_moved = 1;                // the GPU's carries its samples where nothing changed
+    V.raster_dirty = 1;
+    V.ext_changed = 1;
+}
+
+void viewer_relight(void){
+    scene_trees();                             // the bake traces the scene
+    options_bake_probe(&V.o, &V.scene);
+    V.raster_dirty = V.force_present = 1;
+}
+
+int viewer_resize(int w, int h){
+    if (w < 1 || h < 1) return 1;
+    if (w == V.W && h == V.H) return 0;
+    Framebuffer *fb = fb_create(w, h);
+    Vec3 *sum = calloc((size_t)w * h, sizeof(Vec3)), *ema = calloc((size_t)w * h, sizeof(Vec3));
+    int *count = calloc((size_t)w * h, sizeof(int));
+    if (!fb || !sum || !ema || !count || window_resize(V.win, w, h) != 0){
+        fb_destroy(fb);
+        free(sum);
+        free(ema);
+        free(count);
+        return 1;
+    }
+    fb_destroy(V.fb);
+    V.fb = fb;
+    free(V.acc.sum);
+    free(V.acc.count);
+    V.acc = (Accum){w, h, 1, w, h, sum, count, 0, 0};
+    free(V.ema.px);
+    V.ema = (Ema){ema, 0, 0};
+    V.W = V.o.width = w;
+    V.H = V.o.height = h;
+    // the GPU: its surface at the new size, and its view made again (viewer_gpu, next frame)
+    if (V.gview){
+        gpu_view_destroy(V.gview);
+        V.gview = NULL;
+    }
+    if (V.gpu) gpu_resize(V.gpu, w, h);
+    fb_destroy(V.gfb);
+    V.gfb = NULL;
+    V.gpu_tracing = V.gpu_scene = V.gpu_frame_owed = 0;
+    V.reset = V.raster_dirty = V.force_present = 1;
+    V.ext_changed = 1;
+    return 0;
+}
+
+void viewer_status(ViewerStatus *st){
+    memset(st, 0, sizeof(*st));
+    st->tracing = !V.showing_raster;
+    st->on_gpu = V.gview != NULL;
+    st->gpu_starting = V.gpu && !V.gview;
+    st->gpu_tracing = V.gpu_tracing && st->tracing;
+    st->spp = st->gpu_tracing ? gpu_view_trace_passes(V.gview) : V.acc.passes;
+    st->spp_target = V.o.spp;
+    st->fps = V.fps;
+    st->width = V.W;
+    st->height = V.H;
 }

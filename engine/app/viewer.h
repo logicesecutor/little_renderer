@@ -32,4 +32,37 @@ void viewer_run(void);           // frames until quit, then viewer_close (in a p
 void viewer_close(void);
 void viewer_print_controls(void);   // the keys
 
+// ---- for a program that drives the viewer itself (the web editor) ----
+void viewer_set_input(int on);   // 0: the window's keys and mouse are left to the program (in a page: to its elements)
+void viewer_set_title(int on);   // 0: the window's title is left alone
+void viewer_set_hud(int on);     // 0: no frame rate over the image
+void viewer_set_settle(double seconds);   // hybrid: path tracing after this long still (0: the viewer's 0.12 s)
+// hybrid: the GPU's path traced image carried over a move (its samples reprojected, as in rt
+// mode), not started over each time the rasterizer takes over
+void viewer_set_keep_trace(int on);
+void viewer_set_backend(Backend b);   // (to path tracing: its image starts over)
+Backend viewer_backend(void);
+View viewer_view(void);
+void viewer_set_view(const View *v);  // the camera, as if moved by the keys
+void viewer_set_home(const View *v);  // where R goes back to
+// The program changed the scene (instances added, moved, their materials...): what shows
+// follows. restart: the path traced image starts over; else the GPU's keeps the samples of
+// what did not change (the CPU's always starts over).
+void viewer_scene_changed(int restart);
+void viewer_relight(void);       // the rasterizer's light probe made again (key L)
+// The image's size: the buffers, the window (a canvas: its pixels) and the GPU's surface
+// at it, the GPU's view made again; the image starts over. 0 = done, 1 = out of memory.
+int viewer_resize(int w, int h);
+
+typedef struct {
+    int tracing;         // what shows is path traced (else rasterized)
+    int on_gpu;          // the GPU draws (else the CPU)
+    int gpu_starting;    // the GPU is still being set up
+    int gpu_tracing;     // the path traced image is the GPU's
+    int spp, spp_target; // its samples per pixel, and where it stops (-s)
+    double fps;          // frames shown per second
+    int width, height;
+} ViewerStatus;
+void viewer_status(ViewerStatus *st);
+
 #endif
