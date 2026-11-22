@@ -1278,6 +1278,8 @@ void viewer_relight(void){
     V.raster_dirty = V.force_present = 1;
 }
 
+void viewer_redraw(void){ V.raster_dirty = V.force_present = 1; }
+
 int viewer_resize(int w, int h){
     if (w < 1 || h < 1) return 1;
     if (w == V.W && h == V.H) return 0;

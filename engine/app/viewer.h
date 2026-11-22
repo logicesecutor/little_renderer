@@ -50,6 +50,9 @@ void viewer_set_home(const View *v);  // where R goes back to
 // what did not change (the CPU's always starts over).
 void viewer_scene_changed(int restart);
 void viewer_relight(void);       // the rasterizer's light probe made again (key L)
+// The rasterizer's light changed (the program made the probe again itself): its image is drawn
+// again; the path traced image carries on.
+void viewer_redraw(void);
 // The image's size: the buffers, the window (a canvas: its pixels) and the GPU's surface
 // at it, the GPU's view made again; the image starts over. 0 = done, 1 = out of memory.
 int viewer_resize(int w, int h);
