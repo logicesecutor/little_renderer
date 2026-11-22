@@ -54,9 +54,9 @@
 </section>
 
 <nav class="pill modes" aria-label="Mode">
-  <a href="#" aria-current="page">Build</a>
+  <a href="#" data-mode="build" aria-current="page">Build</a>
   <a href="#" aria-disabled="true" title="Light mode comes after v1">Light</a>
-  <a href="#" aria-disabled="true" title="Simulate mode comes after v1">Simulate</a>
+  <a href="#" data-mode="simulate" title="Simulate: run the physics">Simulate</a>
   <a href="#" aria-disabled="true" title="Play mode comes after v1">Play</a>
 </nav>
 
@@ -172,6 +172,37 @@
     <span class="muted small">Drag into the scene, or drop <span class="mono hint-files">.glb .gltf .obj .hdr</span> files from your computer</span>
   </div>
   <div class="tiles" id="tiles" role="tabpanel"></div>
+</div>
+
+<!-- ================= BOTTOM CENTER, Simulate: the controls, or the samples ================= -->
+<div class="tray sim-bar" id="sim-bar" hidden>
+  <div id="sim-controls" class="sim-controls" hidden>
+    <button type="button" id="sim-play" class="sim-play" aria-label="Pause">
+      <svg id="sim-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+      <svg id="sim-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>
+    </button>
+    <button type="button" id="sim-reset" class="sim-reset" title="Back to t = 0: the bodies fall again">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.5-5.8M4 4v5h5"/></svg>
+      Reset
+    </button>
+    <div class="sim-time">
+      <span class="mono sim-clock" id="sim-time" aria-label="Simulated time">0.00 s</span>
+      <span class="muted small" id="sim-bodies"></span>
+    </div>
+    <span class="sim-sep" aria-hidden="true"></span>
+    <span class="caption sim-note"><span class="mono key">Space</span> plays and pauses. Paused, the path traced image refines.</span>
+  </div>
+  <div id="sim-samples" class="sim-samples" hidden>
+    <div class="sample-card">
+      <img class="sample-thumb" src="samples/sky_rain.jpg" alt="" width="144" height="63">
+      <div class="sample-text">
+        <span class="sample-title">Sky rain</span>
+        <span class="caption">2000 bodies of 14 materials rain onto brick paving under an HDR sky, among 3000 still props: the engine's physics demo, simulated on the GPU.</span>
+      </div>
+      <button type="button" class="primary" id="open-sample">Open sample</button>
+    </div>
+    <span class="caption">It opens in a new tab, so this scene stays as it is. Simulating your own dynamic objects comes later.</span>
+  </div>
 </div>
 
 <!-- ================= BOTTOM RIGHT: render status ================= -->

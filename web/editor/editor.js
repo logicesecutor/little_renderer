@@ -16,6 +16,9 @@
 // .obj / .ply files from the computer: in metres (fitted to 1 m when that makes no sense), of clay.
 // Milestone 4: the gizmo (W Move, E Rotate, R Scale).
 // Saving: the scene as glTF 2.0 (.glb), downloaded.
+// Drags without an edge: the pointer locked while a drag moves.
+// Milestone 5: the Simulate tab, and the samples: Sky rain, the engine's physics demo
+// (bin/view -sim on -demo sky) in the view, simulated, with Play / Pause / Reset.
 'use strict';
 
 (() => {
@@ -50,12 +53,25 @@
   const BACKEND = { RT: 0, RASTER: 1, HYBRID: 2 };
   const BACKEND_NAME = ['BACKEND_RT', 'BACKEND_RASTER', 'BACKEND_HYBRID'];
   const FLY_KEYS = { w: 1, a: 2, s: 4, d: 8, e: 16, q: 32, shift: 64 };
+  // the samples (Simulate): the engine's demos, opened with ?sample=<key> (in a new tab).
+  // args: bin/view's options for it; files: what it reads, fetched from samples/ (make
+  // web-editor copies them from models/) into the engine's file system before it starts
+  const SKY_RAIN_HDR = 'models/skies/kloofendal_48d_partly_cloudy_2k.hdr';
+  const SAMPLES = {
+    skyrain: {
+      name: 'Sky rain', file: 'sky_rain',
+      args: ['-sim', 'on', '-demo', 'sky', '-sky', SKY_RAIN_HDR, '-backend', 'rt', '-s', '256'],
+      files: ['models/dragon_recon/dragon_vrip_res4.ply', 'models/torus.obj', SKY_RAIN_HDR],
+    },
+  };
 
   const ui = {
     ready: false, backend: BACKEND.HYBRID, res: [1920, 1080], internals: false, calls: [],
     scene: null, sel: null, tray: 'shapes', status: null, flying: false, flyKeys: 0,
     boxes: {}, dragging: null, adds: 0,
     follow: true,                  // the resolution: the window's, in the screen's real pixels (else fixed)
+    mode: 'build',                 // the mode tab: build, simulate
+    sample: null,                  // the sample shown (SAMPLES), not the editor's own scene
   };
   // the window in the screen's real pixels (its size times the display's scale), within the
   // engine's limits (64..7680 x 64..4320, the shape kept)
@@ -85,7 +101,10 @@
 
   // the address's options go to the engine as bin/view's: ?n=960 -> -n 960
   const args = ['-width', String(windowRes()[0]), '-height', String(windowRes()[1])];   // (the default: the whole window)
-  for (const [k, v] of new URLSearchParams(location.search)) { args.push('-' + k); if (v !== '') args.push(v); }
+  const query = new URLSearchParams(location.search);
+  ui.sample = SAMPLES[query.get('sample')] || null;
+  if (ui.sample) { args.push(...ui.sample.args); ui.mode = 'simulate'; }   // (the address's own options after: they can change it)
+  for (const [k, v] of query) { if (k === 'sample') continue; args.push('-' + k); if (v !== '') args.push(v); }
   ui.res = windowRes();
   { const q = new URLSearchParams(location.search); if (q.has('width') || q.has('height')) ui.follow = false; }   // (a size in the address: fixed)
 
@@ -97,11 +116,32 @@
     // (before the engine's main: its scene and frame are made there, so the page reads them
     // at the first status that has a frame, sync below)
     onRuntimeInitialized: () => { ui.ready = true; },
+    // a sample's files into the engine's file system before its main reads them; without
+    // them (a build without the models) the editor's own scene starts instead
+    preRun: [() => {
+      const sm = ui.sample;
+      if (!sm) return;
+      Module.addRunDependency('sample');
+      Promise.all(sm.files.map(async (f) => {
+        const r = await fetch('samples/' + f);
+        if (!r.ok) throw new Error(f);
+        const data = new Uint8Array(await r.arrayBuffer());
+        Module.FS.mkdirTree('/' + f.slice(0, f.lastIndexOf('/')));
+        Module.FS.writeFile('/' + f, data);
+      })).catch((e) => {
+        const at = args.indexOf(sm.args[0]);
+        if (at >= 0) args.splice(at, sm.args.length);
+        ui.sampleMissing = sm.name + ' needs ' + e.message + ' (make models dragon-download skies-download, then make web-editor)';
+        ui.sample = null;
+        ui.mode = 'build';
+      }).finally(() => Module.removeRunDependency('sample'));
+    }],
   };
 
   // the engine's main has made its scene and opened its frame: the page takes them over
   function sync(st) {
     ui.synced = true;
+    if (ui.sampleMissing) toast(ui.sampleMissing);
     ui.scene = engineJSON('lr_scene');
     ui.res = [st.width, st.height];
     ui.backend = st.backend;
@@ -270,6 +310,7 @@
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === ' ' && ui.sample && e.target.tagName !== 'BUTTON') { e.preventDefault(); simPlay(); return; }
     if (e.key === 'Escape') { if (!closePopovers()) { if (ui.tool !== 'drag') setTool('drag'); else select(null); } return; }
     if (ui.sel && (k === 'w' || k === 'e' || k === 'r')) { e.preventDefault(); setTool({ w: 'move', e: 'rotate', r: 'scale' }[k]); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && ui.sel) { e.preventDefault(); removeSelected(); return; }
@@ -423,6 +464,7 @@
   // ---- what is dragged into the view (6.4): a preview where it would land or what it
   // would change, and its label ----
   function dragKind(e) {
+    if (ui.sample) return null;                     // (a sample is shown, not edited)
     if (ui.dragging) return ui.dragging;
     return e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files') ? { type: 'files' } : null;
   }
@@ -940,7 +982,24 @@
     const ul = $('objects');
     ul.textContent = '';
     if (!sc) { $('count').textContent = ''; return; }
-    $('count').textContent = sc.objects.length + ' objects';
+    $('count').textContent = sc.sample ? sc.sample.instances + ' instances' : sc.objects.length + ' objects';
+    if (sc.sample) {                               // (a sample: what it is made of)
+      $('sky-label').textContent = sc.sky || '';
+      $('sky-label').title = sc.sky || '';
+      $('sky-swatch').style.background = '#A9C4DE';
+      const rows = [['#B5664A', false, 'Brick paving', ''], ['conic-gradient(#E3B04B, #3E6FA8, #5FCB8A, #C9694A, #E3B04B)', true, 'Bodies', sc.sample.bodies + ' · dyn'],
+        ['#A9B0BA', false, 'Props', String(sc.sample.props)]];
+      for (const [bg, round, name, body] of rows) {
+        const li = document.createElement('li');
+        li.className = 'row';
+        li.innerHTML = '<span class="swatch' + (round ? ' round' : '') + '"></span><span class="name"></span><span class="body"></span>';
+        li.firstChild.style.background = bg;
+        li.children[1].textContent = name;
+        li.children[2].textContent = body;
+        ul.appendChild(li);
+      }
+      return;
+    }
     const sky = SKIES.find((k) => k[0] === sc.skyKey);
     $('sky-label').textContent = sc.sky || '';
     $('sky-label').title = sc.sky || '';
@@ -1045,6 +1104,11 @@
       note: (st.relighting ? 'Relighting: the light probe is being rebuilt after the change.' : 'Light probe up to date. Hard shadows, no bounced light.') + cpu,
     };
     const done = st.spp >= st.target;
+    if (st.sim && !st.sim.paused) return {
+      title: 'Simulating · path traced', right: Math.min(st.spp, st.target) + ' / ' + st.target + ' spp',
+      pct: Math.round(100 * Math.min(1, st.spp / Math.max(1, st.target))), green: false,
+      note: 'Each step of the bodies starts the samples again; pause to let the image refine.' + cpu,
+    };
     return {
       title: (auto ? 'Auto · ' : '') + (done ? 'Converged' : 'Refining'),
       right: Math.min(st.spp, st.target) + ' / ' + st.target + ' spp',
@@ -1075,6 +1139,7 @@
       ['frames/s', st ? st.fps.toFixed(0) : ''],
       ['device', st ? (st.gpu ? 'GPU (WebGPU)' : st.gpuStarting ? 'GPU starting' : 'CPU') : ''],
     ];
+    if (st && st.sim) lines.push(['simulation', st.sim.line]);
     const box = $('internal-lines');
     box.textContent = '';
     for (const [k, v] of lines) {
@@ -1090,7 +1155,65 @@
     for (const c of ui.calls.slice().reverse()) { const s = document.createElement('span'); s.textContent = c; calls.appendChild(s); }
   }
 
+  // ---- the modes (5.4): Build, and Simulate (its controls where the tray is) ----
+  document.querySelector('.modes').addEventListener('click', (e) => {
+    const a = e.target.closest('a');
+    if (!a) return;
+    e.preventDefault();
+    if (a.getAttribute('aria-disabled') === 'true' || !a.dataset.mode) return;
+    setMode(a.dataset.mode);
+  });
+  function setMode(m) {
+    if (ui.sample && m === 'build') return;
+    ui.mode = m;
+    if (m !== 'build') { if (ui.tool !== 'drag') setTool('drag'); select(null); closePopovers(); }
+    renderModes();
+  }
+  function renderModes() {
+    for (const a of document.querySelectorAll('.modes a[data-mode]')) {
+      if (a.dataset.mode === ui.mode) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+      if (ui.sample && a.dataset.mode === 'build') { a.setAttribute('aria-disabled', 'true'); a.title = ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited'; }
+    }
+    document.querySelector('.tray:not(.sim-bar)').hidden = ui.mode !== 'build';
+    $('sim-bar').hidden = ui.mode !== 'simulate';
+    $('sim-controls').hidden = !ui.sample;
+    $('sim-samples').hidden = !!ui.sample;
+    if (ui.sample) {
+      document.querySelector('.scene-name').textContent = ui.sample.file + ' · sample';
+      saveBtn.disabled = true;
+      saveBtn.title = 'A sample has nothing of yours to save';
+    }
+    renderSim();
+  }
+  function renderSim() {
+    if (!ui.sample) return;
+    const sim = ui.status && ui.status.sim, paused = !sim || sim.paused;
+    $('sim-play').setAttribute('aria-label', paused ? 'Play' : 'Pause');
+    $('sim-icon-play').toggleAttribute('hidden', !paused);
+    $('sim-icon-pause').toggleAttribute('hidden', paused);
+    $('sim-time').textContent = (sim ? sim.t : 0).toFixed(2) + ' s';
+    $('sim-bodies').textContent = sim && ui.scene && ui.scene.sample ? sim.bodies + ' of ' + ui.scene.sample.bodies + ' bodies' : '';
+    // (the list as it is now: the instances grow as the bodies come; the props are the rest)
+    const sm = ui.scene && ui.scene.sample;
+    if (sim && sm && (sm.instances !== ui.status.instances || sm.props !== ui.status.instances - sim.bodies)) {
+      sm.instances = ui.status.instances;
+      sm.props = ui.status.instances - sim.bodies;
+      renderScene();
+    }
+  }
+  function simPlay() {
+    const sim = ui.status && ui.status.sim;
+    if (!sim) return;
+    call('lr_sim_play', [sim.paused ? 1 : 0], 'lr_sim_play(' + (sim.paused ? 1 : 0) + ')');
+    sim.paused = !sim.paused;                      // (shown at once; the next status says the same)
+    renderSim();
+  }
+  $('sim-play').addEventListener('click', simPlay);
+  $('sim-reset').addEventListener('click', () => { if (ui.status && ui.status.sim) call('lr_sim_reset', [], 'lr_sim_reset()'); });
+  $('open-sample').addEventListener('click', () => window.open(location.pathname + '?sample=skyrain', '_blank'));
+
   function renderAll() {
+    renderModes();
     renderRenderer();
     $('res-label').textContent = ui.res[0] + ' × ' + ui.res[1];
     renderScene();
@@ -1110,6 +1233,7 @@
       if (c.width !== fitted[0] || c.height !== fitted[1]) fitCanvas();
     }
     renderStatus();
+    renderSim();
   }, 100);
 
   renderAll();
