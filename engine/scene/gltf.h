@@ -21,8 +21,9 @@
 #include "scene/scene.h"
 
 // Puts the model into the scene, as mesh_place does with a .obj: turned by rot_y_deg about the
-// vertical axis, scaled so its largest side is `size`, centred on base.x / base.z with its
-// lowest point at base.y. Its materials are added to the scene's (at most MAX_MATS in all:
+// vertical axis, scaled so its largest side is `size` (size < 0: at its own size times -size,
+// so -100 keeps glTF's metres in units of 1 cm), centred on base.x / base.z with its lowest
+// point at base.y. Its materials are added to the scene's (at most MAX_MATS in all:
 // the rest share the last). Returns the instances added, -1 on failure (a message on stderr).
 // The scene's acceleration structure must be (re)built afterwards.
 int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y_deg);

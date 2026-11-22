@@ -161,6 +161,20 @@ static void check_model(const char *what, const char *path){
     check("node 1: its matrix, under node 0", near(c0.y - a0.y, 6 * k, 1e-2) && near(c0.x - a0.x, 0, 1e-3));
     Vec3 s0 = xform_point(&s.insts[2].xf, vec3(0, 0, 0));
     check("node 3: the strip 4 units back, beside node 0", near(s0.z - a0.z, -4 * k, 1e-2) && near(s0.x - a0.x, -k, 1e-2));
+    // at its own size (size < 0: times -size): glTF's metres in units of 1 cm, 8 m tall: 800
+    {
+        Scene r;
+        memset(&r, 0, sizeof(r));
+        scene_add_material(&r, material_diffuse(vec3(1, 1, 1)));
+        int nr = scene_load_gltf(&r, path, -100, vec3(0, 0, 0), 0);
+        Vec3 r0 = nr == 3 ? xform_point(&r.insts[0].xf, vec3(0, 0, 0)) : vec3(0, 0, 0);
+        Vec3 r1 = nr == 3 ? xform_point(&r.insts[0].xf, vec3(1, 0, 0)) : vec3(0, 0, 0);
+        Aabb rb = nr == 3 ? r.insts[1].box : (Aabb){vec3(0, 0, 0), vec3(0, 0, 0)};
+        check("at its own size (-100): node 0's +x 200 long (2 m), node 1 at 600, standing on 0",
+              nr == 3 && near(r1.z - r0.z, -200, 1e-2) && near(xform_point(&r.insts[1].xf, vec3(0, 0, 0)).y - r0.y, 600, 1e-2)
+              && rb.lo.y > -0.5f);
+        scene_free(&r);
+    }
     // the material
     const Material *m = &s.mats[q->tris[0].material];
     check("material: base colour, metallic, roughness", m->type == MAT_PBR && near(m->albedo.x, 0.5, 1e-6) && near(m->albedo.y, 0.25, 1e-6)

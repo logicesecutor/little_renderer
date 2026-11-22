@@ -604,7 +604,7 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
         free(child);
     }
     if (placed.n == 0){ free(placed.p); g_free(g); return fail(path, "no mesh to draw"); }
-    // where it goes: its world box over every instance, fitted into `size`
+    // where it goes: its world box over every instance, fitted into `size` (< 0: scaled by -size)
     double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
     for (int i = 0; i < placed.n; i++){
         const Placed *p = (const Placed *)placed.p + i;
@@ -619,7 +619,7 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
         }
     }
     double ext = fmax(hi[0] - lo[0], fmax(hi[1] - lo[1], hi[2] - lo[2]));
-    double k = ext > 0 ? size / ext : 1, a = rot_y_deg * PI / 180, ca = cos(a), sa = sin(a);
+    double k = size < 0 ? -size : ext > 0 ? size / ext : 1, a = rot_y_deg * PI / 180, ca = cos(a), sa = sin(a);
     double cx = (lo[0] + hi[0]) / 2, cz = (lo[2] + hi[2]) / 2;
     // root = move to base * turn about y * scale * move (cx, lo.y, cz) to the origin
     double root[16] = {k * ca, 0, -k * sa, 0,  0, k, 0, 0,  k * sa, 0, k * ca, 0,  0, 0, 0, 1};
