@@ -10,6 +10,8 @@
 // Milestone 3: materials (dragged onto objects or pressed for the selection), skies (dragged
 // onto the view or pressed), files dropped from the computer (.glb / .gltf at their real size,
 // .hdr as the sky), and the raster's light made again after each change (Relighting).
+// The frame: by default the whole window in the screen's real pixels, following it (a preset
+// or a custom size fixes it).
 'use strict';
 
 (() => {
@@ -39,7 +41,7 @@
     ['noon', 'Noon', 'linear-gradient(180deg, #5E95CF 0%, #D5E4EE 58%, #8A7E6C 60%, #4A4136 100%)', '#D5E4EE'],
     ['overcast', 'Overcast', 'linear-gradient(180deg, #7D8792 0%, #C3C8CC 58%, #6B6660 60%, #3A3734 100%)', '#C3C8CC'],
   ];
-  const RES = [[1280, 720, 'HD'], [1920, 1080, 'Full HD · default'], [2560, 1440, 'QHD'], [3840, 2160, '4K UHD']];
+  const RES = [[1280, 720, 'HD'], [1920, 1080, 'Full HD'], [2560, 1440, 'QHD'], [3840, 2160, '4K UHD']];
   const BACKEND = { RT: 0, RASTER: 1, HYBRID: 2 };
   const BACKEND_NAME = ['BACKEND_RT', 'BACKEND_RASTER', 'BACKEND_HYBRID'];
   const FLY_KEYS = { w: 1, a: 2, s: 4, d: 8, e: 16, q: 32, shift: 64 };
@@ -48,7 +50,16 @@
     ready: false, backend: BACKEND.HYBRID, res: [1920, 1080], internals: false, calls: [],
     scene: null, sel: null, tray: 'shapes', status: null, flying: false, flyKeys: 0,
     boxes: {}, dragging: null, adds: 0,
+    follow: true,                  // the resolution: the window's, in the screen's real pixels (else fixed)
   };
+  // the window in the screen's real pixels (its size times the display's scale), within the
+  // engine's limits (64..7680 x 64..4320, the shape kept)
+  function windowRes() {
+    const dpr = window.devicePixelRatio || 1;
+    let w = Math.max(64, Math.round(window.innerWidth * dpr)), h = Math.max(64, Math.round(window.innerHeight * dpr));
+    const k = Math.min(1, 7680 / w, 4320 / h);
+    return [Math.max(64, Math.round(w * k)), Math.max(64, Math.round(h * k))];
+  }
   const SHAPE_INDEX = { box: 0, sphere: 1, glassball: 2, rock: 3, lamp: 4 };   // (lr_add_shape)
   const SHAPE_WIDTH = { box: 1, sphere: 1, glassball: 1, rock: 1.4, lamp: 0.4 };   // metres: the ground preview's size
 
@@ -68,8 +79,10 @@
   }
 
   // the address's options go to the engine as bin/view's: ?n=960 -> -n 960
-  const args = [];
+  const args = ['-width', String(windowRes()[0]), '-height', String(windowRes()[1])];   // (the default: the whole window)
   for (const [k, v] of new URLSearchParams(location.search)) { args.push('-' + k); if (v !== '') args.push(v); }
+  ui.res = windowRes();
+  { const q = new URLSearchParams(location.search); if (q.has('width') || q.has('height')) ui.follow = false; }   // (a size in the address: fixed)
 
   window.Module = {
     canvas: $('canvas'),
@@ -114,7 +127,23 @@
     return [(x - r.left) / Math.max(1, r.width), (y - r.top) / Math.max(1, r.height)];
   }
   function frameRect() { const r = $('canvas').getBoundingClientRect(); return r; }
-  window.addEventListener('resize', fitCanvas);
+  // the window changed (its size, or the display's scale: a move to another screen, the
+  // browser's zoom): the frame fitted again, and, following the window, made its new size
+  // once it stops changing (a new size restarts the image). Not only on 'resize': browsers
+  // do not always send one when only the scale changes, so the page also looks (below).
+  let resizeTimer = 0, seenWin = '';
+  function windowChanged() {
+    seenWin = window.innerWidth + 'x' + window.innerHeight + '@' + (window.devicePixelRatio || 1);
+    fitCanvas();
+    if (!ui.follow) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const [w, h] = windowRes();
+      if (ui.synced && ui.follow && (w !== ui.res[0] || h !== ui.res[1])) setResolution(w, h, true);
+    }, 250);
+  }
+  window.addEventListener('resize', windowChanged);
+  setInterval(() => { if (seenWin !== window.innerWidth + 'x' + window.innerHeight + '@' + (window.devicePixelRatio || 1)) windowChanged(); }, 100);
 
   // ---- the mouse on the view (6.5, 6.7): an object pressed and dragged slides over the
   // surfaces; elsewhere drag orbits, Shift drag pans, the wheel zooms, the right button held
@@ -558,11 +587,20 @@
   function renderPresets() {
     const box = $('res-presets');
     box.textContent = '';
+    const win = windowRes();
+    const wb = document.createElement('button');
+    wb.type = 'button';
+    wb.setAttribute('role', 'radio');
+    wb.setAttribute('aria-checked', ui.follow ? 'true' : 'false');
+    wb.innerHTML = '<span class="dims">' + win[0] + ' × ' + win[1] + '</span><span class="name">Window · default</span>';
+    wb.title = 'The whole window, in the screen\'s real pixels; it follows the window';
+    wb.addEventListener('click', () => { setResolution(win[0], win[1], true); openRes(false); resBtn.focus(); });
+    box.appendChild(wb);
     for (const [w, h, name] of RES) {
       const b = document.createElement('button');
       b.type = 'button';
       b.setAttribute('role', 'radio');
-      b.setAttribute('aria-checked', w === ui.res[0] && h === ui.res[1] ? 'true' : 'false');
+      b.setAttribute('aria-checked', !ui.follow && w === ui.res[0] && h === ui.res[1] ? 'true' : 'false');
       b.innerHTML = '<span class="dims">' + w + ' × ' + h + '</span><span class="name"></span>';
       b.querySelector('.name').textContent = name;
       b.addEventListener('click', () => { setResolution(w, h); openRes(false); resBtn.focus(); });
@@ -580,8 +618,10 @@
     openRes(false);
     resBtn.focus();
   });
-  function setResolution(w, h) {
+  // follow: the window's size, and again whenever the window changes (else fixed at w x h)
+  function setResolution(w, h, follow) {
     if (call('lr_set_resolution', [w, h]) !== 0 && ui.ready) { toast('Could not use ' + w + ' × ' + h + ' (out of memory)'); return; }
+    ui.follow = !!follow;
     ui.res = [w, h];
     $('res-label').textContent = w + ' × ' + h;
     fitCanvas();
