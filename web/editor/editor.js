@@ -6,7 +6,10 @@
 // zoom, fly), the scene list, the status card and the internals.
 // Milestone 2: shapes added from the tray (dragged into the view or clicked), objects picked
 // by the engine's rays, selected (brackets, the card), dragged over the surfaces, sized,
-// made static or dynamic, deleted; undo and redo. Materials, skies, files and saving come next.
+// made static or dynamic, deleted; undo and redo.
+// Milestone 3: materials (dragged onto objects or pressed for the selection), skies (dragged
+// onto the view or pressed), files dropped from the computer (.glb / .gltf at their real size,
+// .hdr as the sky), and the raster's light made again after each change (Relighting).
 'use strict';
 
 (() => {
@@ -269,37 +272,105 @@
     $('redo').disabled = !(ui.scene && ui.scene.redo > 0);
   }
 
-  // ---- the tray's shapes dragged into the view (6.4): a preview where it would land ----
+  // ---- materials and skies (6.4, 7.2, 7.3) ----
+  function applyMaterial(id, key) {
+    const o = obj(id);
+    if (!o) return;
+    quiet('lr_checkpoint');
+    call('lr_set_material', [id, MAT_ORDER.indexOf(key)], 'lr_set_material(' + id + ', "' + key + '")');
+    refreshScene();
+  }
+  function useSky(key) {
+    if (ui.scene && ui.scene.skyKey === key) return;
+    quiet('lr_checkpoint');
+    call('lr_set_sky', [SKIES.findIndex((k) => k[0] === key)], 'lr_set_sky("' + key + '")');
+    refreshScene();
+  }
+
+  // ---- files from the computer (6.4): .glb / .gltf as an object at its real size, .hdr as
+  // the sky; written into the engine's file system (/drop) first ----
+  let dropDir = false;
+  async function dropFiles(files, sx, sy) {
+    const model = files.find((f) => /\.(glb|gltf)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
+    if (!model && !hdr) { toast('Drop .glb, .gltf or .hdr files'); return; }
+    if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
+    // all of them (a .gltf names its buffers and images, beside it)
+    for (const f of files) Module.FS.writeFile('/drop/' + f.name, new Uint8Array(await f.arrayBuffer()));
+    if (model) {
+      const pk = pick(sx, sy, 0);
+      if (!pk || !pk.hit) { toast('Drop it on the ground or on an object'); return; }
+      toast('Reading ' + model.name);
+      await new Promise((r) => setTimeout(r, 30));      // (the toast shows before the reading)
+      quiet('lr_checkpoint');
+      const id = Module.ccall('lr_import_gltf', 'number', ['string', 'number', 'number', 'number', 'number'],
+                              ['/drop/' + model.name, pk.land[0], pk.land[1], pk.land[2], pk.id || 0]);
+      log('lr_import_gltf("/drop/' + model.name + '", ' + where(pk.land) + (pk.id ? ', on ' + pk.id : '') + ') -> ' + id);
+      if (!id) { quiet('lr_undo'); toast('Could not read ' + model.name); refreshScene(); return; }
+      refreshScene();
+      select(id);
+    } else {
+      quiet('lr_checkpoint');
+      const r = Module.ccall('lr_load_sky', 'number', ['string', 'string'], ['/drop/' + hdr.name, hdr.name]);
+      log('lr_load_sky("/drop/' + hdr.name + '")');
+      if (r) { quiet('lr_undo'); toast('Could not read ' + hdr.name); }
+      refreshScene();
+    }
+  }
+
+  // ---- what is dragged into the view (6.4): a preview where it would land or what it
+  // would change, and its label ----
+  function dragKind(e) {
+    if (ui.dragging) return ui.dragging;
+    return e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files') ? { type: 'files' } : null;
+  }
   view.addEventListener('dragover', (e) => {
-    const d = ui.dragging;
-    if (!d || d.type !== 'shape' || !ui.synced) return;
-    const [sx, sy] = toFrame(e.clientX, e.clientY);
-    const pk = pick(sx, sy, 0);
-    if (!pk || !pk.hit) { e.dataTransfer.dropEffect = 'none'; hideGhosts(); return; }
+    const d = dragKind(e);
+    if (!d || !ui.synced) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    const label = SHAPES.find((t) => t[0] === d.key)[1].toLowerCase();
-    if (pk.id) {
-      const o = obj(pk.id), b = ui.boxes[pk.id];
-      if (b) showRing(b);
-      showPill('Add ' + label + ' onto ' + (o ? o.name : ''), null, null, false, b);
+    hideGhosts();
+    if (d.type === 'sky') {                            // anywhere: the whole view
+      $('ghost-frame').hidden = false;
+      const R = frameRect();
+      showPill('Drop to use the ' + SKIES.find((k) => k[0] === d.key)[1].toLowerCase() + ' sky', R.left + R.width / 2, R.top + 160, false);
+      return;
+    }
+    const [sx, sy] = toFrame(e.clientX, e.clientY);
+    const pk = pick(sx, sy, 0);
+    const o = pk && pk.id ? obj(pk.id) : null, b = o && ui.boxes[o.id];
+    if (d.type === 'material') {
+      const m = MATERIALS[d.key];
+      if (o && b) { showRing(b); showPill('Apply ' + m.label.toLowerCase() + ' to ' + o.name, null, null, false, b); }
+      else { e.dataTransfer.dropEffect = 'none'; showPill('Drop on an object', e.clientX, e.clientY - 24, true); }
+      return;
+    }
+    if (!pk || !pk.hit) { e.dataTransfer.dropEffect = d.type === 'files' ? 'copy' : 'none'; if (d.type === 'files') showPill('.glb / .gltf as an object, .hdr as the sky', e.clientX, e.clientY - 24, true); return; }
+    const label = d.type === 'files' ? null : SHAPES.find((t) => t[0] === d.key)[1].toLowerCase();
+    if (o && b) {
+      showRing(b);
+      showPill(label ? 'Add ' + label + ' onto ' + o.name : '.glb on ' + o.name + ', .hdr as the sky', null, null, false, b);
     } else {
-      const r = 0.6 * SHAPE_WIDTH[d.key];
-      const e1 = showEllipse(pk.land, r);
-      showPill('Add ' + label + ' here', e1 ? e1.cx : e.clientX, e1 ? e1.top - 8 : e.clientY - 24, false);
+      const e1 = showEllipse(pk.land, 0.6 * (label ? SHAPE_WIDTH[d.key] : 1));
+      showPill(label ? 'Add ' + label + ' here' : '.glb / .gltf as an object, .hdr as the sky', e1 ? e1.cx : e.clientX, e1 ? e1.top - 8 : e.clientY - 24, false);
     }
   });
   view.addEventListener('dragleave', (e) => { if (!view.contains(e.relatedTarget)) hideGhosts(); });
   view.addEventListener('drop', (e) => {
-    const d = ui.dragging;
+    const d = dragKind(e);
     ui.dragging = null;
     hideGhosts();
-    if (!d || d.type !== 'shape') return;
+    if (!d || !ui.synced) return;
     e.preventDefault();
     const [sx, sy] = toFrame(e.clientX, e.clientY);
-    addShapeAt(d.key, sx, sy);
+    if (d.type === 'shape') addShapeAt(d.key, sx, sy);
+    else if (d.type === 'sky') useSky(d.key);
+    else if (d.type === 'material') { const pk = pick(sx, sy, 0); if (pk && pk.id) { applyMaterial(pk.id, d.key); select(pk.id); } }
+    else if (d.type === 'files') dropFiles([...e.dataTransfer.files], sx, sy);
   });
   document.addEventListener('dragend', () => { ui.dragging = null; hideGhosts(); });
+  // (a file dropped anywhere else on the page: not opened by the browser)
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
 
   // ---- what the page draws over the render: brackets, previews, lamp notes, the objects' buttons ----
   function px(b) {                                // a frame box (0..1) in the overlay's pixels
@@ -557,8 +628,9 @@
     ul.textContent = '';
     if (!sc) { $('count').textContent = ''; return; }
     $('count').textContent = sc.objects.length + ' objects';
-    const sky = SKIES.find((s) => s[1] === sc.sky);
+    const sky = SKIES.find((k) => k[0] === sc.skyKey);
     $('sky-label').textContent = sc.sky || '';
+    $('sky-label').title = sc.sky || '';
     $('sky-swatch').style.background = sky ? sky[3] : '#C3C8CC';
     const add = (o, depth) => {
       const li = document.createElement('li');
@@ -618,7 +690,6 @@
     const sx = 0.5 + ((n * 0.137) % 0.3) - 0.15, sy = 0.62 + ((n * 0.061) % 0.12) - 0.06;
     if (!addShapeAt(key, sx, sy) && !addShapeAt(key, 0.5, 0.75)) toast('Nowhere to put it: turn the camera towards the ground');
   }
-  const later = (what) => () => toast(what + ' come in the next milestone');
   function renderTiles() {
     const box = $('tiles');
     box.textContent = '';
@@ -635,13 +706,15 @@
           : m.metal ? 'radial-gradient(circle at 65% 35%, #FFFFFF, ' + m.base + ' 45%, #2A2A2A)' : m.base;
         const glow = m.emit ? 'box-shadow: 0 0 14px #F2A65A;' : '';
         box.appendChild(tile('', m.label + ': drag onto an object, or press to apply it to the selection', 'Drag onto an object, or click to apply to the selection',
-          '<span class="mat-swatch" style="background: ' + sw + '; ' + glow + '"></span><span class="label">' + short + '</span>', later('Materials')));
+          '<span class="mat-swatch" style="background: ' + sw + '; ' + glow + '"></span><span class="label">' + short + '</span>',
+          () => { if (ui.sel) applyMaterial(ui.sel, k); else toast('Select an object first, or drag the material onto one'); }, { type: 'material', key: k }));
       }
     } else {
-      for (const [, label, preview] of SKIES) {
-        const t = tile('sky', label + ' sky: drag onto the background, or press to use it', 'Drag onto the background, or click to use', '<span class="label">' + label + '</span>', later('Skies'));
+      for (const [key, label, preview] of SKIES) {
+        const t = tile('sky', label + ' sky: drag onto the background, or press to use it', 'Drag onto the background, or click to use', '<span class="label">' + label + '</span>',
+                       () => useSky(key), { type: 'sky', key });
         t.style.background = preview;
-        t.setAttribute('aria-pressed', ui.scene && ui.scene.sky === label ? 'true' : 'false');
+        t.setAttribute('aria-pressed', ui.scene && ui.scene.skyKey === key ? 'true' : 'false');
         box.appendChild(t);
       }
     }
@@ -654,8 +727,9 @@
     const cpu = st.gpu ? '' : ' (on the CPU: this browser gave no WebGPU)';
     const auto = st.backend === BACKEND.HYBRID;
     if (!st.tracing) return {
-      title: auto ? 'Auto · raster while moving' : 'Raster', right: 'real time', pct: 100, green: true,
-      note: 'Light probe up to date. Hard shadows, no bounced light.' + cpu,
+      title: auto ? 'Auto · raster while moving' : 'Raster', right: st.relighting ? 'relighting' : 'real time',
+      pct: st.relighting ? Math.round(100 * st.relight) : 100, green: true,
+      note: (st.relighting ? 'Relighting: the light probe is being rebuilt after the change.' : 'Light probe up to date. Hard shadows, no bounced light.') + cpu,
     };
     const done = st.spp >= st.target;
     return {
