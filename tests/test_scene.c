@@ -8,11 +8,15 @@
 // 2. A copy that follows the versions (as the GPU's do) ends up with the scene's instances.
 // 3. The top level after a removal: a ray at a removed instance misses it, one at the moved
 //    instance (now at the removed one's index) hits it there.
+// 4. The light probe baked in steps (rt/probe.h, probe_job_*) is the probe and the grid
+//    baked at once, to the bit.
 #include <stdio.h>
 #include <string.h>
 #include "scene/scene.h"
 #include "rt/accel.h"
 #include "rt/intersect.h"
+#include "rt/probe.h"
+#include "scene/env.h"
 #include "test_util.h"
 
 static Xform at(real x, real r){ return xform_axes(mat3_identity(), vec3(r, r, r), vec3(x, 0, 0)); }
@@ -59,6 +63,39 @@ int main(void){
     check("the moved and the added: instances 0 (x = -100) and 2 (x = 500)", hit_inst(&s, -100) == 0 && hit_inst(&s, 500) == 2);
     check("the removed last one (x = 200) misses", hit_inst(&s, 200) == -2);
 
+    scene_free(&s);
+
+    printf("4. the light probe in steps\n");
+    memset(&s, 0, sizeof(s));
+    mat = scene_add_material(&s, material_diffuse(vec3(0.6f, 0.5f, 0.4f)));
+    scene_add_prim(&s, make_quad(vec3(-500, 0, -500), vec3(0, 0, 1000), vec3(1000, 0, 0), mat));
+    scene_add_instance(&s, INST_SPHERE, xform_axes(mat3_identity(), vec3(40, 40, 40), vec3(80, 40, 0)), mat);
+    scene_add_instance(&s, INST_BOX, xform_axes(mat3_identity(), vec3(30, 30, 30), vec3(-60, 30, 40)), mat);
+    s.env = env_procedural_sky(64, 30, 120);
+    s.light = -1;
+    s.probe_set = 1;
+    s.probe_at = vec3(0, 100, 0);
+    s.probe_box = (Aabb){vec3(-500, 0, -500), vec3(500, 400, 500)};
+    scene_set_accel(&s, ACCEL_BVH, NULL);
+    Env *p1 = probe_bake_scene(&s, 16, 4);
+    IrrGrid *g1 = probe_grid_bake_scene(&s, 32);
+    ProbeJob *job = probe_job_start(&s, 16, 4, 32);
+    int steps = 0, early = job ? probe_job_finish(job, &(Env *){0}, &(IrrGrid *){0}) : 0;
+    double was = 0, done = 0;
+    int rising = 1;
+    while (job && done < 1 && steps < 100000){ done = probe_job_step(job, &s, 0); rising &= done >= was; was = done; steps++; }
+    Env *p2 = NULL;
+    IrrGrid *g2 = NULL;
+    int fin = job ? probe_job_finish(job, &p2, &g2) : 2;
+    check("a job: not finished before its steps; many steps, done rising to 1", job && early == 1 && steps > 8 && rising && done == 1);
+    check("finished: a probe and a grid", fin == 0 && p1 && p2 && g1 && g2);
+    if (p1 && p2 && g1 && g2){
+        check("the probe: its texels the same, to the bit", p1->w == p2->w && p1->h == p2->h &&
+              !memcmp(p1->rgb, p2->rgb, sizeof(float) * 3 * (size_t)p1->w * p1->h) && p2->boxed && p2->center.y == p1->center.y);
+        size_t ng = (size_t)g1->n[0] * g1->n[1] * g1->n[2];
+        check("the grid: the same probes, to the bit", g2->n[0] == g1->n[0] && g2->n[1] == g1->n[1] && !memcmp(g1->sh, g2->sh, ng * IRR_FLOATS * sizeof(float)));
+    }
+    env_free(p1); env_free(p2); irr_grid_free(g1); irr_grid_free(g2);
     scene_free(&s);
     if (failures){ printf("%d FAILED\n", failures); return 1; }
     printf("all passed\n");

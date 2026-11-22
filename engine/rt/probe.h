@@ -35,6 +35,21 @@ Env *probe_bake_scene(const Scene *s, int w, int spp);
 // probe_bake_scene gives none.
 IrrGrid *probe_grid_bake_scene(const Scene *s, int paths);
 #define PROBE_GRID_PATHS 2048
+
+// The scene's probe and grid baked in steps, for a program that must keep drawing while the
+// light is made again (the web editor: the page has one thread). The same probe and grid
+// as probe_bake_scene and probe_grid_bake_scene, to the bit. Between steps the scene must
+// stay as it was (else: free the job and start again).
+typedef struct ProbeJob ProbeJob;
+// NULL where probe_bake_scene gives none (or out of memory)
+ProbeJob *probe_job_start(const Scene *s, int w, int spp, int grid_paths);
+// about `ms` milliseconds of the bake (at least one row or one grid probe); how much of it is
+// done, 0..1
+double probe_job_step(ProbeJob *j, const Scene *s, double ms);
+// when all is done: 0, the probe and the grid (NULL if the scene has none) are the caller's,
+// the job is freed; 1: not done yet (the job is kept); -1: out of memory (the job is freed)
+int probe_job_finish(ProbeJob *j, Env **probe, IrrGrid **irr);
+void probe_job_free(ProbeJob *j);
 #define PROBE_GRID_CLAMP 4.0f   // the largest radiance a grid probe's sample counts
 
 #endif

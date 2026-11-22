@@ -7,40 +7,44 @@
 #include "base/sampler.h"
 #include "rt/tracer.h"
 #include "rt/accel.h"
+#include "base/clock.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
-Env *probe_bake(const Scene *s, Vec3 center, const Aabb *box, int w, int spp){
-    if (w < 8) w = 8;
-    w &= ~1;
-    int h = w / 2;
-    if (spp < 1) spp = 1;
-    float *img = malloc(sizeof(float) * 3 * (size_t)w * h);
-    if (!img) return NULL;
+static TraceParams probe_trace_params(void){
     TraceParams tp = trace_default_params();
     tp.max_depth = PROBE_DEPTH;
     tp.sampler = 0;
     tp.no_lamp_seen = 1;
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int y = 0; y < h; y++){
-        Rng rng;
-        rng_seed(&rng, 0x9e3779b97f4a7c15ull ^ (uint64_t)y, 977);
-        for (int x = 0; x < w; x++){
-            Vec3 sum = vec3(0, 0, 0);
-            for (int i = 0; i < spp; i++){
-                // uniform over the texel's solid angle: u uniform, cos(theta) uniform in the row
-                real u = (x + rng_real(&rng)) / w;
-                real c0 = r_cos(y * (real)PI / h), c1 = r_cos((y + 1) * (real)PI / h);
-                real c = c0 + (c1 - c0) * rng_real(&rng);
-                real v = r_acos(c < -1 ? -1 : c > 1 ? 1 : c) * (real)(1.0 / PI);
-                Env tmp = {0};                          // (env_dir of an unturned map)
-                Ray ray = {center, env_dir(&tmp, u, v)};
-                Sampler sm = sampler_make(&rng, 0, 0, 0, 0, 0);
-                Vec3 L = trace_path_sampled(s, ray, &sm, &tp);
-                if (L.x == L.x && L.y == L.y && L.z == L.z) sum = v_add(sum, L);   // (no NaN)
-            }
-            float *o = img + 3 * ((size_t)y * w + x);
-            o[0] = (float)(sum.x / spp); o[1] = (float)(sum.y / spp); o[2] = (float)(sum.z / spp);
+    return tp;
+}
+
+// row y of a w x h probe at center: its texels into img
+static void bake_row(const Scene *s, Vec3 center, int w, int h, int spp, const TraceParams *tp, int y, float *img){
+    Rng rng;
+    rng_seed(&rng, 0x9e3779b97f4a7c15ull ^ (uint64_t)y, 977);
+    for (int x = 0; x < w; x++){
+        Vec3 sum = vec3(0, 0, 0);
+        for (int i = 0; i < spp; i++){
+            // uniform over the texel's solid angle: u uniform, cos(theta) uniform in the row
+            real u = (x + rng_real(&rng)) / w;
+            real c0 = r_cos(y * (real)PI / h), c1 = r_cos((y + 1) * (real)PI / h);
+            real c = c0 + (c1 - c0) * rng_real(&rng);
+            real v = r_acos(c < -1 ? -1 : c > 1 ? 1 : c) * (real)(1.0 / PI);
+            Env tmp = {0};                          // (env_dir of an unturned map)
+            Ray ray = {center, env_dir(&tmp, u, v)};
+            Sampler sm = sampler_make(&rng, 0, 0, 0, 0, 0);
+            Vec3 L = trace_path_sampled(s, ray, &sm, tp);
+            if (L.x == L.x && L.y == L.y && L.z == L.z) sum = v_add(sum, L);   // (no NaN)
         }
+        float *o = img + 3 * ((size_t)y * w + x);
+        o[0] = (float)(sum.x / spp); o[1] = (float)(sum.y / spp); o[2] = (float)(sum.z / spp);
     }
+}
+
+// the baked texels as the probe (img taken)
+static Env *probe_env(float *img, int w, int h, Vec3 center, const Aabb *box){
     Env *e = env_from_rgb(img, w, h);
     if (e && box){
         e->boxed = 1;
@@ -49,6 +53,19 @@ Env *probe_bake(const Scene *s, Vec3 center, const Aabb *box, int w, int spp){
         e->bmax = box->hi;
     }
     return e;
+}
+
+Env *probe_bake(const Scene *s, Vec3 center, const Aabb *box, int w, int spp){
+    if (w < 8) w = 8;
+    w &= ~1;
+    int h = w / 2;
+    if (spp < 1) spp = 1;
+    float *img = malloc(sizeof(float) * 3 * (size_t)w * h);
+    if (!img) return NULL;
+    TraceParams tp = probe_trace_params();
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int y = 0; y < h; y++) bake_row(s, center, w, h, spp, &tp, y, img);
+    return probe_env(img, w, h, center, box);
 }
 
 // How open the space around c is: the harmonic mean of how far 64 rays in all directions
@@ -102,8 +119,19 @@ static Vec3 probe_place(const Scene *s, Vec3 at, const Aabb *box){
     return best;
 }
 
-IrrGrid *probe_grid_bake_scene(const Scene *s, int paths){
-    if (s->light < 0 && !s->env) return NULL;
+// a grid being baked: the grid and what each of its probes needs
+typedef struct {
+    IrrGrid *g;
+    int n[3], paths, ref_escaped;
+    Vec3 lo, hi;
+    real far;
+    TraceParams tp;
+} GridBake;
+
+// the grid made (its probes zero, unused); 0 = none for this scene, or out of memory
+static int grid_begin(const Scene *s, int paths, GridBake *gb){
+    memset(gb, 0, sizeof(*gb));
+    if (s->light < 0 && !s->env) return 0;
     Vec3 lo, hi;
     int n[3] = {5, 5, 5};
     if (s->probe_set && v_len(v_sub(s->probe_box.hi, s->probe_box.lo)) < 4000){
@@ -112,87 +140,103 @@ IrrGrid *probe_grid_bake_scene(const Scene *s, int paths){
         lo = vec3(s->probe_at.x - 700, s->probe_box.lo.y, s->probe_at.z - 700);
         hi = vec3(s->probe_at.x + 700, s->probe_box.lo.y + 400, s->probe_at.z + 700);
         n[1] = 3;
-    } else return NULL;
+    } else return 0;
     IrrGrid *g = calloc(1, sizeof(*g));
-    if (!g) return NULL;
+    if (!g) return 0;
     size_t np = (size_t)n[0] * n[1] * n[2];
     g->sh = calloc(np * IRR_FLOATS, sizeof(float));
-    if (!g->sh){ free(g); return NULL; }
-    for (int k = 0; k < 3; k++) g->n[k] = n[k];
+    if (!g->sh){ free(g); return 0; }
+    for (int k = 0; k < 3; k++){ g->n[k] = n[k]; gb->n[k] = n[k]; }
     g->lo = lo; g->hi = hi;
     static unsigned next_id;
     g->id = ++next_id;
-    if (paths < 16) paths = 16;
-    TraceParams tp = trace_default_params();
-    tp.max_depth = PROBE_DEPTH;
-    tp.sampler = 0;
-    tp.no_lamp_seen = 1;
-    tp.no_sky_seen = 1;
-    real far = v_len(v_sub(hi, lo)) * 4;
+    gb->g = g;
+    gb->lo = lo; gb->hi = hi;
+    gb->paths = paths < 16 ? 16 : paths;
+    gb->tp = probe_trace_params();
+    gb->tp.no_sky_seen = 1;
+    gb->far = v_len(v_sub(hi, lo)) * 4;
     // a probe inside a box of quads (they are seen from either side: no back to hit) is
     // known by none of its rays leaving the scene, where they do from the probe's own place
-    int ref_escaped = 0;
-    if (s->probe_set) openness_ex(s, s->probe_at, far, &ref_escaped);
+    if (s->probe_set) openness_ex(s, s->probe_at, gb->far, &gb->ref_escaped);
+    return 1;
+}
+static int grid_count(const GridBake *gb){ return gb->n[0] * gb->n[1] * gb->n[2]; }
+
+// probe idx of the grid
+static void grid_probe(const Scene *s, const GridBake *gb, int idx){
     static const double band[9] = {1, 2.0 / 3, 2.0 / 3, 2.0 / 3, 0.25, 0.25, 0.25, 0.25, 0.25};
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int idx = 0; idx < (int)np; idx++){
-        int ix = idx % n[0], iy = (idx / n[0]) % n[1], iz = idx / (n[0] * n[1]);
-        Vec3 c = vec3(lo.x + (hi.x - lo.x) * (ix + 0.5f) / n[0], lo.y + (hi.y - lo.y) * (iy + 0.5f) / n[1],
-                      lo.z + (hi.z - lo.z) * (iz + 0.5f) / n[2]);
-        float *q = g->sh + IRR_FLOATS * (size_t)idx;
-        int escaped;
-        if (openness_ex(s, c, far, &escaped) <= 0 || (ref_escaped > 0 && escaped == 0)) continue;   // inside something: unused
-        Rng rng;
-        rng_seed(&rng, 0x51ed27u + (uint64_t)idx, 31);
-        double acc[9][3];
-        memset(acc, 0, sizeof(acc));
-        real turn = rng_real(&rng) * (real)(2 * PI);
+    const int *n = gb->n;
+    const Vec3 lo = gb->lo, hi = gb->hi;
+    const int paths = gb->paths;
+    int ix = idx % n[0], iy = (idx / n[0]) % n[1], iz = idx / (n[0] * n[1]);
+    Vec3 c = vec3(lo.x + (hi.x - lo.x) * (ix + 0.5f) / n[0], lo.y + (hi.y - lo.y) * (iy + 0.5f) / n[1],
+                  lo.z + (hi.z - lo.z) * (iz + 0.5f) / n[2]);
+    float *q = gb->g->sh + IRR_FLOATS * (size_t)idx;
+    int escaped;
+    if (openness_ex(s, c, gb->far, &escaped) <= 0 || (gb->ref_escaped > 0 && escaped == 0)) return;   // inside something: unused
+    Rng rng;
+    rng_seed(&rng, 0x51ed27u + (uint64_t)idx, 31);
+    double acc[9][3];
+    memset(acc, 0, sizeof(acc));
+    real turn = rng_real(&rng) * (real)(2 * PI);
+    for (int i = 0; i < paths; i++){
+        // a Fibonacci sphere, turned at random per probe
+        real z = 1 - 2 * (i + rng_real(&rng)) / paths, r = r_sqrt(r_fmax(0, 1 - z * z)), ph = 2.399963f * i + turn;
+        Vec3 d = vec3(r * r_cos(ph), z, r * r_sin(ph));
+        Ray ray = {c, d};
+        Sampler sm = sampler_make(&rng, 0, 0, 0, 0, 0);
+        Vec3 L = trace_path_sampled(s, ray, &sm, &gb->tp);
+        if (!(L.x == L.x && L.y == L.y && L.z == L.z)) continue;
+        // a rare, very bright sample (the lamp seen through glass) would leave a blotch:
+        // clamped (the diffuse light is a little low where caustics fall). (The sky seen
+        // directly is not in these: sampled below, by its luminance.)
+        real mx = v_max(L);
+        if (mx > PROBE_GRID_CLAMP) L = v_scale(L, PROBE_GRID_CLAMP / mx);
+        real y[9];
+        env_sh_basis(d, y);
+        for (int b = 0; b < 9; b++){ acc[b][0] += L.x * y[b]; acc[b][1] += L.y * y[b]; acc[b][2] += L.z * y[b]; }
+    }
+    // the sky seen directly: directions drawn by its luminance (a sun is found), each
+    // counted if nothing is in the way
+    double sky[9][3];
+    memset(sky, 0, sizeof(sky));
+    if (s->env){
         for (int i = 0; i < paths; i++){
-            // a Fibonacci sphere, turned at random per probe
-            real z = 1 - 2 * (i + rng_real(&rng)) / paths, r = r_sqrt(r_fmax(0, 1 - z * z)), ph = 2.399963f * i + turn;
-            Vec3 d = vec3(r * r_cos(ph), z, r * r_sin(ph));
+            Vec3 d;
+            real pdf;
+            Vec3 L = env_sample(s->env, (i + rng_real(&rng)) / paths, rng_real(&rng), &d, &pdf);
+            if (!(pdf > 0)) continue;
             Ray ray = {c, d};
-            Sampler sm = sampler_make(&rng, 0, 0, 0, 0, 0);
-            Vec3 L = trace_path_sampled(s, ray, &sm, &tp);
-            if (!(L.x == L.x && L.y == L.y && L.z == L.z)) continue;
-            // a rare, very bright sample (the lamp seen through glass) would leave a blotch:
-            // clamped (the diffuse light is a little low where caustics fall). (The sky seen
-            // directly is not in these: sampled below, by its luminance.)
-            real mx = v_max(L);
-            if (mx > PROBE_GRID_CLAMP) L = v_scale(L, PROBE_GRID_CLAMP / mx);
+            if (scene_occluded(s, &ray, 1e-3f, 1e30f)) continue;
             real y[9];
             env_sh_basis(d, y);
-            for (int b = 0; b < 9; b++){ acc[b][0] += L.x * y[b]; acc[b][1] += L.y * y[b]; acc[b][2] += L.z * y[b]; }
+            for (int b = 0; b < 9; b++){ sky[b][0] += L.x * y[b] / pdf; sky[b][1] += L.y * y[b] / pdf; sky[b][2] += L.z * y[b] / pdf; }
         }
-        // the sky seen directly: directions drawn by its luminance (a sun is found), each
-        // counted if nothing is in the way
-        double sky[9][3];
-        memset(sky, 0, sizeof(sky));
-        if (s->env){
-            for (int i = 0; i < paths; i++){
-                Vec3 d;
-                real pdf;
-                Vec3 L = env_sample(s->env, (i + rng_real(&rng)) / paths, rng_real(&rng), &d, &pdf);
-                if (!(pdf > 0)) continue;
-                Ray ray = {c, d};
-                if (scene_occluded(s, &ray, 1e-3f, 1e30f)) continue;
-                real y[9];
-                env_sh_basis(d, y);
-                for (int b = 0; b < 9; b++){ sky[b][0] += L.x * y[b] / pdf; sky[b][1] += L.y * y[b] / pdf; sky[b][2] += L.z * y[b] / pdf; }
-            }
-        }
-        for (int b = 0; b < 9; b++)
-            for (int k = 0; k < 3; k++) q[3 * b + k] = (float)((acc[b][k] * 4 * PI + sky[b][k]) / paths * band[b]);
-        q[27] = 1;
     }
-    return g;
+    for (int b = 0; b < 9; b++)
+        for (int k = 0; k < 3; k++) q[3 * b + k] = (float)((acc[b][k] * 4 * PI + sky[b][k]) / paths * band[b]);
+    q[27] = 1;
 }
 
-Env *probe_bake_scene(const Scene *s, int w, int spp){
-    if (s->light < 0 && !s->env) return NULL;
-    if (w <= 0) w = s->light >= 0 ? PROBE_RES : PROBE_RES_OPEN;
-    if (s->probe_set) return probe_bake(s, probe_place(s, s->probe_at, &s->probe_box), &s->probe_box, w, spp);
-    if (s->light < 0) return NULL;
+IrrGrid *probe_grid_bake_scene(const Scene *s, int paths){
+    GridBake gb;
+    if (!grid_begin(s, paths, &gb)) return NULL;
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int idx = 0; idx < grid_count(&gb); idx++) grid_probe(s, &gb, idx);
+    return gb.g;
+}
+
+// where the scene's probe goes, and the box its lookups are corrected by; 0: none
+static int probe_where(const Scene *s, int *w, Vec3 *center, Aabb *box){
+    if (s->light < 0 && !s->env) return 0;
+    if (*w <= 0) *w = s->light >= 0 ? PROBE_RES : PROBE_RES_OPEN;
+    if (s->probe_set){
+        *box = s->probe_box;
+        *center = probe_place(s, s->probe_at, &s->probe_box);
+        return 1;
+    }
+    if (s->light < 0) return 0;
     Aabb b = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};   // lo, hi
     int any = 0;
     for (int i = 0; i < s->nprims; i++){
@@ -205,7 +249,91 @@ Env *probe_bake_scene(const Scene *s, int w, int spp){
         }
         any = 1;
     }
-    if (!any) return NULL;
-    Vec3 center = v_scale(v_add(b.lo, b.hi), 0.5f);
-    return probe_bake(s, probe_place(s, center, &b), &b, w, spp);
+    if (!any) return 0;
+    *box = b;
+    *center = probe_place(s, v_scale(v_add(b.lo, b.hi), 0.5f), &b);
+    return 1;
+}
+
+Env *probe_bake_scene(const Scene *s, int w, int spp){
+    Vec3 c;
+    Aabb box;
+    if (!probe_where(s, &w, &c, &box)) return NULL;
+    return probe_bake(s, c, &box, w, spp);
+}
+
+// ---- the same bake in steps (probe.h) ----
+
+struct ProbeJob {
+    int w, h, spp, row;             // the probe: its size, and the rows done
+    Vec3 center;
+    Aabb box;
+    float *img;
+    TraceParams tp;
+    GridBake gb;                    // the grid (gb.g NULL: none), and its probes done
+    int grid, idx;
+    double probe_work, grid_work;   // (paths: how much of the whole each part is)
+};
+
+ProbeJob *probe_job_start(const Scene *s, int w, int spp, int grid_paths){
+    ProbeJob *j = calloc(1, sizeof(*j));
+    if (!j) return NULL;
+    if (!probe_where(s, &w, &j->center, &j->box)){ free(j); return NULL; }
+    if (w < 8) w = 8;
+    w &= ~1;
+    j->w = w;
+    j->h = w / 2;
+    j->spp = spp < 1 ? 1 : spp;
+    j->img = malloc(sizeof(float) * 3 * (size_t)j->w * j->h);
+    if (!j->img){ free(j); return NULL; }
+    j->tp = probe_trace_params();
+    j->grid = grid_begin(s, grid_paths, &j->gb);
+    j->probe_work = (double)j->w * j->h * j->spp;
+    j->grid_work = j->grid ? 2.0 * grid_count(&j->gb) * j->gb.paths : 0;
+    return j;
+}
+
+static double job_done(const ProbeJob *j){
+    double d = j->probe_work * j->row / j->h + (j->grid ? j->grid_work * j->idx / grid_count(&j->gb) : 0);
+    return d / (j->probe_work + j->grid_work);
+}
+
+double probe_job_step(ProbeJob *j, const Scene *s, double ms){
+    double t0 = clock_ms();
+    while (j->row < j->h || (j->grid && j->idx < grid_count(&j->gb))){
+        if (j->row < j->h){
+            // (natively a few rows at once, on the threads; in a page one at a time)
+            int n = 1;
+#ifdef _OPENMP
+            n = omp_get_max_threads();
+#endif
+            if (n > j->h - j->row) n = j->h - j->row;
+            const int y0 = j->row;
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int y = y0; y < y0 + n; y++) bake_row(s, j->center, j->w, j->h, j->spp, &j->tp, y, j->img);
+            j->row += n;
+        } else grid_probe(s, &j->gb, j->idx++);
+        if (clock_ms() - t0 >= ms) break;
+    }
+    return job_done(j);
+}
+
+int probe_job_finish(ProbeJob *j, Env **probe, IrrGrid **irr){
+    if (j->row < j->h || (j->grid && j->idx < grid_count(&j->gb))) return 1;
+    *probe = probe_env(j->img, j->w, j->h, j->center, &j->box);   // (img taken, even when it fails)
+    j->img = NULL;
+    *irr = j->gb.g;
+    j->gb.g = NULL;
+    probe_job_free(j);
+    if (*probe) return 0;
+    irr_grid_free(*irr);
+    *irr = NULL;
+    return -1;
+}
+
+void probe_job_free(ProbeJob *j){
+    if (!j) return;
+    free(j->img);
+    irr_grid_free(j->gb.g);
+    free(j);
 }
