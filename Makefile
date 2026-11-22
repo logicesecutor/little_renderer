@@ -400,10 +400,22 @@ $(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h $(WEB_STAMP) $(wildcard 
 #   make web-editor && make serve       then open http://localhost:8000/editor/
 WEB_EDITOR = $(WEB)/editor
 WEB_EDITOR_PAGE = $(patsubst web/editor/%,$(WEB_EDITOR)/%,$(wildcard web/editor/*.* web/editor/fonts/*))
-web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR_PAGE)
+# the samples (the Simulate tab): what their demos read, fetched by the page only when one is
+# opened (Sky rain: bin/view -sim on -demo sky's dragon and torus, and the README's sky; make
+# models dragon-download skies-download first), and their pictures
+EDITOR_SAMPLE_FILES = models/dragon_recon/dragon_vrip_res4.ply models/torus.obj models/skies/kloofendal_48d_partly_cloudy_2k.hdr
+WEB_EDITOR_SAMPLES = $(patsubst %,$(WEB_EDITOR)/samples/%,$(wildcard $(EDITOR_SAMPLE_FILES))) $(WEB_EDITOR)/samples/sky_rain.jpg
+web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR_PAGE) $(WEB_EDITOR_SAMPLES)
 $(WEB_EDITOR)/engine.js: $(SRC) $(WGSL_C) apps/editor.c $(HDR) $(WEB_STAMP)
 	@mkdir -p $(WEB_EDITOR)
-	$(EMCC) $(WEBBASE) -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,ccall,FS $(SRC) $(WGSL_C) apps/editor.c -o $@
+	$(EMCC) $(WEBBASE) -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,ccall,FS,addRunDependency,removeRunDependency \
+	    $(SRC) $(WGSL_C) apps/editor.c -o $@
+$(WEB_EDITOR)/samples/models/%: models/%
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(WEB_EDITOR)/samples/sky_rain.jpg: docs/images/sky_rain.jpg
+	@mkdir -p $(dir $@)
+	cp $< $@
 $(WEB_EDITOR)/%: web/editor/%
 	@mkdir -p $(dir $@)
 	cp $< $@

@@ -110,6 +110,9 @@ typedef struct {
     Vec3 pivot;
     double dist;
     int fly_keys;                  // W A S D E Q Shift held while flying (lr_camera_fly)
+    // a built-in sample instead of the editor's own scene (-sim on: the engine's physics
+    // demo exactly, bin/view -sim on -demo ...): shown and simulated, not edited
+    int sample;
     double t_prev;
 } Editor;
 
@@ -595,7 +598,7 @@ static Vec3 metres(double x, double y, double z){
 EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
     static const struct { EdKind kind; int mat; const char *label; } SH[NSHAPES] = {
         {ED_BOX, 0, NULL}, {ED_SPHERE, 1, NULL}, {ED_SPHERE, 6, "Glass ball"}, {ED_ROCK, 2, NULL}, {ED_LAMP, 7, NULL}};
-    if (shape < 0 || shape >= NSHAPES) return 0;
+    if (shape < 0 || shape >= NSHAPES || E.sample) return 0;
     if (support && !object_find(support)) support = 0;
     int id = object_add(SH[shape].kind, SH[shape].mat, -1, metres(x, y, z), 1, 0, support, SH[shape].label);
     changed();
@@ -678,6 +681,7 @@ EXPORT int lr_set_material(int id, int mat){
 // real size (glTF's metres), standing at (x, y, z) on `support`. Returns its id (0: it could
 // not be read).
 EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int support){
+    if (E.sample) return 0;
     Scene *s = viewer_scene();
     int n0 = s->ninsts;
     int n = scene_load_gltf(s, path, (real)-UNITS_PER_M, vec3(0, 0, 0), 0);
@@ -709,6 +713,7 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
 // no sense: it is fitted to 1 m (lr_last_import_fitted says so). Returns its id (0: it could
 // not be read).
 EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int support){
+    if (E.sample) return 0;
     Mesh *mesh = mesh_load(path);
     if (!mesh) return 0;
     Vec3 lo = vec3(1e30f, 1e30f, 1e30f), hi = vec3(-1e30f, -1e30f, -1e30f);
@@ -744,13 +749,13 @@ EXPORT int lr_last_import_fitted(void){ return E.last_fitted; }
 // the sky: a preset (0 Dusk, 1 Noon, 2 Overcast), or a Radiance .hdr file (name: what the
 // page shows); the path traced image starts over. 0 = done.
 EXPORT int lr_set_sky(int preset){
-    if (set_sky(preset, NULL, NULL)) return 1;
+    if (E.sample || set_sky(preset, NULL, NULL)) return 1;
     viewer_scene_changed(1);
     relight_start();
     return 0;
 }
 EXPORT int lr_load_sky(const char *path, const char *name){
-    if (set_sky(SKY_FILE, path, name)) return 1;
+    if (E.sample || set_sky(SKY_FILE, path, name)) return 1;
     viewer_scene_changed(1);
     relight_start();
     return 0;
@@ -902,19 +907,6 @@ static void jprintf(const char *fmt, ...){
 }
 
 // the render's state: {"tracing":1,"gpu":1,...}
-EXPORT const char *lr_status(void){
-    ViewerStatus st;
-    viewer_status(&st);
-    int emitters = 0;
-    for (int i = 0; i < E.nobjs; i++) emitters += E.objs[i].mat >= 0 && MATERIALS[E.objs[i].mat].glow > 0;
-    jlen = 0;
-    jprintf("{\"backend\":%d,\"tracing\":%d,\"gpu\":%d,\"gpuStarting\":%d,\"gpuTracing\":%d,\"spp\":%d,\"target\":%d,"
-            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f}",
-            (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
-            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
-    return json_buf;
-}
-
 // a string for JSON: quotes and backslashes escaped, control characters dropped
 static void jstring(const char *t){
     jprintf("\"");
@@ -925,6 +917,35 @@ static void jstring(const char *t){
     jprintf("\"");
 }
 
+// ---- the simulation (the Simulate tab): the physics demo's, when it runs (-sim on) ----------
+EXPORT int lr_sim_play(int play){                    // 1 runs, 0 pauses; 0 = done
+    if (!viewer_sim_on()) return 1;
+    viewer_sim_pause(!play);
+    return 0;
+}
+EXPORT int lr_sim_reset(void){ return viewer_sim_restart(); }   // from t = 0, as it was set up; 0 = done
+
+EXPORT const char *lr_status(void){
+    ViewerStatus st;
+    viewer_status(&st);
+    int emitters = 0;
+    for (int i = 0; i < E.nobjs; i++) emitters += E.objs[i].mat >= 0 && MATERIALS[E.objs[i].mat].glow > 0;
+    jlen = 0;
+    jprintf("{\"backend\":%d,\"tracing\":%d,\"gpu\":%d,\"gpuStarting\":%d,\"gpuTracing\":%d,\"spp\":%d,\"target\":%d,"
+            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f",
+            (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
+            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
+    if (viewer_sim_on()){                            // the simulation: its time, its bodies so far
+        char line[200];
+        viewer_sim_line(line, sizeof(line));
+        jprintf(",\"sim\":{\"paused\":%d,\"t\":%.3f,\"bodies\":%d,\"line\":", viewer_sim_paused(), viewer_sim_time(), viewer_sim_bodies());
+        jstring(line);
+        jprintf("}");
+    }
+    jprintf("}");
+    return json_buf;
+}
+
 // the scene as the page lists it: {"sky":"Dusk","objects":[{"id":1,"name":"Rock 1",...},...]}
 // (metres; pos: the middle of its bottom, top: its height)
 EXPORT const char *lr_scene(void){
@@ -932,7 +953,13 @@ EXPORT const char *lr_scene(void){
     jprintf("{\"sky\":");
     jstring(E.sky_name);
     jprintf(",\"skyKey\":\"%s\"", E.sky == SKY_FILE ? "file" : E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
-    jprintf(",\"undo\":%d,\"redo\":%d,\"objects\":[", nundo, nredo);
+    jprintf(",\"undo\":%d,\"redo\":%d", nundo, nredo);
+    if (E.sample){                                   // (what the sample is made of: the engine's demo)
+        const Options *op = viewer_options();
+        jprintf(",\"sample\":{\"name\":\"Sky rain\",\"bodies\":%d,\"props\":%d,\"instances\":%d}",
+                op->sim.bodies, op->sim.props, viewer_scene()->ninsts);
+    }
+    jprintf(",\"objects\":[");
     for (int i = 0; i < E.nobjs; i++){
         const EdObject *o = &E.objs[i];
         Aabb bx = object_box(o);
@@ -958,6 +985,7 @@ EXPORT const char *lr_scene(void){
 // there would stand (on an object: on its top, near the point; on the ground: there, kept
 // on the floor). {"hit":0}: the sky.
 EXPORT const char *lr_pick(double sx, double sy, int exclude){
+    if (E.sample){ jlen = 0; jprintf("{\"hit\":0}"); return json_buf; }   // (a sample: nothing of its to pick)
     Scene *s = viewer_scene();
     scene_update_instances(s, &viewer_options()->ap);   // (the top level, as the instances are now)
     Camera c = camera_now();
@@ -1083,6 +1111,7 @@ EXPORT int lr_frame_object(int id){
 #define EXT_SCENE "LR_scene"
 
 EXPORT int lr_save_gltf(const char *path){
+    if (E.sample) return 1;                          // (a sample is the engine's: nothing of the editor's to save)
     Scene *s = viewer_scene();
     GltfWriter *w = gltf_writer_new(s, (real)(1 / UNITS_PER_M));
     if (!w) return 1;
@@ -1184,9 +1213,18 @@ int main(int argc, char **argv){
     options_parse(o, PROG_VIEW, argc + npre, args);
 
     Scene *s = viewer_scene();
-    if (build_scene(s)) return 1;
-    scene_set_accel(s, options_resolve_accel(o, s), &o->ap);
-    options_bake_probe(o, s);
+    if (o->sim.on){
+        // a sample (the page's ?sample=...: bin/view's options for the demo): the engine's
+        // physics demo as bin/view sets it up, its seed, camera, materials and light
+        E.sample = 1;
+        snprintf(E.sky_name, sizeof(E.sky_name), "%s", o->scene.sky ? (strrchr(o->scene.sky, '/') ? strrchr(o->scene.sky, '/') + 1 : o->scene.sky) : "Procedural");
+        E.sky = SKY_FILE;
+        if (viewer_setup_scene()) return 1;
+    } else {
+        if (build_scene(s)) return 1;
+        scene_set_accel(s, options_resolve_accel(o, s), &o->ap);
+        options_bake_probe(o, s);
+    }
     if (viewer_open("Kiln") != 0) return 1;
 
     E.pivot = s->cam_at;
