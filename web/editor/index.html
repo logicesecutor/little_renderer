@@ -12,8 +12,19 @@
      it, calling the engine's exported functions (editor.js). -->
 
 <!-- ================= RENDER VIEW: the engine's canvas, the whole window ================= -->
-<section id="view" aria-label="Render view">
+<section id="view" aria-label="Render view. Drop shapes here.">
   <canvas id="canvas" tabindex="-1" aria-label="The scene, drawn by the engine"></canvas>
+  <!-- over the frame, in its place and size (editor.js): what the page draws on the render -->
+  <div id="overlay" aria-hidden="false">
+    <div id="lamp-notes" aria-hidden="true"></div>
+    <div id="brackets" class="brackets" aria-hidden="true" hidden><span></span><span></span><span></span><span></span></div>
+    <div id="ghost-ground" class="ghost-ground" aria-hidden="true" hidden></div>
+    <div id="ghost-ring" class="ghost-ring" aria-hidden="true" hidden></div>
+    <div id="ghost-frame" class="ghost-frame" aria-hidden="true" hidden></div>
+    <span id="ghost-pill" class="ghost-pill" aria-hidden="true" hidden></span>
+    <!-- one button per object, over its box: the keyboard's way to the objects (the mouse picks by ray) -->
+    <div id="hits"></div>
+  </div>
 </section>
 
 <!-- ================= TOP BAR ================= -->
@@ -81,6 +92,51 @@
   </div>
   <ul id="objects"></ul>
 </nav>
+
+<!-- ================= OBJECT CARD: next to the selection ================= -->
+<section id="card" class="card" aria-labelledby="card-name" hidden>
+  <div class="card-head">
+    <span id="card-swatch" class="card-swatch" aria-hidden="true"></span>
+    <h2 id="card-name"></h2>
+    <button type="button" id="card-delete" class="icon-sq" aria-label="Delete">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+    </button>
+    <button type="button" id="card-close" class="icon-sq" aria-label="Close">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="card-row">
+    <span class="secondary">Physics</span>
+    <div role="group" aria-label="Body type" class="segmented quiet small" id="card-body">
+      <button type="button" data-dynamic="0" aria-pressed="true">Static</button>
+      <button type="button" data-dynamic="1" aria-pressed="false">Dynamic</button>
+    </div>
+  </div>
+  <div class="mat-slot" id="card-mat-slot">
+    <span id="card-mat-swatch" class="mat-dot" aria-hidden="true"></span>
+    <span class="mat-text"><span id="card-mat" class="mat-name"></span><span class="muted small">Drag a material onto the object to change it</span></span>
+  </div>
+  <div class="card-size">
+    <div class="size-head"><label for="card-scale" class="secondary">Size</label><span id="card-scale-text" class="mono small"></span></div>
+    <input id="card-scale" type="range" min="0.25" max="3" step="0.05" value="1">
+    <span id="card-model-note" class="muted small" hidden>Imported at the real size in the file (glTF metres).</span>
+  </div>
+  <div class="card-transform">
+    <span class="secondary">Transform</span>
+    <div role="group" aria-label="Transform tool" class="tools" id="card-tools">
+      <button type="button" data-tool="drag" aria-pressed="true">Drag<span class="mono key">surface</span></button>
+      <button type="button" data-tool="move" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Move<span class="mono key">W</span></button>
+      <button type="button" data-tool="rotate" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Rotate<span class="mono key">E</span></button>
+      <button type="button" data-tool="scale" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Scale<span class="mono key">R</span></button>
+    </div>
+    <div class="readout mono" aria-label="Position in metres">
+      <span><span class="ax-x">X</span><span id="card-px"></span></span>
+      <span><span class="ax-y">Y</span><span id="card-py"></span></span>
+      <span><span class="ax-z">Z</span><span id="card-pz"></span></span>
+    </div>
+  </div>
+  <span id="card-note" class="caption" hidden></span>
+</section>
 
 <!-- ================= BOTTOM LEFT: history + navigation ================= -->
 <div class="bottom-left">
