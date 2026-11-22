@@ -395,14 +395,15 @@ $(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h $(WEB_STAMP) $(wildcard 
 	$(EMCC) $(WEBBASE) $(WEBMT) $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m)) $(WEB_SRC) -o $@
 
 # the editor (Kiln, docs: the editor's design handoff): apps/editor.c's engine under the page
-# web/editor (HTML, CSS and JS over the engine's canvas, calling its exported lr_ functions):
+# web/editor (HTML, CSS and JS over the engine's canvas, calling its exported lr_ functions;
+# files dropped on the page go into the engine's file system, FS, under /drop):
 #   make web-editor && make serve       then open http://localhost:8000/editor/
 WEB_EDITOR = $(WEB)/editor
 WEB_EDITOR_PAGE = $(patsubst web/editor/%,$(WEB_EDITOR)/%,$(wildcard web/editor/*.* web/editor/fonts/*))
 web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR_PAGE)
 $(WEB_EDITOR)/engine.js: $(SRC) $(WGSL_C) apps/editor.c $(HDR) $(WEB_STAMP)
 	@mkdir -p $(WEB_EDITOR)
-	$(EMCC) $(WEBBASE) -sEXPORTED_RUNTIME_METHODS=UTF8ToString $(SRC) $(WGSL_C) apps/editor.c -o $@
+	$(EMCC) $(WEBBASE) -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,ccall,FS $(SRC) $(WGSL_C) apps/editor.c -o $@
 $(WEB_EDITOR)/%: web/editor/%
 	@mkdir -p $(dir $@)
 	cp $< $@

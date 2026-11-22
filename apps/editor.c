@@ -21,6 +21,8 @@
 #include "rt/accel.h"
 #include "rt/intersect.h"
 #include "scene/camera.h"
+#include "scene/gltf.h"
+#include "rt/probe.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #define EXPORT EMSCRIPTEN_KEEPALIVE
@@ -64,28 +66,42 @@ static Vec3 srgb_hex(unsigned rgb){
 typedef enum { ED_BOX, ED_SPHERE, ED_ROCK, ED_LAMP, ED_MODEL } EdKind;
 static const char *const KIND_NAMES[] = {"box", "sphere", "rock", "lamp", "model"};
 
-#define ED_MAX_INST 3
 typedef struct {
     int id;
     EdKind kind;
     char name[64];
     int mat;                       // index into MATERIALS (-1: a model's own)
-    int mesh;                      // a rock's or a model's mesh (Scene.meshes)
+    int mesh;                      // a rock's mesh (Scene.meshes)
+    int model;                     // a model's index into Editor.models
     int dynamic;                   // its body in the physics (Simulate mode): 0 static, 1 dynamic
     real scale;                    // 1 = the shape's own size (a model: the file's)
     Vec3 pos;                      // the middle of its bottom, units
     real yaw;                      // degrees about the vertical
     int support;                   // the id of what it rests on (0: the ground)
-    int inst[ED_MAX_INST], ninst;  // its instances in the scene
+    int *inst, ninst;              // its instances in the scene (its own array)
 } EdObject;
+
+// a model read from a file: its parts as the file places them, at its own size, the middle
+// of its bottom at the origin (kept while the editor runs, for undo)
+typedef struct { int mesh, material; Xform xf; } EdPart;
+typedef struct { EdPart *parts; int nparts; Aabb box; } EdModel;
+
+// the sky presets (the spec, 7.3), and a file's
+enum { SKY_DUSK, SKY_NOON, SKY_OVERCAST, NSKIES, SKY_FILE = -1 };
+static const char *const SKY_NAMES[NSKIES] = {"Dusk", "Noon", "Overcast"};
 
 typedef struct {
     EdObject *objs;
     int nobjs, cap, next_id;
+    EdModel *models;
+    int nmodels, cap_models;
     int mats[NMATERIALS];          // the catalogue's materials in the scene
     int dark;                      // the lamp's stand
     int rock_mesh;                 // the rock's mesh (made here)
-    const char *sky;               // the sky's name
+    int sky;                       // the sky: a preset, or SKY_FILE (sky_path)
+    char sky_name[96], sky_path[256];
+    struct ProbeJob *relight;      // the rasterizer's light being made again (NULL: up to date)
+    double relight_done;
     // the orbit camera: around a point, at a distance
     Vec3 pivot;
     double dist;
@@ -101,46 +117,55 @@ static Mat3 yaw_mat(real deg){
     return r;
 }
 
-// the instance transforms of an object: its parts in its own space (units, bottom centre at
-// the origin), scaled, turned, moved to pos
-static void object_xforms(const EdObject *o, Xform *xf, int *n){
+static int object_parts(const EdObject *o){
+    return o->kind == ED_LAMP ? 3 : o->kind == ED_MODEL ? E.models[o->model].nparts : 1;
+}
+
+// part i's transform: its place in the object's own space (units, bottom centre at the
+// origin), scaled, turned, moved to pos
+static Xform object_part_xform(const EdObject *o, int i){
     real s = o->scale;
     Mat3 r = yaw_mat(o->yaw);
     Vec3 p = o->pos;
     switch (o->kind){
-    case ED_BOX:
-        xf[0] = xform_axes(r, vec3(50 * s, 50 * s, 50 * s), v_add(p, vec3(0, 50 * s, 0)));
-        *n = 1;
-        break;
-    case ED_SPHERE:
-        xf[0] = xform_axes(r, vec3(50 * s, 50 * s, 50 * s), v_add(p, vec3(0, 50 * s, 0)));
-        *n = 1;
-        break;
+    case ED_BOX: case ED_SPHERE:
+        return xform_axes(r, vec3(50 * s, 50 * s, 50 * s), v_add(p, vec3(0, 50 * s, 0)));
     case ED_ROCK:
-    case ED_MODEL:
-        xf[0] = xform_axes(r, vec3(s, s, s), p);
-        *n = 1;
-        break;
+        return xform_axes(r, vec3(s, s, s), p);
     case ED_LAMP:   // a base, a pole and the glowing ball on top
-        xf[0] = xform_axes(r, vec3(18 * s, 3 * s, 18 * s), v_add(p, vec3(0, 3 * s, 0)));
-        xf[1] = xform_axes(r, vec3(3 * s, 32 * s, 3 * s), v_add(p, vec3(0, 38 * s, 0)));
-        xf[2] = xform_axes(r, vec3(20 * s, 20 * s, 20 * s), v_add(p, vec3(0, 88 * s, 0)));
-        *n = 3;
-        break;
+        if (i == 0) return xform_axes(r, vec3(18 * s, 3 * s, 18 * s), v_add(p, vec3(0, 3 * s, 0)));
+        if (i == 1) return xform_axes(r, vec3(3 * s, 32 * s, 3 * s), v_add(p, vec3(0, 38 * s, 0)));
+        return xform_axes(r, vec3(20 * s, 20 * s, 20 * s), v_add(p, vec3(0, 88 * s, 0)));
+    case ED_MODEL: default: {
+        // world = pos + s r (the part's own transform)
+        const Xform *x = &E.models[o->model].parts[i].xf;
+        Xform w;
+        for (int a = 0; a < 3; a++){
+            for (int c = 0; c < 4; c++){
+                real v = 0;
+                for (int k = 0; k < 3; k++) v += r.m[a][k] * x->m[k][c];
+                w.m[a][c] = s * v;
+            }
+            w.m[a][3] += a == 0 ? p.x : a == 1 ? p.y : p.z;
+        }
+        return w;
+    }
     }
 }
 
 // the materials of an object's parts: the lamp's stand is dark, the rest its material (a
-// model: its triangles' own)
+// model: its own, unless one of the catalogue's was put on it)
 static int part_material(const EdObject *o, int part){
     if (o->kind == ED_LAMP && part < 2) return E.dark;
-    return o->mat >= 0 ? E.mats[o->mat] : -1;
+    if (o->mat >= 0) return E.mats[o->mat];
+    return o->kind == ED_MODEL ? E.models[o->model].parts[part].material : -1;
 }
 static int part_mesh(const EdObject *o, int part){
     switch (o->kind){
     case ED_BOX: return INST_BOX;
     case ED_SPHERE: return INST_SPHERE;
     case ED_LAMP: return part < 2 ? INST_BOX : INST_SPHERE;
+    case ED_MODEL: return E.models[o->model].parts[part].mesh;
     default: return o->mesh;
     }
 }
@@ -148,22 +173,19 @@ static int part_mesh(const EdObject *o, int part){
 // its instances made (an object new, or back by an undo)
 static void object_instances(EdObject *o){
     Scene *s = viewer_scene();
-    Xform xf[ED_MAX_INST];
-    int n = 0;
-    object_xforms(o, xf, &n);
-    for (int i = 0; i < n; i++) o->inst[i] = scene_add_instance(s, part_mesh(o, i), xf[i], part_material(o, i));
+    int n = object_parts(o);
+    o->inst = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+    if (!o->inst) lr_oom("editor");
+    for (int i = 0; i < n; i++) o->inst[i] = scene_add_instance(s, part_mesh(o, i), object_part_xform(o, i), part_material(o, i));
     o->ninst = n;
 }
 
 // its instances where its fields say, of its material
 static void object_update(EdObject *o){
     Scene *s = viewer_scene();
-    Xform xf[ED_MAX_INST];
-    int n = 0;
-    object_xforms(o, xf, &n);
-    for (int i = 0; i < n && i < o->ninst; i++){
+    for (int i = 0; i < o->ninst; i++){
         s->insts[o->inst[i]].material = part_material(o, i);
-        scene_move_instance(s, o->inst[i], xf[i]);          // (a new version: the copies take it again)
+        scene_move_instance(s, o->inst[i], object_part_xform(o, i));   // (a new version: the copies take it again)
     }
 }
 
@@ -179,11 +201,14 @@ static void object_drop_instances(EdObject *o){
             for (int q = 0; q < E.objs[j].ninst; q++)
                 if (E.objs[j].inst[q] == moved) E.objs[j].inst[q] = i;
     }
+    free(o->inst);
+    o->inst = NULL;
     o->ninst = 0;
 }
 
-// label: the name before its number ("Glass ball"; NULL: the kind's)
-static int object_add(EdKind kind, int mat, Vec3 pos, real scale, int dynamic, int support, const char *label){
+// a new object, with its instances. label: the name before its number ("Glass ball"; NULL:
+// the kind's); a model (model >= 0): its name as it is
+static int object_add(EdKind kind, int mat, int model, Vec3 pos, real scale, int dynamic, int support, const char *label){
     E.objs = lr_grow(E.objs, sizeof(EdObject), &E.cap, E.nobjs + 1, 16);
     EdObject *o = &E.objs[E.nobjs];
     memset(o, 0, sizeof(*o));
@@ -191,11 +216,13 @@ static int object_add(EdKind kind, int mat, Vec3 pos, real scale, int dynamic, i
     o->kind = kind;
     o->mat = mat;
     o->mesh = kind == ED_ROCK ? E.rock_mesh : -1;
+    o->model = model;
     o->scale = scale;
     o->pos = pos;
     o->dynamic = dynamic;
     o->support = support;
-    if (label) snprintf(o->name, sizeof(o->name), "%s %d", label, o->id);
+    if (kind == ED_MODEL) snprintf(o->name, sizeof(o->name), "%s", label ? label : "Model");
+    else if (label) snprintf(o->name, sizeof(o->name), "%s %d", label, o->id);
     else snprintf(o->name, sizeof(o->name), "%c%s %d", KIND_NAMES[kind][0] - 32, KIND_NAMES[kind] + 1, o->id);
     object_instances(o);
     E.nobjs++;
@@ -227,6 +254,7 @@ static real object_top(const EdObject *o){
     switch (o->kind){
     case ED_BOX: case ED_SPHERE: return 100 * o->scale;
     case ED_LAMP: return 108 * o->scale;
+    case ED_MODEL: return E.models[o->model].box.hi.y * o->scale;
     default: return viewer_scene()->meshes[o->mesh].box.hi.y * o->scale;
     }
 }
@@ -236,7 +264,7 @@ static real object_reach(const EdObject *o){
     case ED_SPHERE: return 12 * o->scale;
     case ED_LAMP: return 6 * o->scale;
     default: {
-        Aabb b = viewer_scene()->meshes[o->mesh].box;
+        Aabb b = o->kind == ED_MODEL ? E.models[o->model].box : viewer_scene()->meshes[o->mesh].box;
         return 0.3f * r_fmin(b.hi.x - b.lo.x, b.hi.z - b.lo.z) * o->scale;
     }
     }
@@ -333,15 +361,59 @@ static int make_rock(Scene *s){
     return id;
 }
 
-// the sky presets (Light mode will set them; v1: Dusk)
-static int set_sky(Scene *s, const char *name){
-    Env *e = NULL;
-    if (!strcmp(name, "Dusk")) e = env_procedural_sky(1024, 4, 150);
-    else if (!strcmp(name, "Noon")) e = env_procedural_sky(1024, 60, 150);
+// ---- the skies (the spec, 7.3; their exact looks belong to Light mode) -----------------------
+
+// Dusk: a low warm sun (4 degrees up) under a deep blue sky, warm along the horizon; Noon: the
+// engine's sky with the sun 60 degrees up; Overcast: no sun, a soft grey sky
+static Env *make_sky(int preset){
+    if (preset == SKY_NOON) return env_procedural_sky(1024, 60, 150);
+    int w = 1024, h = 512;
+    float *img = malloc(sizeof(float) * 3 * (size_t)w * h);
+    if (!img) return NULL;
+    real el = 4 * (real)PI / 180, az = 150 * (real)PI / 180;
+    Vec3 sun = vec3(r_cos(el) * r_sin(az), r_sin(el), r_cos(el) * r_cos(az));
+    const real sun_cos = r_cos(1.2f * (real)PI / 180);
+    Env flat = {0};                                       // (env_dir of an unturned map)
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++){
+            Vec3 d = env_dir(&flat, (x + 0.5f) / w, (y + 0.5f) / h), c;
+            if (preset == SKY_OVERCAST){
+                if (d.y >= 0){
+                    real t = r_pow(1 - d.y, 3);
+                    c = v_add(v_scale(vec3(0.50f, 0.53f, 0.57f), 1 - t), v_scale(vec3(0.78f, 0.80f, 0.82f), t));
+                } else {
+                    real t = r_fmin(-d.y * 4, 1);
+                    c = v_add(v_scale(vec3(0.55f, 0.55f, 0.55f), 1 - t), v_scale(vec3(0.16f, 0.15f, 0.14f), t));
+                }
+            } else {                                      // dusk
+                real cs = v_dot(d, sun);
+                if (d.y >= 0){
+                    real t = 1 - d.y, t4 = t * t * t * t;
+                    c = v_add(v_scale(vec3(0.05f, 0.08f, 0.22f), 1 - t4), v_scale(vec3(0.95f, 0.52f, 0.30f), t4));
+                    c = v_add(c, v_scale(vec3(1.0f, 0.55f, 0.25f), 1.2f * r_pow(r_fmax(cs, 0), 24)));   // the glow around the sun
+                    c = v_add(c, v_scale(vec3(0.9f, 0.45f, 0.25f), 0.25f * r_pow(r_fmax(cs, 0), 3)));
+                    if (cs > sun_cos) c = v_add(c, vec3(1700, 850, 340));                         // the sun, red through the air
+                } else {
+                    real t = r_fmin(-d.y * 4, 1);
+                    c = v_add(v_scale(vec3(0.45f, 0.30f, 0.22f), 1 - t), v_scale(vec3(0.07f, 0.06f, 0.05f), t));
+                }
+            }
+            float *o = img + 3 * ((size_t)y * w + x);
+            o[0] = (float)c.x; o[1] = (float)c.y; o[2] = (float)c.z;
+        }
+    return env_from_rgb(img, w, h);
+}
+
+// the sky made: a preset, or a file (.hdr) when path is given; 0 = done (else nothing changed)
+static int set_sky(int preset, const char *path, const char *name){
+    Scene *s = viewer_scene();
+    Env *e = path ? env_load_hdr(path) : preset >= 0 && preset < NSKIES ? make_sky(preset) : NULL;
     if (!e) return 1;
-    if (s->env) env_free(s->env);
+    env_free(s->env);
     s->env = e;
-    E.sky = name;
+    E.sky = path ? SKY_FILE : preset;
+    snprintf(E.sky_path, sizeof(E.sky_path), "%s", path ? path : "");
+    snprintf(E.sky_name, sizeof(E.sky_name), "%s", path ? name : SKY_NAMES[preset]);
     return 0;
 }
 
@@ -357,19 +429,19 @@ static int build_scene(Scene *s){
     int ground = scene_add_material(s, material_pbr(srgb_hex(0x8A7E6C), 0, 0.95, 1.5, 0));
     scene_add_prim(s, make_quad(vec3(-10000, 0, -10000), vec3(0, 0, 20000), vec3(20000, 0, 0), ground));
     s->light = -1;
-    if (set_sky(s, "Dusk")) return 1;
+    if (set_sky(SKY_DUSK, NULL, NULL)) return 1;
     s->probe_set = 1;
     s->probe_at = vec3(0, 150, 0);
     s->probe_box = (Aabb){vec3(-10000, 0, -10000), vec3(10000, 1e5f, 10000)};
     E.rock_mesh = make_rock(s);
     // the prototype's starting set: a rock, a box with a smaller steel one on it, a lamp,
     // a terracotta ball and a glass one (the camera looks down +z: +x is on the left)
-    object_add(ED_ROCK, 2, vec3(250, 0, 260), 1, 0, 0, NULL);
-    int box = object_add(ED_BOX, 0, vec3(40, 0, 120), 1, 0, 0, NULL);
-    object_add(ED_BOX, 3, vec3(43, 100, 118), 0.7f, 1, box, NULL);
-    object_add(ED_LAMP, 7, vec3(-240, 0, 200), 1, 0, 0, NULL);
-    object_add(ED_SPHERE, 1, vec3(-120, 0, -40), 1, 1, 0, NULL);
-    object_add(ED_SPHERE, 6, vec3(170, 0, -110), 1, 1, 0, "Glass ball");
+    object_add(ED_ROCK, 2, -1, vec3(250, 0, 260), 1, 0, 0, NULL);
+    int box = object_add(ED_BOX, 0, -1, vec3(40, 0, 120), 1, 0, 0, NULL);
+    object_add(ED_BOX, 3, -1, vec3(43, 100, 118), 0.7f, 1, box, NULL);
+    object_add(ED_LAMP, 7, -1, vec3(-240, 0, 200), 1, 0, 0, NULL);
+    object_add(ED_SPHERE, 1, -1, vec3(-120, 0, -40), 1, 1, 0, NULL);
+    object_add(ED_SPHERE, 6, -1, vec3(170, 0, -110), 1, 1, 0, "Glass ball");
     s->cam_from = vec3(0, 240, -680);
     s->cam_at = vec3(0, 50, 100);
     s->cam_up = vec3(0, 1, 0);
@@ -450,7 +522,50 @@ EXPORT int lr_set_resolution(int w, int h){          // 0 = done
 
 // ---- the objects: what the page adds, moves, sizes, removes (positions in metres) --------------
 
-static void changed(void){ viewer_scene_changed(0); }   // (the path traced image keeps what did not change)
+// ---- relighting: the rasterizer's light probe made again after every change, in steps between
+// the frames (rt/probe.h, probe_job_*): the page keeps drawing; the old light shows until
+// the new one is done ----------------------------------------------------------------------
+
+#define RELIGHT_MS 10.0    // of each frame (the page draws in the rest)
+
+static void relight_start(void){
+    probe_job_free(E.relight);
+    E.relight = NULL;
+    E.relight_done = 1;
+    Options *o = viewer_options();
+    Scene *s = viewer_scene();
+    if (!o->probe) return;
+    scene_update_instances(s, &o->ap);              // (the bake traces the scene as it is now)
+    E.relight = probe_job_start(s, o->probe_res, o->probe_spp, PROBE_GRID_PATHS);
+    E.relight_done = 0;
+}
+
+static void relight_step(void){
+    if (!E.relight) return;
+    Scene *s = viewer_scene();
+    scene_update_instances(s, &viewer_options()->ap);
+    E.relight_done = probe_job_step(E.relight, s, RELIGHT_MS);
+    if (E.relight_done < 1) return;
+    Env *p = NULL;
+    IrrGrid *g = NULL;
+    int r = probe_job_finish(E.relight, &p, &g);
+    if (r == 1) return;                             // (not yet: it says it is all done only when it is)
+    E.relight = NULL;
+    if (r == 0){
+        env_free(s->probe);
+        s->probe = p;
+        irr_grid_free(s->irr);
+        s->irr = g;
+        viewer_redraw();
+    }
+}
+
+// a change made: what shows follows (the path traced image keeps what did not change), the
+// light is made again
+static void changed(void){
+    viewer_scene_changed(0);
+    relight_start();
+}
 
 // shapes as the tray has them (the spec, 7.1), with their default materials (6.4)
 enum { SHAPE_BOX, SHAPE_SPHERE, SHAPE_GLASS_BALL, SHAPE_ROCK, SHAPE_LAMP, NSHAPES };
@@ -466,7 +581,7 @@ EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
         {ED_BOX, 0, NULL}, {ED_SPHERE, 1, NULL}, {ED_SPHERE, 6, "Glass ball"}, {ED_ROCK, 2, NULL}, {ED_LAMP, 7, NULL}};
     if (shape < 0 || shape >= NSHAPES) return 0;
     if (support && !object_find(support)) support = 0;
-    int id = object_add(SH[shape].kind, SH[shape].mat, metres(x, y, z), 1, 0, support, SH[shape].label);
+    int id = object_add(SH[shape].kind, SH[shape].mat, -1, metres(x, y, z), 1, 0, support, SH[shape].label);
     changed();
     return id;
 }
@@ -496,6 +611,61 @@ EXPORT int lr_scale_object(int id, double scale){
 }
 
 // static or dynamic (its body in Simulate mode)
+// its material: one of the catalogue's (MATERIALS, 0..7), or -1: a model's own again
+EXPORT int lr_set_material(int id, int mat){
+    EdObject *o = object_find(id);
+    if (!o || mat < -1 || mat >= NMATERIALS || (mat < 0 && o->kind != ED_MODEL)) return 1;
+    o->mat = mat;
+    object_update(o);
+    changed();
+    return 0;
+}
+
+// a glTF model (.gltf, .glb: the page puts the dropped files into its file system first) at its
+// real size (glTF's metres), standing at (x, y, z) on `support`. Returns its id (0: it could
+// not be read).
+EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int support){
+    Scene *s = viewer_scene();
+    int n0 = s->ninsts;
+    int n = scene_load_gltf(s, path, (real)-UNITS_PER_M, vec3(0, 0, 0), 0);
+    if (n <= 0) return 0;
+    // its instances, as the file places them standing at the origin: the model's parts; they
+    // become the object's (made again from the parts: the same, in the object's place)
+    E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
+    EdModel *m = &E.models[E.nmodels];
+    m->nparts = s->ninsts - n0;
+    m->parts = malloc((size_t)m->nparts * sizeof(EdPart));
+    if (!m->parts) lr_oom("editor");
+    m->box = (Aabb){vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+    for (int i = 0; i < m->nparts; i++){
+        const Instance *in = &s->insts[n0 + i];
+        m->parts[i] = (EdPart){in->mesh, in->material, in->xf};
+        m->box.lo = vec3(r_fmin(m->box.lo.x, in->box.lo.x), r_fmin(m->box.lo.y, in->box.lo.y), r_fmin(m->box.lo.z, in->box.lo.z));
+        m->box.hi = vec3(r_fmax(m->box.hi.x, in->box.hi.x), r_fmax(m->box.hi.y, in->box.hi.y), r_fmax(m->box.hi.z, in->box.hi.z));
+    }
+    while (s->ninsts > n0) scene_remove_instance(s, s->ninsts - 1);
+    if (support && !object_find(support)) support = 0;
+    const char *file = strrchr(path, '/');
+    int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    changed();
+    return id;
+}
+
+// the sky: a preset (0 Dusk, 1 Noon, 2 Overcast), or a Radiance .hdr file (name: what the
+// page shows); the path traced image starts over. 0 = done.
+EXPORT int lr_set_sky(int preset){
+    if (set_sky(preset, NULL, NULL)) return 1;
+    viewer_scene_changed(1);
+    relight_start();
+    return 0;
+}
+EXPORT int lr_load_sky(const char *path, const char *name){
+    if (set_sky(SKY_FILE, path, name)) return 1;
+    viewer_scene_changed(1);
+    relight_start();
+    return 0;
+}
+
 EXPORT int lr_set_body(int id, int dynamic){
     EdObject *o = object_find(id);
     if (!o) return 1;
@@ -525,15 +695,21 @@ EXPORT int lr_remove_object(int id){
 
 // ---- undo / redo: the objects as they were before each change -------------------------------
 
-typedef struct { EdObject *objs; int n; } Snapshot;
+typedef struct { EdObject *objs; int n; int sky; char sky_name[96], sky_path[256]; } Snapshot;
 #define HISTORY 100
 static Snapshot undo_st[HISTORY], redo_st[HISTORY];
 static int nundo, nredo;
 
 static Snapshot snapshot_take(void){
-    Snapshot sn = {malloc((size_t)(E.nobjs > 0 ? E.nobjs : 1) * sizeof(EdObject)), E.nobjs};
+    Snapshot sn;
+    memset(&sn, 0, sizeof(sn));
+    sn.objs = malloc((size_t)(E.nobjs > 0 ? E.nobjs : 1) * sizeof(EdObject));
+    sn.n = E.nobjs;
     if (!sn.objs) lr_oom("editor");
     memcpy(sn.objs, E.objs, (size_t)E.nobjs * sizeof(EdObject));
+    sn.sky = E.sky;
+    memcpy(sn.sky_name, E.sky_name, sizeof(sn.sky_name));
+    memcpy(sn.sky_path, E.sky_path, sizeof(sn.sky_path));
     return sn;
 }
 static void snapshot_push(Snapshot *st, int *n, Snapshot sn){
@@ -557,8 +733,9 @@ static void snapshot_apply(const Snapshot *sn){
     for (int j = 0; j < sn->n; j++){
         now[j] = sn->objs[j];
         const EdObject *cur = object_find(now[j].id);
+        now[j].inst = NULL;                      // (the snapshot's are not its: its instances are the live object's)
         now[j].ninst = 0;
-        if (cur){ memcpy(now[j].inst, cur->inst, sizeof(cur->inst)); now[j].ninst = cur->ninst; }
+        if (cur){ now[j].inst = cur->inst; now[j].ninst = cur->ninst; }
     }
     free(E.objs);
     E.objs = now;
@@ -567,6 +744,9 @@ static void snapshot_apply(const Snapshot *sn){
     for (int j = 0; j < E.nobjs; j++){
         if (E.objs[j].ninst == 0) object_instances(&E.objs[j]);
         else object_update(&E.objs[j]);
+    }
+    if (sn->sky != E.sky || strcmp(sn->sky_path, E.sky_path)){     // (another sky: the path traced image starts over)
+        if (set_sky(sn->sky, sn->sky == SKY_FILE ? sn->sky_path : NULL, sn->sky_name) == 0) viewer_scene_changed(1);
     }
     changed();
 }
@@ -635,9 +815,9 @@ EXPORT const char *lr_status(void){
     for (int i = 0; i < E.nobjs; i++) emitters += E.objs[i].mat >= 0 && MATERIALS[E.objs[i].mat].glow > 0;
     jlen = 0;
     jprintf("{\"backend\":%d,\"tracing\":%d,\"gpu\":%d,\"gpuStarting\":%d,\"gpuTracing\":%d,\"spp\":%d,\"target\":%d,"
-            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d}",
+            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f}",
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
-            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters);
+            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
     return json_buf;
 }
 
@@ -656,7 +836,8 @@ static void jstring(const char *t){
 EXPORT const char *lr_scene(void){
     jlen = 0;
     jprintf("{\"sky\":");
-    jstring(E.sky ? E.sky : "");
+    jstring(E.sky_name);
+    jprintf(",\"skyKey\":\"%s\"", E.sky == SKY_FILE ? "file" : E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
     jprintf(",\"undo\":%d,\"redo\":%d,\"objects\":[", nundo, nredo);
     for (int i = 0; i < E.nobjs; i++){
         const EdObject *o = &E.objs[i];
@@ -778,6 +959,7 @@ static int editor_frame(void){
     double t = clock_s(), dt = fmin(t - E.t_prev, 0.1);
     E.t_prev = t;
     fly_step(dt);
+    relight_step();
     return viewer_frame();
 }
 
