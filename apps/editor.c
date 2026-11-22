@@ -18,6 +18,9 @@
 #include "lr.h"
 #include "base/mem.h"
 #include "scene/env.h"
+#include "rt/accel.h"
+#include "rt/intersect.h"
+#include "scene/camera.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #define EXPORT EMSCRIPTEN_KEEPALIVE
@@ -67,6 +70,7 @@ typedef struct {
     EdKind kind;
     char name[64];
     int mat;                       // index into MATERIALS (-1: a model's own)
+    int mesh;                      // a rock's or a model's mesh (Scene.meshes)
     int dynamic;                   // its body in the physics (Simulate mode): 0 static, 1 dynamic
     real scale;                    // 1 = the shape's own size (a model: the file's)
     Vec3 pos;                      // the middle of its bottom, units
@@ -126,36 +130,137 @@ static void object_xforms(const EdObject *o, Xform *xf, int *n){
     }
 }
 
-static int object_add(EdKind kind, int mat, Vec3 pos, real scale, int dynamic, int support, const char *name){
+// the materials of an object's parts: the lamp's stand is dark, the rest its material (a
+// model: its triangles' own)
+static int part_material(const EdObject *o, int part){
+    if (o->kind == ED_LAMP && part < 2) return E.dark;
+    return o->mat >= 0 ? E.mats[o->mat] : -1;
+}
+static int part_mesh(const EdObject *o, int part){
+    switch (o->kind){
+    case ED_BOX: return INST_BOX;
+    case ED_SPHERE: return INST_SPHERE;
+    case ED_LAMP: return part < 2 ? INST_BOX : INST_SPHERE;
+    default: return o->mesh;
+    }
+}
+
+// its instances made (an object new, or back by an undo)
+static void object_instances(EdObject *o){
     Scene *s = viewer_scene();
+    Xform xf[ED_MAX_INST];
+    int n = 0;
+    object_xforms(o, xf, &n);
+    for (int i = 0; i < n; i++) o->inst[i] = scene_add_instance(s, part_mesh(o, i), xf[i], part_material(o, i));
+    o->ninst = n;
+}
+
+// its instances where its fields say, of its material
+static void object_update(EdObject *o){
+    Scene *s = viewer_scene();
+    Xform xf[ED_MAX_INST];
+    int n = 0;
+    object_xforms(o, xf, &n);
+    for (int i = 0; i < n && i < o->ninst; i++){
+        s->insts[o->inst[i]].material = part_material(o, i);
+        scene_move_instance(s, o->inst[i], xf[i]);          // (a new version: the copies take it again)
+    }
+}
+
+// its instances removed (the scene's last ones take their places: whoever had those now has these)
+static void object_drop_instances(EdObject *o){
+    Scene *s = viewer_scene();
+    for (int k = o->ninst - 1; k >= 0; k--){
+        int i = o->inst[k];
+        o->inst[k] = -1;
+        int moved = scene_remove_instance(s, i);
+        if (moved < 0) continue;
+        for (int j = 0; j < E.nobjs; j++)
+            for (int q = 0; q < E.objs[j].ninst; q++)
+                if (E.objs[j].inst[q] == moved) E.objs[j].inst[q] = i;
+    }
+    o->ninst = 0;
+}
+
+// label: the name before its number ("Glass ball"; NULL: the kind's)
+static int object_add(EdKind kind, int mat, Vec3 pos, real scale, int dynamic, int support, const char *label){
     E.objs = lr_grow(E.objs, sizeof(EdObject), &E.cap, E.nobjs + 1, 16);
     EdObject *o = &E.objs[E.nobjs];
     memset(o, 0, sizeof(*o));
     o->id = ++E.next_id;
     o->kind = kind;
     o->mat = mat;
+    o->mesh = kind == ED_ROCK ? E.rock_mesh : -1;
     o->scale = scale;
     o->pos = pos;
     o->dynamic = dynamic;
     o->support = support;
-    if (name) snprintf(o->name, sizeof(o->name), "%s", name);
+    if (label) snprintf(o->name, sizeof(o->name), "%s %d", label, o->id);
     else snprintf(o->name, sizeof(o->name), "%c%s %d", KIND_NAMES[kind][0] - 32, KIND_NAMES[kind] + 1, o->id);
-    Xform xf[ED_MAX_INST];
-    int n = 0;
-    object_xforms(o, xf, &n);
-    int m = mat >= 0 ? E.mats[mat] : -1;
-    for (int i = 0; i < n; i++){
-        int mesh = kind == ED_BOX || kind == ED_LAMP ? INST_BOX : kind == ED_SPHERE ? INST_SPHERE : E.rock_mesh;
-        int im = m;
-        if (kind == ED_LAMP){
-            mesh = i < 2 ? INST_BOX : INST_SPHERE;
-            im = i < 2 ? E.dark : m;
-        }
-        o->inst[i] = scene_add_instance(s, mesh, xf[i], im);
-    }
-    o->ninst = n;
+    object_instances(o);
     E.nobjs++;
     return o->id;
+}
+
+static EdObject *object_find(int id){
+    for (int i = 0; i < E.nobjs; i++) if (E.objs[i].id == id) return &E.objs[i];
+    return NULL;
+}
+static EdObject *object_of_inst(int inst){
+    for (int i = 0; i < E.nobjs; i++)
+        for (int k = 0; k < E.objs[i].ninst; k++) if (E.objs[i].inst[k] == inst) return &E.objs[i];
+    return NULL;
+}
+// id is root, or rests on it (on something resting on it...)
+static int in_stack(int id, int root){
+    for (int depth = 0; id > 0 && depth < 1000; depth++){
+        if (id == root) return 1;
+        const EdObject *o = object_find(id);
+        id = o ? o->support : 0;
+    }
+    return 0;
+}
+
+// how tall it is (where something put on it stands), and how far from its middle its top
+// reaches (where on it something can stand), units
+static real object_top(const EdObject *o){
+    switch (o->kind){
+    case ED_BOX: case ED_SPHERE: return 100 * o->scale;
+    case ED_LAMP: return 108 * o->scale;
+    default: return viewer_scene()->meshes[o->mesh].box.hi.y * o->scale;
+    }
+}
+static real object_reach(const EdObject *o){
+    switch (o->kind){
+    case ED_BOX: return 40 * o->scale;
+    case ED_SPHERE: return 12 * o->scale;
+    case ED_LAMP: return 6 * o->scale;
+    default: {
+        Aabb b = viewer_scene()->meshes[o->mesh].box;
+        return 0.3f * r_fmin(b.hi.x - b.lo.x, b.hi.z - b.lo.z) * o->scale;
+    }
+    }
+}
+
+// its world box: around its instances'
+static Aabb object_box(const EdObject *o){
+    const Scene *s = viewer_scene();
+    Aabb box = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+    for (int k = 0; k < o->ninst; k++){
+        Aabb b = s->insts[o->inst[k]].box;
+        box.lo = vec3(r_fmin(box.lo.x, b.lo.x), r_fmin(box.lo.y, b.lo.y), r_fmin(box.lo.z, b.lo.z));
+        box.hi = vec3(r_fmax(box.hi.x, b.hi.x), r_fmax(box.hi.y, b.hi.y), r_fmax(box.hi.z, b.hi.z));
+    }
+    return box;
+}
+
+// an object moved by d, and what rests on it with it
+static void object_shift(int id, Vec3 d, int depth){
+    EdObject *o = object_find(id);
+    if (!o || depth > 1000) return;
+    o->pos = v_add(o->pos, d);
+    object_update(o);
+    for (int i = 0; i < E.nobjs; i++) if (E.objs[i].support == id) object_shift(E.objs[i].id, d, depth + 1);
 }
 
 // ---- the scene -----------------------------------------------------------------------------
@@ -264,7 +369,7 @@ static int build_scene(Scene *s){
     object_add(ED_BOX, 3, vec3(43, 100, 118), 0.7f, 1, box, NULL);
     object_add(ED_LAMP, 7, vec3(-240, 0, 200), 1, 0, 0, NULL);
     object_add(ED_SPHERE, 1, vec3(-120, 0, -40), 1, 1, 0, NULL);
-    object_add(ED_SPHERE, 6, vec3(170, 0, -110), 1, 1, 0, NULL);
+    object_add(ED_SPHERE, 6, vec3(170, 0, -110), 1, 1, 0, "Glass ball");
     s->cam_from = vec3(0, 240, -680);
     s->cam_at = vec3(0, 50, 100);
     s->cam_up = vec3(0, 1, 0);
@@ -343,6 +448,163 @@ EXPORT int lr_set_resolution(int w, int h){          // 0 = done
     return viewer_resize(w, h);
 }
 
+// ---- the objects: what the page adds, moves, sizes, removes (positions in metres) --------------
+
+static void changed(void){ viewer_scene_changed(0); }   // (the path traced image keeps what did not change)
+
+// shapes as the tray has them (the spec, 7.1), with their default materials (6.4)
+enum { SHAPE_BOX, SHAPE_SPHERE, SHAPE_GLASS_BALL, SHAPE_ROCK, SHAPE_LAMP, NSHAPES };
+
+static Vec3 metres(double x, double y, double z){
+    return vec3((real)(x * UNITS_PER_M), (real)(y * UNITS_PER_M), (real)(z * UNITS_PER_M));
+}
+
+// a shape standing at (x, y, z) (the middle of its bottom), on `support` (0: the ground);
+// static, at its own size. Returns its id (0: none).
+EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
+    static const struct { EdKind kind; int mat; const char *label; } SH[NSHAPES] = {
+        {ED_BOX, 0, NULL}, {ED_SPHERE, 1, NULL}, {ED_SPHERE, 6, "Glass ball"}, {ED_ROCK, 2, NULL}, {ED_LAMP, 7, NULL}};
+    if (shape < 0 || shape >= NSHAPES) return 0;
+    if (support && !object_find(support)) support = 0;
+    int id = object_add(SH[shape].kind, SH[shape].mat, metres(x, y, z), 1, 0, support, SH[shape].label);
+    changed();
+    return id;
+}
+
+// moved to stand at (x, y, z) on `support` (0: the ground), what rests on it with it; not onto
+// itself or what rests on it. 0 = done.
+EXPORT int lr_move_object(int id, double x, double y, double z, int support){
+    EdObject *o = object_find(id);
+    if (!o || (support && (!object_find(support) || in_stack(support, id)))) return 1;
+    o->support = support;
+    object_shift(id, v_sub(metres(x, y, z), o->pos), 0);
+    changed();
+    return 0;
+}
+
+// its size (1: its own), what rests on it raised or lowered with its top
+EXPORT int lr_scale_object(int id, double scale){
+    EdObject *o = object_find(id);
+    if (!o || !(scale >= 0.05 && scale <= 20)) return 1;
+    real top = object_top(o);
+    o->scale = (real)scale;
+    object_update(o);
+    Vec3 d = vec3(0, object_top(o) - top, 0);
+    for (int i = 0; i < E.nobjs; i++) if (E.objs[i].support == id) object_shift(E.objs[i].id, d, 0);
+    changed();
+    return 0;
+}
+
+// static or dynamic (its body in Simulate mode)
+EXPORT int lr_set_body(int id, int dynamic){
+    EdObject *o = object_find(id);
+    if (!o) return 1;
+    o->dynamic = dynamic != 0;
+    return 0;
+}
+
+// removed; what rested on it comes down to where it stood, onto what it stood on
+EXPORT int lr_remove_object(int id){
+    EdObject *o = object_find(id);
+    if (!o) return 1;
+    Vec3 base = o->pos;
+    int under = o->support;
+    for (int i = 0; i < E.nobjs; i++)
+        if (E.objs[i].support == id){
+            E.objs[i].support = under;
+            object_shift(E.objs[i].id, vec3(0, base.y - E.objs[i].pos.y, 0), 0);
+        }
+    o = object_find(id);
+    object_drop_instances(o);
+    int k = (int)(o - E.objs);
+    memmove(&E.objs[k], &E.objs[k + 1], (size_t)(E.nobjs - k - 1) * sizeof(EdObject));
+    E.nobjs--;
+    changed();
+    return 0;
+}
+
+// ---- undo / redo: the objects as they were before each change -------------------------------
+
+typedef struct { EdObject *objs; int n; } Snapshot;
+#define HISTORY 100
+static Snapshot undo_st[HISTORY], redo_st[HISTORY];
+static int nundo, nredo;
+
+static Snapshot snapshot_take(void){
+    Snapshot sn = {malloc((size_t)(E.nobjs > 0 ? E.nobjs : 1) * sizeof(EdObject)), E.nobjs};
+    if (!sn.objs) lr_oom("editor");
+    memcpy(sn.objs, E.objs, (size_t)E.nobjs * sizeof(EdObject));
+    return sn;
+}
+static void snapshot_push(Snapshot *st, int *n, Snapshot sn){
+    if (*n == HISTORY){ free(st[0].objs); memmove(st, st + 1, (HISTORY - 1) * sizeof(Snapshot)); (*n)--; }
+    st[(*n)++] = sn;
+}
+
+// the objects made what the snapshot has: those not in it removed, those back made again,
+// the rest moved, sized, coloured as it says (their instances kept: their samples carry on)
+static void snapshot_apply(const Snapshot *sn){
+    for (int i = E.nobjs - 1; i >= 0; i--){
+        int keep = 0;
+        for (int j = 0; j < sn->n && !keep; j++) keep = sn->objs[j].id == E.objs[i].id;
+        if (keep) continue;
+        object_drop_instances(&E.objs[i]);
+        memmove(&E.objs[i], &E.objs[i + 1], (size_t)(E.nobjs - i - 1) * sizeof(EdObject));
+        E.nobjs--;
+    }
+    EdObject *now = malloc((size_t)(sn->n > 0 ? sn->n : 1) * sizeof(EdObject));
+    if (!now) lr_oom("editor");
+    for (int j = 0; j < sn->n; j++){
+        now[j] = sn->objs[j];
+        const EdObject *cur = object_find(now[j].id);
+        now[j].ninst = 0;
+        if (cur){ memcpy(now[j].inst, cur->inst, sizeof(cur->inst)); now[j].ninst = cur->ninst; }
+    }
+    free(E.objs);
+    E.objs = now;
+    E.cap = sn->n > 0 ? sn->n : 1;
+    E.nobjs = sn->n;
+    for (int j = 0; j < E.nobjs; j++){
+        if (E.objs[j].ninst == 0) object_instances(&E.objs[j]);
+        else object_update(&E.objs[j]);
+    }
+    changed();
+}
+
+// before a change (an add, a move, a size, a material, a body, a removal): the scene as it is
+EXPORT void lr_checkpoint(void){
+    snapshot_push(undo_st, &nundo, snapshot_take());
+    while (nredo > 0) free(redo_st[--nredo].objs);
+}
+EXPORT int lr_undo(void){
+    if (nundo == 0) return 0;
+    snapshot_push(redo_st, &nredo, snapshot_take());
+    Snapshot sn = undo_st[--nundo];
+    snapshot_apply(&sn);
+    free(sn.objs);
+    return 1;
+}
+EXPORT int lr_redo(void){
+    if (nredo == 0) return 0;
+    snapshot_push(undo_st, &nundo, snapshot_take());
+    Snapshot sn = redo_st[--nredo];
+    snapshot_apply(&sn);
+    free(sn.objs);
+    return 1;
+}
+
+// ---- the camera and the screen: picking, projecting, framing ---------------------------------
+
+static Camera camera_now(void){
+    View v = viewer_view();
+    ViewerStatus st;
+    viewer_status(&st);
+    return camera_make(v.pos, v_add(v.pos, view_forward(&v)), vec3(0, 1, 0), (real)v.fov,
+                       (real)(st.width > 0 ? st.width : 16) / (real)(st.height > 0 ? st.height : 9));
+}
+
+#define FLOOR_M 99.0     // (the floor reaches 100 m from the middle: a landing stays on it)
+
 // ---- what the page reads: JSON text (valid until the next call) -----------------------------
 
 static char *json_buf;
@@ -379,20 +641,135 @@ EXPORT const char *lr_status(void){
     return json_buf;
 }
 
+// a string for JSON: quotes and backslashes escaped, control characters dropped
+static void jstring(const char *t){
+    jprintf("\"");
+    for (; *t; t++){
+        if (*t == '"' || *t == '\\') jprintf("\\%c", *t);
+        else if ((unsigned char)*t >= 32) jprintf("%c", *t);
+    }
+    jprintf("\"");
+}
+
 // the scene as the page lists it: {"sky":"Dusk","objects":[{"id":1,"name":"Rock 1",...},...]}
+// (metres; pos: the middle of its bottom, top: its height)
 EXPORT const char *lr_scene(void){
     jlen = 0;
-    jprintf("{\"sky\":\"%s\",\"objects\":[", E.sky ? E.sky : "");
+    jprintf("{\"sky\":");
+    jstring(E.sky ? E.sky : "");
+    jprintf(",\"undo\":%d,\"redo\":%d,\"objects\":[", nundo, nredo);
     for (int i = 0; i < E.nobjs; i++){
         const EdObject *o = &E.objs[i];
-        jprintf("%s{\"id\":%d,\"name\":\"%s\",\"kind\":\"%s\",\"material\":\"%s\",\"dynamic\":%d,\"scale\":%.3f,"
-                "\"pos\":[%.3f,%.3f,%.3f],\"support\":%d}",
-                i ? "," : "", o->id, o->name, KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : "",
+        jprintf("%s{\"id\":%d,\"name\":", i ? "," : "", o->id);
+        jstring(o->name);
+        jprintf(",\"kind\":\"%s\",\"material\":\"%s\",\"dynamic\":%d,\"scale\":%.3f,"
+                "\"pos\":[%.3f,%.3f,%.3f],\"top\":%.3f,\"yaw\":%.1f,\"support\":%d}",
+                KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : "",
                 o->dynamic, (double)o->scale, (double)o->pos.x / UNITS_PER_M, (double)o->pos.y / UNITS_PER_M,
-                (double)o->pos.z / UNITS_PER_M, o->support);
+                (double)o->pos.z / UNITS_PER_M, (double)object_top(o) / UNITS_PER_M, (double)o->yaw, o->support);
     }
     jprintf("]}");
     return json_buf;
+}
+
+// What is under the screen point (sx, sy) (0..1 of the frame, from the top left), not counting
+// `exclude` and what rests on it (an object being dragged): {"hit":1,"id":2,"p":[x,y,z],
+// "land":[x,y,z]}: the object (0: the ground), the point hit, and where something dropped
+// there would stand (on an object: on its top, near the point; on the ground: there, kept
+// on the floor). {"hit":0}: the sky.
+EXPORT const char *lr_pick(double sx, double sy, int exclude){
+    Scene *s = viewer_scene();
+    scene_update_instances(s, &viewer_options()->ap);   // (the top level, as the instances are now)
+    Camera c = camera_now();
+    Ray ray = camera_ray(&c, (real)sx, (real)sy);
+    Hit h;
+    real tmin = 1e-3f;
+    const EdObject *on = NULL;
+    Vec3 p = vec3(0, 0, 0);
+    int hit = 0;
+    for (int tries = 0; tries < 16; tries++){
+        if (!scene_intersect(s, &ray, tmin, 1e9f, &h)) break;
+        on = h.inst >= 0 ? object_of_inst(h.inst) : NULL;
+        if (on && exclude && in_stack(on->id, exclude)){ tmin = h.t + 0.01f; on = NULL; continue; }
+        p = h.p;
+        hit = 1;
+        break;
+    }
+    if (!hit && ray.d.y < 0){                // (past the floor's end: where the ray meets its plane)
+        p = v_add(ray.o, v_scale(ray.d, -ray.o.y / ray.d.y));
+        hit = 1;
+        on = NULL;
+    }
+    jlen = 0;
+    if (!hit){ jprintf("{\"hit\":0}"); return json_buf; }
+    Vec3 land;
+    if (on){
+        Vec3 d = v_sub(p, on->pos);
+        d.y = 0;
+        real r = object_reach(on), l = v_len(d);
+        if (l > r) d = v_scale(d, r / l);
+        land = vec3(on->pos.x + d.x, on->pos.y + object_top(on), on->pos.z + d.z);
+    } else {
+        real f = (real)(FLOOR_M * UNITS_PER_M);
+        land = vec3(r_fmax(-f, r_fmin(f, p.x)), 0, r_fmax(-f, r_fmin(f, p.z)));
+    }
+    jprintf("{\"hit\":1,\"id\":%d,\"p\":[%.3f,%.3f,%.3f],\"land\":[%.3f,%.3f,%.3f]}", on ? on->id : 0,
+            (double)p.x / UNITS_PER_M, (double)p.y / UNITS_PER_M, (double)p.z / UNITS_PER_M,
+            (double)land.x / UNITS_PER_M, (double)land.y / UNITS_PER_M, (double)land.z / UNITS_PER_M);
+    return json_buf;
+}
+
+// where a point (metres) is on the screen: [sx,sy] (0..1 of the frame), or null behind the camera
+EXPORT const char *lr_project(double x, double y, double z){
+    Camera c = camera_now();
+    real u, v, cs;
+    jlen = 0;
+    if (!camera_project(&c, metres(x, y, z), &u, &v, &cs)) jprintf("null");
+    else jprintf("[%.5f,%.5f]", (double)u, (double)v);
+    return json_buf;
+}
+
+// every object's box on the screen: {"2":[s0,t0,s1,t1,d],...} (0..1 of the frame; d: its
+// distance, metres; what is all behind the camera is left out)
+EXPORT const char *lr_boxes(void){
+    Camera c = camera_now();
+    jlen = 0;
+    jprintf("{");
+    int first = 1;
+    for (int i = 0; i < E.nobjs; i++){
+        const EdObject *o = &E.objs[i];
+        real s0 = 1e9f, t0 = 1e9f, s1 = -1e9f, t1 = -1e9f;
+        int any = 0;
+        Aabb box = object_box(o);
+        for (int q = 0; q < 8; q++){
+            Vec3 p = vec3(q & 1 ? box.hi.x : box.lo.x, q & 2 ? box.hi.y : box.lo.y, q & 4 ? box.hi.z : box.lo.z);
+            real u, v, cs;
+            if (!camera_project(&c, p, &u, &v, &cs)) continue;
+            any = 1;
+            s0 = r_fmin(s0, u); s1 = r_fmax(s1, u); t0 = r_fmin(t0, v); t1 = r_fmax(t1, v);
+        }
+        if (!any) continue;
+        real d = v_len(v_sub(v_scale(v_add(box.lo, box.hi), 0.5f), c.origin));
+        jprintf("%s\"%d\":[%.5f,%.5f,%.5f,%.5f,%.3f]", first ? "" : ",", o->id, (double)s0, (double)t0, (double)s1,
+                (double)t1, (double)d / UNITS_PER_M);
+        first = 0;
+    }
+    jprintf("}");
+    return json_buf;
+}
+
+// the camera turned as it is, moved to show the object whole in the middle (F)
+EXPORT int lr_frame_object(int id){
+    const EdObject *o = object_find(id);
+    if (!o) return 1;
+    Aabb box = object_box(o);
+    View v = viewer_view();
+    double r = 0.5 * v_len(v_sub(box.hi, box.lo));
+    E.pivot = v_scale(v_add(box.lo, box.hi), 0.5f);
+    E.dist = fmax(30, 1.6 * r / sin(v.fov * PI / 360));
+    camera_from_pivot(&v);
+    viewer_set_view(&v);
+    return 0;
 }
 
 // ---- the loop --------------------------------------------------------------------------------
