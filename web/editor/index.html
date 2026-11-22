@@ -18,6 +18,8 @@
   <div id="overlay" aria-hidden="false">
     <div id="lamp-notes" aria-hidden="true"></div>
     <div id="brackets" class="brackets" aria-hidden="true" hidden><span></span><span></span><span></span><span></span></div>
+    <!-- the gizmo (5.13): W Move, E Rotate, R Scale; drawn from the engine's camera (editor.js) -->
+    <svg id="gizmo" class="gizmo" aria-hidden="true" hidden></svg>
     <div id="ghost-ground" class="ghost-ground" aria-hidden="true" hidden></div>
     <div id="ghost-ring" class="ghost-ring" aria-hidden="true" hidden></div>
     <div id="ghost-frame" class="ghost-frame" aria-hidden="true" hidden></div>
@@ -125,9 +127,9 @@
     <span class="secondary">Transform</span>
     <div role="group" aria-label="Transform tool" class="tools" id="card-tools">
       <button type="button" data-tool="drag" aria-pressed="true">Drag<span class="mono key">surface</span></button>
-      <button type="button" data-tool="move" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Move<span class="mono key">W</span></button>
-      <button type="button" data-tool="rotate" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Rotate<span class="mono key">E</span></button>
-      <button type="button" data-tool="scale" aria-pressed="false" aria-disabled="true" title="The gizmo comes in milestone 4">Scale<span class="mono key">R</span></button>
+      <button type="button" data-tool="move" aria-pressed="false" title="Move along an axis, or in the screen's plane (W)">Move<span class="mono key">W</span></button>
+      <button type="button" data-tool="rotate" aria-pressed="false" title="Turn about an axis, or the view (E)">Rotate<span class="mono key">E</span></button>
+      <button type="button" data-tool="scale" aria-pressed="false" title="Stretch along its own axes, or all at once (R)">Scale<span class="mono key">R</span></button>
     </div>
     <div class="readout mono" aria-label="Position in metres">
       <span><span class="ax-x">X</span><span id="card-px"></span></span>

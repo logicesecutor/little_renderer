@@ -234,3 +234,9 @@ a { color: var(--accent-amber); }
 .readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; font-size: 12px; }
 .readout > span { display: flex; gap: 6px; padding: 6px 8px; border-radius: 8px; background: var(--surface-inset); }
 .ax-x { color: var(--axis-x); } .ax-y { color: var(--axis-y); } .ax-z { color: var(--axis-z); }
+
+/* the gizmo (5.13): 200 x 200 px round the object's middle, its handles taking the mouse */
+.gizmo { overflow: visible; pointer-events: none; }
+.gizmo .hit { stroke: transparent; fill: none; stroke-width: 16; pointer-events: stroke; cursor: grab; }
+.gizmo .hit-fill { fill: transparent; pointer-events: all; cursor: grab; }
+.gizmo .hot { filter: brightness(1.35); }

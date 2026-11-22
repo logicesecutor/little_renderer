@@ -14,6 +14,7 @@
 // or a custom size fixes it).
 // The middle button held pans, as Shift with the left one.
 // .obj / .ply files from the computer: in metres (fitted to 1 m when that makes no sense), of clay.
+// Milestone 4: the gizmo (W Move, E Rotate, R Scale).
 'use strict';
 
 (() => {
@@ -219,7 +220,8 @@
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === 'Escape') { if (!closePopovers()) select(null); return; }
+    if (e.key === 'Escape') { if (!closePopovers()) { if (ui.tool !== 'drag') setTool('drag'); else select(null); } return; }
+    if (ui.sel && (k === 'w' || k === 'e' || k === 'r')) { e.preventDefault(); setTool({ w: 'move', e: 'rotate', r: 'scale' }[k]); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && ui.sel) { e.preventDefault(); removeSelected(); return; }
     if (k === 'f' && ui.sel) { e.preventDefault(); call('lr_frame_object', [ui.sel]); }
   });
@@ -340,7 +342,7 @@
       const id = Module.ccall(fn, 'number', ['string', 'number', 'number', 'number', 'number'],
                               ['/drop/' + model.name, pk.land[0], pk.land[1], pk.land[2], pk.id || 0]);
       log(fn + '("/drop/' + model.name + '", ' + where(pk.land) + (pk.id ? ', on ' + pk.id : '') + ') -> ' + id);
-      if (!id) { quiet('lr_undo'); toast('Could not read ' + model.name); refreshScene(); return; }
+      if (!id) { quiet('lr_forget_checkpoint'); toast('Could not read ' + model.name); refreshScene(); return; }
       if (fn === 'lr_import_mesh' && quiet('lr_last_import_fitted')) toast(model.name + ': its size made no sense in metres, so it was fitted to 1 m');
       refreshScene();
       select(id);
@@ -348,7 +350,7 @@
       quiet('lr_checkpoint');
       const r = Module.ccall('lr_load_sky', 'number', ['string', 'string'], ['/drop/' + hdr.name, hdr.name]);
       log('lr_load_sky("/drop/' + hdr.name + '")');
-      if (r) { quiet('lr_undo'); toast('Could not read ' + hdr.name); }
+      if (r) { quiet('lr_forget_checkpoint'); toast('Could not read ' + hdr.name); }
       refreshScene();
     }
   }
@@ -484,6 +486,7 @@
       place(b, q.left, q.top, Math.max(34, q.w), Math.max(34, q.h));
     }
     placeCard(R);
+    drawGizmo();
   }
   function frameLoop() { placeOverlay(); requestAnimationFrame(frameLoop); }
   requestAnimationFrame(frameLoop);
@@ -560,8 +563,177 @@
   });
   $('card-tools').addEventListener('click', (e) => {
     const b = e.target.closest('button');
-    if (b && b.getAttribute('aria-disabled') === 'true') toast('The gizmo (Move, Rotate, Scale) comes in milestone 4');
+    if (b) setTool(b.dataset.tool);
   });
+
+  // ---- the gizmo (5.13, 6.5): W Move, E Rotate, R Scale; Drag (surface) without one ----
+  // It is drawn here from the engine's camera (lr_camera), 200 x 200 px round the object's
+  // middle whatever its distance. A handle dragged changes the object along that axis only
+  // (Move: the world's X, Y, Z; Scale: the object's own), its centre in the screen's plane
+  // (Move) or all at once (Scale); Rotate turns it about its middle, about an axis or the
+  // view. One undo step per drag; what rests on it comes along.
+  const AXES = [[1, 0, 0, '#F0565A'], [0, 1, 0, '#5BD16B'], [0, 0, 1, '#5C9BFF']];
+  const V3 = {
+    add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]], sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+    mul: (a, k) => [a[0] * k, a[1] * k, a[2] * k], dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+    cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+    norm: (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+  };
+  const Q = {                                        // quaternions [w, x, y, z]
+    mul: (a, b) => [a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]],
+    axis: (v, ang) => { const s2 = Math.sin(ang / 2); return [Math.cos(ang / 2), v[0] * s2, v[1] * s2, v[2] * s2]; },
+    rotate: (q, v) => { const p = Q.mul(Q.mul(q, [0, v[0], v[1], v[2]]), [q[0], -q[1], -q[2], -q[3]]); return [p[1], p[2], p[3]]; },
+  };
+  let cam = null;
+  // a point (metres) in the overlay's pixels, and how many pixels a metre is there; null behind the camera
+  function proj(p) {
+    if (!cam) return null;
+    const r = V3.sub(p, cam.pos), z = V3.dot(r, cam.fwd);
+    if (z <= 1e-3) return null;
+    const R = frameRect(), h = Math.tan(cam.fov * Math.PI / 360), a = cam.w / cam.h;
+    return [(0.5 + V3.dot(r, cam.right) / (z * 2 * h * a)) * R.width, (0.5 - V3.dot(r, cam.up) / (z * 2 * h)) * R.height, R.height / (2 * z * h)];
+  }
+  function setTool(t) {
+    if (!['drag', 'move', 'rotate', 'scale'].includes(t)) return;
+    ui.tool = t;
+    for (const b of $('card-tools').querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.tool === t ? 'true' : 'false');
+    placeOverlay();
+  }
+  ui.tool = 'drag';
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  const giz = $('gizmo');
+  let gdrag = null;                                  // a handle being dragged
+  // what the handles are: {kind: 'axis' | 'plane' | 'ring' | 'view' | 'uniform', axis: 0..2}
+  function handle(kind, axis, shape, attrs, hit) {
+    const g = el('g', {}, giz);
+    el(shape, attrs, g);
+    const h = el(hit.tag, Object.assign({ class: hit.fill ? 'hit-fill' : 'hit' }, hit.attrs), g);
+    h.addEventListener('pointerdown', (e) => startGizmo(e, kind, axis, g));
+    return g;
+  }
+  function drawGizmo() {
+    const o = obj(ui.sel);
+    giz.textContent = '';
+    // (an svg: shown and hidden by the attribute itself; it has no .hidden)
+    if (!o || ui.tool === 'drag' || !ui.synced) { giz.toggleAttribute('hidden', true); return; }
+    cam = engineText('lr_camera');
+    const c = proj(o.centre);
+    if (!cam || !c) { giz.toggleAttribute('hidden', true); return; }
+    const R = frameRect();
+    giz.toggleAttribute('hidden', false);
+    // (the svg's own box the size of the frame: the browser takes the mouse on an svg's
+    // children only inside it, whatever they overflow)
+    giz.setAttribute('width', R.width); giz.setAttribute('height', R.height);
+    giz.style.left = '0px'; giz.style.top = '0px';
+    giz.style.width = R.width + 'px'; giz.style.height = R.height + 'px';
+    const k = c[2];                                  // pixels per metre at the object
+    const rot = [o.rot[0], o.rot[1], o.rot[2], o.rot[3]];
+    const dirs = AXES.map((A, i) => {                // each axis on the screen: a unit 2D direction
+      const v = ui.tool === 'scale' ? Q.rotate(rot, [A[0], A[1], A[2]]) : [A[0], A[1], A[2]];
+      const q = proj(V3.add(o.centre, V3.mul(v, 0.5 / k * 100)));   // (a point 50 px along it, about)
+      if (!q) return null;
+      const dx = q[0] - c[0], dy = q[1] - c[1], l = Math.hypot(dx, dy);
+      return l < 6 ? null : { v, d: [dx / l, dy / l], i };          // (pointing at the camera: no handle)
+    });
+    const at = (d, len) => [c[0] + d[0] * len, c[1] + d[1] * len];
+    if (ui.tool === 'move' || ui.tool === 'scale') {
+      for (const a of dirs) {
+        if (!a) continue;
+        const col = AXES[a.i][3], e1 = at(a.d, ui.tool === 'move' ? 70 : 68);
+        const g = handle('axis', a.i, 'line', { x1: c[0], y1: c[1], x2: e1[0], y2: e1[1], stroke: col, 'stroke-width': 3, 'stroke-linecap': 'round' },
+                         { tag: 'line', attrs: { x1: c[0], y1: c[1], x2: e1[0] + a.d[0] * 12, y2: e1[1] + a.d[1] * 12 } });
+        if (ui.tool === 'move') {
+          const tip = at(a.d, 82), n = [-a.d[1], a.d[0]];
+          el('polygon', { points: [[e1[0] + n[0] * 6, e1[1] + n[1] * 6], tip, [e1[0] - n[0] * 6, e1[1] - n[1] * 6]].map((p) => p.join(',')).join(' '), fill: col }, g);
+        } else el('rect', { x: e1[0] - 6, y: e1[1] - 6, width: 12, height: 12, fill: col }, g);
+      }
+      const sq = ui.tool === 'move' ? 5 : 6;
+      handle(ui.tool === 'move' ? 'plane' : 'uniform', -1, 'rect', { x: c[0] - sq, y: c[1] - sq, width: 2 * sq, height: 2 * sq, fill: '#ECEDEF' },
+             { tag: 'rect', fill: true, attrs: { x: c[0] - 10, y: c[1] - 10, width: 20, height: 20 } });
+    } else {                                         // rotate: a ring per axis (round it in the world), the view's ring
+      const rw = 55 / k;
+      for (let i = 2; i >= 0; i--) {
+        const A = AXES[i], ax = [A[0], A[1], A[2]];
+        const u = V3.norm(V3.cross(ax, Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])), v = V3.cross(ax, u);
+        const pts = [];
+        for (let j = 0; j <= 64; j++) {
+          const t = j / 64 * 2 * Math.PI, q = proj(V3.add(o.centre, V3.add(V3.mul(u, rw * Math.cos(t)), V3.mul(v, rw * Math.sin(t)))));
+          if (q) pts.push(q[0].toFixed(1) + ',' + q[1].toFixed(1));
+        }
+        const d = 'M' + pts.join('L');
+        handle('ring', i, 'path', { d, fill: 'none', stroke: A[3], 'stroke-width': 2.5 }, { tag: 'path', attrs: { d } });
+      }
+      handle('view', -1, 'circle', { cx: c[0], cy: c[1], r: 64, fill: 'none', stroke: '#ECEDEF', 'stroke-opacity': 0.35, 'stroke-width': 2.5 },
+             { tag: 'circle', attrs: { cx: c[0], cy: c[1], r: 64 } });
+    }
+    giz.__c = c;
+    giz.__dirs = dirs;
+  }
+  function startGizmo(e, kind, axis, g) {
+    const o = obj(ui.sel);
+    if (!o || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    quiet('lr_checkpoint');                          // (the whole drag: one undo step)
+    const c = giz.__c, dirs = giz.__dirs;
+    gdrag = { kind, axis, id: o.id, x0: e.clientX, y0: e.clientY, pos: o.pos.slice(), centre: o.centre.slice(), rot: o.rot.slice(),
+              stretch: o.stretch.slice(), c: [c[0], c[1]], k: c[2], dir: axis >= 0 && dirs[axis] ? dirs[axis] : null, pointer: e.pointerId };
+    g.classList.add('hot');
+    window.addEventListener('pointermove', moveGizmo);
+    window.addEventListener('pointerup', endGizmo);
+    window.addEventListener('pointercancel', endGizmo);
+  }
+  function moveGizmo(e) {
+    const d = gdrag;
+    if (!d || e.pointerId !== d.pointer) return;
+    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    let pos = d.pos, rot = d.rot, st = d.stretch;
+    const o = obj(d.id);
+    const uniform = o && (o.kind === 'sphere' || o.kind === 'lamp');   // (they keep their shape)
+    if (d.kind === 'axis' && d.dir && ui.tool === 'move') pos = V3.add(d.pos, V3.mul(d.dir.v, (dx * d.dir.d[0] + dy * d.dir.d[1]) / d.k));
+    else if (d.kind === 'plane') pos = V3.add(d.pos, V3.add(V3.mul(cam.right, dx / d.k), V3.mul(cam.up, -dy / d.k)));
+    else if (d.kind === 'axis' && d.dir) {           // scale along its own axis (100 px: twice as long)
+      const f = Math.max(0.05, 1 + (dx * d.dir.d[0] + dy * d.dir.d[1]) / 100);
+      st = uniform ? d.stretch.map((x) => x * f) : d.stretch.map((x, i) => (i === d.axis ? x * f : x));
+    } else if (d.kind === 'uniform') {
+      const f = Math.max(0.05, 1 + (dx - dy) / 150);
+      st = d.stretch.map((x) => x * f);
+    } else if (d.kind === 'ring' || d.kind === 'view') {
+      const a0 = Math.atan2(d.y0 - frameRect().top - d.c[1], d.x0 - frameRect().left - d.c[0]);
+      const a1 = Math.atan2(e.clientY - frameRect().top - d.c[1], e.clientX - frameRect().left - d.c[0]);
+      let da = a1 - a0;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      const ax = d.kind === 'view' ? cam.fwd : AXES[d.axis].slice(0, 3);
+      const turn = Q.axis(ax, da * Math.sign(V3.dot(ax, cam.fwd) || 1));   // (as the mouse goes round, seen from the camera)
+      rot = Q.mul(turn, d.rot);
+      pos = V3.add(d.centre, Q.rotate(turn, V3.sub(d.pos, d.centre)));    // (about its middle)
+    }
+    quiet('lr_set_transform', d.id, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3], st[0], st[1], st[2]);
+    d.moved = true;
+    ui.scene = engineJSON('lr_scene');
+    renderCard();
+  }
+  function endGizmo(e) {
+    const d = gdrag;
+    if (!d || (e && e.pointerId !== d.pointer)) return;
+    gdrag = null;
+    window.removeEventListener('pointermove', moveGizmo);
+    window.removeEventListener('pointerup', endGizmo);
+    window.removeEventListener('pointercancel', endGizmo);
+    const o = obj(d.id);
+    if (d.moved && o) log('lr_set_transform(' + d.id + ', ' + where(o.pos) + ', [' + o.rot.map((x) => x.toFixed(3)).join(', ') + '], [' + o.stretch.map(fmt).join(', ') + '])');
+    else if (!d.moved) quiet('lr_forget_checkpoint');   // (a press without a move: no step)
+    refreshScene();
+  }
+
 
   // ---- the renderer switch (5.5) ----
   $('renderer').addEventListener('click', (e) => {
