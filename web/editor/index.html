@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln — untitled_scene</title>
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<!-- Kiln, the web editor of little_renderer (docs: the editor's design handoff). The engine
+     (apps/editor.c, compiled to engine.js) draws into #canvas; everything else is HTML over
+     it, calling the engine's exported functions (editor.js). -->
+
+<!-- ================= RENDER VIEW: the engine's canvas, the whole window ================= -->
+<section id="view" aria-label="Render view">
+  <canvas id="canvas" tabindex="-1" aria-label="The scene, drawn by the engine"></canvas>
+</section>
+
+<!-- ================= TOP BAR ================= -->
+<div class="pill project">
+  <span class="wordmark">Kiln</span>
+  <span class="sep" aria-hidden="true"></span>
+  <span class="scene-name">untitled_scene</span>
+  <button type="button" id="res-button" class="res-button mono" aria-haspopup="dialog" aria-expanded="false">
+    <span id="res-label">1920 × 1080</span>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
+</div>
+
+<section id="res-popover" class="popover res-popover" role="dialog" aria-label="Render resolution" hidden>
+  <h2>Render resolution</h2>
+  <div role="radiogroup" aria-label="Presets" id="res-presets" class="res-presets"></div>
+  <form id="res-custom" class="res-custom">
+    <label>Width<input id="res-w" type="number" min="64" max="7680" step="1" class="mono"></label>
+    <span class="times" aria-hidden="true">×</span>
+    <label>Height<input id="res-h" type="number" min="64" max="4320" step="1" class="mono"></label>
+    <button type="submit" class="primary">Apply</button>
+  </form>
+  <span class="caption">The view always shows the whole frame. Shapes other than 16:9 get dark bars.</span>
+</section>
+
+<nav class="pill modes" aria-label="Mode">
+  <a href="#" aria-current="page">Build</a>
+  <a href="#" aria-disabled="true" title="Light mode comes after v1">Light</a>
+  <a href="#" aria-disabled="true" title="Simulate mode comes after v1">Simulate</a>
+  <a href="#" aria-disabled="true" title="Play mode comes after v1">Play</a>
+</nav>
+
+<div class="pill right-cluster">
+  <div role="group" aria-label="Renderer" class="segmented top" id="renderer">
+    <button type="button" data-backend="1" aria-pressed="false" title="Raster: instant, one light, hard shadows">Raster</button>
+    <button type="button" data-backend="0" aria-pressed="false" title="Path traced: all light, refines over time">Path traced</button>
+    <button type="button" data-backend="2" aria-pressed="true" title="Auto: raster while things move, path traced when still">Auto</button>
+  </div>
+  <button type="button" id="internals" class="switch" aria-pressed="false">
+    <span class="track" aria-hidden="true"><span class="knob"></span></span>Internals
+  </button>
+  <button type="button" id="save-button" class="primary save" aria-haspopup="menu" aria-expanded="false">Save</button>
+</div>
+
+<div id="save-menu" class="popover save-menu" role="menu" aria-label="Save" hidden>
+  <button type="button" role="menuitem" id="save-glb" aria-disabled="true" disabled>
+    <span class="item-title">Save scene</span>
+    <span class="item-sub mono">glTF 2.0 · untitled_scene.glb · next milestones</span>
+  </button>
+  <button type="button" role="menuitem" aria-disabled="true" disabled>
+    <span class="item-title">Export OpenUSD (.usda)</span>
+    <span class="item-sub">planned</span>
+  </button>
+</div>
+
+<div id="toast" class="toast" role="status" hidden><span class="dot" aria-hidden="true"></span><span id="toast-text"></span></div>
+
+<!-- ================= SCENE LIST ================= -->
+<nav class="panel scene-list" aria-label="Scene">
+  <div class="list-head"><span class="list-title">Scene</span><span id="count" class="mono muted small"></span></div>
+  <div class="sky-row">
+    <span class="swatch round" id="sky-swatch" aria-hidden="true"></span>
+    <span class="grow">Sky</span>
+    <span id="sky-label" class="muted small ellipsis"></span>
+  </div>
+  <ul id="objects"></ul>
+</nav>
+
+<!-- ================= BOTTOM LEFT: history + navigation ================= -->
+<div class="bottom-left">
+  <div role="group" aria-label="History" class="pill history">
+    <button type="button" id="undo" class="icon" aria-label="Undo (Ctrl Z)" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+    </button>
+    <button type="button" id="redo" class="icon" aria-label="Redo (Ctrl Shift Z)" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 0 0 0 12h3"/></svg>
+    </button>
+  </div>
+  <div class="nav-help">
+    <span><span class="mono key">drag</span> orbit</span>
+    <span><span class="mono key">Shift drag</span> pan</span>
+    <span><span class="mono key">wheel</span> zoom</span>
+    <span><span class="mono key">hold right + WASD</span> fly</span>
+    <span><span class="mono key">F</span> frame selection</span>
+  </div>
+</div>
+
+<!-- ================= BOTTOM CENTER: the tray ================= -->
+<div class="tray">
+  <div class="tray-top">
+    <div role="tablist" aria-label="Tray" class="segmented quiet small" id="tray-tabs">
+      <button type="button" role="tab" aria-selected="true" data-tab="shapes">Shapes</button>
+      <button type="button" role="tab" aria-selected="false" data-tab="materials">Materials</button>
+      <button type="button" role="tab" aria-selected="false" data-tab="skies">Skies</button>
+    </div>
+    <span class="grow"></span>
+    <span class="muted small">Drag into the scene, or drop <span class="mono hint-files">.glb .gltf .hdr</span> files from your computer</span>
+  </div>
+  <div class="tiles" id="tiles" role="tabpanel"></div>
+</div>
+
+<!-- ================= BOTTOM RIGHT: render status ================= -->
+<div class="panel status" id="status">
+  <div class="status-head">
+    <span id="status-title" class="status-title" aria-live="polite">Starting the engine</span>
+    <span id="status-right" class="mono muted small nowrap"></span>
+  </div>
+  <div class="bar" role="progressbar" id="status-bar" aria-label="Path tracer samples" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div id="status-fill" class="fill"></div>
+  </div>
+  <span id="status-note" class="muted small note">Loading the renderer and its GPU.</span>
+  <div id="internals-block" class="internals mono" hidden>
+    <div id="internal-lines"></div>
+    <span class="muted calls-title">engine calls</span>
+    <div id="calls"></div>
+  </div>
+</div>
+
+<script src="editor.js"></script>
+<script async src="engine.js"></script>
+</body>
+</html>
