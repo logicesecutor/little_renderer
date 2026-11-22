@@ -94,7 +94,7 @@ LIBS = -lm -lX11 -ldl
 EXE =
 endif
 
-APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim $(BIN)/bench)
+APPS = $(addsuffix $(EXE),$(BIN)/render $(BIN)/view $(BIN)/sim $(BIN)/bench $(BIN)/editor)
 EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_scene $(BIN)/raster_milestones \
                               $(BIN)/hello_physics $(BIN)/mesh_rain)
 # the unit tests, in the order make test runs them
