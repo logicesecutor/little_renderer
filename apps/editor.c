@@ -22,6 +22,7 @@
 #include "rt/intersect.h"
 #include "scene/camera.h"
 #include "scene/gltf.h"
+#include "scene/gltf_write.h"
 #include "rt/probe.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -1040,6 +1041,90 @@ EXPORT int lr_frame_object(int id){
     camera_from_pivot(&v);
     viewer_set_view(&v);
     return 0;
+}
+
+// ---- saving: the scene as glTF 2.0 (.glb), in metres (the spec, 6.8) ------------------------
+//
+// Every object a node (named as in the list) over its parts, each a mesh of its material;
+// physics as KHR_physics_rigid_bodies (a dynamic object's node has a motion; every part a
+// collider: the unit box or sphere of KHR_collision_shapes under the part's transform, a
+// mesh part its convex hull); what the standards have no place for in LR_scene: the sky,
+// the renderer and the resolution (the file's), each object's id, kind, catalogue material
+// and what it rests on (its node's). Both physics extensions are Review Drafts: their names
+// are here only, to change when they do.
+#define EXT_BODIES "KHR_physics_rigid_bodies"
+#define EXT_SHAPES "KHR_collision_shapes"
+#define EXT_SCENE "LR_scene"
+
+EXPORT int lr_save_gltf(const char *path){
+    Scene *s = viewer_scene();
+    GltfWriter *w = gltf_writer_new(s, (real)(1 / UNITS_PER_M));
+    if (!w) return 1;
+    int *geo = malloc(sizeof(int) * (size_t)(s->nmeshes + 2));             // (geometries: the meshes', then the box's and the sphere's)
+    int nmesh = 0, cap = 0;
+    struct { int geo, mat, mesh; } *meshes = NULL;
+    int *kids = NULL, kcap = 0;
+    if (!geo){ gltf_writer_free(w); return 1; }
+    for (int i = 0; i < s->nmeshes + 2; i++) geo[i] = -1;
+    int nodes = 0, ok = 1;
+    char ext[512], extras[256];
+    for (int i = 0; i < E.nobjs && ok; i++){
+        const EdObject *o = &E.objs[i];
+        kids = lr_grow(kids, sizeof(int), &kcap, o->ninst, 8);
+        for (int k = 0; k < o->ninst; k++){
+            const Instance *in = &s->insts[o->inst[k]];
+            int gi = in->mesh >= 0 ? in->mesh : s->nmeshes + (in->mesh == INST_BOX ? 0 : 1);
+            if (geo[gi] < 0) geo[gi] = gltf_add_geometry(w, in->mesh);
+            int m = -1;
+            for (int j = 0; j < nmesh && m < 0; j++) if (meshes[j].geo == geo[gi] && meshes[j].mat == in->material) m = meshes[j].mesh;
+            if (m < 0){
+                meshes = lr_grow(meshes, sizeof(*meshes), &cap, nmesh + 1, 16);
+                m = gltf_add_mesh(w, geo[gi], in->material);
+                meshes[nmesh].geo = geo[gi]; meshes[nmesh].mat = in->material; meshes[nmesh++].mesh = m;
+            }
+            if (geo[gi] < 0 || m < 0){ ok = 0; break; }
+            if (in->mesh >= 0) snprintf(ext, sizeof(ext), "\"" EXT_BODIES "\":{\"collider\":{\"geometry\":{\"node\":%d,\"convexHull\":true}}}", nodes);
+            else snprintf(ext, sizeof(ext), "\"" EXT_BODIES "\":{\"collider\":{\"geometry\":{\"shape\":%d}}}", in->mesh == INST_BOX ? 0 : 1);
+            char name[96];                       // (a name of 63 characters at most, and its part)
+            snprintf(name, sizeof(name), "%s, part %d", o->name, k + 1);
+            kids[k] = gltf_add_node(w, name, m, &in->xf, ext, NULL);
+            nodes++;
+        }
+        if (!ok) break;
+        const EdObject *sup = object_find(o->support);
+        int n = 0;
+        n += snprintf(ext + n, sizeof(ext) - (size_t)n, "\"" EXT_SCENE "\":{\"id\":%d,\"kind\":\"%s\"", o->id, KIND_NAMES[o->kind]);
+        if (o->mat >= 0) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"%s\"", MATERIALS[o->mat].key);
+        if (sup) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"restsOn\":%d", sup->id);
+        n += snprintf(ext + n, sizeof(ext) - (size_t)n, "}");
+        if (o->dynamic) snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"" EXT_BODIES "\":{\"motion\":{}}");
+        snprintf(extras, sizeof(extras), "\"scale\":%.4f", (double)o->scale);
+        gltf_add_group(w, o->name, kids, o->ninst, ext, extras);
+        nodes++;
+    }
+    // the file's extensions: the two unit shapes; the scene's own
+    gltf_use_extension(w, EXT_SHAPES, "{\"shapes\":[{\"type\":\"box\",\"box\":{\"size\":[2,2,2]}},{\"type\":\"sphere\",\"sphere\":{\"radius\":1}}]}", 0);
+    gltf_use_extension(w, EXT_BODIES, NULL, 0);
+    ViewerStatus st;
+    viewer_status(&st);
+    static const char *const RENDERERS[] = {"path traced", "raster", "auto"};
+    char root[640], sky[320];
+    if (E.sky == SKY_FILE){
+        snprintf(sky, sizeof(sky), "{\"file\":\"");
+        size_t k = strlen(sky);
+        for (const char *c = E.sky_name; *c && k < sizeof(sky) - 4; c++) if (*c != '"' && *c != '\\' && (unsigned char)*c >= 32) sky[k++] = *c;
+        snprintf(sky + k, sizeof(sky) - k, "\"}");
+    } else snprintf(sky, sizeof(sky), "{\"preset\":\"%s\"}", E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
+    int b = (int)viewer_backend();
+    snprintf(root, sizeof(root), "{\"version\":1,\"sky\":%s,\"renderer\":\"%s\",\"resolution\":[%d,%d],\"unitsPerMetre\":%g}",
+             sky, b >= 0 && b < 3 ? RENDERERS[b] : "auto", st.width, st.height, UNITS_PER_M);
+    gltf_use_extension(w, EXT_SCENE, root, 0);
+    if (ok) ok = gltf_write_glb(w, path) == 0;
+    gltf_writer_free(w);
+    free(geo);
+    free(meshes);
+    free(kids);
+    return ok ? 0 : 1;
 }
 
 // ---- the loop --------------------------------------------------------------------------------
