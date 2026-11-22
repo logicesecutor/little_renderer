@@ -296,8 +296,8 @@ typedef struct Scene {
     int nmeshes, cap_meshes;
     Instance *insts;
     int ninsts, cap_insts;
-    unsigned inst_version;  // changes whenever an instance is added or moved (scene_add_instance,
-                            // scene_move_instance; scene_mesh_changed for its mesh's instances): what
+    unsigned inst_version;  // changes whenever an instance is added, moved or removed (scene_add_instance,
+                            // scene_move_instance, scene_remove_instance; scene_mesh_changed for its mesh's instances): what
                             // holds a copy (the top level, the GPU) makes it again only then, so
                             // change s->insts through these
     unsigned insts_id;      // the inst_version its first instance was given: which scene's instances
@@ -354,6 +354,11 @@ Primitive instance_shape_prim(const Instance *in, int part);
 // the unit box's face k (0..5) in its own space, u x v outwards
 Primitive unit_box_face(int k, int material);
 void scene_move_instance(Scene *s, int inst, Xform xf);
+// Removes instance `inst`: the last one takes its place (its index becomes `inst`, its version
+// a new one, so a copy takes it again), the scene has one fewer. Returns the index the moved
+// one had (s->ninsts after the call), or -1 if `inst` was the last and nothing moved. Whoever
+// keeps instance indices (the physics' bodies, an editor's objects) changes that one to inst.
+int scene_remove_instance(Scene *s, int inst);
 // after changing a dynamic mesh's triangles: its bounds, and a new version (its BVHs rebuild)
 void scene_mesh_changed(Scene *s, int mesh);
 // the material of an instance's triangle

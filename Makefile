@@ -99,7 +99,7 @@ EXAMPLES = $(addsuffix $(EXE),$(BIN)/hello_raster $(BIN)/hello_rt $(BIN)/custom_
                               $(BIN)/hello_physics $(BIN)/mesh_rain)
 # the unit tests, in the order make test runs them
 TEST_NAMES = test_medium test_png test_jpeg test_brdf test_env test_tex test_gltf test_gpu_basic test_gpu_brdf \
-             test_physics test_gpu_rigid test_gpu_fluid test_gpu_rt test_gpu_trace
+             test_scene test_physics test_gpu_rigid test_gpu_fluid test_gpu_rt test_gpu_trace
 TESTS = $(addsuffix $(EXE),$(addprefix $(BIN)/,$(TEST_NAMES)))
 
 all: lib apps examples tests
@@ -257,7 +257,7 @@ view-dragon: $(BIN)/view$(EXE)
 	mkdir -p out
 	$(BIN)/view -scene mesh -obj $(DRAGON) -rot -35 $(ARGS)
 
-# the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the physics (CPU and GPU)
+# the unit tests: the medium sampling, PNG and JPEG files, the BSDF (and its WGSL), the environment, the textures, glTF models, the scene's instances, the physics (CPU and GPU)
 test: $(TESTS)
 	mkdir -p out
 	@for t in $(TEST_NAMES); do echo "$(BIN)/$$t"; $(BIN)/$$t || exit 1; done

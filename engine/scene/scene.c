@@ -706,6 +706,17 @@ void scene_move_instance(Scene *s, int i, Xform xf){
     in->version = s->inst_version;
 }
 
+int scene_remove_instance(Scene *s, int i){
+    if (i < 0 || i >= s->ninsts) return -1;
+    int last = s->ninsts - 1;
+    s->ninsts--;
+    s->inst_version = ++inst_versions;         // (fewer: what holds a copy takes them all again)
+    if (i == last) return -1;
+    s->insts[i] = s->insts[last];
+    s->insts[i].version = s->inst_version;
+    return last;
+}
+
 Primitive unit_box_face(int f, int material){
     Vec3 e[3] = {vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1)};
     int k = f / 2;
