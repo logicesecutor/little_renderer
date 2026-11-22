@@ -155,39 +155,87 @@
   // with W A S D flies. A click selects what is under it, or nothing. ----
   const view = $('view');
   let drag = null;
+
+  // ---- drags without an edge: the pointer locked (the browser's Pointer Lock) ----
+  // Once a drag moves, the cursor is hidden and the mouse's own movement is used, so the
+  // window's edge never stops it: orbit, pan and fly turn on, a gizmo handle goes on, an
+  // object carried over the surfaces takes the view with it past the frame's edge
+  // (lr_camera_slide). Each drag keeps a cursor of its own (vx, vy: where the cursor would
+  // be), drawn while the real one is hidden where it matters (carrying, the gizmo). Without
+  // the lock (not granted, Esc pressed, a browser without it) the same code runs on the
+  // real cursor's moves.
+  const lock = { want: false, reset: false };
+  const locked = () => document.pointerLockElement === view;
+  function lockPointer() {
+    if (lock.want || !view.requestPointerLock) return;
+    lock.want = true;
+    try { const p = view.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* (no lock: the real cursor) */ }
+  }
+  function unlockPointer() {
+    lock.want = false;
+    if (locked()) document.exitPointerLock();
+    $('vcursor').hidden = true;
+  }
+  // (the lock taken or lost: the next move is measured from where the cursor is then)
+  document.addEventListener('pointerlockchange', () => { lock.reset = true; if (!locked()) $('vcursor').hidden = true; });
+  function track(d, x, y) { d.lx = x; d.ly = y; d.vx = x; d.vy = y; }
+  // this event's move in window pixels; it moves the drag's cursor too
+  function moved(e, d) {
+    let mx, my;
+    if (locked()) {
+      const cap = (m) => Math.max(-250, Math.min(250, m || 0));   // (a first move after the lock can be a jump)
+      mx = cap(e.movementX); my = cap(e.movementY);
+      if (lock.reset) { lock.reset = false; if (Math.abs(mx) > 60 || Math.abs(my) > 60) mx = my = 0; }
+    } else if (lock.reset) {
+      lock.reset = false; mx = my = 0;
+    } else { mx = e.clientX - d.lx; my = e.clientY - d.ly; }
+    d.lx = e.clientX; d.ly = e.clientY;
+    d.vx += mx; d.vy += my;
+    return [mx, my];
+  }
+  function showVCursor(x, y) {
+    const el = $('vcursor'), R = frameRect();
+    el.style.left = (x - R.left) + 'px';
+    el.style.top = (y - R.top) + 'px';
+    el.hidden = !locked();
+  }
   view.addEventListener('contextmenu', (e) => e.preventDefault());
   view.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // (no auto-scroll on the middle button)
   view.addEventListener('auxclick', (e) => e.preventDefault());
   view.addEventListener('pointerdown', (e) => {
     if (drag || !ui.synced) return;
-    if ((e.button === 0 && e.shiftKey) || e.button === 1) drag = { mode: 'pan', x: e.clientX, y: e.clientY, id: e.pointerId };
+    if ((e.button === 0 && e.shiftKey) || e.button === 1) drag = { mode: 'pan' };
     else if (e.button === 0) {
       const [sx, sy] = toFrame(e.clientX, e.clientY);
       const pk = pick(sx, sy, 0);
-      drag = { mode: pk && pk.id ? 'press-object' : 'press', obj: pk && pk.id, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, id: e.pointerId };
+      drag = { mode: pk && pk.id ? 'press-object' : 'press', obj: pk && pk.id };
     } else if (e.button === 2) {
-      drag = { mode: 'fly', x: e.clientX, y: e.clientY, id: e.pointerId };
+      drag = { mode: 'fly' };
       ui.flying = true;
       ui.flyKeys = 0;
     } else return;
+    drag.id = e.pointerId;
+    drag.x0 = e.clientX;
+    drag.y0 = e.clientY;
+    track(drag, e.clientX, e.clientY);
+    lock.reset = false;
     view.setPointerCapture(e.pointerId);
     e.preventDefault();
   });
   view.addEventListener('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.id) return;
-    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    drag.x = e.clientX;
-    drag.y = e.clientY;
+    const [dx, dy] = moved(e, drag);
     if (!dx && !dy) return;
-    const far = Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 4;
+    const far = Math.hypot(drag.vx - drag.x0, drag.vy - drag.y0) > 4;
     if (drag.mode === 'press' && far) drag.mode = 'orbit';
     if (drag.mode === 'press-object' && far) startObjectDrag(drag);
+    if (drag.mode !== 'press' && drag.mode !== 'press-object') lockPointer();   // (a click: the cursor stays)
     const c = $('canvas');
     const toPx = c.height / Math.max(1, c.clientHeight);       // window pixels -> the render's
     if (drag.mode === 'orbit') quiet('lr_camera_orbit', dx, dy);
     else if (drag.mode === 'pan') quiet('lr_camera_pan', dx * toPx, dy * toPx);
     else if (drag.mode === 'fly') quiet('lr_camera_look', dx, dy);
-    else if (drag.mode === 'object') dragObject(drag, e.clientX, e.clientY);
+    else if (drag.mode === 'object') dragObject(drag);
   });
   function endDrag(e) {
     if (!drag || (e && e.pointerId !== drag.id)) return;
@@ -196,6 +244,7 @@
     if (drag.mode === 'press') select(null);
     if (drag.mode === 'object') endObjectDrag(drag);
     drag = null;
+    unlockPointer();
   }
   view.addEventListener('pointerup', endDrag);
   view.addEventListener('pointercancel', endDrag);
@@ -272,7 +321,22 @@
     d.moved = false;
     select(d.obj);
   }
-  function dragObject(d, x, y) {
+  // the object under the drag's cursor; the cursor stays on the frame, and what goes past
+  // its edge slides the view (by as much, at the object's depth), so the object can be
+  // carried as far as the mouse goes
+  function dragObject(d) {
+    const R = frameRect(), m = 2;
+    const x = Math.max(R.left + m, Math.min(R.right - m, d.vx)), y = Math.max(R.top + m, Math.min(R.bottom - m, d.vy));
+    const ox = d.vx - x, oy = d.vy - y;
+    d.vx = x;
+    d.vy = y;
+    const at = obj(d.obj);
+    if ((ox || oy) && at) {
+      const c = $('canvas'), toPx = c.height / Math.max(1, c.clientHeight);
+      quiet('lr_camera_slide', ox * toPx, oy * toPx, at.centre[0], at.centre[1], at.centre[2]);
+      d.slid = true;
+    }
+    showVCursor(x, y);
     const [sx, sy] = toFrame(x, y);
     const pk = pick(sx, sy, d.obj);               // (not onto itself or what rests on it)
     if (!pk || !pk.hit) return;
@@ -686,6 +750,8 @@
     const c = giz.__c, dirs = giz.__dirs;
     gdrag = { kind, axis, id: o.id, x0: e.clientX, y0: e.clientY, pos: o.pos.slice(), centre: o.centre.slice(), rot: o.rot.slice(),
               stretch: o.stretch.slice(), c: [c[0], c[1]], k: c[2], dir: axis >= 0 && dirs[axis] ? dirs[axis] : null, pointer: e.pointerId };
+    track(gdrag, e.clientX, e.clientY);
+    lock.reset = false;
     g.classList.add('hot');
     window.addEventListener('pointermove', moveGizmo);
     window.addEventListener('pointerup', endGizmo);
@@ -694,7 +760,10 @@
   function moveGizmo(e) {
     const d = gdrag;
     if (!d || e.pointerId !== d.pointer) return;
-    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    const [mx, my] = moved(e, d);
+    if (!mx && !my) return;
+    lockPointer();
+    const dx = d.vx - d.x0, dy = d.vy - d.y0;
     let pos = d.pos, rot = d.rot, st = d.stretch;
     const o = obj(d.id);
     const uniform = o && (o.kind === 'sphere' || o.kind === 'lamp');   // (they keep their shape)
@@ -708,7 +777,8 @@
       st = d.stretch.map((x) => x * f);
     } else if (d.kind === 'ring' || d.kind === 'view') {
       const a0 = Math.atan2(d.y0 - frameRect().top - d.c[1], d.x0 - frameRect().left - d.c[0]);
-      const a1 = Math.atan2(e.clientY - frameRect().top - d.c[1], e.clientX - frameRect().left - d.c[0]);
+      const a1 = Math.atan2(d.vy - frameRect().top - d.c[1], d.vx - frameRect().left - d.c[0]);
+      showVCursor(d.vx, d.vy);                    // (round the ring: where the hidden cursor is)
       let da = a1 - a0;
       while (da > Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
@@ -729,6 +799,7 @@
     window.removeEventListener('pointermove', moveGizmo);
     window.removeEventListener('pointerup', endGizmo);
     window.removeEventListener('pointercancel', endGizmo);
+    unlockPointer();
     const o = obj(d.id);
     if (d.moved && o) log('lr_set_transform(' + d.id + ', ' + where(o.pos) + ', [' + o.rot.map((x) => x.toFixed(3)).join(', ') + '], [' + o.stretch.map(fmt).join(', ') + '])');
     else if (!d.moved) quiet('lr_forget_checkpoint');   // (a press without a move: no step)

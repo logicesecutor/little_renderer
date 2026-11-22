@@ -199,6 +199,8 @@ a { color: var(--accent-amber); }
 .ghost-frame { inset: 12px; border-radius: 28px; border: 2px dashed var(--accent-amber); background: #F2A65A0D; }
 .ghost-pill { transform: translate(-50%, -100%); height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 999px; background: var(--accent-amber); color: var(--ink-on-amber); font-weight: 600; white-space: nowrap; }
 .ghost-pill.dark { background: var(--surface-float); color: var(--text-primary); }
+/* the cursor of a drag while the real one is hidden (the pointer locked) */
+.vcursor { width: 14px; height: 14px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.4); }
 /* raster lamp note (5.16) */
 .lamp-note { position: absolute; transform: translate(-50%, -100%); height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 999px; background: var(--surface-float); border: 1px solid var(--border-strong); font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
 .lamp-note::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #FFD39A; }

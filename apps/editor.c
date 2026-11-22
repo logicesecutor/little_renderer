@@ -464,6 +464,32 @@ EXPORT void lr_camera_pan(double dx, double dy){     // a drag, in pixels of the
     viewer_set_view(&v);
 }
 
+// an object dragged past the frame's edge (by dx, dy pixels of the page's view): the camera
+// slides over the ground, its height kept, so that the point p (the object, at its depth)
+// moves on the screen by about that much and the drag can go on as far as the mouse goes.
+// Sideways along the view's right, up and down along its forward (both level); up and
+// down a ground point moves less on the screen than it does on the ground (seen at a
+// slant), so the slide there is longer by 1 / sin of the angle the ray meets it at.
+EXPORT void lr_camera_slide(double dx, double dy, double x, double y, double z){
+    View v = viewer_view();
+    ViewerStatus st;
+    viewer_status(&st);
+    Vec3 f = view_forward(&v), to = v_sub(vec3((real)x, (real)y, (real)z), v.pos);
+    double depth = fmax(30, v_dot(to, f));
+    double k = 2 * depth * tan(v.fov * PI / 360) / (st.height > 0 ? st.height : 1);
+    Vec3 r = view_right(&v);
+    r.y = 0;
+    f.y = 0;
+    if (v_dot(r, r) < 1e-8f || v_dot(f, f) < 1e-8f) return;
+    r = v_norm(r);
+    f = v_norm(f);
+    double slant = fmax(0.2, fabs(v_norm(to).y));
+    Vec3 mv = v_add(v_scale(r, (real)(dx * k)), v_scale(f, (real)(-dy * k / slant)));
+    E.pivot = v_add(E.pivot, mv);
+    v.pos = v_add(v.pos, mv);
+    viewer_set_view(&v);
+}
+
 EXPORT void lr_camera_dolly(double steps){           // wheel steps, + towards
     View v = viewer_view();
     E.dist = fmax(30, fmin(20000, E.dist * pow(0.88, steps)));
