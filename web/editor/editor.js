@@ -15,6 +15,7 @@
 // The middle button held pans, as Shift with the left one.
 // .obj / .ply files from the computer: in metres (fitted to 1 m when that makes no sense), of clay.
 // Milestone 4: the gizmo (W Move, E Rotate, R Scale).
+// Saving: the scene as glTF 2.0 (.glb), downloaded.
 'use strict';
 
 (() => {
@@ -734,6 +735,27 @@
     refreshScene();
   }
 
+  // ---- saving (5.7, 6.8): the scene as glTF 2.0 (.glb), downloaded ----
+  $('save-glb').addEventListener('click', () => {
+    closeSave();
+    if (!ui.ready) return;
+    const name = 'untitled_scene.glb';
+    try { Module.FS.mkdir('/save'); } catch (e) { /* (there already) */ }
+    const r = Module.ccall('lr_save_gltf', 'number', ['string'], ['/save/' + name]);
+    log('lr_save_gltf("' + name + '")');
+    if (r) { toast('Could not save the scene'); return; }
+    const data = Module.FS.readFile('/save/' + name);
+    const url = URL.createObjectURL(new Blob([data], { type: 'model/gltf-binary' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    window.__lastSave = data;                        // (for a test to look at)
+    toast('Saved ' + name);
+  });
 
   // ---- the renderer switch (5.5) ----
   $('renderer').addEventListener('click', (e) => {
