@@ -366,6 +366,20 @@ static void gpu_sim_stop(void){
     V.grigid = NULL;
 }
 
+// the demo again from t = 0: the scene made again as sim_setup makes it. 0 = done
+static int sim_restart(void){
+    gpu_sim_stop();
+    sim_free(&V.sim);
+    scene_free(&V.scene);
+    memset(&V.scene, 0, sizeof(V.scene));
+    if (sim_setup(&V.sim, &V.o, &V.scene) != 0) return 1;
+    V.sim.max_dt = 1.0 / 30;
+    gpu_sim_start();
+    sim_step(&V.sim, &V.scene, 0);
+    scene_set_accel(&V.scene, V.accel, &V.o.ap);
+    return 0;
+}
+
 #ifdef __EMSCRIPTEN__
 // A screenshot of what the GPU shows (the canvas cannot be read back directly): the pixels
 // become a PNG, kept in window.lrCapture, and downloaded when asked for with the P key.
@@ -780,15 +794,7 @@ static int viewer_input(Frame *fr){
             case 'n': if (V.o.sim.on) sim_drop_ball(&V.sim, &V.scene); break;
             case 't':
                 if (V.o.sim.on){
-                    gpu_sim_stop();
-                    sim_free(&V.sim);
-                    scene_free(&V.scene);
-                    memset(&V.scene, 0, sizeof(V.scene));
-                    if (sim_setup(&V.sim, &V.o, &V.scene) != 0) return 0;
-                    V.sim.max_dt = 1.0 / 30;
-                    gpu_sim_start();
-                    sim_step(&V.sim, &V.scene, 0);
-                    scene_set_accel(&V.scene, V.accel, &V.o.ap);
+                    if (sim_restart() != 0) return 0;
                     fr->changed = 1;
                 }
                 break;
@@ -1270,6 +1276,23 @@ void viewer_scene_changed(int restart){
     else V.gpu_scene_moved = 1;                // the GPU's carries its samples where nothing changed
     V.raster_dirty = 1;
     V.ext_changed = 1;
+}
+
+int viewer_sim_on(void){ return V.o.sim.on; }
+void viewer_sim_pause(int paused){ if (V.o.sim.on) V.sim_paused = paused != 0; }
+int viewer_sim_paused(void){ return V.o.sim.on && V.sim_paused; }
+double viewer_sim_time(void){ return V.o.sim.on ? (double)V.sim.pw.time : 0; }
+int viewer_sim_bodies(void){ return V.o.sim.on ? V.sim.pw.rigid.nbodies : 0; }
+void viewer_sim_line(char *buf, int len){
+    if (len <= 0) return;
+    if (V.o.sim.on) sim_status(&V.sim, buf, len);
+    else buf[0] = 0;
+}
+int viewer_sim_restart(void){
+    if (!V.o.sim.on) return 1;
+    if (sim_restart() != 0) return 1;
+    viewer_scene_changed(1);
+    return 0;
 }
 
 void viewer_relight(void){

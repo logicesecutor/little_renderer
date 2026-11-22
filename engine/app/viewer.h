@@ -57,6 +57,15 @@ void viewer_redraw(void);
 // at it, the GPU's view made again; the image starts over. 0 = done, 1 = out of memory.
 int viewer_resize(int w, int h);
 
+// The physics demo (-sim on), for a program's own controls (the keys: Space, T):
+int viewer_sim_on(void);
+void viewer_sim_pause(int paused);   // (the image carries on: path traced, it converges)
+int viewer_sim_paused(void);
+int viewer_sim_restart(void);    // the demo again from t = 0, as set up (key T). 0 = done
+double viewer_sim_time(void);    // simulated seconds so far
+int viewer_sim_bodies(void);     // bodies in the world now (the demo adds them as it goes)
+void viewer_sim_line(char *buf, int len);   // one line about it (simdemo.h, sim_status)
+
 typedef struct {
     int tracing;         // what shows is path traced (else rasterized)
     int on_gpu;          // the GPU draws (else the CPU)
