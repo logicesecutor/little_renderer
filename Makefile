@@ -394,6 +394,19 @@ $(WEB)/index_mt.js: $(WEB_SRC) $(HDR) web/include/omp.h $(WEB_STAMP) $(wildcard 
 	@mkdir -p $(WEB)
 	$(EMCC) $(WEBBASE) $(WEBMT) $(foreach m,$(wildcard $(WEB_MODELS)),--preload-file $(m)@$(m)) $(WEB_SRC) -o $@
 
+# the editor (Kiln, docs: the editor's design handoff): apps/editor.c's engine under the page
+# web/editor (HTML, CSS and JS over the engine's canvas, calling its exported lr_ functions):
+#   make web-editor && make serve       then open http://localhost:8000/editor/
+WEB_EDITOR = $(WEB)/editor
+WEB_EDITOR_PAGE = $(patsubst web/editor/%,$(WEB_EDITOR)/%,$(wildcard web/editor/*.* web/editor/fonts/*))
+web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR_PAGE)
+$(WEB_EDITOR)/engine.js: $(SRC) $(WGSL_C) apps/editor.c $(HDR) $(WEB_STAMP)
+	@mkdir -p $(WEB_EDITOR)
+	$(EMCC) $(WEBBASE) -sEXPORTED_RUNTIME_METHODS=UTF8ToString $(SRC) $(WGSL_C) apps/editor.c -o $@
+$(WEB_EDITOR)/%: web/editor/%
+	@mkdir -p $(dir $@)
+	cp $< $@
+
 # a local web server for the page (the browser will not run WebAssembly from file://)
 # the GPU air against the CPU air in a browser (open web/build/test_gpu_fluid.html, or see
 # docs/WEB.md; natively it is part of make test)
@@ -416,4 +429,4 @@ web-check: $(WEB)/bench.html $(if $(THREADS),$(WEB)/bench_mt.html)
 clean:
 	rm -rf build bin $(WEB)
 
-.PHONY: FORCE all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web webtest serve clean
+.PHONY: FORCE all lib apps examples tests check-layers models dragon-download gltf-download skies-download demo run view view-dragon final dragon bench bench-dragon perf perf-quick web-bench web-check test cloud cloud-frames sim sim-blast gif web web-editor webtest serve clean
