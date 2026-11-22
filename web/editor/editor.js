@@ -12,6 +12,7 @@
 // .hdr as the sky), and the raster's light made again after each change (Relighting).
 // The frame: by default the whole window in the screen's real pixels, following it (a preset
 // or a custom size fixes it).
+// The middle button held pans, as Shift with the left one.
 'use strict';
 
 (() => {
@@ -151,9 +152,11 @@
   const view = $('view');
   let drag = null;
   view.addEventListener('contextmenu', (e) => e.preventDefault());
+  view.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // (no auto-scroll on the middle button)
+  view.addEventListener('auxclick', (e) => e.preventDefault());
   view.addEventListener('pointerdown', (e) => {
     if (drag || !ui.synced) return;
-    if (e.button === 0 && e.shiftKey) drag = { mode: 'pan', x: e.clientX, y: e.clientY, id: e.pointerId };
+    if ((e.button === 0 && e.shiftKey) || e.button === 1) drag = { mode: 'pan', x: e.clientX, y: e.clientY, id: e.pointerId };
     else if (e.button === 0) {
       const [sx, sy] = toFrame(e.clientX, e.clientY);
       const pk = pick(sx, sy, 0);
