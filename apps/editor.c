@@ -76,7 +76,8 @@ typedef struct {
     int dynamic;                   // its body in the physics (Simulate mode): 0 static, 1 dynamic
     real scale;                    // 1 = the shape's own size (a model: the file's)
     Vec3 pos;                      // the middle of its bottom, units
-    real yaw;                      // degrees about the vertical
+    Quat rot;                      // its turn, about the middle of its bottom
+    Vec3 stretch;                  // its size along its own axes, times scale (the gizmo's Scale: 1, 1, 1 at first)
     int support;                   // the id of what it rests on (0: the ground)
     int *inst, ninst;              // its instances in the scene (its own array)
 } EdObject;
@@ -113,46 +114,42 @@ typedef struct {
 
 static Editor E;
 
-static Mat3 yaw_mat(real deg){
-    real a = deg * (real)PI / 180, c = r_cos(a), s = r_sin(a);
-    Mat3 r = {{{c, 0, s}, {0, 1, 0}, {-s, 0, c}}};
-    return r;
-}
-
 static int object_parts(const EdObject *o){
     return o->kind == ED_LAMP ? 3 : o->kind == ED_MODEL ? E.models[o->model].nparts : 1;
 }
 
-// part i's transform: its place in the object's own space (units, bottom centre at the
-// origin), scaled, turned, moved to pos
-static Xform object_part_xform(const EdObject *o, int i){
-    real s = o->scale;
-    Mat3 r = yaw_mat(o->yaw);
-    Vec3 p = o->pos;
+// part i in the object's own space at its own size (units, the middle of its bottom at the
+// origin)
+static Xform object_part_local(const EdObject *o, int i){
     switch (o->kind){
     case ED_BOX: case ED_SPHERE:
-        return xform_axes(r, vec3(50 * s, 50 * s, 50 * s), v_add(p, vec3(0, 50 * s, 0)));
+        return xform_axes(mat3_identity(), vec3(50, 50, 50), vec3(0, 50, 0));
     case ED_ROCK:
-        return xform_axes(r, vec3(s, s, s), p);
+        return xform_identity();
     case ED_LAMP:   // a base, a pole and the glowing ball on top
-        if (i == 0) return xform_axes(r, vec3(18 * s, 3 * s, 18 * s), v_add(p, vec3(0, 3 * s, 0)));
-        if (i == 1) return xform_axes(r, vec3(3 * s, 32 * s, 3 * s), v_add(p, vec3(0, 38 * s, 0)));
-        return xform_axes(r, vec3(20 * s, 20 * s, 20 * s), v_add(p, vec3(0, 88 * s, 0)));
-    case ED_MODEL: default: {
-        // world = pos + s r (the part's own transform)
-        const Xform *x = &E.models[o->model].parts[i].xf;
-        Xform w;
-        for (int a = 0; a < 3; a++){
-            for (int c = 0; c < 4; c++){
-                real v = 0;
-                for (int k = 0; k < 3; k++) v += r.m[a][k] * x->m[k][c];
-                w.m[a][c] = s * v;
-            }
-            w.m[a][3] += a == 0 ? p.x : a == 1 ? p.y : p.z;
+        if (i == 0) return xform_axes(mat3_identity(), vec3(18, 3, 18), vec3(0, 3, 0));
+        if (i == 1) return xform_axes(mat3_identity(), vec3(3, 32, 3), vec3(0, 38, 0));
+        return xform_axes(mat3_identity(), vec3(20, 20, 20), vec3(0, 88, 0));
+    case ED_MODEL: default:
+        return E.models[o->model].parts[i].xf;
+    }
+}
+
+// part i in the world: its own place, sized (scale times stretch along the object's axes),
+// turned, moved to pos
+static Xform object_part_xform(const EdObject *o, int i){
+    const Xform L = object_part_local(o, i);
+    Mat3 r = quat_to_mat3(o->rot);
+    Vec3 k = v_scale(o->stretch, o->scale);
+    real ks[3] = {k.x, k.y, k.z}, p[3] = {o->pos.x, o->pos.y, o->pos.z};
+    Xform w;
+    for (int a = 0; a < 3; a++)
+        for (int c = 0; c < 4; c++){
+            real v = 0;
+            for (int j = 0; j < 3; j++) v += r.m[a][j] * ks[j] * L.m[j][c];
+            w.m[a][c] = c == 3 ? v + p[a] : v;
         }
-        return w;
-    }
-    }
+    return w;
 }
 
 // the materials of an object's parts: the lamp's stand is dark, the rest its material (a
@@ -220,6 +217,8 @@ static int object_add(EdKind kind, int mat, int model, Vec3 pos, real scale, int
     o->mesh = kind == ED_ROCK ? E.rock_mesh : -1;
     o->model = model;
     o->scale = scale;
+    o->rot = quat_identity();
+    o->stretch = vec3(1, 1, 1);
     o->pos = pos;
     o->dynamic = dynamic;
     o->support = support;
@@ -250,28 +249,6 @@ static int in_stack(int id, int root){
     return 0;
 }
 
-// how tall it is (where something put on it stands), and how far from its middle its top
-// reaches (where on it something can stand), units
-static real object_top(const EdObject *o){
-    switch (o->kind){
-    case ED_BOX: case ED_SPHERE: return 100 * o->scale;
-    case ED_LAMP: return 108 * o->scale;
-    case ED_MODEL: return E.models[o->model].box.hi.y * o->scale;
-    default: return viewer_scene()->meshes[o->mesh].box.hi.y * o->scale;
-    }
-}
-static real object_reach(const EdObject *o){
-    switch (o->kind){
-    case ED_BOX: return 40 * o->scale;
-    case ED_SPHERE: return 12 * o->scale;
-    case ED_LAMP: return 6 * o->scale;
-    default: {
-        Aabb b = o->kind == ED_MODEL ? E.models[o->model].box : viewer_scene()->meshes[o->mesh].box;
-        return 0.3f * r_fmin(b.hi.x - b.lo.x, b.hi.z - b.lo.z) * o->scale;
-    }
-    }
-}
-
 // its world box: around its instances'
 static Aabb object_box(const EdObject *o){
     const Scene *s = viewer_scene();
@@ -282,6 +259,15 @@ static Aabb object_box(const EdObject *o){
         box.hi = vec3(r_fmax(box.hi.x, b.hi.x), r_fmax(box.hi.y, b.hi.y), r_fmax(box.hi.z, b.hi.z));
     }
     return box;
+}
+
+// how high its top is above the middle of its bottom (where something put on it stands),
+// and how far from its middle its top reaches (where on it something can stand), units:
+// from its box in the world (turned or stretched by the gizmo too)
+static real object_top(const EdObject *o){ return object_box(o).hi.y - o->pos.y; }
+static real object_reach(const EdObject *o){
+    Aabb b = object_box(o);
+    return 0.3f * r_fmin(b.hi.x - b.lo.x, b.hi.z - b.lo.z);
 }
 
 // an object moved by d, and what rests on it with it
@@ -613,6 +599,43 @@ EXPORT int lr_scale_object(int id, double scale){
     return 0;
 }
 
+// the gizmo (Move, Rotate, Scale): its place (the middle of its bottom, metres), its turn (a
+// quaternion w x y z) and its stretch along its own axes, all at once. What rests on it comes
+// along, as one with it (moved and turned with it, raised or lowered with its top). Lifted
+// or lowered (by more than a centimetre) it no longer rests on what it stood on.
+static void object_carry(int id, Vec3 from, Vec3 to, Quat turn, real lift, int depth){
+    for (int i = 0; i < E.nobjs && depth < 1000; i++){
+        EdObject *c = &E.objs[i];
+        if (c->support != id) continue;
+        Vec3 p = v_add(v_add(to, quat_rotate(turn, v_sub(c->pos, from))), vec3(0, lift, 0));
+        Vec3 was = c->pos;
+        c->pos = p;
+        c->rot = quat_norm(quat_mul(turn, c->rot));
+        object_update(c);
+        object_carry(c->id, was, p, turn, 0, depth + 1);
+    }
+}
+EXPORT int lr_set_transform(int id, double x, double y, double z, double qw, double qx, double qy, double qz,
+                            double sx, double sy, double sz){
+    EdObject *o = object_find(id);
+    if (!o || !(sx > 0.01 && sy > 0.01 && sz > 0.01 && sx < 100 && sy < 100 && sz < 100)) return 1;
+    Quat q = quat_norm(quat((real)qw, (real)qx, (real)qy, (real)qz));
+    Quat turn = quat_mul(q, quat(o->rot.w, -o->rot.x, -o->rot.y, -o->rot.z));   // (the new turn after the old one undone)
+    Vec3 from = o->pos;
+    real top = object_top(o);
+    o->pos = metres(x, y, z);
+    o->rot = q;
+    o->stretch = vec3((real)sx, (real)sy, (real)sz);
+    object_update(o);
+    if (r_fabs(o->pos.y - from.y) > 1) o->support = 0;
+    // (the children: as one with it; a change of its size raises or lowers them with its top,
+    // when it is not turned at the same time)
+    real lift = r_fabs(turn.w) > 0.999999f ? object_top(o) - top : 0;     // (the move itself is in from -> pos)
+    object_carry(id, from, o->pos, turn, lift, 0);
+    changed();
+    return 0;
+}
+
 // static or dynamic (its body in Simulate mode)
 // its material: one of the catalogue's (MATERIALS, 0..7), or -1: a model's own again
 EXPORT int lr_set_material(int id, int mat){
@@ -796,6 +819,10 @@ EXPORT void lr_checkpoint(void){
     snapshot_push(undo_st, &nundo, snapshot_take());
     while (nredo > 0) free(redo_st[--nredo].objs);
 }
+// the last checkpoint, when nothing changed after it after all (a press without a drag)
+EXPORT void lr_forget_checkpoint(void){
+    if (nundo > 0) free(undo_st[--nundo].objs);
+}
 EXPORT int lr_undo(void){
     if (nundo == 0) return 0;
     snapshot_push(redo_st, &nredo, snapshot_take());
@@ -881,13 +908,18 @@ EXPORT const char *lr_scene(void){
     jprintf(",\"undo\":%d,\"redo\":%d,\"objects\":[", nundo, nredo);
     for (int i = 0; i < E.nobjs; i++){
         const EdObject *o = &E.objs[i];
+        Aabb bx = object_box(o);
+        Vec3 c = v_scale(v_add(bx.lo, bx.hi), 0.5f);
         jprintf("%s{\"id\":%d,\"name\":", i ? "," : "", o->id);
         jstring(o->name);
         jprintf(",\"kind\":\"%s\",\"material\":\"%s\",\"dynamic\":%d,\"scale\":%.3f,"
-                "\"pos\":[%.3f,%.3f,%.3f],\"top\":%.3f,\"yaw\":%.1f,\"support\":%d}",
+                "\"pos\":[%.4f,%.4f,%.4f],\"top\":%.4f,\"rot\":[%.6f,%.6f,%.6f,%.6f],\"stretch\":[%.4f,%.4f,%.4f],"
+                "\"centre\":[%.4f,%.4f,%.4f],\"support\":%d}",
                 KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : o->kind == ED_MODEL && E.models[o->model].clay ? "clay" : "",
                 o->dynamic, (double)o->scale, (double)o->pos.x / UNITS_PER_M, (double)o->pos.y / UNITS_PER_M,
-                (double)o->pos.z / UNITS_PER_M, (double)object_top(o) / UNITS_PER_M, (double)o->yaw, o->support);
+                (double)o->pos.z / UNITS_PER_M, (double)object_top(o) / UNITS_PER_M,
+                (double)o->rot.w, (double)o->rot.x, (double)o->rot.y, (double)o->rot.z, (double)o->stretch.x, (double)o->stretch.y, (double)o->stretch.z,
+                (double)c.x / UNITS_PER_M, (double)c.y / UNITS_PER_M, (double)c.z / UNITS_PER_M, o->support);
     }
     jprintf("]}");
     return json_buf;
@@ -925,11 +957,13 @@ EXPORT const char *lr_pick(double sx, double sy, int exclude){
     if (!hit){ jprintf("{\"hit\":0}"); return json_buf; }
     Vec3 land;
     if (on){
-        Vec3 d = v_sub(p, on->pos);
+        Aabb ob = object_box(on);
+        Vec3 mid = v_scale(v_add(ob.lo, ob.hi), 0.5f);
+        Vec3 d = v_sub(p, mid);
         d.y = 0;
         real r = object_reach(on), l = v_len(d);
         if (l > r) d = v_scale(d, r / l);
-        land = vec3(on->pos.x + d.x, on->pos.y + object_top(on), on->pos.z + d.z);
+        land = vec3(mid.x + d.x, ob.hi.y, mid.z + d.z);
     } else {
         real f = (real)(FLOOR_M * UNITS_PER_M);
         land = vec3(r_fmax(-f, r_fmin(f, p.x)), 0, r_fmax(-f, r_fmin(f, p.z)));
@@ -947,6 +981,21 @@ EXPORT const char *lr_project(double x, double y, double z){
     jlen = 0;
     if (!camera_project(&c, metres(x, y, z), &u, &v, &cs)) jprintf("null");
     else jprintf("[%.5f,%.5f]", (double)u, (double)v);
+    return json_buf;
+}
+
+// the camera, for the page's gizmo: {"pos":[m],"fwd":[...],"right":[...],"up":[...],"fov":40,
+// "w":1920,"h":1080} (fov: the vertical, degrees)
+EXPORT const char *lr_camera(void){
+    View v = viewer_view();
+    ViewerStatus st;
+    viewer_status(&st);
+    Vec3 f = view_forward(&v), r = view_right(&v), u = v_cross(r, f);
+    jlen = 0;
+    jprintf("{\"pos\":[%.5f,%.5f,%.5f],\"fwd\":[%.6f,%.6f,%.6f],\"right\":[%.6f,%.6f,%.6f],\"up\":[%.6f,%.6f,%.6f],\"fov\":%.4f,\"w\":%d,\"h\":%d}",
+            (double)v.pos.x / UNITS_PER_M, (double)v.pos.y / UNITS_PER_M, (double)v.pos.z / UNITS_PER_M,
+            (double)f.x, (double)f.y, (double)f.z, (double)r.x, (double)r.y, (double)r.z, (double)u.x, (double)u.y, (double)u.z,
+            v.fov, st.width, st.height);
     return json_buf;
 }
 
