@@ -529,7 +529,7 @@ EXPORT int lr_set_resolution(int w, int h){          // 0 = done
 // the frames (rt/probe.h, probe_job_*): the page keeps drawing; the old light shows until
 // the new one is done ----------------------------------------------------------------------
 
-#define RELIGHT_MS 10.0    // of each frame (the page draws in the rest)
+#define RELIGHT_MS 6.0     // of each frame: with the frame itself under a 60 Hz screen's 16.7 ms
 
 static void relight_start(void){
     probe_job_free(E.relight);

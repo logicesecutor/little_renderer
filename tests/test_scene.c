@@ -8,8 +8,9 @@
 // 2. A copy that follows the versions (as the GPU's do) ends up with the scene's instances.
 // 3. The top level after a removal: a ray at a removed instance misses it, one at the moved
 //    instance (now at the removed one's index) hits it there.
-// 4. The light probe baked in steps (rt/probe.h, probe_job_*) is the probe and the grid
-//    baked at once, to the bit.
+// 4. The light probe baked in steps (rt/probe.h, probe_job_*), its levels made in steps
+//    too (scene/env.h, env_prepare_start / _step), is the probe and the grid baked at once,
+//    to the bit.
 #include <stdio.h>
 #include <string.h>
 #include "scene/scene.h"
@@ -92,6 +93,11 @@ int main(void){
     if (p1 && p2 && g1 && g2){
         check("the probe: its texels the same, to the bit", p1->w == p2->w && p1->h == p2->h &&
               !memcmp(p1->rgb, p2->rgb, sizeof(float) * 3 * (size_t)p1->w * p1->h) && p2->boxed && p2->center.y == p1->center.y);
+        int lv = 1;
+        for (int k = 0; k < ENV_LEVELS; k++)
+            lv &= p1->lw[k] == p2->lw[k] && !memcmp(p1->level[k], p2->level[k], sizeof(float) * 3 * (size_t)p1->lw[k] * p1->lh[k]);
+        check("its levels (made in steps) and harmonics the same, to the bit", lv && !memcmp(p1->sh, p2->sh, sizeof(p1->sh)) &&
+              !memcmp(p1->cond, p2->cond, sizeof(float) * (size_t)p1->h * (p1->w + 1)) && p2->id != p1->id);
         size_t ng = (size_t)g1->n[0] * g1->n[1] * g1->n[2];
         check("the grid: the same probes, to the bit", g2->n[0] == g1->n[0] && g2->n[1] == g1->n[1] && !memcmp(g1->sh, g2->sh, ng * IRR_FLOATS * sizeof(float)));
     }

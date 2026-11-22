@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "formats/hdr.h"
+#include "base/clock.h"
 
 static inline Vec3 v_lerp_(Vec3 a, Vec3 b, real f){ return v_add(a, v_scale(v_sub(b, a), f)); }
 static inline real bsdf_clamp01_(real x){ return x < 0 ? 0 : x > 1 ? 1 : x; }
@@ -228,16 +229,15 @@ static Vec3 chain_lookup(float *const *src, int nsrc, int lw, int lh, real u, re
 // importance sampling the half vectors; each sample reads the chain at the level whose
 // texels are as large as the solid angle it stands for (filtered importance sampling,
 // Krivanek & Colbert 2008), so 128 samples are enough
-static void prefilter_level(Env *e, float *const *src, int nsrc, int k){
-    int w = e->lw[k], h = e->lh[k];
-    float *out = e->level[k];
+// what a sample's half vector, weight and level are depends on the level alone, not on the
+// texel: made once per level (the same values as made per texel: the same expressions), so
+// a texel's 128 samples call no sin, cos or log2 (docs/PERF_REVIEW.md, N4)
+typedef struct { real ch[PREFILTER_SAMPLES], tc[PREFILTER_SAMPLES], bs[PREFILTER_SAMPLES], lod[PREFILTER_SAMPLES]; } PrefilterTables;
+
+static void prefilter_tables(const Env *e, int k, PrefilterTables *T){
     real r = (real)k / (ENV_LEVELS - 1);
     real a = r_fmax(r * r, 1e-3f), a2 = a * a;
     real texel = (real)(2 * PI * PI) / ((real)e->lw[0] * e->lh[0]);   // a level-0 texel's solid angle (at the equator)
-    // What a sample's half vector, weight and level are depends on the level alone, not on
-    // the texel: made once here (the same values as made per texel: the same expressions),
-    // so a texel's 128 samples call no sin, cos or log2 (docs/PERF_REVIEW.md, N4)
-    real s_ch[PREFILTER_SAMPLES], s_tc[PREFILTER_SAMPLES], s_bs[PREFILTER_SAMPLES], s_lod[PREFILTER_SAMPLES];
     for (int i = 0; i < PREFILTER_SAMPLES; i++){
         real e1 = (i + 0.5f) / PREFILTER_SAMPLES, e2 = radical_inverse((unsigned)i);
         real ch = r_sqrt((1 - e1) / (1 + (a2 - 1) * e1)), sh = r_sqrt(r_fmax(1 - ch * ch, 0));
@@ -245,35 +245,50 @@ static void prefilter_level(Env *e, float *const *src, int nsrc, int k){
         real dd = ch * ch * (a2 - 1) + 1;
         real D = a2 / ((real)PI * dd * dd);
         real pdf = D * 0.25f;                       // D (n.h) / (4 v.h), v = n
-        s_ch[i] = ch;
-        s_tc[i] = sh * r_cos(ph);
-        s_bs[i] = sh * r_sin(ph);
-        s_lod[i] = 0.5f * r_log2(1 / (PREFILTER_SAMPLES * pdf * texel));
+        T->ch[i] = ch;
+        T->tc[i] = sh * r_cos(ph);
+        T->bs[i] = sh * r_sin(ph);
+        T->lod[i] = 0.5f * r_log2(1 / (PREFILTER_SAMPLES * pdf * texel));
     }
-    #pragma omp parallel for schedule(dynamic, 2)
-    for (int y = 0; y < h; y++){
-        for (int x = 0; x < w; x++){
-            Vec3 n = map_dir((x + 0.5f) / w, (y + 0.5f) / h);
-            Vec3 t = r_fabs(n.y) < 0.999f ? v_norm(v_cross(vec3(0, 1, 0), n)) : vec3(1, 0, 0);
-            Vec3 b = v_cross(n, t);
-            Vec3 sum = vec3(0, 0, 0);
-            real wsum = 0;
-            for (int i = 0; i < PREFILTER_SAMPLES; i++){
-                const real ch = s_ch[i];
-                Vec3 hv = v_add(v_scale(n, ch), v_add(v_scale(t, s_tc[i]), v_scale(b, s_bs[i])));
-                Vec3 l = v_sub(v_scale(hv, 2 * ch), n);
-                real nl = v_dot(n, l);
-                if (nl <= 0) continue;
-                real lu, lv;
-                map_uv(l, &lu, &lv);       // (map_uv_fast: 1% faster still, the images no longer the same)
-                sum = v_add(sum, v_scale(chain_lookup(src, nsrc, e->lw[0], e->lh[0], lu, lv, s_lod[i]), nl));
-                wsum += nl;
-            }
-            if (wsum > 0) sum = v_scale(sum, 1 / wsum);
-            float *o = out + 3 * ((size_t)y * w + x);
-            o[0] = (float)sum.x; o[1] = (float)sum.y; o[2] = (float)sum.z;
+}
+
+// row y of level k
+static void prefilter_row(Env *e, float *const *src, int nsrc, int k, const PrefilterTables *T, int y){
+    int w = e->lw[k], h = e->lh[k];
+    float *out = e->level[k];
+    for (int x = 0; x < w; x++){
+        Vec3 n = map_dir((x + 0.5f) / w, (y + 0.5f) / h);
+        Vec3 t = r_fabs(n.y) < 0.999f ? v_norm(v_cross(vec3(0, 1, 0), n)) : vec3(1, 0, 0);
+        Vec3 b = v_cross(n, t);
+        Vec3 sum = vec3(0, 0, 0);
+        real wsum = 0;
+        for (int i = 0; i < PREFILTER_SAMPLES; i++){
+            const real ch = T->ch[i];
+            Vec3 hv = v_add(v_scale(n, ch), v_add(v_scale(t, T->tc[i]), v_scale(b, T->bs[i])));
+            Vec3 l = v_sub(v_scale(hv, 2 * ch), n);
+            real nl = v_dot(n, l);
+            if (nl <= 0) continue;
+            real lu, lv;
+            map_uv(l, &lu, &lv);       // (map_uv_fast: 1% faster still, the images no longer the same)
+            sum = v_add(sum, v_scale(chain_lookup(src, nsrc, e->lw[0], e->lh[0], lu, lv, T->lod[i]), nl));
+            wsum += nl;
         }
+        if (wsum > 0) sum = v_scale(sum, 1 / wsum);
+        float *o = out + 3 * ((size_t)y * w + x);
+        o[0] = (float)sum.x; o[1] = (float)sum.y; o[2] = (float)sum.z;
     }
+}
+
+// level k: for every texel's direction n (= the view = the reflected ray, as split-sum
+// assumes), the average of L(l) (n.l) over GGX of roughness k / (ENV_LEVELS - 1), by
+// importance sampling the half vectors; each sample reads the chain at the level whose
+// texels are as large as the solid angle it stands for (filtered importance sampling,
+// Krivanek & Colbert 2008), so 128 samples are enough
+static void prefilter_level(Env *e, float *const *src, int nsrc, int k){
+    PrefilterTables T;
+    prefilter_tables(e, k, &T);
+    #pragma omp parallel for schedule(dynamic, 2)
+    for (int y = 0; y < e->lh[k]; y++) prefilter_row(e, src, nsrc, k, &T, y);
 }
 
 void env_sh_basis(Vec3 d, real *y){
@@ -315,7 +330,9 @@ static void make_sh(Env *e){
     e->mean = vec3((real)(mean[0] / area), (real)(mean[1] / area), (real)(mean[2] / area));
 }
 
-int env_prepare(Env *e){
+// the sampling tables, the levels made, level 0 and the chain of 2x2 averages under it (into
+// src, *nsrc of them; src[0] is level 0): all but the prefiltering and the harmonics
+static int prepare_base(Env *e, float **src, int *nsrc_out){
     static unsigned next_id;
     e->id = ++next_id;
     int w = e->w, h = e->h;
@@ -373,7 +390,6 @@ int env_prepare(Env *e){
             o[0] = (float)(s.x / (ns * ns)); o[1] = (float)(s.y / (ns * ns)); o[2] = (float)(s.z / (ns * ns));
         }
     // the chain of 2x2 averages under level 0, for the prefiltering's lookups
-    float *src[16];
     int nsrc = 1;
     src[0] = e->level[0];
     while (nsrc < 16 && (LW >> nsrc) >= 4){
@@ -387,18 +403,79 @@ int env_prepare(Env *e){
                                                        p[3 * ((2 * y + 1) * pw + 2 * x) + k] + p[3 * ((2 * y + 1) * pw + 2 * x + 1) + k]);
         src[nsrc++] = s;
     }
+    *nsrc_out = nsrc;
+    return 0;
+}
+
+int env_prepare(Env *e){
+    float *src[16];
+    int nsrc = 0;
+    if (prepare_base(e, src, &nsrc)) return 1;
     for (int k = 1; k < ENV_LEVELS; k++) prefilter_level(e, src, nsrc, k);
     for (int k = 1; k < nsrc; k++) free(src[k]);
     make_sh(e);
     return 0;
 }
 
-Env *env_from_rgb(float *rgb, int w, int h){
+// ---- the same in steps (env.h) ----
+
+struct EnvPrep {
+    Env *e;
+    float *src[16];
+    int nsrc, k, y;                 // the level being prefiltered, and its row
+    int rows, done;                 // (how much: all the levels' rows, those done)
+    PrefilterTables T;
+};
+
+EnvPrep *env_prepare_start(Env *e){
+    EnvPrep *p = calloc(1, sizeof(*p));
+    if (!p) return NULL;
+    p->e = e;
+    if (prepare_base(e, p->src, &p->nsrc)){
+        for (int k = 1; k < p->nsrc; k++) free(p->src[k]);
+        free(p);
+        return NULL;
+    }
+    for (int k = 1; k < ENV_LEVELS; k++) p->rows += e->lh[k];
+    p->k = 1;
+    prefilter_tables(e, 1, &p->T);
+    return p;
+}
+
+double env_prepare_step(EnvPrep *p, double ms){
+    double t0 = clock_ms();
+    while (p->k < ENV_LEVELS){
+        prefilter_row(p->e, p->src, p->nsrc, p->k, &p->T, p->y++);
+        p->done++;
+        if (p->y == p->e->lh[p->k]){
+            p->y = 0;
+            if (++p->k < ENV_LEVELS) prefilter_tables(p->e, p->k, &p->T);
+            else make_sh(p->e);
+        }
+        if (clock_ms() - t0 >= ms) break;
+    }
+    return p->k < ENV_LEVELS ? (double)p->done / (p->rows + 1) : 1;
+}
+
+void env_prepare_free(EnvPrep *p){
+    if (!p) return;
+    for (int k = 1; k < p->nsrc; k++) free(p->src[k]);
+    free(p);
+}
+
+
+
+Env *env_wrap_rgb(float *rgb, int w, int h){
     Env *e = calloc(1, sizeof(*e));
     if (!e){ free(rgb); return NULL; }
     e->w = w; e->h = h; e->rgb = rgb; e->scale = 1;
     env_set_rot(e, 0);
-    if (env_prepare(e)){ env_free(e); return NULL; }
+    return e;
+}
+
+Env *env_from_rgb(float *rgb, int w, int h){
+    Env *e = env_wrap_rgb(rgb, w, h);
+    if (e && env_prepare(e)){ env_free(e); return NULL; }
     return e;
 }
 

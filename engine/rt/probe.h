@@ -38,7 +38,8 @@ IrrGrid *probe_grid_bake_scene(const Scene *s, int paths);
 
 // The scene's probe and grid baked in steps, for a program that must keep drawing while the
 // light is made again (the web editor: the page has one thread). The same probe and grid
-// as probe_bake_scene and probe_grid_bake_scene, to the bit. Between steps the scene must
+// as probe_bake_scene and probe_grid_bake_scene, to the bit (the probe's levels made in
+// steps too: scene/env.h, env_prepare_start). Between steps the scene must
 // stay as it was (else: free the job and start again).
 typedef struct ProbeJob ProbeJob;
 // NULL where probe_bake_scene gives none (or out of memory)

@@ -52,6 +52,8 @@ typedef struct Env {
 // An environment from a map (it takes rgb, which must come from malloc), prepared; NULL if
 // out of memory (rgb is then freed)
 Env *env_from_rgb(float *rgb, int w, int h);
+// ... not prepared yet (env_prepare or env_prepare_start next)
+Env *env_wrap_rgb(float *rgb, int w, int h);
 // a Radiance .hdr file (formats/hdr.h), resampled to a 2:1 map if it is not one
 Env *env_load_hdr(const char *path);
 // A clear sky made here: blue above, haze at the horizon, a sun (width w, w / 2 high);
@@ -63,6 +65,15 @@ Env *env_constant(Vec3 c);
 void env_set_rot(Env *e, real rot);
 // (Re)makes the sampling tables, the levels and the harmonics from rgb
 int env_prepare(Env *e);
+// The same in steps, for a program that must keep drawing meanwhile (the web editor's light
+// probe: its levels take a third of a second in a page), to the bit: start makes the tables
+// and level 0 (NULL: out of memory), each step prefilters rows of the other levels for about
+// `ms` milliseconds (at least one row) and says how much is done (1: all, the harmonics
+// too); until then e's levels are not to be read.
+typedef struct EnvPrep EnvPrep;
+EnvPrep *env_prepare_start(Env *e);
+double env_prepare_step(EnvPrep *p, double ms);
+void env_prepare_free(EnvPrep *p);
 void env_free(Env *e);
 
 // map coordinates (0..1) of a direction, and back
