@@ -12,12 +12,16 @@
 //    placement), normals, texture coordinates (not turned over), tangents, the material,
 //    the texture's pixels and wrap modes - the same from the three files.
 // 3. Broken files are refused, not crashed on.
+// 4. A scene written as .glb by the engine (scene/gltf_write.h: the model, a glowing box, a
+//    glass sphere, in metres) and read back: where everything stands, its triangles, its
+//    materials and their extensions, the texture's pixels, the extensions in the file.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "formats/json.h"
 #include "scene/gltf.h"
+#include "scene/gltf_write.h"
 #include "formats/png.h"
 #include "test_util.h"
 
@@ -196,6 +200,82 @@ static void check_model(const char *what, const char *path){
     scene_free(&s);
 }
 
+
+// 4. A scene written as .glb (scene/gltf_write.h) and read back: the test model (its two
+// meshes, three nodes, materials and texture), a glowing box and a sphere of glass, the file
+// in metres (unit 0.01), read at its own size (-100): the same scene
+static void check_written(void){
+    printf("4. written as .glb, read back\n");
+    Scene a;
+    memset(&a, 0, sizeof(a));
+    scene_add_material(&a, material_diffuse(vec3(1, 1, 1)));
+    int n = scene_load_gltf(&a, "out/test_gltf.glb", -100, vec3(0, 0, 0), 0);
+    Material glow = material_pbr(vec3(1, 0.5f, 0.25f), 0, 0.6f, 1.5f, 0);
+    glow.emission = vec3(8, 4, 2);
+    int mg = scene_add_material(&a, glow), mq = scene_add_material(&a, material_pbr(vec3(1, 1, 1), 0, 0.05f, 1.33f, 1));
+    scene_add_instance(&a, INST_BOX, xform_axes(mat3_identity(), vec3(50, 30, 20), vec3(300, 30, -100)), mg);
+    scene_add_instance(&a, INST_SPHERE, xform_axes(mat3_identity(), vec3(40, 40, 40), vec3(-200, 40, 0)), mq);
+    GltfWriter *w = gltf_writer_new(&a, 0.01f);
+    int ok = n == 3 && w;
+    int geo[2] = {-1, -1}, box = -1, sph = -1;
+    for (int i = 0; ok && i < a.ninsts; i++){
+        const Instance *in = &a.insts[i];
+        int g;
+        if (in->mesh >= 0){
+            if (geo[in->mesh] < 0) geo[in->mesh] = gltf_add_geometry(w, in->mesh);
+            g = geo[in->mesh];
+        } else if (in->mesh == INST_BOX){ if (box < 0) box = gltf_add_geometry(w, INST_BOX); g = box; }
+        else { if (sph < 0) sph = gltf_add_geometry(w, INST_SPHERE); g = sph; }
+        char name[32];
+        snprintf(name, sizeof(name), "node %d", i);
+        ok &= gltf_add_node(w, name, gltf_add_mesh(w, g, in->material), &in->xf, NULL, i == 3 ? "\"glowing\":true" : NULL) == i;
+    }
+    const int kids[2] = {3, 4};                      // (the box and the sphere: one group's)
+    ok = ok && gltf_add_group(w, "shapes", kids, 2, NULL, "\"group\":1") == 5;
+    gltf_use_extension(w, "LR_test", "{\"answer\":42}", 0);
+    ok = ok && gltf_write_glb(w, "out/test_gltf_written.glb") == 0;
+    gltf_writer_free(w);
+    check("written: the model's 3 nodes, a box and a sphere in a group", ok);
+    Scene b;
+    memset(&b, 0, sizeof(b));
+    scene_add_material(&b, material_diffuse(vec3(1, 1, 1)));
+    int m = ok ? scene_load_gltf(&b, "out/test_gltf_written.glb", -100, vec3(0, 0, 0), 0) : -1;
+    check("read back: 5 instances", m == 5 && b.ninsts == 5);
+    if (m == 5){
+        // (both placed with their lowest point on the floor, centred: the same scene's offset
+        // for the two, so compare relative positions)
+        Vec3 d = v_sub(xform_point(&b.insts[0].xf, vec3(0, 0, 0)), xform_point(&a.insts[0].xf, vec3(0, 0, 0)));
+        real worst = 0;
+        for (int i = 0; i < 5; i++){
+            Aabb ba = a.insts[i].box, bb = b.insts[i].box;
+            Vec3 e1 = v_sub(v_add(ba.lo, d), bb.lo), e2 = v_sub(v_add(ba.hi, d), bb.hi);
+            worst = r_fmax(worst, r_fmax(r_fmax(r_fabs(e1.x), r_fmax(r_fabs(e1.y), r_fabs(e1.z))), r_fmax(r_fabs(e2.x), r_fmax(r_fabs(e2.y), r_fabs(e2.z)))));
+        }
+        check_near("every instance's box where it was (worst, units)", worst, 0, 0.6);   // (the sphere: 64 x 32 triangles inside the exact one)
+        const SceneMesh *q = &b.meshes[b.insts[0].mesh], *bx = &b.meshes[b.insts[3].mesh], *sp = &b.meshes[b.insts[4].mesh];
+        check("the quad's 2 triangles; the box 12; the sphere 64 x 32 x 2", q->ntris == 2 && bx->ntris == 12 && sp->ntris == 4096);
+        const Material *mq0 = &b.mats[q->tris[0].material], *mq1 = &a.mats[a.meshes[a.insts[0].mesh].tris[0].material];
+        check("the model's material: base, metallic, roughness, emission, ior, transmission", near(mq0->albedo.x, mq1->albedo.x, 1e-6) &&
+              near(mq0->metallic, mq1->metallic, 1e-6) && near(mq0->roughness, mq1->roughness, 1e-6) && near(mq0->emission.x, mq1->emission.x, 1e-5) &&
+              near(mq0->ior, mq1->ior, 1e-6) && near(mq0->transmission, mq1->transmission, 1e-6));
+        int tex = mq0->tex_base > 0 && mq0->tex_normal > 0 && b.ntexmaps >= 1;
+        check("its textures: the same pixels", tex && b.texmaps[mq0->tex_normal - 1].w == 4 && !memcmp(b.texmaps[mq0->tex_normal - 1].px, a.texmaps[mq1->tex_normal - 1].px, 16 * 4));
+        const Material *g = &b.mats[bx->tris[0].material], *gl = &b.mats[sp->tris[0].material];
+        check("the box glows 8, 4, 2 (factor x KHR_materials_emissive_strength)", near(g->emission.x, 8, 1e-4) && near(g->emission.y, 4, 1e-4) && near(g->roughness, 0.6, 1e-6));
+        check("the sphere: transmission 1, ior 1.33 (KHR_materials_transmission, _ior)", near(gl->transmission, 1, 1e-6) && near(gl->ior, 1.33, 1e-6) && near(gl->roughness, 0.05, 1e-6));
+    }
+    FILE *f = fopen("out/test_gltf_written.glb", "rb");
+    char head[4096] = {0};
+    size_t got = f ? fread(head, 1, sizeof(head) - 1, f) : 0;
+    if (f) fclose(f);
+    check("the file: the scene of nodes 0, 1, 2 and the group; its children", got > 20 && strstr(head + 20, "\"scenes\":[{\"nodes\":[0,1,2,5]}]") &&
+          strstr(head + 20, "\"children\":[3,4]"));
+    check("the file names its extensions, a node's extras, the root's extension", got > 20 && strstr(head + 20, "\"KHR_materials_emissive_strength\"") &&
+          strstr(head + 20, "\"KHR_materials_ior\"") && strstr(head + 20, "\"glowing\":true") && strstr(head + 20, "\"LR_test\":{\"answer\":42}"));
+    scene_free(&a);
+    scene_free(&b);
+}
+
 int main(void){
     test_json();
     for (int i = 0; i < 16; i++){
@@ -280,6 +360,7 @@ int main(void){
     char d[96];
     snprintf(d, sizeof(d), "truncated, version, past the buffer, Draco, loop, bad offsets, indices: %d of %d refused", refused, tries);
     check(d, refused == tries);
+    check_written();
     free(g); free(j); free(bu); free(iu); free(duri); free(iuri); free(png);
     if (failures){ printf("test_gltf: %d FAILED\n", failures); return 1; }
     printf("all glTF tests passed\n");
