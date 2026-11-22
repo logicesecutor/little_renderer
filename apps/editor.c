@@ -84,7 +84,7 @@ typedef struct {
 // a model read from a file: its parts as the file places them, at its own size, the middle
 // of its bottom at the origin (kept while the editor runs, for undo)
 typedef struct { int mesh, material; Xform xf; } EdPart;
-typedef struct { EdPart *parts; int nparts; Aabb box; } EdModel;
+typedef struct { EdPart *parts; int nparts; Aabb box; int clay; } EdModel;   // (clay: a mesh file's, of no material of its own)
 
 // the sky presets (the spec, 7.3), and a file's
 enum { SKY_DUSK, SKY_NOON, SKY_OVERCAST, NSKIES, SKY_FILE = -1 };
@@ -97,6 +97,8 @@ typedef struct {
     int nmodels, cap_models;
     int mats[NMATERIALS];          // the catalogue's materials in the scene
     int dark;                      // the lamp's stand
+    int clay;                      // what a mesh file (.obj, .ply) is made of: it has no material
+    int last_fitted;               // the last mesh file was fitted to 1 m (lr_import_mesh)
     int rock_mesh;                 // the rock's mesh (made here)
     int sky;                       // the sky: a preset, or SKY_FILE (sky_path)
     char sky_name[96], sky_path[256];
@@ -425,6 +427,7 @@ static int build_scene(Scene *s){
         E.mats[i] = scene_add_material(s, m);
     }
     E.dark = scene_add_material(s, material_pbr(srgb_hex(0x3A3530), 0, 0.6, 1.5, 0));
+    E.clay = scene_add_material(s, material_pbr(srgb_hex(0xB8AFA3), 0, 0.6, 1.5, 0));
     // the ground: 200 m of plain earth-coloured floor
     int ground = scene_add_material(s, material_pbr(srgb_hex(0x8A7E6C), 0, 0.95, 1.5, 0));
     scene_add_prim(s, make_quad(vec3(-10000, 0, -10000), vec3(0, 0, 20000), vec3(20000, 0, 0), ground));
@@ -651,6 +654,43 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
     return id;
 }
 
+// a mesh file (.obj, ASCII .ply) as an object of one part, of clay (the file has no material).
+// Its units are taken as metres; one under 1 cm or over 100 m on its longest side would make
+// no sense: it is fitted to 1 m (lr_last_import_fitted says so). Returns its id (0: it could
+// not be read).
+EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int support){
+    Mesh *mesh = mesh_load(path);
+    if (!mesh) return 0;
+    Vec3 lo = vec3(1e30f, 1e30f, 1e30f), hi = vec3(-1e30f, -1e30f, -1e30f);
+    for (int i = 0; i < mesh->nv; i++){
+        Vec3 v = mesh->v[i];
+        lo = vec3(r_fmin(lo.x, v.x), r_fmin(lo.y, v.y), r_fmin(lo.z, v.z));
+        hi = vec3(r_fmax(hi.x, v.x), r_fmax(hi.y, v.y), r_fmax(hi.z, v.z));
+    }
+    real ext = r_fmax(hi.x - lo.x, r_fmax(hi.y - lo.y, hi.z - lo.z));
+    E.last_fitted = !(ext >= 0.01f && ext <= 100);
+    if (mesh->nv == 0 || !(ext > 0)){ mesh_destroy(mesh); return 0; }
+    mesh_place(mesh, (real)UNITS_PER_M * (E.last_fitted ? 1 : ext), vec3(0, 0, 0), 0);   // (its own size: metres in units)
+    Scene *s = viewer_scene();
+    int mi = scene_add_mesh_object(s, mesh, E.clay);
+    mesh_destroy(mesh);
+    if (mi < 0) return 0;
+    E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
+    EdModel *m = &E.models[E.nmodels];
+    m->nparts = 1;
+    m->parts = malloc(sizeof(EdPart));
+    if (!m->parts) lr_oom("editor");
+    m->parts[0] = (EdPart){mi, -1, xform_identity()};
+    m->box = s->meshes[mi].box;
+    m->clay = 1;
+    if (support && !object_find(support)) support = 0;
+    const char *file = strrchr(path, '/');
+    int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    changed();
+    return id;
+}
+EXPORT int lr_last_import_fitted(void){ return E.last_fitted; }
+
 // the sky: a preset (0 Dusk, 1 Noon, 2 Overcast), or a Radiance .hdr file (name: what the
 // page shows); the path traced image starts over. 0 = done.
 EXPORT int lr_set_sky(int preset){
@@ -845,7 +885,7 @@ EXPORT const char *lr_scene(void){
         jstring(o->name);
         jprintf(",\"kind\":\"%s\",\"material\":\"%s\",\"dynamic\":%d,\"scale\":%.3f,"
                 "\"pos\":[%.3f,%.3f,%.3f],\"top\":%.3f,\"yaw\":%.1f,\"support\":%d}",
-                KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : "",
+                KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : o->kind == ED_MODEL && E.models[o->model].clay ? "clay" : "",
                 o->dynamic, (double)o->scale, (double)o->pos.x / UNITS_PER_M, (double)o->pos.y / UNITS_PER_M,
                 (double)o->pos.z / UNITS_PER_M, (double)object_top(o) / UNITS_PER_M, (double)o->yaw, o->support);
     }

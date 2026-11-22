@@ -13,6 +13,7 @@
 // The frame: by default the whole window in the screen's real pixels, following it (a preset
 // or a custom size fixes it).
 // The middle button held pans, as Shift with the left one.
+// .obj / .ply files from the computer: in metres (fitted to 1 m when that makes no sense), of clay.
 'use strict';
 
 (() => {
@@ -28,6 +29,7 @@
     rubber: { label: 'Blue rubber', base: '#3E6FA8' },
     glass: { label: 'Glass', base: '#BFD8EE', glass: true },
     glow: { label: 'Emissive', base: '#FFE2B8', emit: true },
+    clay: { label: 'Clay (the file has no material)', base: '#B8AFA3' },   // (.obj / .ply)
   };
   const MAT_ORDER = ['wood', 'terracotta', 'stone', 'steel', 'gold', 'rubber', 'glass', 'glow'];
   const SHAPES = [
@@ -323,8 +325,8 @@
   // the sky; written into the engine's file system (/drop) first ----
   let dropDir = false;
   async function dropFiles(files, sx, sy) {
-    const model = files.find((f) => /\.(glb|gltf)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
-    if (!model && !hdr) { toast('Drop .glb, .gltf or .hdr files'); return; }
+    const model = files.find((f) => /\.(glb|gltf|obj|ply)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
+    if (!model && !hdr) { toast('Drop .glb, .gltf, .obj or .hdr files'); return; }
     if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
     // all of them (a .gltf names its buffers and images, beside it)
     for (const f of files) Module.FS.writeFile('/drop/' + f.name, new Uint8Array(await f.arrayBuffer()));
@@ -334,10 +336,12 @@
       toast('Reading ' + model.name);
       await new Promise((r) => setTimeout(r, 30));      // (the toast shows before the reading)
       quiet('lr_checkpoint');
-      const id = Module.ccall('lr_import_gltf', 'number', ['string', 'number', 'number', 'number', 'number'],
+      const fn = /\.(obj|ply)$/i.test(model.name) ? 'lr_import_mesh' : 'lr_import_gltf';   // (a mesh file: metres, of clay)
+      const id = Module.ccall(fn, 'number', ['string', 'number', 'number', 'number', 'number'],
                               ['/drop/' + model.name, pk.land[0], pk.land[1], pk.land[2], pk.id || 0]);
-      log('lr_import_gltf("/drop/' + model.name + '", ' + where(pk.land) + (pk.id ? ', on ' + pk.id : '') + ') -> ' + id);
+      log(fn + '("/drop/' + model.name + '", ' + where(pk.land) + (pk.id ? ', on ' + pk.id : '') + ') -> ' + id);
       if (!id) { quiet('lr_undo'); toast('Could not read ' + model.name); refreshScene(); return; }
+      if (fn === 'lr_import_mesh' && quiet('lr_last_import_fitted')) toast(model.name + ': its size made no sense in metres, so it was fitted to 1 m');
       refreshScene();
       select(id);
     } else {
@@ -376,14 +380,14 @@
       else { e.dataTransfer.dropEffect = 'none'; showPill('Drop on an object', e.clientX, e.clientY - 24, true); }
       return;
     }
-    if (!pk || !pk.hit) { e.dataTransfer.dropEffect = d.type === 'files' ? 'copy' : 'none'; if (d.type === 'files') showPill('.glb / .gltf as an object, .hdr as the sky', e.clientX, e.clientY - 24, true); return; }
+    if (!pk || !pk.hit) { e.dataTransfer.dropEffect = d.type === 'files' ? 'copy' : 'none'; if (d.type === 'files') showPill('.glb / .gltf / .obj as an object, .hdr as the sky', e.clientX, e.clientY - 24, true); return; }
     const label = d.type === 'files' ? null : SHAPES.find((t) => t[0] === d.key)[1].toLowerCase();
     if (o && b) {
       showRing(b);
-      showPill(label ? 'Add ' + label + ' onto ' + o.name : '.glb on ' + o.name + ', .hdr as the sky', null, null, false, b);
+      showPill(label ? 'Add ' + label + ' onto ' + o.name : '.glb / .obj on ' + o.name + ', .hdr as the sky', null, null, false, b);
     } else {
       const e1 = showEllipse(pk.land, 0.6 * (label ? SHAPE_WIDTH[d.key] : 1));
-      showPill(label ? 'Add ' + label + ' here' : '.glb / .gltf as an object, .hdr as the sky', e1 ? e1.cx : e.clientX, e1 ? e1.top - 8 : e.clientY - 24, false);
+      showPill(label ? 'Add ' + label + ' here' : '.glb / .gltf / .obj as an object, .hdr as the sky', e1 ? e1.cx : e.clientX, e1 ? e1.top - 8 : e.clientY - 24, false);
     }
   });
   view.addEventListener('dragleave', (e) => { if (!view.contains(e.relatedTarget)) hideGhosts(); });
@@ -503,6 +507,7 @@
     if (document.activeElement !== sl) sl.value = String(o.scale);
     $('card-scale-text').textContent = o.scale.toFixed(2) + '×' + (o.kind === 'model' ? ' file size' : '');
     $('card-model-note').hidden = o.kind !== 'model';
+    $('card-model-note').textContent = /\.(obj|ply)$/i.test(o.name) ? 'Its units taken as metres (the file has none).' : 'Imported at the real size in the file (glTF metres).';
     $('card-px').textContent = fmt(o.pos[0]);
     $('card-py').textContent = fmt(o.pos[1]);
     $('card-pz').textContent = fmt(o.pos[2]);
