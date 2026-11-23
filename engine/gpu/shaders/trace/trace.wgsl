@@ -1054,7 +1054,11 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
-        if (kind == 3u) { g.n = h.n; g.z = dist + h.t; break; }    /* a lamp: kept for reprojection */
+        /* a lamp: kept for reprojection. So is a surface glowing at least as bright as white
+           paper under a light of 1 (a lamp's bulb): the denoiser leaves it as it is, and does not
+           mix it into its neighbours (thousands of times brighter, it left a halo of speckles
+           round it); a dimmer glow (a glTF's emissive details) is denoised with its surface */
+        if (kind == 3u || glow_bright(m.emission.rgb)) { g.n = h.n; g.z = dist + h.t; break; }
         var b = mat_bsdf(m, h.front);
         if (bsdf_rough_part(&b)) {     /* a surface the light scatters on (not only a mirror or glass) */
             g.n = h.n; g.z = dist + h.t; g.a = a * m.albedo.rgb; g.kind = 0.0;
@@ -1079,8 +1083,16 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
 }
 
 
+/* the camera ray's first hit was a surface glowing at least as bright as a lamp (glow_bright):
+   that sample is the pixel's coverage of it (its edge, anti-aliased), not noise of the surface
+   the pixel's guide sees, so it is left out of the denoiser's variance (else the denoiser,
+   spreading what looks like a firefly, left a halo of speckles round a bulb) */
+var<private> cam_glow: bool;
+fn glow_bright(e: vec3f) -> bool { return max(e.r, max(e.g, e.b)) >= 1.0; }
+
 /* the radiance arriving along one camera ray */
 fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
+    cam_glow = false;
     var ray = ray0;
     var radiance = vec3f(0.0);
     var thr = vec3f(1.0);
@@ -1135,7 +1147,10 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         let kind = u32(m.albedo.w);
         /* a glowing surface (glTF's emissive): found by the paths that hit it; a glowing shape
            sampled as a light: weighted against that (emit_weight) */
-        if (kind != 3u) { radiance += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, bounce_pdf, 1.0); }
+        if (kind != 3u) {
+            radiance += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, bounce_pdf, 1.0);
+            if (depth == 0 && glow_bright(m.emission.rgb)) { cam_glow = true; }
+        }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -1211,7 +1226,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
         let N = W * T.dims.y;
         let ga = accum[3u * N + k];           /* the guide, made by gbuf before the first sample */
         let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), ga.w == 0.0));
-        accum[N + k] += vec4f(l, l * l, 0.0, 0.0);
+        if (!(cam_glow && ga.w == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
     }
 }
 

@@ -30,7 +30,8 @@ fn q_get(which: u32, i: u32) -> u32 { return WF[wf_q(which) + i / 4u][i % 4u]; }
 fn q_set(which: u32, i: u32, v: u32) { WF[wf_q(which) + i / 4u][i % 4u] = v; }
 
 /* a path: its ray, the pdf of the bounce that made it, its pixel, throughput, random state,
-   radiance so far, and flags: depth (bits 0-15), emit (16-17), chain (18), spec (19) */
+   radiance so far, and flags: depth (bits 0-15), emit (16-17), chain (18), spec (19), the
+   camera ray found a bright glow (20: cam_glow) */
 struct PS { o: vec3f, pdf: f32, d: vec3f, pix: u32, thr: vec3f, rng: u32, rad: vec3f, fl: u32 };
 fn ps_load(p: u32) -> PS {
     let s = wf_st(p);
@@ -251,7 +252,10 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
-        if (kind != 3u) { s.rad += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, s.pdf, wf_esel()); }
+        if (kind != 3u) {
+            s.rad += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, s.pdf, wf_esel());
+            if (depth == 0 && glow_bright(m.emission.rgb)) { s.fl |= 1u << 20u; }
+        }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -292,7 +296,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
     }
     s.thr = thr;
     s.rng = rng;
-    s.fl = u32(depth + 1) | (u32(emit) << 16u) | select(0u, 1u << 18u, chain) | select(0u, 1u << 19u, spec);
+    s.fl = u32(depth + 1) | (u32(emit) << 16u) | select(0u, 1u << 18u, chain) | select(0u, 1u << 19u, spec) | (s.fl & (1u << 20u));
     if (go_on) {
         s.o = nxt_o;
         s.d = nxt_d;
@@ -365,6 +369,6 @@ fn wf_resolve(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups
         let N = T.dims.x * T.dims.y;
         let ga = accum[3u * N + k];
         let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), ga.w == 0.0));
-        accum[N + k] += vec4f(l, l * l, 0.0, 0.0);
+        if (!((WF[st + 3u].w & (1u << 20u)) != 0u && ga.w == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
     }
 }
