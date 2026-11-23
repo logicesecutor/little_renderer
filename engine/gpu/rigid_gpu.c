@@ -10,6 +10,7 @@ void gpu_rigid_set_wait(GpuRigid *gr, int wait){ (void)gr; (void)wait; }
 void gpu_rigid_sync(GpuRigid *gr){ (void)gr; }
 void gpu_rigid_destroy(GpuRigid *gr){ (void)gr; }
 int gpu_rigid_skipped(const GpuRigid *gr){ (void)gr; return 0; }
+int gpu_rigid_pending(const GpuRigid *gr){ (void)gr; return 0; }
 double gpu_rigid_gpu_ms(GpuRigid *gr){ (void)gr; return 0; }
 void gpu_rigid_gpu_ms_reset(GpuRigid *gr){ (void)gr; }
 #else
@@ -127,6 +128,14 @@ GPU_WGSL(K_SCAN, rigid_scan);
 /* each contact into its bodies' lists */
 GPU_WGSL(K_FILL, rigid_fill);
 
+/* each body's list in an order of its own (the other body, then the point), not the order
+   the contacts were found in: the pairs, the contacts and the list entries all come from
+   atomic counters, whose order changes from run to run, and a body adds up its contacts'
+   impulses in its list's order (floating point: another order, another sum), and K_PREP
+   takes the first match in last step's list. With K_MESHFLUSH's candidates sorted too, the
+   same start gives the same bodies, to the bit, run after run (-simfixed) */
+GPU_WGSL(K_SORT, rigid_sort);
+
 /* each contact before solving, every substep: where its points are now (la, lb moved with
    their bodies) and so its depth, arms, tangents, effective masses with each body's mass
    split among its contacts, the bias (bounce, push-out, or for a gap how fast it may close),
@@ -169,7 +178,7 @@ typedef struct {
 } GRP;
 
 enum { R_GCOUNT, R_GSCAN, R_GPLACE, R_VEL, R_BROAD, R_ARGS, R_SIMPLE, R_HULLPRE, R_ARGS3, R_HEAVY, R_HULLC, R_MESHQ, R_ARGS2, R_MESHTRI, R_MESHFLUSH,
-       R_SCAN, R_FILL, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, R_RELAX, R_VELS, R_SLEEP0, R_CCD0, R_CCD1, NR };
+       R_SCAN, R_FILL, R_SORT, R_PREP, R_SOLVE, R_APPLY, R_POS, R_WAKE, R_SLEEP, R_RELAX, R_VELS, R_SLEEP0, R_CCD0, R_CCD1, NR };
 static const struct { const char *name, *types; const char **part[4]; } RK[NR] = {
     {"bodies: grid (count)", "URW",  {&K_GCOUNT, &K_GRID}},
     {"bodies: grid (scan)", "URW",   {&K_GSCAN, &K_GRID}},
@@ -188,6 +197,7 @@ static const struct { const char *name, *types; const char **part[4]; } RK[NR] =
     {"bodies: contacts (meshes)", "URWWRW--RW", {&K_NARROW, &K_CONVEX, &K_MESHFLUSH}},
     {"bodies: lists 1",  "UWWW",     {&K_SCAN}},
     {"bodies: lists 2",  "URWRWW",   {&K_FILL}},
+    {"bodies: lists 3",  "URRRW",    {&K_SORT}},
     {"bodies: prepare",  "URWWRRRRW", {&K_PREP}},
     {"bodies: solve",    "URWRRRWRW", {&K_LANES, &K_SOLVE}},
     {"bodies: warm start", "URRRRW", {&K_LANES, &K_APPLY}},
@@ -309,6 +319,7 @@ static void make_groups(GpuRigid *gr){
           gr->bg[R_MESHFLUSH][p] = gpu_bind(g, gr->bgl[R_MESHFLUSH], b_, 10); }
         BG(R_SCAN, gr->par, gr->cnt, O, gr->cursor);
         BG(R_FILL, gr->par, C, gr->cnt, O, gr->cursor, L);
+        BG(R_SORT, gr->par, gr->bodies, C, O, L);
         BG(R_PREP, gr->par, gr->bodies, C, gr->cnt, O, Cp, Lp, Op, gr->imps[0]);
         BG(R_APPLY, gr->par, gr->bodies, C, O, L, gr->vel[0]);
         for (int t = 0; t < 2; t++){
@@ -737,6 +748,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
             dispatch(enc, &pass, gr, R_MESHFLUSH, 0);
             dispatch(enc, &pass, gr, R_SCAN, 1);
             dispatch(enc, &pass, gr, R_FILL, gr->cap_contacts);
+            dispatch(enc, &pass, gr, R_SORT, (size_t)nb);
         }
         dispatch(enc, &pass, gr, R_PREP, gr->cap_contacts);
         dispatch(enc, &pass, gr, R_APPLY, 8 * (size_t)nb);              // the warm start, into vel[0]; 8 threads a body
@@ -838,6 +850,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
 void gpu_rigid_set_wait(GpuRigid *gr, int wait){ if (gr) gr->wait = wait; }
 
 int gpu_rigid_skipped(const GpuRigid *gr){ return gr ? gr->skipped : 0; }
+int gpu_rigid_pending(const GpuRigid *gr){ return gr && (gr->rb_pending || gr->inflight > 0); }
 double gpu_rigid_gpu_ms(GpuRigid *gr){ return gr ? gpu_timer_ms_per_round(gr->timer) : 0; }
 void gpu_rigid_gpu_ms_reset(GpuRigid *gr){ if (gr) gpu_timer_reset(gr->timer); }
 

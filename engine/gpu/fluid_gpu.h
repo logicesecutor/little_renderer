@@ -35,6 +35,9 @@ void gpu_fluid_set_wait(GpuFluid *gf, int wait);
 // steps submitted to the GPU and not finished yet (beyond 2, phys_step waits for the GPU:
 // the step's time is added to the next one)
 int gpu_fluid_pending(const GpuFluid *gf);
+// 1 while a step is on the GPU or the air around the bodies is not back on the CPU yet (the
+// viewer's -simfixed steps only once it is: the drag then always comes from the step before)
+int gpu_fluid_busy(const GpuFluid *gf);
 // gives the air back to the CPU (pw->fluid keeps the velocities it had when the GPU took
 // over, and the cloud as of the last sync) and frees the GPU's copy
 // Benchmarks: the GPU time of a step of the air and the cloud (gpu_set_timing) since the

@@ -32,6 +32,9 @@ void gpu_rigid_set_wait(GpuRigid *gr, int wait);
 void gpu_rigid_sync(GpuRigid *gr);
 // steps not made because every body slept and nothing had changed (they would change nothing)
 int gpu_rigid_skipped(const GpuRigid *gr);
+// 1 while a step is on the GPU or its bodies are not back on the CPU yet (the viewer's
+// -simfixed steps only once they are: the CPU then always works from the step just made)
+int gpu_rigid_pending(const GpuRigid *gr);
 // Benchmarks: the GPU time of a step (all its passes, gpu_set_timing) since the last reset
 // (0 when not timed), and a new measuring window
 double gpu_rigid_gpu_ms(GpuRigid *gr);

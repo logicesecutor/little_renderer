@@ -364,6 +364,14 @@ static void gpu_sim_start(void){
         gpu_fluid_attach_view(V.gfluid, V.gview);
     if (V.o.gpu_rigid && !V.grigid) V.grigid = gpu_rigid_create(V.gpu, &V.sim.pw);
 }
+
+// -simfixed on: a step only once the GPU's last one is done and back on the CPU. They come
+// back a step or two late, as fast as the GPU is, and what the CPU does with them (the air's
+// drag, the bodies it adds) then depended on the timing: two runs parted. (The browser
+// cannot wait for the GPU: the frame goes on, and the step waits for a later frame.)
+static int gpu_sim_pending(void){
+    return (V.grigid && gpu_rigid_pending(V.grigid)) || (V.gfluid && gpu_fluid_busy(V.gfluid));
+}
 static void gpu_sim_stop(void){
     gpu_fluid_destroy(V.gfluid);
     V.gfluid = NULL;
@@ -892,6 +900,7 @@ static void viewer_update(Frame *fr){
             V.sim_last = fr->t;
             int n = 0;
             while (!V.sim_paused && V.sim_acc >= h && n < 4){
+                if (gpu_sim_pending()){ if (V.sim_acc > h) V.sim_acc = h; break; }   // (slower, not piled up)
                 PROF(PROF_SIM, sim_step(&V.sim, &V.scene, h));
                 V.sim_acc -= h;
                 n++;
