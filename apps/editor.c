@@ -92,7 +92,11 @@ typedef struct { int mesh, material; Xform xf; } EdPart;
 typedef struct { EdPart *parts; int nparts; Aabb box; int clay; } EdModel;   // (clay: a mesh file's, of no material of its own)
 
 // the sky presets (the spec, 7.3), and a file's
-enum { SKY_DUSK, SKY_NOON, SKY_OVERCAST, NSKIES, SKY_FILE = -1 };
+enum { SKY_DUSK, SKY_NOON, SKY_OVERCAST, NSKIES, SKY_FILE = -1, SKY_SUN = 10 };
+// the Light tab's sky (SKY_SUN): made here from the time of day (t: 0 night .. 0.35 dusk ..
+// 1 noon), the sun's intensity, its disc's size (degrees across), the haze (1 clear .. 10),
+// its direction (degrees) and whether its colour follows its height (warm low down)
+typedef struct { real t, intensity, size, haze, az; int warm; } SunSky;
 static const char *const SKY_NAMES[NSKIES] = {"Dusk", "Noon", "Overcast"};
 
 typedef struct {
@@ -105,14 +109,22 @@ typedef struct {
     int clay;                      // what a mesh file (.obj, .ply) is made of: it has no material
     int last_fitted;               // the last mesh file was fitted to 1 m (lr_import_mesh)
     int rock_mesh;                 // the rock's mesh (made here)
-    int sky;                       // the sky: a preset, or SKY_FILE (sky_path)
+    int sky;                       // the sky: a preset, SKY_SUN (sun), or SKY_FILE (sky_path)
+    SunSky sun;                    // SKY_SUN's
+    int sun_w;                     // ... made this wide (a slider being dragged: smaller, quicker)
     char sky_name[96], sky_path[256];
     struct ProbeJob *relight;      // the rasterizer's light being made again (NULL: up to date)
     double relight_done;
     // the orbit camera: around a point, at a distance
     Vec3 pivot;
     double dist;
-    int fly_keys;                  // W A S D E Q Shift held while flying (lr_camera_fly)
+    int fly_keys;                  // W A S D E Q Shift (and Space: 128) held while flying or walking (lr_camera_fly)
+    int walk;                      // Play: the camera walks (level, at eye height, falls, jumps) instead of flying
+    double walk_vy;                // ... its vertical speed (units / s)
+    View saved_view;               // lr_camera_save: the view to come back to (after Play)
+    Vec3 saved_pivot;
+    double saved_dist;
+    int have_saved;
     // a built-in sample instead of the editor's own scene (-sim on: the engine's physics
     // demo exactly, bin/view -sim on -demo ...): shown and simulated, not edited
     int sample;
@@ -400,16 +412,68 @@ static Env *make_sky(int preset){
     return env_from_rgb(img, w, h);
 }
 
+static Vec3 mix3(Vec3 a, Vec3 b, real t){ return v_add(v_scale(a, 1 - t), v_scale(b, t)); }
+static real smooth01(real x){ x = r_fmin(r_fmax(x, 0), 1); return x * x * (3 - 2 * x); }
+static real sun_elev(const SunSky *p){ return -8 + 68 * p->t; }     // degrees: -8 (night) .. 60 (noon)
+
+// the Light tab's sky: blue by day, warm at dusk, dark at night (zenith and horizon colours
+// blended by the sun's height), whiter at the horizon with haze, a glow round the sun and its
+// disc, whose light on the ground (radiance times its solid angle) is the intensity times 3
+// whatever its size, reddened and dimmed low down when its colour follows its height
+static Env *make_sun_sky(const SunSky *p, int w){
+    int h = w / 2;
+    float *img = malloc(sizeof(float) * 3 * (size_t)w * h);
+    if (!img) return NULL;
+    real eld = sun_elev(p), el = eld * (real)PI / 180, az = p->az * (real)PI / 180;
+    Vec3 sun = vec3(r_cos(el) * r_sin(az), r_sin(el), r_cos(el) * r_cos(az));
+    real day = smooth01(eld / 25), dusk = smooth01((eld + 8) / 8), hk = r_fmin(r_fmax((p->haze - 1) / 9, 0), 1);
+    Vec3 zn = mix3(mix3(vec3(0.003f, 0.005f, 0.012f), vec3(0.05f, 0.08f, 0.22f), dusk), vec3(0.10f, 0.22f, 0.55f), day);
+    Vec3 hz = mix3(mix3(vec3(0.012f, 0.014f, 0.03f), vec3(0.95f, 0.52f, 0.30f), dusk), vec3(0.62f, 0.72f, 0.86f), day);
+    real lum = 0.3f * hz.x + 0.6f * hz.y + 0.1f * hz.z;
+    hz = mix3(hz, vec3(lum * 1.1f, lum * 1.1f, lum * 1.1f), 0.6f * hk);
+    zn = mix3(zn, hz, 0.35f * hk);
+    Vec3 sc = p->warm ? mix3(vec3(1.0f, 0.45f, 0.18f), vec3(1.0f, 0.96f, 0.90f), smooth01(eld / 35)) : vec3(1.0f, 0.97f, 0.93f);
+    real through = p->warm ? 0.25f + 0.75f * smooth01(eld / 20) : 1;            // (more air low down)
+    real rad = 0.5f * r_fmax(p->size, 0.05f) * (real)PI / 180, cos_r = r_cos(rad);
+    real e_sun = p->intensity * 3 * through * smooth01((eld + 1) / 2) * (1 - 0.5f * hk);
+    Vec3 disc = v_scale(sc, e_sun / ((real)PI * rad * rad));
+    real glow = (0.9f * (1 - day) + 0.25f * day) * dusk * p->intensity;
+    Env flat = {0};                                       // (env_dir of an unturned map)
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++){
+            Vec3 d = env_dir(&flat, (x + 0.5f) / w, (y + 0.5f) / h), c;
+            real cs = v_dot(d, sun);
+            if (d.y >= 0){
+                real t = 1 - d.y, tt = r_pow(t, 4 - 2 * hk);
+                c = mix3(zn, hz, tt);
+                c = v_add(c, v_scale(sc, glow * (1.2f * r_pow(r_fmax(cs, 0), 24) + 0.25f * r_pow(r_fmax(cs, 0), 3))));
+                if (cs > cos_r && e_sun > 0) c = v_add(c, disc);
+            } else {
+                real t = r_fmin(-d.y * 4, 1);
+                c = mix3(v_scale(hz, 0.5f), v_scale(vec3(0.07f, 0.06f, 0.05f), 0.2f + 0.8f * day + 0.4f * dusk), t);
+            }
+            float *o = img + 3 * ((size_t)y * w + x);
+            o[0] = (float)c.x; o[1] = (float)c.y; o[2] = (float)c.z;
+        }
+    return env_from_rgb(img, w, h);
+}
+static void sun_name(char *out, size_t n){            // "Sun 18:24": the clock of the Light tab
+    int mins = (int)lrint((21.5 - E.sun.t * 8.5) * 60);
+    snprintf(out, n, "Sun %02d:%02d", mins / 60, mins % 60);
+}
+
 // the sky made: a preset, or a file (.hdr) when path is given; 0 = done (else nothing changed)
 static int set_sky(int preset, const char *path, const char *name){
     Scene *s = viewer_scene();
-    Env *e = path ? env_load_hdr(path) : preset >= 0 && preset < NSKIES ? make_sky(preset) : NULL;
+    Env *e = path ? env_load_hdr(path) : preset == SKY_SUN ? make_sun_sky(&E.sun, E.sun_w > 0 ? E.sun_w : 1024) :
+             preset >= 0 && preset < NSKIES ? make_sky(preset) : NULL;
     if (!e) return 1;
     env_free(s->env);
     s->env = e;
     E.sky = path ? SKY_FILE : preset;
     snprintf(E.sky_path, sizeof(E.sky_path), "%s", path ? path : "");
-    snprintf(E.sky_name, sizeof(E.sky_name), "%s", path ? name : SKY_NAMES[preset]);
+    if (preset == SKY_SUN && !path) sun_name(E.sky_name, sizeof(E.sky_name));
+    else snprintf(E.sky_name, sizeof(E.sky_name), "%s", path ? name : SKY_NAMES[preset]);
     return 0;
 }
 
@@ -515,7 +579,9 @@ EXPORT void lr_camera_look(double dx, double dy){
     viewer_set_view(&v);
 }
 
+static void walk_step(double dt);
 static void fly_step(double dt){
+    if (E.walk){ walk_step(dt); return; }
     if (!E.fly_keys) return;
     View v = viewer_view();
     Vec3 f = view_forward(&v), r = view_right(&v), mv = vec3(0, 0, 0);
@@ -530,6 +596,53 @@ static void fly_step(double dt){
     v.pos = v_add(v.pos, v_scale(v_norm(mv), (real)speed));
     E.pivot = v_add(v.pos, v_scale(view_forward(&v), (real)E.dist));
     viewer_set_view(&v);
+}
+
+// Play: the camera walks. W A S D along the ground (the view's forward and right, level),
+// Shift faster, Space jumps; the eye EYE above whatever it stands on (the ground: 0), falling
+// back under gravity.
+#define EYE 165.0
+static void walk_step(double dt){
+    View v = viewer_view();
+    Vec3 f = view_forward(&v), r = view_right(&v), mv = vec3(0, 0, 0);
+    f.y = 0; r.y = 0;
+    if (v_dot(f, f) > 1e-8f) f = v_norm(f);
+    if (v_dot(r, r) > 1e-8f) r = v_norm(r);
+    if (E.fly_keys & 1) mv = v_add(mv, f);
+    if (E.fly_keys & 4) mv = v_sub(mv, f);
+    if (E.fly_keys & 8) mv = v_add(mv, r);
+    if (E.fly_keys & 2) mv = v_sub(mv, r);
+    Vec3 was = v.pos;
+    if (v_dot(mv, mv) > 0) v.pos = v_add(v.pos, v_scale(v_norm(mv), (real)(240 * (E.fly_keys & 64 ? 2.5 : 1) * dt)));
+    int ground = v.pos.y <= EYE + 0.5;
+    if (ground && (E.fly_keys & 128)) E.walk_vy = 420;               // (a jump of about 0.9 m)
+    E.walk_vy -= 981 * dt;
+    v.pos.y = (real)(v.pos.y + E.walk_vy * dt);
+    if (v.pos.y < EYE){ v.pos.y = (real)EYE; E.walk_vy = 0; }
+    if (!memcmp(&was, &v.pos, sizeof(was))) return;
+    E.pivot = v_add(v.pos, v_scale(view_forward(&v), (real)E.dist));
+    viewer_set_view(&v);
+}
+EXPORT void lr_camera_walk(int on){                  // Play: walk (1, from eye height) or fly (0)
+    E.walk = on != 0;
+    E.walk_vy = 0;
+    if (!E.walk) return;
+    View v = viewer_view();
+    v.pos.y = (real)EYE;
+    E.pivot = v_add(v.pos, v_scale(view_forward(&v), (real)E.dist));
+    viewer_set_view(&v);
+}
+EXPORT void lr_camera_save(void){                    // the view now, to come back to
+    E.saved_view = viewer_view();
+    E.saved_pivot = E.pivot;
+    E.saved_dist = E.dist;
+    E.have_saved = 1;
+}
+EXPORT void lr_camera_restore(void){
+    if (!E.have_saved) return;
+    E.pivot = E.saved_pivot;
+    E.dist = E.saved_dist;
+    viewer_set_view(&E.saved_view);
 }
 
 // ---- what the page sets ---------------------------------------------------------------------
@@ -762,6 +875,19 @@ EXPORT int lr_set_sky(int preset){
     relight_start();
     return 0;
 }
+// the Light tab: the sun sky (SunSky) as these say; quick = 1 while a slider is dragged (a
+// smaller map, quicker to make), 0 when let go. 0 = done.
+EXPORT int lr_set_sun(double t, double intensity, double size, double haze, double az, int warm, int quick){
+    if (E.sample) return 1;
+    E.sun = (SunSky){(real)fmin(fmax(t, 0), 1), (real)fmax(intensity, 0), (real)fmin(fmax(size, 0.05), 10),
+                     (real)fmin(fmax(haze, 1), 10), (real)az, warm != 0};
+    E.sun_w = quick ? 256 : 1024;
+    if (set_sky(SKY_SUN, NULL, NULL)) return 1;
+    viewer_scene_changed(1);
+    relight_start();
+    return 0;
+}
+
 EXPORT int lr_load_sky(const char *path, const char *name){
     if (E.sample || set_sky(SKY_FILE, path, name)) return 1;
     viewer_scene_changed(1);
@@ -800,7 +926,7 @@ EXPORT int lr_remove_object(int id){
 
 // ---- undo / redo: the objects as they were before each change -------------------------------
 
-typedef struct { EdObject *objs; int n; int sky; char sky_name[96], sky_path[256]; } Snapshot;
+typedef struct { EdObject *objs; int n; int sky; SunSky sun; char sky_name[96], sky_path[256]; } Snapshot;
 #define HISTORY 100
 static Snapshot undo_st[HISTORY], redo_st[HISTORY];
 static int nundo, nredo;
@@ -813,6 +939,7 @@ static Snapshot snapshot_take(void){
     if (!sn.objs) lr_oom("editor");
     memcpy(sn.objs, E.objs, (size_t)E.nobjs * sizeof(EdObject));
     sn.sky = E.sky;
+    sn.sun = E.sun;
     memcpy(sn.sky_name, E.sky_name, sizeof(sn.sky_name));
     memcpy(sn.sky_path, E.sky_path, sizeof(sn.sky_path));
     return sn;
@@ -850,7 +977,10 @@ static void snapshot_apply(const Snapshot *sn){
         if (E.objs[j].ninst == 0) object_instances(&E.objs[j]);
         else object_update(&E.objs[j]);
     }
-    if (sn->sky != E.sky || strcmp(sn->sky_path, E.sky_path)){     // (another sky: the path traced image starts over)
+    if (sn->sky != E.sky || strcmp(sn->sky_path, E.sky_path) || (sn->sky == SKY_SUN && memcmp(&sn->sun, &E.sun, sizeof(SunSky)))){
+        // (another sky: the path traced image starts over)
+        E.sun = sn->sun;
+        E.sun_w = 0;
         if (set_sky(sn->sky, sn->sky == SKY_FILE ? sn->sky_path : NULL, sn->sky_name) == 0) viewer_scene_changed(1);
     }
     changed();
@@ -1174,6 +1304,23 @@ EXPORT const char *lr_sim_digest(void){
     jprintf("%016llx", E.sample ? viewer_sim_digest() : 0ULL);
     return json_buf;
 }
+// a ball (blue rubber, 30 cm) thrown from the camera into the running simulation (Play's B):
+// an object of the scene while it lasts (Reset and Stop take it away with the rest). Its id.
+EXPORT int lr_sim_throw(double speed){
+    if (E.sample || !S.on) return 0;
+    View v = viewer_view();
+    Vec3 f = view_forward(&v), c = v_add(v.pos, v_scale(f, 60));
+    const real k = 0.3f;
+    int id = object_add(ED_SPHERE, 5, -1, v_sub(c, vec3(0, 50 * k, 0)), k, 1, 0, "Ball");
+    int b = rigid_add_sphere(&S.pw.rigid, c, 50 * k, SIM_DENSITY);
+    if (b < 0) return id;
+    S.pw.rigid.bodies[b].vel = v_scale(f, (real)speed);
+    S.links = realloc(S.links, sizeof(SimLink) * (size_t)(S.nlinks + 1));
+    if (!S.links) lr_oom("editor");
+    S.links[S.nlinks++] = (SimLink){id, b, 0, vec3(0, 50 * k, 0)};
+    viewer_scene_changed(0);
+    return id;
+}
 EXPORT int lr_sim_keep(void){ if (E.sample || !S.on) return 1; sim_keep(); return 0; }
 
 EXPORT const char *lr_status(void){
@@ -1216,7 +1363,9 @@ EXPORT const char *lr_scene(void){
     jlen = 0;
     jprintf("{\"sky\":");
     jstring(E.sky_name);
-    jprintf(",\"skyKey\":\"%s\"", E.sky == SKY_FILE ? "file" : E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
+    jprintf(",\"skyKey\":\"%s\"", E.sky == SKY_FILE ? "file" : E.sky == SKY_SUN ? "sun" : E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
+    jprintf(",\"sun\":{\"t\":%.4f,\"intensity\":%.4f,\"size\":%.4f,\"haze\":%.4f,\"az\":%.2f,\"warm\":%d}",
+            (double)E.sun.t, (double)E.sun.intensity, (double)E.sun.size, (double)E.sun.haze, (double)E.sun.az, E.sun.warm);
     jprintf(",\"undo\":%d,\"redo\":%d", nundo, nredo);
     if (E.sample){                                   // (what the sample is made of: the engine's demo)
         const Options *op = viewer_options();
@@ -1439,6 +1588,9 @@ EXPORT int lr_save_gltf(const char *path){
         size_t k = strlen(sky);
         for (const char *c = E.sky_name; *c && k < sizeof(sky) - 4; c++) if (*c != '"' && *c != '\\' && (unsigned char)*c >= 32) sky[k++] = *c;
         snprintf(sky + k, sizeof(sky) - k, "\"}");
+    } else if (E.sky == SKY_SUN){
+        snprintf(sky, sizeof(sky), "{\"preset\":\"sun\",\"sun\":{\"t\":%.4f,\"intensity\":%.4f,\"size\":%.4f,\"haze\":%.4f,\"az\":%.2f,\"warm\":%d}}",
+                 (double)E.sun.t, (double)E.sun.intensity, (double)E.sun.size, (double)E.sun.haze, (double)E.sun.az, E.sun.warm);
     } else snprintf(sky, sizeof(sky), "{\"preset\":\"%s\"}", E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
     int b = (int)viewer_backend();
     snprintf(root, sizeof(root), "{\"version\":2,\"sky\":%s,\"renderer\":\"%s\",\"resolution\":[%d,%d],\"unitsPerMetre\":%g}",
@@ -1613,8 +1765,14 @@ EXPORT const char *lr_open_scene(const char *path){
     // the sky: a preset as it says; a file's only by its name (its .hdr: dropped with it)
     const Json *sky = json_get(root, "sky");
     const char *preset = json_str(json_get(sky, "preset"), NULL), *file = json_str(json_get(sky, "file"), NULL);
-    int sp = preset ? (!strcmp(preset, "noon") ? SKY_NOON : !strcmp(preset, "overcast") ? SKY_OVERCAST : SKY_DUSK) : -2;
-    if (sp >= 0 && sp != E.sky && set_sky(sp, NULL, NULL) == 0) viewer_scene_changed(1);
+    int sp = preset ? (!strcmp(preset, "noon") ? SKY_NOON : !strcmp(preset, "overcast") ? SKY_OVERCAST : !strcmp(preset, "sun") ? SKY_SUN : SKY_DUSK) : -2;
+    if (sp == SKY_SUN){                                // (the Light tab's: as it was set)
+        const Json *su = json_get(sky, "sun");
+        E.sun = (SunSky){(real)json_num(json_get(su, "t"), 0.35), (real)json_num(json_get(su, "intensity"), 1.2), (real)json_num(json_get(su, "size"), 0.53),
+                         (real)json_num(json_get(su, "haze"), 2.5), (real)json_num(json_get(su, "az"), 150), json_int(json_get(su, "warm"), 1)};
+        E.sun_w = 0;
+        if (set_sky(SKY_SUN, NULL, NULL) == 0) viewer_scene_changed(1);
+    } else if (sp >= 0 && sp != E.sky && set_sky(sp, NULL, NULL) == 0) viewer_scene_changed(1);
     int need_sky = file && !(E.sky == SKY_FILE && !strcmp(E.sky_name, file));
     jlen = 0;
     jprintf("{\"opened\":1,\"objects\":%d,\"skyFile\":", made);
@@ -1661,6 +1819,7 @@ int main(int argc, char **argv){
     args[argc + npre] = NULL;
     Options *o = viewer_options();
     options_parse(o, PROG_VIEW, argc + npre, args);
+    E.sun = (SunSky){0.35f, 1.2f, 0.53f, 2.5f, 150, 1};   // (the Light tab's sun until it is moved: dusk, as the design has it)
 
     Scene *s = viewer_scene();
     if (o->sim.on){
