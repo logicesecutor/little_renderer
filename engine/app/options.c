@@ -276,6 +276,8 @@ static const Opt OPTS[] = {
     {"-simhz", K_DBL, P_V, .off = F(sim_hz), .arg = "n",
      .text = "with -sim on: physics steps per second at most; frames between\nsteps refine the same image",
      .def = "; 0: a step every frame"},
+    {"-simfixed", K_ONOFF, P_V, .off = F(sim_fixed),
+     .text = "with -sim on: steps of exactly 1/simhz, as many as the time that\nwent by asks (at most 4 a frame): the same motion at any frame\nrate, the same seed the same run"},
     {"-denoisemove", K_INT, P_V, .off = F(denoise_move), .arg = "n",
      .text = "GPU denoiser while things move: its passes, 1-5 (a footprint of\n5 to 65 pixels), cheaper and less smooth",
      .def = "; 0: all 5, as still"},
@@ -562,6 +564,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->history < 0) fail(prog, "history must be >= 0", "-history");
     if (o->speed <= 0) fail(prog, "speed must be > 0", "-speed");
     if (o->sim_hz < 0) fail(prog, "physics steps per second must be >= 0 (0 = every frame)", "-simhz");
+    if (o->sim_fixed && o->sim_hz <= 0) fail(prog, "-simfixed on needs a step: -simhz above 0", "-simfixed");
     if (o->autoquit < 0) fail(prog, "autoquit must be >= 0 (0 = never)", "-autoquit");
     if (o->band_ms < 0) fail(prog, "band must be >= 0 ms (0 = automatic)", "-band");
     if (o->denoise_move < 0 || o->denoise_move > 5) fail(prog, "denoiser passes while moving must be 0..5", "-denoisemove");

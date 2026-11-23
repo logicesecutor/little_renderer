@@ -282,6 +282,7 @@ typedef struct {
     int prof_on;
     double pass_t0, pass_ms, raster_ms;
     int sim_paused, sim_moved;
+    double sim_acc, sim_pause_at;  // -simfixed on: time not stepped yet; pause once the simulation reaches this (0: no)
     double sim_last;
 
     // the GPU (-gpu on, the default in a browser): frames are shown and clouds raymarched there
@@ -377,6 +378,7 @@ static int sim_restart(void){
     gpu_sim_start();
     sim_step(&V.sim, &V.scene, 0);
     scene_set_accel(&V.scene, V.accel, &V.o.ap);
+    V.sim_acc = 0;
     return 0;
 }
 
@@ -869,12 +871,31 @@ static void viewer_update(Frame *fr){
     if (V.o.sim.on){
         double sdt = fmin(fr->t - V.sim_last, 0.05);
         V.sim_moved = 0;
-        if (V.sim_paused || sdt <= 0 || V.o.sim_hz <= 0 || sdt >= 1.0 / V.o.sim_hz) V.sim_last = fr->t;
-        else sdt = 0;                                   // (not yet: the time goes on adding up)
-        if (!V.sim_paused && sdt > 0){
-            PROF(PROF_SIM, sim_step(&V.sim, &V.scene, sdt));   // the bodies are instances: the world stays
-            V.sim_moved = 1;                                  // (their trees: scene_trees, when read)
-            V.raster_dirty = 1;
+        if (V.o.sim_fixed){
+            // -simfixed on: steps of exactly 1 / simhz, as many as the time asks (at most 4 a
+            // frame: a slow frame slows the simulation down rather than piling steps up), so the
+            // same seed gives the same motion whatever the frame rate
+            const double h = 1.0 / V.o.sim_hz;
+            V.sim_acc = V.sim_paused ? 0 : V.sim_acc + fmin(fr->t - V.sim_last, 0.1);
+            V.sim_last = fr->t;
+            int n = 0;
+            while (!V.sim_paused && V.sim_acc >= h && n < 4){
+                PROF(PROF_SIM, sim_step(&V.sim, &V.scene, h));
+                V.sim_acc -= h;
+                n++;
+                // (within half a step: float time after n steps of 1/60 falls a hair short of n / 60)
+                if (V.sim_pause_at > 0 && V.sim.pw.time >= V.sim_pause_at - 0.5 * h){ V.sim_paused = 1; V.sim_pause_at = 0; }
+            }
+            if (n == 4) V.sim_acc = 0;
+            if (n){ V.sim_moved = 1; V.raster_dirty = 1; }
+        } else {
+            if (V.sim_paused || sdt <= 0 || V.o.sim_hz <= 0 || sdt >= 1.0 / V.o.sim_hz) V.sim_last = fr->t;
+            else sdt = 0;                                   // (not yet: the time goes on adding up)
+            if (!V.sim_paused && sdt > 0){
+                PROF(PROF_SIM, sim_step(&V.sim, &V.scene, sdt));   // the bodies are instances: the world stays
+                V.sim_moved = 1;                                  // (their trees: scene_trees, when read)
+                V.raster_dirty = 1;
+            }
         }
     }
 
@@ -1287,6 +1308,15 @@ void viewer_sim_line(char *buf, int len){
     if (len <= 0) return;
     if (V.o.sim.on) sim_status(&V.sim, buf, len);
     else buf[0] = 0;
+}
+void viewer_sim_pause_at(double t){ V.sim_pause_at = V.o.sim.on && t > 0 ? t : 0; }
+unsigned long long viewer_sim_digest(void){
+    unsigned long long h = 1469598103934665603ULL;     // FNV-1a over every instance's place and turn
+    for (int i = 0; i < V.scene.ninsts; i++){
+        const unsigned char *b = (const unsigned char *)&V.scene.insts[i].xf;
+        for (size_t k = 0; k < sizeof(Xform); k++){ h ^= b[k]; h *= 1099511628211ULL; }
+    }
+    return h;
 }
 int viewer_sim_restart(void){
     if (!V.o.sim.on) return 1;

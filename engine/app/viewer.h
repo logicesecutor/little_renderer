@@ -65,6 +65,10 @@ int viewer_sim_restart(void);    // the demo again from t = 0, as set up (key T)
 double viewer_sim_time(void);    // simulated seconds so far
 int viewer_sim_bodies(void);     // bodies in the world now (the demo adds them as it goes)
 void viewer_sim_line(char *buf, int len);   // one line about it (simdemo.h, sim_status)
+// with -simfixed on: pause once the simulated time reaches t (0: no); and a digest of where
+// every instance is (two runs of the same seed to the same t: the same digest)
+void viewer_sim_pause_at(double t);
+unsigned long long viewer_sim_digest(void);
 
 typedef struct {
     int tracing;         // what shows is path traced (else rasterized)

@@ -112,6 +112,7 @@ typedef struct {
                            // up to 33 ms; with it off, bands of 12-45 ms)
     const char *stats;     // view -autoquit: its frame rate written to this file (bin/bench)
     double sim_hz;         // view -sim on: physics steps per second at most (60); 0 = one every frame
+    int sim_fixed;         // view -sim on, -simfixed on: steps of exactly 1 / sim_hz (the same motion at any frame rate)
     int denoise_move;      // view, GPU denoiser while things move: a-trous passes, 1-5 (3); 0 = all 5
     int aa;                // view, GPU: anti-aliasing of rasterized frames, 1 = FXAA (default), 0 = off
 
