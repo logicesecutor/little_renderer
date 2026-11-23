@@ -276,6 +276,14 @@ With `-backend raster`, `render` ignores the path tracer options (`-s`, `-d`, `-
 | `-tex name` | the model's base colour texture: a `.png` file, or one made here: `checker`, `bricks` (which brings its own `bricks_normal` and `bricks_mr` unless given). The texture multiplies `-base` (white unless given) | none |
 | `-mrmap name` | the model's metallic (blue) and roughness (green) texture, as glTF's: a `.png`, or `bricks_mr`, `plate_mr` (a worn metal plate). They multiply `-metal` and `-rough` (1 unless given) | none |
 | `-normalmap name` | the model's normal map (tangent space, green up the image, as glTF and OpenGL): a `.png`, or `bricks_normal` | none |
+| `-normalscale k` | the normal map's tilt times k (glTF's `normalTexture.scale`) | 1 |
+| `-normalflip on\|off` | the normal map's green points down (DirectX's, as many texture sets have it, `_DX` in their names): turned over | off |
+| `-bumpmap file.png` | a height (bump, displacement) map: made into a normal map, on top of `-normalmap` if there is one (PBR.md, PBR7) | none |
+| `-bumpscale s` | the bump's strength: a height step of 1 across a texel's width tilts by atan(s * size / 256), the same look at any size | 1 |
+| `-roughmap file.png` / `-metalmap file.png` | roughness and metallic as separate greys: packed into one map as glTF's `-mrmap` (in its place). Each makes its factor 1 unless `-rough` / `-metal` is given | none |
+| `-aomap file.png` | ambient occlusion (red: how much light from around reaches); the rasterizers darken the sky's and the room's light with it, the path tracers do not (they trace it) | none |
+| `-emissivemap file.png` | the glow's colour, sRGB | none |
+| `-emissive k` | the glow's brightness (the emissive map's white times k) | 1 |
 | `-uvscale k` | the model's texture coordinates times k (the texture repeats k times) | 1 |
 | `-rot degrees` | turns the model around the vertical axis | 0 |
 | `-instances n` | n instances of the model (one mesh placed n times by transforms) in any scene: in a row (`-scene spheres`: beside the spheres first); on the GPU too (WEB.md 2.7) | 0: the model as world triangles, `-scene mesh` only |

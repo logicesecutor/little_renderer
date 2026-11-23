@@ -96,6 +96,7 @@ node with a mesh becomes an instance), the materials above with their textures. 
 | PBR4 | The environment: light probes, `.hdr` skies, prefiltering, the split-sum table, SH irradiance; the sky as a light in the path tracer; an open scene to use it | raster reflections of the room on the mirror dragon; a sky-lit scene path traced and rasterized. **Done** (below) |
 | PBR5 | Textures and normal maps in all four pipelines | a textured model the same in the four. **Done** (below) |
 | PBR6 | glTF + JPEG; `-gltf`; the showcase with glTF models | the Khronos sample models (DamagedHelmet, MetalRoughSpheres, ...) load and look as in other viewers. **Done** (below) |
+| PBR7 | Texture sets as artists have them (a bump, roughness and metallic apart, DirectX normal maps, AO, emission), in the programs and in the editor's own looks | the same image from the four pipelines; the GPU and CPU path tracers agree on a bumped plate; a look saved and opened again looks the same. **Done** (below) |
 
 Every phase: CPU and GPU together, Windows and Linux (float and double) builds and
 `make test`; the measurements in [STATUS.md](STATUS.md); one commit per phase.
@@ -364,6 +365,70 @@ Decided and found on the way:
 - Not read (gltf.h): animations and skins, cameras, lights, morph targets, sparse accessors,
   alpha masking and blending (drawn opaque), texture coordinates 1, KHR_texture_transform;
   Draco and meshopt compression are refused, KTX2 and WebP images skipped.
+
+### PBR7, done (2026-11-24)
+
+Every pipeline reads glTF's set of maps: base colour, metallic-roughness in one (green
+roughness, blue metallic), a normal map (green up), occlusion (red) and emission. Texture
+sets often bring other maps, so `scene/pbr_maps.{c,h}` make glTF's set from them once, in
+C, at load. The native programs and the web build then read the same texels, and no shader
+changed:
+
+- **A bump (height) map into a normal map** (`pbr_bump_to_normal`). Central differences,
+  wrapped as the texture repeats; each axis is scaled by its own size (s * w / 256 across,
+  s * h / 256 down), so a map twice as large gives the same tilt. A height rising up the
+  image tilts the normal up the image (green), as glTF's normal maps do.
+- **A bump on top of a normal map** (`pbr_combine_normals`): reoriented normal mapping
+  (RNM). A flat detail keeps the base, a flat base gives the detail, and the same tilt twice
+  doubles it. The larger of the two sizes is kept.
+- **A DirectX normal map** (green down) turned over (`pbr_flip_green`).
+- **Roughness and metallic apart** packed into glTF's one map (`pbr_pack_mr`). The missing
+  one is white, and the factor of each map given is 1 unless it was set.
+- **`pbr_apply`** sets a material's textures from such a set. What it makes goes into the
+  scene (`scene_add_texmap`), or in place of what it made before (`scene_replace_texmap`
+  frees it and bumps `tex_version`, so the GPU's atlas is made again).
+
+The programs take the maps for the model (USAGE.md): `-bumpmap`, `-bumpscale`,
+`-roughmap`, `-metalmap`, `-aomap`, `-emissivemap`, `-emissive`, `-normalscale`,
+`-normalflip`.
+
+In the editor, an object's own look (the card's Own) has a row per slot: base colour,
+normal, bump, roughness, metallic, packed ORM, AO and emissive. Each row has a Choose…
+button and ×. Sliders set the bump, normal, AO and glow strengths, and a check box turns a
+normal map's green over.
+
+- **Dropped images** go to the slots their names say: normal / nrm / nor, height / bump /
+  disp, rough, metal / metalness, orm / arm / metallicRoughness, ao / occlusion,
+  emissive / emission / glow, and base / albedo / diffuse / color. `_dx` turns the green
+  over. A name with no such word goes to the base colour if that slot is free.
+- **Undo.** A drop is one undo step for all its images, and a slider drag is one step.
+- **Baking.** A made map is baked again only when its sources or the bump's strength
+  change (the editor keeps what each made texture was made from).
+- **Removing maps.** Taking a metallic (or packed) map off makes the look not metallic
+  again, since its 1 was the map's.
+- **Saving.** A look is saved in the scene's extras with its maps' names and strengths. The
+  glTF file holds the made maps: one normal map (the bump in it) and one packed map.
+  Opened again, they come back in the normal and ORM slots, with the green already turned
+  over.
+
+**Checks**
+
+- `bin/test_tex`, section 6, checks:
+  - the tilts: a ramp across and up the image, and a map twice as wide gives the same tilt;
+  - a flat height gives a flat normal;
+  - the combining, the flip and the packing;
+  - a baked bump bending a quad's normal through `material_normal`.
+- `bin/test_gpu_trace` (`pbr_plate`) renders a floor with base, bump, rough, metal, AO and
+  emissive maps under a lamp at 256 spp. The GPU, the wavefront and the CPU path tracers
+  gave means 0.1159, 0.1159 and 0.1156, with a 4×4-block correlation of 0.9994.
+- `bin/view` showed a sphere with every map. Image means: CPU raster 64.72 and GPU raster
+  64.65 (mean difference 0.47); CPU path traced 59.57 and GPU path traced 60.32.
+- `edtest20` (browser) checks:
+  - the names' slots, and a drop of four images (one undo step);
+  - a DirectX normal map, the strengths and their undo, a map taken off, AO and emissive
+    chosen;
+  - saved and opened again, the same maps, strengths and picture (means 64.2 / 64.2,
+    spread 33.7 / 33.5).
 
 ### Since the phases (2026-11-18)
 
