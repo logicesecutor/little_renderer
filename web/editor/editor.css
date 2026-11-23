@@ -247,6 +247,16 @@ a { color: var(--accent-amber); }
 .mat-text { flex: 1 1 auto; display: flex; flex-direction: column; }
 .mat-name { font-weight: 500; }
 .mat-text .muted { font-size: 11px; line-height: 1.35; }
+.own-toggle { flex: 0 0 auto; height: 28px; padding: 0 12px; border: 1px solid #FFFFFF26; border-radius: 14px; background: transparent; color: var(--text-secondary, #C9CCD3); font: inherit; font-size: 12px; cursor: pointer; }
+.own-toggle[aria-expanded="true"], .own-toggle:hover { border-color: var(--accent-amber); color: var(--accent-amber); }
+.look-edit { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 12px; background: #FFFFFF06; border: 1px solid #FFFFFF14; }
+.look-row { display: grid; grid-template-columns: 76px 1fr 44px; align-items: center; gap: 8px; font-size: 12px; }
+.look-row input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent-amber); }
+.look-row input[type="color"] { width: 100%; height: 26px; padding: 0; border: 1px solid #FFFFFF26; border-radius: 6px; background: transparent; cursor: pointer; }
+.look-image-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look-image-row { grid-template-columns: 76px auto auto 1fr; }
+.look-btn { height: 26px; padding: 0 10px; border: 1px solid #FFFFFF26; border-radius: 13px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.look-btn:hover { border-color: var(--accent-amber); }
 .card-size { display: flex; flex-direction: column; gap: 4px; }
 .size-head { display: flex; justify-content: space-between; }
 .card-size input { width: 100%; margin: 0; accent-color: var(--accent-amber); }

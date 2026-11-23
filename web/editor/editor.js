@@ -26,14 +26,14 @@
 
   // ---- the catalogues: what the tray shows (the engine has the same, apps/editor.c) ----
   const MATERIALS = {
-    wood: { label: 'Painted wood', base: '#C9A27E' },
-    terracotta: { label: 'Terracotta', base: '#C9694A' },
-    stone: { label: 'Stone', base: '#8C857A' },
-    steel: { label: 'Brushed steel', base: '#A9B0BA', metal: true },
-    gold: { label: 'Gold', base: '#E3B04B', metal: true },
-    rubber: { label: 'Blue rubber', base: '#3E6FA8' },
-    glass: { label: 'Glass', base: '#BFD8EE', glass: true },
-    glow: { label: 'Emissive', base: '#FFE2B8', emit: true },
+    wood: { label: 'Painted wood', base: '#C9A27E', rough: 0.7 },
+    terracotta: { label: 'Terracotta', base: '#C9694A', rough: 0.8 },
+    stone: { label: 'Stone', base: '#8C857A', rough: 0.9 },
+    steel: { label: 'Brushed steel', base: '#A9B0BA', metal: true, rough: 0.35 },
+    gold: { label: 'Gold', base: '#E3B04B', metal: true, rough: 0.25 },
+    rubber: { label: 'Blue rubber', base: '#3E6FA8', rough: 0.6 },
+    glass: { label: 'Glass', base: '#BFD8EE', glass: true, rough: 0.05 },
+    glow: { label: 'Emissive', base: '#FFE2B8', emit: true, rough: 1 },
     clay: { label: 'Clay (the file has no material)', base: '#B8AFA3' },   // (.obj / .ply)
   };
   const MAT_ORDER = ['wood', 'terracotta', 'stone', 'steel', 'gold', 'rubber', 'glass', 'glow'];
@@ -445,7 +445,15 @@
   let dropDir = false;
   async function dropFiles(files, sx, sy) {
     const model = files.find((f) => /\.(glb|gltf|obj|ply)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
-    if (!model && !hdr) { toast('Drop .glb, .gltf, .obj or .hdr files'); return; }
+    const img = files.find((f) => /\.(png|jpe?g)$/i.test(f.name));
+    if (!model && !hdr && img) {                      // (an image: onto the object it was dropped on)
+      const pk = pick(sx, sy, 0);
+      if (!pk || !pk.hit || !pk.id) { toast('Drop an image onto an object'); return; }
+      select(pk.id);
+      await lookImage(pk.id, img);
+      return;
+    }
+    if (!model && !hdr) { toast('Drop .glb, .gltf, .obj, .hdr files, or an image onto an object'); return; }
     if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
     // all of them (a .gltf names its buffers and images, beside it)
     for (const f of files) Module.FS.writeFile('/drop/' + f.name, new Uint8Array(await f.arrayBuffer()));
@@ -642,11 +650,96 @@
 
   // ---- the object card (5.9): next to the selection ----
   const card = $('card');
+  // its own material (the card's Own): colour, roughness, metallic, an image
+  const look = { open: false, drag: false, raf: 0, id: 0 };
+  function lookNow() {
+    return [parseInt($('look-rgb').value.slice(1), 16), Number($('look-rough').value), Number($('look-metal').value)];
+  }
+  function renderLook(o) {
+    const own = o.material === 'own' && o.look;
+    if (look.id !== o.id) { look.id = o.id; look.open = !!own; }
+    $('look-edit').hidden = !look.open || ui.sample;
+    $('card-own').hidden = !!ui.sample;
+    $('card-own').setAttribute('aria-expanded', look.open ? 'true' : 'false');
+    if (!look.drag && own) {
+      if (document.activeElement !== $('look-rgb')) $('look-rgb').value = o.look.rgb.toLowerCase();
+      $('look-rough').value = String(o.look.roughness);
+      $('look-metal').value = String(o.look.metallic);
+    }
+    const v = lookNow();
+    $('look-rgb-v').textContent = $('look-rgb').value.toUpperCase().slice(1);
+    $('look-rough-v').textContent = v[1].toFixed(2);
+    $('look-metal-v').textContent = v[2].toFixed(2);
+    $('look-image-name').textContent = own && o.look.image ? o.look.image : 'none';
+    $('look-image-off').hidden = !(own && o.look.image);
+  }
+  function lookResult(r) {
+    if (r === 2) toast('No room for another material: a scene has 64 at most');
+    else if (r) toast('Could not change its material');
+    return r;
+  }
+  function sendLook(final) {
+    const o = obj(ui.sel);
+    if (!o) return;
+    const v = lookNow();
+    const r = quiet('lr_set_look', o.id, v[0], v[1], v[2]);
+    if (final) log('lr_set_look(' + o.id + ', #' + v[0].toString(16).padStart(6, '0').toUpperCase() + ', ' + v[1].toFixed(2) + ', ' + v[2].toFixed(2) + ')' + (r ? ' -> ' + r : ''));
+    if (lookResult(r) || final) refreshScene();
+  }
+  $('card-own').addEventListener('click', () => {
+    const o = obj(ui.sel);
+    if (!o) return;
+    look.open = !look.open;
+    if (look.open && o.material !== 'own') {          // (from what it is made of now)
+      const m = MATERIALS[o.material] || MATERIALS.clay;
+      $('look-rgb').value = m.base.toLowerCase();
+      $('look-rough').value = String(m.rough ?? 0.6);
+      $('look-metal').value = m.metal ? '1' : '0';
+      quiet('lr_checkpoint');
+      if (lookResult(quiet('lr_set_look', o.id, ...lookNow()))) { quiet('lr_forget_checkpoint'); look.open = false; }
+    }
+    refreshScene();
+  });
+  for (const id of ['look-rgb', 'look-rough', 'look-metal']) {
+    $(id).addEventListener('input', () => {
+      if (!look.drag) { quiet('lr_checkpoint'); look.drag = true; }    // (the whole drag: one undo step)
+      renderLook(obj(ui.sel) || { material: '' });
+      if (!look.raf) look.raf = requestAnimationFrame(() => { look.raf = 0; if (look.drag) sendLook(false); });
+    });
+    $(id).addEventListener('change', () => { look.drag = false; sendLook(true); });
+  }
+  // an image for its base colour: into the page's file system, then onto it
+  async function lookImage(id, file) {
+    if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
+    Module.FS.writeFile('/drop/' + file.name, new Uint8Array(await file.arrayBuffer()));
+    quiet('lr_checkpoint');
+    const r = Module.ccall('lr_set_look_image', 'number', ['number', 'string'], [id, '/drop/' + file.name]);
+    log('lr_set_look_image(' + id + ', "/drop/' + file.name + '") -> ' + r);
+    if (r) { quiet('lr_forget_checkpoint'); if (r === 1) toast('Could not read ' + file.name); else lookResult(r); }
+    else { look.id = id; look.open = true; }
+    refreshScene();
+  }
+  $('look-image').addEventListener('click', () => $('look-file').click());
+  $('look-file').addEventListener('change', () => {
+    const f = $('look-file').files[0];
+    if (f && ui.sel) lookImage(ui.sel, f);
+    $('look-file').value = '';
+  });
+  $('look-image-off').addEventListener('click', () => {
+    if (!ui.sel) return;
+    quiet('lr_checkpoint');
+    lookResult(Module.ccall('lr_set_look_image', 'number', ['number', 'string'], [ui.sel, '']));
+    refreshScene();
+  });
+
   function renderCard() {
     const o = obj(ui.sel);
     card.hidden = !o;
     if (!o) return;
-    const m = MATERIALS[o.material] || { label: 'From the file', base: '#B8AFA3' };
+    const own = o.material === 'own' && o.look;
+    const m = own ? { label: 'Its own' + (o.look.image ? ' · ' + o.look.image : ''), base: o.look.rgb } : MATERIALS[o.material] || { label: 'From the file', base: '#B8AFA3' };
+    $('card-mat-hint').textContent = own ? 'A colour, roughness and image of its own' : 'Drag a material onto the object to change it';
+    renderLook(o);
     $('card-name').textContent = o.name;
     card.setAttribute('aria-label', o.name + ' properties');
     $('card-delete').setAttribute('aria-label', 'Delete ' + o.name);

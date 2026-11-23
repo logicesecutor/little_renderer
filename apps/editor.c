@@ -74,7 +74,7 @@ typedef struct {
     int id;
     EdKind kind;
     char name[64];
-    int mat;                       // index into MATERIALS (-1: a model's own)
+    int mat;                       // index into MATERIALS (-1: a model's own, MAT_OWN: its look)
     int mesh;                      // a rock's mesh (Scene.meshes)
     int model;                     // a model's index into Editor.models
     int dynamic;                   // its body in the physics (Simulate mode): 0 static, 1 dynamic
@@ -84,7 +84,16 @@ typedef struct {
     Vec3 stretch;                  // its size along its own axes, times scale (the gizmo's Scale: 1, 1, 1 at first)
     int support;                   // the id of what it rests on (0: the ground)
     int *inst, ninst;              // its instances in the scene (its own array)
+    // its own material (lr_set_look; mat == MAT_OWN): the scene material it has (-1: none yet;
+    // kept once made, through undo), its base colour (sRGB), roughness, metallic, and an image
+    // for the base colour (1 + an index into Scene.texmaps, 0: none; its file's name, to show)
+    int look;
+    unsigned look_rgb;
+    real look_rough, look_metal;
+    int look_tex;
+    char look_tex_name[64];
 } EdObject;
+#define MAT_OWN (-2)
 
 // a model read from a file: its parts as the file places them, at its own size, the middle
 // of its bottom at the origin (kept while the editor runs, for undo)
@@ -177,6 +186,7 @@ static Xform object_part_xform(const EdObject *o, int i){
 static int part_material(const EdObject *o, int part){
     if (o->kind == ED_LAMP && part < 2) return E.dark;
     if (o->mat >= 0) return E.mats[o->mat];
+    if (o->mat == MAT_OWN && o->look >= 0) return o->look;
     return o->kind == ED_MODEL ? E.models[o->model].parts[part].material : -1;
 }
 static int part_mesh(const EdObject *o, int part){
@@ -242,6 +252,7 @@ static int object_add(EdKind kind, int mat, int model, Vec3 pos, real scale, int
     o->pos = pos;
     o->dynamic = dynamic;
     o->support = support;
+    o->look = -1;
     if (kind == ED_MODEL) snprintf(o->name, sizeof(o->name), "%s", label ? label : "Model");
     else if (label) snprintf(o->name, sizeof(o->name), "%s %d", label, o->id);
     else snprintf(o->name, sizeof(o->name), "%c%s %d", KIND_NAMES[kind][0] - 32, KIND_NAMES[kind] + 1, o->id);
@@ -825,6 +836,64 @@ EXPORT int lr_set_transform(int id, double x, double y, double z, double qw, dou
     return 0;
 }
 
+// its own material made (or made again) from its look fields. 1 = no room for another
+// material in the scene (MAX_MATS)
+static int look_sync(EdObject *o){
+    Scene *s = viewer_scene();
+    Material m = material_pbr(srgb_hex(o->look_rgb), o->look_metal, o->look_rough, 1.5, 0);
+    m.tex_base = o->look_tex > 0 && o->look_tex <= s->ntexmaps ? o->look_tex : 0;
+    if (o->look < 0){
+        if (s->nmats >= MAX_MATS) return 1;
+        o->look = scene_add_material(s, m);
+    } else s->mats[o->look] = m;
+    return 0;
+}
+// the look starts from what it is made of now (a preset's colour, roughness, metallic)
+static void look_from_now(EdObject *o){
+    if (o->mat == MAT_OWN) return;
+    const EdMaterial *d = &MATERIALS[o->mat >= 0 && o->mat < 6 ? o->mat : 0];    // (glass, glow: from wood)
+    o->look_rgb = d->rgb;
+    o->look_rough = d->roughness;
+    o->look_metal = d->metallic;
+}
+// Its own material (the card's Own): base colour rgb (sRGB 0xRRGGBB), roughness and metallic
+// (0..1); its image, if it has one, stays (the colour then tints it). 0 = done, 1 = no such
+// object, 2 = no room for another material
+EXPORT int lr_set_look(int id, int rgb, double roughness, double metallic){
+    EdObject *o = object_find(id);
+    if (!o || editing_off()) return 1;
+    EdObject was = *o;
+    o->look_rgb = (unsigned)rgb & 0xffffffu;
+    o->look_rough = (real)fmin(1, fmax(0, roughness));
+    o->look_metal = (real)fmin(1, fmax(0, metallic));
+    if (look_sync(o)){ *o = was; return 2; }
+    o->mat = MAT_OWN;
+    object_update(o);
+    changed();
+    return 0;
+}
+// An image (.png, .jpg: a file the page put in its file system) as its base colour, on its own
+// material (from its material now, its colour white so the image shows as it is); "" takes
+// the image off. 0 = done, 1 = no such object or image, 2 = no room for another material
+EXPORT int lr_set_look_image(int id, const char *path){
+    EdObject *o = object_find(id);
+    if (!o || editing_off()) return 1;
+    EdObject was = *o;
+    int t = 0;
+    if (path && *path && !(t = scene_texture(viewer_scene(), path, 1))) return 1;
+    if (t && o->mat != MAT_OWN){ look_from_now(o); o->look_rgb = 0xffffff; }
+    if (!t && o->mat != MAT_OWN) look_from_now(o);
+    o->look_tex = t;
+    const char *f = path ? strrchr(path, '/') : NULL;
+    snprintf(o->look_tex_name, sizeof(o->look_tex_name), "%s", t ? (f ? f + 1 : path) : "");
+    for (char *c = o->look_tex_name; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';   // (it goes into JSON)
+    if (look_sync(o)){ *o = was; return 2; }
+    o->mat = MAT_OWN;
+    object_update(o);
+    changed();
+    return 0;
+}
+
 // static or dynamic (its body in Simulate mode)
 // its material: one of the catalogue's (MATERIALS, 0..7), or -1: a model's own again
 EXPORT int lr_set_material(int id, int mat){
@@ -1015,6 +1084,7 @@ static void snapshot_apply(const Snapshot *sn){
     E.cap = sn->n > 0 ? sn->n : 1;
     E.nobjs = sn->n;
     for (int j = 0; j < E.nobjs; j++){
+        if (E.objs[j].mat == MAT_OWN) look_sync(&E.objs[j]);     // (its own material as it was then)
         if (E.objs[j].ninst == 0) object_instances(&E.objs[j]);
         else object_update(&E.objs[j]);
     }
@@ -1422,12 +1492,18 @@ EXPORT const char *lr_scene(void){
         jstring(o->name);
         jprintf(",\"kind\":\"%s\",\"material\":\"%s\",\"dynamic\":%d,\"scale\":%.3f,"
                 "\"pos\":[%.4f,%.4f,%.4f],\"top\":%.4f,\"rot\":[%.6f,%.6f,%.6f,%.6f],\"stretch\":[%.4f,%.4f,%.4f],"
-                "\"centre\":[%.4f,%.4f,%.4f],\"support\":%d}",
-                KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : o->kind == ED_MODEL && E.models[o->model].clay ? "clay" : "",
+                "\"centre\":[%.4f,%.4f,%.4f],\"support\":%d",
+                KIND_NAMES[o->kind], o->mat >= 0 ? MATERIALS[o->mat].key : o->mat == MAT_OWN ? "own" : o->kind == ED_MODEL && E.models[o->model].clay ? "clay" : "",
                 o->dynamic, (double)o->scale, (double)o->pos.x / UNITS_PER_M, (double)o->pos.y / UNITS_PER_M,
                 (double)o->pos.z / UNITS_PER_M, (double)object_top(o) / UNITS_PER_M,
                 (double)o->rot.w, (double)o->rot.x, (double)o->rot.y, (double)o->rot.z, (double)o->stretch.x, (double)o->stretch.y, (double)o->stretch.z,
                 (double)c.x / UNITS_PER_M, (double)c.y / UNITS_PER_M, (double)c.z / UNITS_PER_M, o->support);
+        if (o->mat == MAT_OWN){
+            jprintf(",\"look\":{\"rgb\":\"#%06X\",\"roughness\":%.3f,\"metallic\":%.3f,\"image\":", o->look_rgb, (double)o->look_rough, (double)o->look_metal);
+            jstring(o->look_tex_name);
+            jprintf("}");
+        }
+        jprintf("}");
     }
     jprintf("]}");
     return json_buf;
@@ -1583,6 +1659,12 @@ EXPORT int lr_save_gltf(const char *path){
     for (int i = 0; i < NMATERIALS; i++) gltf_name_material(w, E.mats[i], MATERIALS[i].label);   // (as the catalogue calls them)
     gltf_name_material(w, E.dark, "Lamp stand");
     gltf_name_material(w, E.clay, "Clay");
+    for (int i = 0; i < E.nobjs; i++)                   // (an object's own: by its name)
+        if (E.objs[i].mat == MAT_OWN && E.objs[i].look >= 0){
+            char nm[96];
+            snprintf(nm, sizeof(nm), "%s (own)", E.objs[i].name);
+            gltf_name_material(w, E.objs[i].look, nm);
+        }
     int *geo = malloc(sizeof(int) * (size_t)(s->nmeshes + 2));             // (geometries: the meshes', then the box's and the sphere's)
     int nmesh = 0, cap = 0;
     struct { int geo, mat, mesh; } *meshes = NULL;
@@ -1618,6 +1700,9 @@ EXPORT int lr_save_gltf(const char *path){
         int n = 0;
         n += snprintf(ext + n, sizeof(ext) - (size_t)n, "\"" EXT_SCENE "\":{\"id\":%d,\"kind\":\"%s\"", o->id, KIND_NAMES[o->kind]);
         if (o->mat >= 0) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"%s\"", MATERIALS[o->mat].key);
+        else if (o->mat == MAT_OWN)
+            n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"own\",\"look\":{\"rgb\":\"#%06X\",\"roughness\":%.3f,\"metallic\":%.3f,\"image\":\"%s\"}",
+                          o->look_rgb, (double)o->look_rough, (double)o->look_metal, o->look_tex_name);
         else if (o->kind == ED_MODEL && E.models[o->model].clay) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"clay\":true");
         if (sup) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"restsOn\":%d", sup->id);
         n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"pos\":[%.6f,%.6f,%.6f],\"rot\":[%.8f,%.8f,%.8f,%.8f],\"stretch\":[%.6f,%.6f,%.6f]}",
@@ -1692,12 +1777,57 @@ static Aabb box_grow(Aabb b, Vec3 p){
 // model's from its box. The objects get new ids (undo goes back to the old ones). JSON:
 // {"opened":0} not such a scene (an ordinary model: import it), {"opened":-1} could not be
 // read; {"opened":1,"objects":n,"skyFile":name or null,"renderer":name}.
+// The materials from m0 on that no object took (a saved scene has the catalogue's, which are
+// the editor's already, and the lamp's stand, the clay) taken out again, those taken moved
+// down: opening a scene does not fill the scene's room (MAX_MATS) with copies. A model's
+// parts have their materials in their meshes' triangles (the meshes from k0 on: the file's)
+static void materials_compact(int m0, int k0){
+    Scene *s = viewer_scene();
+    int used[MAX_MATS] = {0}, map[MAX_MATS];
+    for (int i = 0; i < E.nobjs; i++){
+        const EdObject *o = &E.objs[i];
+        if (o->mat == MAT_OWN && o->look >= m0) used[o->look] = 1;
+        if (o->kind != ED_MODEL || o->mat >= 0) continue;          // (a catalogue material on it: not its own)
+        for (int q = 0; q < E.models[o->model].nparts; q++){
+            const EdPart *pt = &E.models[o->model].parts[q];
+            if (pt->material >= m0 && pt->material < MAX_MATS) used[pt->material] = 1;
+            if (pt->mesh >= k0 && pt->material < 0)
+                for (int t = 0; t < s->meshes[pt->mesh].ntris; t++){
+                    int m = s->meshes[pt->mesh].tris[t].material;
+                    if (m >= m0 && m < MAX_MATS) used[m] = 1;
+                }
+        }
+    }
+    int k = m0;
+    for (int i = m0; i < s->nmats; i++){
+        map[i] = used[i] ? k : -1;
+        if (used[i]) s->mats[k++] = s->mats[i];
+    }
+    for (int i = k0; i < s->nmeshes; i++)                          // (unused meshes: any material)
+        for (int t = 0; t < s->meshes[i].ntris; t++){
+            int *m = &s->meshes[i].tris[t].material;
+            if (*m >= m0 && *m < s->nmats) *m = map[*m] >= 0 ? map[*m] : 0;
+        }
+    s->nmats = k;
+    for (int i = 0; i < E.nobjs; i++){
+        EdObject *o = &E.objs[i];
+        if (o->look >= m0) o->look = map[o->look];
+        if (o->kind == ED_MODEL)
+            for (int q = 0; q < E.models[o->model].nparts; q++){
+                int *m = &E.models[o->model].parts[q].material;
+                if (*m >= m0 && *m < MAX_MATS) *m = map[*m];
+            }
+        object_update(o);
+    }
+}
+
 EXPORT const char *lr_open_scene(const char *path){
     Json *j = gltf_json(path);
     const Json *root = json_get(json_get(j, "extensions"), EXT_SCENE);
     if (!root || editing_off()){ json_free(j); jlen = 0; jprintf("{\"opened\":%d}", root ? -1 : j ? 0 : -1); return json_buf; }
     Scene *s = viewer_scene();
     lr_checkpoint();
+    const int m0 = s->nmats, k0 = s->nmeshes;       // (the file's materials and meshes come after: materials_compact)
     // its nodes' instances where the file has them: taken (a model's parts need them), then
     // removed (the shapes are made again as the editor makes them)
     int n0 = s->ninsts, *node_of = NULL;
@@ -1723,6 +1853,7 @@ EXPORT const char *lr_open_scene(const char *path){
         int mat = -1;
         const char *mk = json_str(json_get(ls, "material"), NULL);
         for (int q = 0; mk && q < NMATERIALS; q++) if (!strcmp(mk, MATERIALS[q].key)) mat = q;
+        const int own = mk && !strcmp(mk, "own");     // (its own material: the file's, and its look's numbers)
         if (k != ED_MODEL && mat < 0) mat = k == ED_ROCK ? 2 : k == ED_LAMP ? 7 : k == ED_SPHERE ? 1 : 0;
         int dynamic = json_get(json_get(json_get(nd, "extensions"), EXT_BODIES), "motion") != NULL;
         real scale = (real)json_num(json_get(json_get(nd, "extras"), "scale"), 1);
@@ -1795,6 +1926,10 @@ EXPORT const char *lr_open_scene(const char *path){
             }
             model = E.nmodels++;
         }
+        // (the material the file has for its first part: the instance's, or its mesh's)
+        int file_mat = np > 0 ? got[pi[0]].material : -1;
+        if (file_mat < 0 && np > 0 && got[pi[0]].mesh >= 0 && s->meshes[got[pi[0]].mesh].ntris > 0)
+            file_mat = s->meshes[got[pi[0]].mesh].tris[0].material;
         free(pi);
         int id = object_add((EdKind)k, mat, model, pos, scale, dynamic, 0, NULL);
         EdObject *o = object_find(id);
@@ -1802,11 +1937,26 @@ EXPORT const char *lr_open_scene(const char *path){
         if (name && *name) snprintf(o->name, sizeof(o->name), "%s", name);
         o->rot = rot;
         o->stretch = stretch;
+        if (own){
+            const Json *lk = json_get(ls, "look");
+            const char *hex = json_str(json_get(lk, "rgb"), "#C9A27E");
+            o->look_rgb = (unsigned)strtoul(hex[0] == '#' ? hex + 1 : hex, NULL, 16) & 0xffffffu;
+            o->look_rough = (real)json_num(json_get(lk, "roughness"), 0.7);
+            o->look_metal = (real)json_num(json_get(lk, "metallic"), 0);
+            snprintf(o->look_tex_name, sizeof(o->look_tex_name), "%s", json_str(json_get(lk, "image"), ""));
+            for (char *c = o->look_tex_name; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';
+            const int fm = file_mat;                    // (its own material, as the file has it: its image too)
+            o->look_tex = fm >= 0 ? s->mats[fm].tex_base : 0;
+            if (!o->look_tex) o->look_tex_name[0] = 0;
+            o->look = fm;
+            if (look_sync(o) == 0) o->mat = MAT_OWN;
+        }
         object_update(o);
         new_id[ni] = id;
         file_id[ni] = json_int(json_get(ls, "id"), 0);
         made++;
     }
+    materials_compact(m0, k0);
     // what rests on what: the file's ids, now the new ones
     for (int ni = 0; ni < nn; ni++){
         if (!new_id[ni]) continue;
