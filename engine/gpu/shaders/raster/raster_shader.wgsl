@@ -37,7 +37,7 @@ struct RU {
     irrn: vec4u,     /* the irradiance grid (IrrGrid, in IG): its probes along x, y, z; w = 1: there is one */
     irrlo: vec4f,
     irrhi: vec4f,
-    mats: array<RMat, 16>,
+    mats: array<RMat, 64>,
 };
 @group(0) @binding(0) var<uniform> U: RU;
 @group(0) @binding(1) var<storage, read> vpos: array<vec4f>;
@@ -202,7 +202,7 @@ fn normal_to_world(k: u32, n: vec3f) -> vec3f {
     let x = ix[k];
     return normalize(n.x * x.i0.xyz + n.y * x.i1.xyz + n.z * x.i2.xyz);
 }
-fn mat_of(k: u32, code: u32) -> u32 { return select(code & 15u, ix[k].m.x & 15u, ix[k].m.x != 0xffffffffu); }
+fn mat_of(k: u32, code: u32) -> u32 { return select(code & 63u, ix[k].m.x & 63u, ix[k].m.x != 0xffffffffu); }
 
 struct VO {
     @builtin(position) pos: vec4f,
@@ -376,7 +376,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> VO {
     let mode = u32(U.eye.w);
     let face_n = normalize(cross(p1 - p0, p2 - p0));
     var n = face_n;
-    if ((code & 64u) != 0u && mode != 1u) { n = normal_to_world(k, vnrm[vi].xyz); }
+    if ((code & 256u) != 0u && mode != 1u) { n = normal_to_world(k, vnrm[vi].xyz); }
     let p = to_world(k, vpos[vi].xyz);
     var o: VO;
     o.pos = clip_of(p);
@@ -389,7 +389,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> VO {
     o.tg = vec4f(dir_to_world(k, oct_decode(tx.zw)), vnrm[vi].w);
     if (U.mats[o.mat].base.w > 0.5) { return o; }
     if (mode == 1u) {
-        let flag = (code >> 4u) & 3u;
+        let flag = (code >> 6u) & 3u;
         var at = (p0 + p1 + p2) * (1.0 / 3.0);
         if (flag == 1u) { at = (p0 + p2) * 0.5; }
         if (flag == 2u) { at = (p0 + p1) * 0.5; }

@@ -10,7 +10,7 @@
 // index ("vertex pulling"): a vertex can then look at the other two corners of its
 // triangle, which flat shading needs (one brightness per triangle, from the face normal),
 // and the wireframe draws the same data as lines.
-//   pos[i] = position, w = material + 16 * flat_flag + 64 * has_normals
+//   pos[i] = position, w = material + 64 * flat_flag + 256 * has_normals
 //   nrm[i] = normal (when has_normals)
 // flat_flag says where flat shading is evaluated: 0 the centroid, 1 / 2 the middle of the
 // edge v0-v2 / v0-v1 (a quad's center, for its two halves: both get one color).
@@ -267,7 +267,7 @@ static size_t prims_to_tris(GpuRaster *r, const Primitive *pr, int n, size_t nv)
             Vec4 tg[3];
             render_prim_texcoords(&pr[i], sub, uv, tg);
             int flag = pr[i].type == PRIM_QUAD ? (sub == 0 ? 1 : 2) : 0;
-            float code = (float)((pr[i].material & 15) + 16 * flag + 64 * (has_n != 0));
+            float code = (float)((pr[i].material & 63) + 64 * flag + 256 * (has_n != 0));
             for (int k = 0; k < 3; k++, nv++){
                 put(r->tmp_pos + 4 * nv, wp[k], code);
                 put(r->tmp_nrm + 4 * nv, wn[k], 0);
@@ -338,7 +338,7 @@ static int upload_tris(GpuRaster *r, Geo *geo, const Triangle *tris, int ntris, 
             for (int i = 0; i < n; i++){
                 const Triangle *t = &tris[first + i];
                 int has_n = t->n[0] >= 0;
-                float code = (float)((t->material & 15) + 64 * has_n);
+                float code = (float)((t->material & 63) + 256 * has_n);
                 Vec3 wp[3] = {t->q, v_add(t->q, t->u), v_add(t->q, t->v)};
                 for (int k = 0; k < 3; k++){
                     put(r->tmp_pos + 4 * (3 * (size_t)i + k), wp[k], code);

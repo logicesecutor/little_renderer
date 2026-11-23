@@ -8,7 +8,7 @@ struct Prim {
     n: vec4f,      /* unit normal; w = plane_d */
     w: vec4f,      /* (u x v) / |u x v|^2 */
 };
-struct Tri { q: vec3f, n0: u32, u: vec3f, n1: u32, v: vec3f, nm: u32 };   /* nm: normal 2, material in the top 4 bits */
+struct Tri { q: vec3f, n0: u32, u: vec3f, n1: u32, v: vec3f, nm: u32 };   /* nm: normal 2, material in the top 6 bits */
 /* albedo: the base colour, w = the type (3 a lamp); emission, w = ior; pbr: metallic, roughness,
    transmission (material_resolved) */
 struct TMat { albedo: vec4f, emission: vec4f, pbr: vec4f, tex: vec4u };   /* tex: as RMat's (raster_gpu.c) */
@@ -26,7 +26,7 @@ struct TP {
     sky: vec4f,    /* the sky (SKY, SKYC): its scale, cos and sin of its turn, 1 = there is one */
     txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
                       triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
-    mats: array<TMat, 16>,
+    mats: array<TMat, 64>,
     em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many; y: the
                       indirect clamp's bits (indirect_cap) */
     emi: array<vec4u, 4>,   /* ... their instances, 4 to an entry */
@@ -381,7 +381,7 @@ fn normal_at(i: u32) -> vec3f {
 
 fn shape_mat(id: u32) -> u32 {
     if (id < T.opt.z) { return u32(prims[id].u.w); }
-    return tris[id - T.opt.z].nm >> 28u;
+    return tris[id - T.opt.z].nm >> 26u;
 }
 fn hit_mat(f: Found) -> u32 {
     if (f.inst != NONE) {
@@ -418,7 +418,7 @@ fn make_hit(r: Ray, f: Found) -> Hit {
         outward = normalize(cross(tr.u, tr.v));
         if (tr.n0 != NONE) {
             ns = normalize(normal_at(tr.n0) * (1.0 - f.b.x - f.b.y) + normal_at(tr.n1) * f.b.x +
-                           normal_at(tr.nm & 0x0fffffffu) * f.b.y);
+                           normal_at(tr.nm & 0x03ffffffu) * f.b.y);
             smooth_n = true;
         }
         if (f.inst != NONE) {                 /* an instance: its normals into the world */

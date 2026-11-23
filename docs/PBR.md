@@ -357,9 +357,10 @@ Decided and found on the way:
   now. One difference remains, the same on CPU and GPU: on the normal-map mirror test, light
   tracing gives 0.4% less than path tracing alone (normal maps are not reciprocal: the bent
   normal is tilted towards the light in one and towards the camera in the other).
-- **At most 16 materials** (`MAX_MATS`): the GPU packs a triangle's material in 4 bits. Every
-  sample model fits; a model with more shares the last one (with a message). More materials
-  need a wider packing: later, with the Vulkan backend's scene layout.
+- **At most 64 materials** (`MAX_MATS`; 16 before the editor's own materials): the GPU packs a
+  triangle's material in 6 bits (its third normal's index in the other 26), and the raster's
+  vertices theirs in 6 (then the quad flag and has-normals). Every sample model fits; a model
+  with more shares the last one (with a message).
 - Not read (gltf.h): animations and skins, cameras, lights, morph targets, sparse accessors,
   alpha masking and blending (drawn opaque), texture coordinates 1, KHR_texture_transform;
   Draco and meshopt compression are refused, KTX2 and WebP images skipped.

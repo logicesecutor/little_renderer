@@ -170,7 +170,7 @@ Things the engine expects from a hand-made scene:
   sampling and the rasterizer's point light both use only this quad. A second `MAT_LIGHT`
   object would be visible to the camera and in mirrors and glass, but it would not light
   diffuse surfaces.
-- At most `MAX_MATS` (16) materials; primitives are unlimited (the array grows).
+- At most `MAX_MATS` (64) materials; primitives are unlimited (the array grows).
 - Units are arbitrary, but the path tracer's ray offsets (`RT_EPS` in `rt/tracer.c`)
   assume scenes roughly hundreds of units across (the Cornell box is 555).
 

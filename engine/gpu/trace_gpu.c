@@ -864,7 +864,7 @@ static void put_tris(uint32_t *tr, const Triangle *src, int n, uint32_t nrm0){
         int smooth_n = q->n[0] >= 0;
         o[3] = smooth_n ? nrm0 + (uint32_t)q->n[0] : 0xffffffffu;
         o[7] = smooth_n ? nrm0 + (uint32_t)q->n[1] : 0;
-        o[11] = ((uint32_t)(q->material & 15) << 28) | (smooth_n ? ((nrm0 + (uint32_t)q->n[2]) & 0x0fffffffu) : 0);
+        o[11] = ((uint32_t)(q->material & 63) << 26) | (smooth_n ? ((nrm0 + (uint32_t)q->n[2]) & 0x03ffffffu) : 0);
     }
 }
 

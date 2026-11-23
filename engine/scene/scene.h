@@ -8,7 +8,7 @@
 #include "scene/mesh.h"
 #include "scene/texture.h"
 
-#define MAX_MATS 16
+#define MAX_MATS 64     // (the GPU's triangles and raster vertices keep a material in 6 bits)
 #define MAX_VOLUMES 8
 #define MAX_EMITTERS 16   // glowing shapes sampled as lights (Scene.emitters)
 
