@@ -88,6 +88,7 @@ struct GltfWriter {
     unsigned char *child;            // per node: 1 if it is a group's (not in the scene itself)
     int cap_child;
     int *mat_map, *tex_map;          // the scene's materials and textures written: their glTF index (-1: not yet)
+    char **mat_name;                 // gltf_name_material: a scene material's name in the file (NULL: "material N")
     char used[16][64];
     int nused, required[16];
     int use_transmission, use_ior, use_strength;
@@ -99,11 +100,22 @@ GltfWriter *gltf_writer_new(const Scene *s, real unit){
     w->s = s;
     w->unit = unit;
     w->mat_map = malloc(sizeof(int) * (size_t)(s->nmats > 0 ? s->nmats : 1));
+    w->mat_name = calloc((size_t)(s->nmats > 0 ? s->nmats : 1), sizeof(char *));
     w->tex_map = malloc(sizeof(int) * (size_t)(s->ntexmaps > 0 ? s->ntexmaps : 1));
-    if (!w->mat_map || !w->tex_map){ gltf_writer_free(w); return NULL; }
+    if (!w->mat_map || !w->tex_map || !w->mat_name){ gltf_writer_free(w); return NULL; }
     for (int i = 0; i < s->nmats; i++) w->mat_map[i] = -1;
     for (int i = 0; i < s->ntexmaps; i++) w->tex_map[i] = -1;
     return w;
+}
+
+void gltf_name_material(GltfWriter *w, int material, const char *name){
+    if (!w || material < 0 || material >= w->s->nmats || !name) return;
+    char *c = malloc(strlen(name) + 1), *d = c;
+    if (!c) return;
+    for (const char *q = name; *q; q++) if (*q != '"' && *q != '\\' && (unsigned char)*q >= 32) *d++ = *q;   // (as JSON wants it)
+    *d = 0;
+    free(w->mat_name[material]);
+    w->mat_name[material] = c;
 }
 
 void gltf_writer_free(GltfWriter *w){
@@ -114,6 +126,8 @@ void gltf_writer_free(GltfWriter *w){
     for (int i = 0; i < w->ngeoms; i++) free(w->geoms[i].p);
     free(w->geoms);
     free(w->child);
+    for (int i = 0; w->mat_name && i < w->s->nmats; i++) free(w->mat_name[i]);
+    free(w->mat_name);
     free(w->mat_map);
     free(w->tex_map);
     free(w);
@@ -197,8 +211,10 @@ static int material_of(GltfWriter *w, int mat){
     int te = texture_of(w, m->tex_emissive), to = texture_of(w, m->tex_occlusion);
     int i = tx_item(&w->materials);
     Text *t = &w->materials;
-    tx_put(t, "{\"name\":\"material %d\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[%.6g,%.6g,%.6g,1],\"metallicFactor\":%.6g,\"roughnessFactor\":%.6g",
-           mat, (double)base.x, (double)base.y, (double)base.z, (double)metal, (double)rough);
+    if (w->mat_name[mat]) tx_put(t, "{\"name\":\"%s\"", w->mat_name[mat]);
+    else tx_put(t, "{\"name\":\"material %d\"", mat);
+    tx_put(t, ",\"pbrMetallicRoughness\":{\"baseColorFactor\":[%.6g,%.6g,%.6g,1],\"metallicFactor\":%.6g,\"roughnessFactor\":%.6g",
+           (double)base.x, (double)base.y, (double)base.z, (double)metal, (double)rough);
     if (tb >= 0) tx_put(t, ",\"baseColorTexture\":{\"index\":%d}", tb);
     if (tm >= 0) tx_put(t, ",\"metallicRoughnessTexture\":{\"index\":%d}", tm);
     tx_put(t, "}");

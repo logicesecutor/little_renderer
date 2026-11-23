@@ -24,6 +24,8 @@ typedef struct GltfWriter GltfWriter;
 
 GltfWriter *gltf_writer_new(const Scene *s, real unit);
 void gltf_writer_free(GltfWriter *w);
+// the name a scene material has in the file (before it is written; without one: "material N")
+void gltf_name_material(GltfWriter *w, int material, const char *name);
 
 // a geometry: mesh >= 0 a SceneMesh of the scene, or INST_BOX / INST_SPHERE; -1 on failure
 int gltf_add_geometry(GltfWriter *w, int mesh);

@@ -1371,6 +1371,9 @@ EXPORT int lr_save_gltf(const char *path){
     Scene *s = viewer_scene();
     GltfWriter *w = gltf_writer_new(s, (real)(1 / UNITS_PER_M));
     if (!w) return 1;
+    for (int i = 0; i < NMATERIALS; i++) gltf_name_material(w, E.mats[i], MATERIALS[i].label);   // (as the catalogue calls them)
+    gltf_name_material(w, E.dark, "Lamp stand");
+    gltf_name_material(w, E.clay, "Clay");
     int *geo = malloc(sizeof(int) * (size_t)(s->nmeshes + 2));             // (geometries: the meshes', then the box's and the sphere's)
     int nmesh = 0, cap = 0;
     struct { int geo, mat, mesh; } *meshes = NULL;

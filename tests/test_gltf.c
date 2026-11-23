@@ -218,6 +218,7 @@ static void check_written(void){
     scene_add_instance(&a, INST_SPHERE, xform_axes(mat3_identity(), vec3(40, 40, 40), vec3(-200, 40, 0)), mq);
     GltfWriter *w = gltf_writer_new(&a, 0.01f);
     int ok = n == 3 && w;
+    gltf_name_material(w, mg, "Glow \"hot\"");        // (its quotes left out: "Glow hot")
     int geo[2] = {-1, -1}, box = -1, sph = -1;
     for (int i = 0; ok && i < a.ninsts; i++){
         const Instance *in = &a.insts[i];
@@ -291,6 +292,8 @@ static void check_written(void){
           strstr(head + 20, "\"children\":[3,4]"));
     check("the file names its extensions, a node's extras, the root's extension", got > 20 && strstr(head + 20, "\"KHR_materials_emissive_strength\"") &&
           strstr(head + 20, "\"KHR_materials_ior\"") && strstr(head + 20, "\"glowing\":true") && strstr(head + 20, "\"LR_test\":{\"answer\":42}"));
+    check("a material named (gltf_name_material), the others numbered", got > 20 && strstr(head + 20, "\"name\":\"Glow hot\"") &&
+          strstr(head + 20, "\"name\":\"material "));
     scene_free(&a);
     scene_free(&b);
 }
