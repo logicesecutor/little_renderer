@@ -147,6 +147,7 @@
     ui.backend = st.backend;
     renderAll();
     fitCanvas();
+    if (window.KILN_PLAY) startPlayer();             // (a published game: Play, from its files)
   }
 
   // ---- the frame, shown whole: scaled to fit the window, bars around it (5.15) ----
@@ -304,7 +305,7 @@
   // the keys (6.5): Delete removes the selection, Esc deselects (and closes a popover), F
   // frames it, Ctrl Z / Ctrl Shift Z undo and redo; not while typing in a field
   window.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && ui.synced) { e.preventDefault(); if (paletteOpen()) closePalette(); else openPalette(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && ui.synced && !ui.player) { e.preventDefault(); if (paletteOpen()) closePalette(); else openPalette(); return; }
     if (paletteOpen()) return;                       // (the palette's own field has the keys)
     if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
     if (ui.mode === 'play') {                        // (the game's keys, and no others: Stop first)
@@ -1337,6 +1338,7 @@
   // which modes can be gone to now (and why not): a sample is shown and simulated only;
   // while a simulation holds the objects (not Reset or Kept), Build waits; Play leaves by Stop
   function modeBlock(m, leavingPlay) {
+    if (ui.player && m !== 'play') return 'A published game: Play only';
     if (ui.mode === 'play' && m !== 'play') return leavingPlay ? '' : 'Stop the game first';   // (Stop puts all back)
     if (ui.sample && (m === 'build' || m === 'light' || m === 'play')) return ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited';
     if (m === 'build' && simHolds()) return 'Reset or Keep the simulation to edit again';
@@ -1479,6 +1481,111 @@
     $('play-publish').setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open && document.pointerLockElement === view) document.exitPointerLock();
   });
+  // ---- Publish: the game as a zip of static files (the engine, a player page, the scene) ----
+  // a zip of files [name, bytes], stored (the wasm and the scene are compressed already)
+  const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(b) { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+  function makeZip(files) {
+    const enc = new TextEncoder(), parts = [], dir = [];
+    let at = 0;
+    const d = new Date(), dt = ((d.getFullYear() - 1980) << 9 | (d.getMonth() + 1) << 5 | d.getDate()) << 16 | d.getHours() << 11 | d.getMinutes() << 5 | (d.getSeconds() >> 1);
+    for (const [name, data] of files) {
+      const nm = enc.encode(name), crc = crc32(data), h = new DataView(new ArrayBuffer(30));
+      h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+      h.setUint32(10, dt, true); h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true);
+      h.setUint16(26, nm.length, true); h.setUint16(28, 0, true);
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true);
+      c.setUint32(12, dt, true); c.setUint32(16, crc, true); c.setUint32(20, data.length, true); c.setUint32(24, data.length, true);
+      c.setUint16(28, nm.length, true); c.setUint32(42, at, true);
+      parts.push(new Uint8Array(h.buffer), nm, data);
+      dir.push(new Uint8Array(c.buffer), nm);
+      at += 30 + nm.length + data.length;
+    }
+    const size = dir.reduce((n, x) => n + x.length, 0), e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, size, true); e.setUint32(16, at, true);
+    return new Blob([...parts, ...dir, new Uint8Array(e.buffer)], { type: 'application/zip' });
+  }
+  const slugOf = (t) => (t || 'untitled').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'untitled';
+  async function buildGame(title) {
+    try { Module.FS.mkdir('/save'); } catch (e) { /* (there already) */ }
+    if (Module.ccall('lr_save_gltf', 'number', ['string'], ['/save/game.glb'])) throw new Error('the scene could not be saved');
+    const files = [['scene.glb', Module.FS.readFile('/save/game.glb')]];
+    const play = { scene: 'scene.glb', title };
+    const sc = ui.scene;
+    if (sc && sc.skyKey === 'file' && sc.skyPath) {    // (its sky's .hdr goes with it)
+      try { const name = sc.skyPath.slice(sc.skyPath.lastIndexOf('/') + 1); files.push([name, Module.FS.readFile(sc.skyPath)]); play.sky = name; } catch (e) { /* (not there: the default sky) */ }
+    }
+    // the page's own files, as this page has them
+    for (const f of ['editor.css', 'editor.js', 'engine.js', 'engine.wasm']) {
+      const r = await fetch(new URL(f, location.href));
+      if (!r.ok) throw new Error(f + ' could not be read');
+      files.push([f, new Uint8Array(await r.arrayBuffer())]);
+    }
+    const r = await fetch(new URL('index.html', location.href));
+    if (!r.ok) throw new Error('index.html could not be read');
+    const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    let html = await r.text();
+    html = html.replace(/<title>[^<]*<\/title>/, '<title>' + esc(title) + '</title>')
+      .replace('<script src="editor.js"></script>', '<script>window.KILN_PLAY = ' + JSON.stringify(play).replace(/</g, '\\u003c') + ';</script>\n<script src="editor.js"></script>');
+    files.push(['index.html', new TextEncoder().encode(html)]);
+    files.push(['README.txt', new TextEncoder().encode(title + '\r\n\r\nA game made in Kiln (little_renderer\'s editor). Open index.html from a web server, not as a file:\r\n' +
+      'put this folder on a static host (itch.io as an HTML game, GitHub Pages, Netlify), or serve it\r\nyourself (in the folder: python -m http.server, then http://localhost:8000).\r\n' +
+      'It runs in the browser, on WebGPU (Chrome, Edge; Firefox and Safari with WebGPU on).\r\n\r\nClick to look around, WASD to move, Shift to run, Space to jump, B to throw a ball, Esc to free the mouse.\r\n')]);
+    return makeZip(files);
+  }
+  $('pub-game').addEventListener('click', async () => {
+    const title = ($('pub-title').value || 'Untitled').trim() || 'Untitled';
+    $('pub-game').disabled = true;
+    try {
+      const zip = await buildGame(title);
+      const name = slugOf(title) + '.zip';
+      const url = URL.createObjectURL(zip);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      window.__lastGame = zip;                        // (for a test to look at)
+      log('published ' + name + ' (' + Math.round(zip.size / 1024) + ' KB)');
+      toast('Downloaded ' + name + ': put the folder on a web host to share it');
+    } catch (e) {
+      toast('Could not make the game: ' + e.message);
+    } finally {
+      $('pub-game').disabled = false;
+    }
+  });
+  // the player page (a published game): the scene from its files, straight into Play
+  async function startPlayer() {
+    const P = window.KILN_PLAY;
+    ui.player = true;
+    document.body.classList.add('player');
+    document.title = P.title || 'Kiln';
+    try {
+      if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
+      for (const f of [P.scene, P.sky].filter(Boolean)) {
+        const r = await fetch(f);
+        if (!r.ok) throw new Error(f);
+        Module.FS.writeFile('/drop/' + f, new Uint8Array(await r.arrayBuffer()));
+      }
+      const r = JSON.parse(Module.ccall('lr_open_scene', 'string', ['string'], ['/drop/' + P.scene]));
+      if (r.opened !== 1) throw new Error(P.scene);
+      if (P.sky) Module.ccall('lr_load_sky', 'number', ['string', 'string'], ['/drop/' + P.sky, P.sky]);
+      const b = { 'path traced': 0, raster: 1, auto: 2 }[r.renderer];
+      if (b !== undefined && b !== ui.backend) { ui.backend = b; quiet('lr_set_backend', b); renderRenderer(); }
+      ui.sceneFile = P.scene;
+      document.querySelector('.scene-name').textContent = P.title || 'Kiln';
+      refreshScene();
+      setMode('play');
+      $('play-name').textContent = P.title || '';
+    } catch (e) {
+      toast('Could not load the game (' + e.message + '): open it from a web server');
+    }
+  }
+
   $('pub-download').addEventListener('click', () => {
     const t = ($('pub-title').value || 'untitled').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'untitled';
     ui.sceneFile = t + '.glb';

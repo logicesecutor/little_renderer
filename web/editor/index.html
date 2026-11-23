@@ -282,12 +282,9 @@
 <section class="panel publish-sheet" id="publish-sheet" aria-label="Publish" hidden>
   <div class="sheet-head"><h2>Publish to the web</h2><span class="caption">runs in any WebGPU browser</span></div>
   <div class="field"><label for="pub-title">Title</label><input id="pub-title" type="text" autocomplete="off"></div>
-  <div class="field">
-    <span>Who can play</span>
-    <div class="segmented quiet" role="group" aria-label="Who can play"><button type="button" disabled>Only me</button><button type="button" disabled aria-pressed="true">Link</button><button type="button" disabled>Public</button></div>
-  </div>
-  <p class="caption">Publishing needs somewhere to host the game, and that is not built yet. Until it is, download the scene to share it: it opens again here (drop it in), and in Blender.</p>
-  <button type="button" class="primary big" id="pub-download">Download the scene (.glb)</button>
+  <p class="caption">The game as a folder of files: the engine, a player page and your scene. Put them on any static web host (itch.io as HTML, GitHub Pages, Netlify) or serve the folder yourself, and it runs in the player's browser, on WebGPU.</p>
+  <button type="button" class="primary big" id="pub-game">Download the game (.zip)</button>
+  <button type="button" class="quiet-button" id="pub-download">The scene only (.glb): it opens again here, and in Blender</button>
 </section>
 
 <!-- ================= Ctrl K: the palette ================= -->

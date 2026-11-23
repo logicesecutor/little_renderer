@@ -1476,6 +1476,7 @@ EXPORT const char *lr_scene(void){
     jprintf("{\"sky\":");
     jstring(E.sky_name);
     jprintf(",\"skyKey\":\"%s\"", E.sky == SKY_FILE ? "file" : E.sky == SKY_SUN ? "sun" : E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
+    if (E.sky == SKY_FILE){ jprintf(",\"skyPath\":"); jstring(E.sky_path); }   // (where its .hdr is: Publish packs it)
     jprintf(",\"sun\":{\"t\":%.4f,\"intensity\":%.4f,\"size\":%.4f,\"haze\":%.4f,\"az\":%.2f,\"warm\":%d}",
             (double)E.sun.t, (double)E.sun.intensity, (double)E.sun.size, (double)E.sun.haze, (double)E.sun.az, E.sun.warm);
     jprintf(",\"undo\":%d,\"redo\":%d", nundo, nredo);

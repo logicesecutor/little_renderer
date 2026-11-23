@@ -303,6 +303,10 @@ a { color: var(--accent-amber); }
 .time-row { display: flex; align-items: center; gap: 14px; }
 
 /* ---- Play (StagePlay): the editor as one pill; the rest of it away ---- */
+/* a published game (the player page: Publish's zip): Play only, no way back to the editor */
+body.player #play-stop, body.player #play-publish { display: none; }
+.quiet-button { display: block; width: 100%; margin-top: 8px; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--text-secondary, #C9CCD3); font: inherit; font-size: 12px; text-align: center; cursor: pointer; }
+.quiet-button:hover { color: var(--accent-amber); }
 body.playing .project, body.playing .modes, body.playing .right-cluster, body.playing .scene-list, body.playing .bottom-left,
 body.playing .tray, body.playing .status, body.playing #card, body.playing #overlay, body.playing .toast:not(.keep) { display: none !important; }
 .play-pill { left: 50%; top: 20px; transform: translateX(-50%); height: 48px; gap: 6px; padding: 0 6px 0 16px; box-sizing: border-box; z-index: 6; }
