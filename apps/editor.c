@@ -24,6 +24,8 @@
 #include "scene/gltf.h"
 #include "scene/gltf_write.h"
 #include "phys/world.h"
+#include "formats/json.h"
+#include "base/file.h"
 #include "rt/probe.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -1357,8 +1359,8 @@ EXPORT int lr_frame_object(int id){
 // physics as KHR_physics_rigid_bodies (a dynamic object's node has a motion; every part a
 // collider: the unit box or sphere of KHR_collision_shapes under the part's transform, a
 // mesh part its convex hull); what the standards have no place for in LR_scene: the sky,
-// the renderer and the resolution (the file's), each object's id, kind, catalogue material
-// and what it rests on (its node's). Both physics extensions are Review Drafts: their names
+// the renderer and the resolution (the file's), each object's id, kind, catalogue material,
+// what it rests on and (version 2) its place, turn and stretch (its node's). Both physics extensions are Review Drafts: their names
 // are here only, to change when they do.
 #define EXT_BODIES "KHR_physics_rigid_bodies"
 #define EXT_SHAPES "KHR_collision_shapes"
@@ -1404,8 +1406,11 @@ EXPORT int lr_save_gltf(const char *path){
         int n = 0;
         n += snprintf(ext + n, sizeof(ext) - (size_t)n, "\"" EXT_SCENE "\":{\"id\":%d,\"kind\":\"%s\"", o->id, KIND_NAMES[o->kind]);
         if (o->mat >= 0) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"%s\"", MATERIALS[o->mat].key);
+        else if (o->kind == ED_MODEL && E.models[o->model].clay) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"clay\":true");
         if (sup) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"restsOn\":%d", sup->id);
-        n += snprintf(ext + n, sizeof(ext) - (size_t)n, "}");
+        n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"pos\":[%.6f,%.6f,%.6f],\"rot\":[%.8f,%.8f,%.8f,%.8f],\"stretch\":[%.6f,%.6f,%.6f]}",
+                      o->pos.x / UNITS_PER_M, o->pos.y / UNITS_PER_M, o->pos.z / UNITS_PER_M, (double)o->rot.w, (double)o->rot.x,
+                      (double)o->rot.y, (double)o->rot.z, (double)o->stretch.x, (double)o->stretch.y, (double)o->stretch.z);
         if (o->dynamic) snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"" EXT_BODIES "\":{\"motion\":{}}");
         snprintf(extras, sizeof(extras), "\"scale\":%.4f", (double)o->scale);
         gltf_add_group(w, o->name, kids, o->ninst, ext, extras);
@@ -1425,7 +1430,7 @@ EXPORT int lr_save_gltf(const char *path){
         snprintf(sky + k, sizeof(sky) - k, "\"}");
     } else snprintf(sky, sizeof(sky), "{\"preset\":\"%s\"}", E.sky == SKY_NOON ? "noon" : E.sky == SKY_OVERCAST ? "overcast" : "dusk");
     int b = (int)viewer_backend();
-    snprintf(root, sizeof(root), "{\"version\":1,\"sky\":%s,\"renderer\":\"%s\",\"resolution\":[%d,%d],\"unitsPerMetre\":%g}",
+    snprintf(root, sizeof(root), "{\"version\":2,\"sky\":%s,\"renderer\":\"%s\",\"resolution\":[%d,%d],\"unitsPerMetre\":%g}",
              sky, b >= 0 && b < 3 ? RENDERERS[b] : "auto", st.width, st.height, UNITS_PER_M);
     gltf_use_extension(w, EXT_SCENE, root, 0);
     if (ok) ok = gltf_write_glb(w, path) == 0;
@@ -1434,6 +1439,185 @@ EXPORT int lr_save_gltf(const char *path){
     free(meshes);
     free(kids);
     return ok ? 0 : 1;
+}
+
+// ---- a saved scene opened again ---------------------------------------------------------------
+
+// the JSON of a .glb (its first chunk) or of a .gltf, parsed; NULL: neither
+static Json *gltf_json(const char *path){
+    size_t n = 0;
+    unsigned char *f = file_read_all(path, &n);
+    if (!f) return NULL;
+    Json *j = NULL;
+    #define LE32(p) ((uint32_t)(p)[0] | (uint32_t)(p)[1] << 8 | (uint32_t)(p)[2] << 16 | (uint32_t)(p)[3] << 24)
+    if (n >= 20 && LE32(f) == 0x46546C67u){
+        size_t len = LE32(f + 12);
+        if (LE32(f + 16) == 0x4E4F534Au && len <= n - 20) j = json_parse((const char *)f + 20, len);
+    } else j = json_parse((const char *)f, n);
+    #undef LE32
+    free(f);
+    return j;
+}
+static Vec3 json_vec3(const Json *a, Vec3 def){
+    if (json_len(a) != 3) return def;
+    return vec3((real)json_num(json_at(a, 0), def.x), (real)json_num(json_at(a, 1), def.y), (real)json_num(json_at(a, 2), def.z));
+}
+static real v_at(Vec3 v, int i){ return i == 0 ? v.x : i == 1 ? v.y : v.z; }
+static Aabb box_grow(Aabb b, Vec3 p){
+    b.lo = vec3(r_fmin(b.lo.x, p.x), r_fmin(b.lo.y, p.y), r_fmin(b.lo.z, p.z));
+    b.hi = vec3(r_fmax(b.hi.x, p.x), r_fmax(b.hi.y, p.y), r_fmax(b.hi.z, p.z));
+    return b;
+}
+
+// A scene saved by lr_save_gltf (its root has LR_scene), opened in place of this one, as one
+// undo step: its objects (names, kinds, catalogue materials, static or dynamic, what rests on
+// what, places, turns and stretches; a model's parts its own meshes and materials), its sky
+// when a preset (a file's .hdr is not in the file: its name is said), its renderer said.
+// Files of version 1 (before places were saved): the shapes' places from their geometry, a
+// model's from its box. The objects get new ids (undo goes back to the old ones). JSON:
+// {"opened":0} not such a scene (an ordinary model: import it), {"opened":-1} could not be
+// read; {"opened":1,"objects":n,"skyFile":name or null,"renderer":name}.
+EXPORT const char *lr_open_scene(const char *path){
+    Json *j = gltf_json(path);
+    const Json *root = json_get(json_get(j, "extensions"), EXT_SCENE);
+    if (!root || editing_off()){ json_free(j); jlen = 0; jprintf("{\"opened\":%d}", root ? -1 : j ? 0 : -1); return json_buf; }
+    Scene *s = viewer_scene();
+    lr_checkpoint();
+    // its nodes' instances where the file has them: taken (a model's parts need them), then
+    // removed (the shapes are made again as the editor makes them)
+    int n0 = s->ninsts, *node_of = NULL;
+    int n = scene_load_gltf_placed(s, path, (real)UNITS_PER_M, &node_of);
+    if (n < 0){ lr_forget_checkpoint(); json_free(j); jlen = 0; jprintf("{\"opened\":-1}"); return json_buf; }
+    Instance *got = malloc(sizeof(Instance) * (size_t)(n > 0 ? n : 1));
+    if (!got) lr_oom("editor");
+    memcpy(got, s->insts + n0, sizeof(Instance) * (size_t)n);
+    while (s->ninsts > n0) scene_remove_instance(s, s->ninsts - 1);
+    for (int i = E.nobjs - 1; i >= 0; i--) object_drop_instances(&E.objs[i]);   // (this scene's objects gone)
+    E.nobjs = 0;
+    const Json *nodes = json_get(j, "nodes");
+    int nn = json_len(nodes), made = 0;
+    int *new_id = calloc((size_t)(nn > 0 ? nn : 1), sizeof(int)), *file_id = calloc((size_t)(nn > 0 ? nn : 1), sizeof(int));
+    if (!new_id || !file_id) lr_oom("editor");
+    for (int ni = 0; ni < nn; ni++){
+        const Json *nd = json_at(nodes, ni), *ls = json_get(json_get(nd, "extensions"), EXT_SCENE);
+        if (!ls) continue;
+        const char *kind = json_str(json_get(ls, "kind"), "");
+        int k = -1;
+        for (int q = 0; q < 5; q++) if (!strcmp(kind, KIND_NAMES[q])) k = q;
+        if (k < 0) continue;
+        int mat = -1;
+        const char *mk = json_str(json_get(ls, "material"), NULL);
+        for (int q = 0; mk && q < NMATERIALS; q++) if (!strcmp(mk, MATERIALS[q].key)) mat = q;
+        if (k != ED_MODEL && mat < 0) mat = k == ED_ROCK ? 2 : k == ED_LAMP ? 7 : k == ED_SPHERE ? 1 : 0;
+        int dynamic = json_get(json_get(json_get(nd, "extensions"), EXT_BODIES), "motion") != NULL;
+        real scale = (real)json_num(json_get(json_get(nd, "extras"), "scale"), 1);
+        if (!(scale > 0)) scale = 1;
+        // the instances of its parts, in the order of its children
+        const Json *kids = json_get(nd, "children");
+        int nk = json_len(kids), np = 0, *pi = malloc(sizeof(int) * (size_t)(nk > 0 ? nk : 1));
+        if (!pi) lr_oom("editor");
+        for (int c = 0; c < nk; c++){
+            int cn = json_int(json_at(kids, c), -1);
+            for (int q = 0; q < n; q++) if (node_of[q] == cn){ pi[np++] = q; break; }
+        }
+        EdObject shape;                              // (its kind's parts: to read its place back)
+        memset(&shape, 0, sizeof(shape));
+        shape.kind = (EdKind)k;
+        Vec3 pos = vec3(0, 0, 0), stretch = vec3(1, 1, 1);
+        Quat rot = quat_identity();
+        const Json *jp = json_get(ls, "pos");
+        if (jp){                                      // version 2: as saved
+            pos = v_scale(json_vec3(jp, vec3(0, 0, 0)), (real)UNITS_PER_M);
+            const Json *jr = json_get(ls, "rot");
+            if (json_len(jr) == 4)
+                rot = quat_norm(quat((real)json_num(json_at(jr, 0), 1), (real)json_num(json_at(jr, 1), 0),
+                                     (real)json_num(json_at(jr, 2), 0), (real)json_num(json_at(jr, 3), 0)));
+            stretch = json_vec3(json_get(ls, "stretch"), vec3(1, 1, 1));
+        } else if (k != ED_MODEL && np > 0){          // version 1: from its first part, W = pos + R diag(kk) L
+            Xform L = object_part_local(&shape, 0), W = got[pi[0]].xf;
+            Mat3 R;
+            real kv[3];
+            for (int c = 0; c < 3; c++){
+                Vec3 col = vec3(W.m[0][c] / L.m[c][c], W.m[1][c] / L.m[c][c], W.m[2][c] / L.m[c][c]);
+                kv[c] = v_len(col);
+                for (int r = 0; r < 3; r++) R.m[r][c] = v_at(col, r) / (kv[c] > 0 ? kv[c] : 1);
+            }
+            Vec3 kk = vec3(kv[0], kv[1], kv[2]);
+            rot = quat_of_mat3(R);
+            pos = v_sub(vec3(W.m[0][3], W.m[1][3], W.m[2][3]), mat3_mul_vec(R, v_mul(kk, vec3(L.m[0][3], L.m[1][3], L.m[2][3]))));
+            stretch = v_scale(kk, 1 / scale);
+        } else if (np > 0){                           // version 1, a model: the middle of its bottom, no turn
+            Aabb b = {vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+            for (int q = 0; q < np; q++){ b = box_grow(b, got[pi[q]].box.lo); b = box_grow(b, got[pi[q]].box.hi); }
+            pos = vec3((b.lo.x + b.hi.x) / 2, b.lo.y, (b.lo.z + b.hi.z) / 2);
+            stretch = vec3(1 / scale, 1 / scale, 1 / scale);
+        }
+        int model = -1;
+        if (k == ED_MODEL){                           // its parts in its own frame: L = diag(1/kk) R^T (W - pos)
+            if (np == 0){ free(pi); continue; }
+            E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
+            EdModel *m = &E.models[E.nmodels];
+            m->nparts = np;
+            m->clay = json_get(ls, "clay") != NULL;      // (a mesh file's: of clay, no material of its own)
+            m->parts = malloc(sizeof(EdPart) * (size_t)np);
+            if (!m->parts) lr_oom("editor");
+            Mat3 Rt = mat3_transpose(quat_to_mat3(rot));
+            Vec3 kk = v_scale(stretch, scale);
+            m->box = (Aabb){vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
+            for (int q = 0; q < np; q++){
+                const Instance *in = &got[pi[q]];
+                Xform L;
+                for (int r = 0; r < 3; r++)
+                    for (int c = 0; c < 4; c++){
+                        real v = 0;
+                        for (int t = 0; t < 3; t++) v += Rt.m[r][t] * (in->xf.m[t][c] - (c == 3 ? v_at(pos, t) : 0));
+                        L.m[r][c] = v / v_at(kk, r);
+                    }
+                m->parts[q] = (EdPart){in->mesh, in->material, L};
+                Aabb mb = s->meshes[in->mesh].box;
+                for (int c = 0; c < 8; c++)
+                    m->box = box_grow(m->box, xform_point(&L, vec3(c & 1 ? mb.hi.x : mb.lo.x, c & 2 ? mb.hi.y : mb.lo.y, c & 4 ? mb.hi.z : mb.lo.z)));
+            }
+            model = E.nmodels++;
+        }
+        free(pi);
+        int id = object_add((EdKind)k, mat, model, pos, scale, dynamic, 0, NULL);
+        EdObject *o = object_find(id);
+        const char *name = json_str(json_get(nd, "name"), NULL);
+        if (name && *name) snprintf(o->name, sizeof(o->name), "%s", name);
+        o->rot = rot;
+        o->stretch = stretch;
+        object_update(o);
+        new_id[ni] = id;
+        file_id[ni] = json_int(json_get(ls, "id"), 0);
+        made++;
+    }
+    // what rests on what: the file's ids, now the new ones
+    for (int ni = 0; ni < nn; ni++){
+        if (!new_id[ni]) continue;
+        int on = json_int(json_get(json_get(json_get(json_at(nodes, ni), "extensions"), EXT_SCENE), "restsOn"), 0);
+        for (int q = 0; on && q < nn; q++)
+            if (new_id[q] && file_id[q] == on){ object_find(new_id[ni])->support = new_id[q]; break; }
+    }
+    // the sky: a preset as it says; a file's only by its name (its .hdr: dropped with it)
+    const Json *sky = json_get(root, "sky");
+    const char *preset = json_str(json_get(sky, "preset"), NULL), *file = json_str(json_get(sky, "file"), NULL);
+    int sp = preset ? (!strcmp(preset, "noon") ? SKY_NOON : !strcmp(preset, "overcast") ? SKY_OVERCAST : SKY_DUSK) : -2;
+    if (sp >= 0 && sp != E.sky && set_sky(sp, NULL, NULL) == 0) viewer_scene_changed(1);
+    int need_sky = file && !(E.sky == SKY_FILE && !strcmp(E.sky_name, file));
+    jlen = 0;
+    jprintf("{\"opened\":1,\"objects\":%d,\"skyFile\":", made);
+    if (need_sky) jstring(file); else jprintf("null");
+    jprintf(",\"renderer\":");
+    jstring(json_str(json_get(root, "renderer"), "auto"));
+    jprintf("}");
+    free(new_id);
+    free(file_id);
+    free(got);
+    free(node_of);
+    json_free(j);
+    changed();
+    return json_buf;
 }
 
 // ---- the loop --------------------------------------------------------------------------------
