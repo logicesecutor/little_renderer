@@ -10,6 +10,7 @@
 
 #define MAX_MATS 16
 #define MAX_VOLUMES 8
+#define MAX_EMITTERS 16   // glowing shapes sampled as lights (Scene.emitters)
 
 // A material is glTF 2.0's metallic-roughness model with transmission (docs/PBR.md, the
 // BSDF in scene/brdf.h): base colour, metallic, roughness, index of refraction, transmission.
@@ -304,6 +305,14 @@ typedef struct Scene {
                             // these are (a copy of the same scene's takes only those changed since,
                             // Instance.version)
 
+    // The glowing shapes (scene_find_emitters): instances of the unit ball (a ball, one
+    // radius) or box (any box) of a glowing material, which the path tracers sample as
+    // lights (next event estimation) besides the lamp and the sky; at most MAX_EMITTERS, the
+    // first ones (the rest are found only by the paths that hit them). Kept up to date with
+    // the top level over the instances (rt/accel.c).
+    int emitters[MAX_EMITTERS];
+    int nemitters;
+
     // Acceleration structure, owned by the backend that built it (the path tracer's
     // scene_set_accel). scene_free calls accel_free. Rebuild it after adding geometry.
     void *accel;
@@ -345,6 +354,13 @@ int scene_add_instance(Scene *s, int mesh, Xform xf, int material);
 // of up to `gap` unchanged ones joined in (fewer writes); 0 when none is left.
 //     for (int i = 0, a, b; scene_changed_run(s, since, 32, &i, &a, &b);) ...
 int scene_changed_run(const Scene *s, unsigned since, int gap, int *i, int *first, int *last);
+// The glowing shapes of the scene (Scene.emitters): their instances into out (MAX_EMITTERS
+// at most), how many. A ball counts when its three axes have one length.
+int scene_find_emitters(const Scene *s, int *out);
+// a glowing shape's light: what it sends (its material's emission), its surface area, and
+// for a ball its centre and radius (box: centre and the three half axes, in a[0..2])
+typedef struct { int ball; Vec3 c, a[3]; real r, area; Vec3 le; } Emitter;
+Emitter scene_emitter(const Scene *s, int inst);
 // rotation r (columns: the shape's axes), scaled per axis, then moved to t: a box of half
 // sizes `half`, or a sphere of radius r (scale r, r, r)
 Xform xform_axes(Mat3 r, Vec3 scale, Vec3 t);

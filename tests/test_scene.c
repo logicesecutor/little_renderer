@@ -11,13 +11,21 @@
 // 4. The light probe baked in steps (rt/probe.h, probe_job_*), its levels made in steps
 //    too (scene/env.h, env_prepare_start / _step), is the probe and the grid baked at once,
 //    to the bit.
+// 5. Glowing shapes sampled as lights (Scene.emitters, rt/tracer.c): a floor of albedo 0.5
+//    under a glowing ball of radiance 10, radius 10, 50 above it: the floor right below sends
+//    0.5 * 10 * (10 / 50)^2 = 0.2. With next event estimation (MIS on and off) and found by
+//    the paths alone: the same mean, NEE's far less noisy. A glowing box: NEE and the paths
+//    alone agree. A stretched ball is not a light; a lamp-less scene with none is unchanged.
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "scene/scene.h"
 #include "rt/accel.h"
 #include "rt/intersect.h"
 #include "rt/probe.h"
 #include "scene/env.h"
+#include "rt/tracer.h"
+#include "base/rng.h"
 #include "test_util.h"
 
 static Xform at(real x, real r){ return xform_axes(mat3_identity(), vec3(r, r, r), vec3(x, 0, 0)); }
@@ -103,6 +111,70 @@ int main(void){
     }
     env_free(p1); env_free(p2); irr_grid_free(g1); irr_grid_free(g2);
     scene_free(&s);
+    printf("5. glowing shapes as lights\n");
+    {
+        Scene g;
+        memset(&g, 0, sizeof(g));
+        int floor = scene_add_material(&g, material_diffuse(vec3(0.5f, 0.5f, 0.5f)));
+        Material glow = material_pbr(vec3(0, 0, 0), 0, 1, 1.5f, 0);
+        glow.emission = vec3(10, 10, 10);
+        int mg = scene_add_material(&g, glow);
+        scene_add_prim(&g, make_quad(vec3(-5000, 0, -5000), vec3(0, 0, 10000), vec3(10000, 0, 0), floor));
+        int ball = scene_add_instance(&g, INST_SPHERE, xform_axes(mat3_identity(), vec3(10, 10, 10), vec3(0, 50, 0)), mg);
+        g.light = -1;
+        scene_set_accel(&g, ACCEL_BVH, NULL);
+        check("the ball is the scene's one glowing shape", g.nemitters == 1 && g.emitters[0] == ball);
+        // the floor point below the ball, seen from the side
+        Ray r = {vec3(-200, 20, 0), v_norm(vec3(200, -20, 0))};
+        const int N = 40000;
+        double mean[3], var[3];
+        for (int mode = 0; mode < 3; mode++){            // 0: NEE + MIS, 1: NEE without MIS, 2: the paths alone
+            TraceParams tp = trace_default_params();
+            tp.mis = mode != 1;
+            tp.sampler = 0;
+            g.nemitters = mode == 2 ? 0 : 1;
+            Rng rng;
+            rng_seed(&rng, 1234, 5);
+            double sum = 0, sum2 = 0;
+            for (int k = 0; k < N; k++){ double v = trace_path_ex(&g, r, &rng, &tp).x; sum += v; sum2 += v * v; }
+            mean[mode] = sum / N;
+            var[mode] = sum2 / N - mean[mode] * mean[mode];
+        }
+        g.nemitters = 1;
+        printf("   means %.5f %.5f %.5f, standard deviations %.4f %.4f %.4f\n", mean[0], mean[1], mean[2], sqrt(var[0]), sqrt(var[1]), sqrt(var[2]));
+        // (within 2%: the diffuse BSDF is not quite Lambert's, seen this low)
+        check_near("with NEE and MIS: 0.5 * 10 * (10 / 50)^2", mean[0], 0.2, 0.004);
+        check_near("NEE without MIS", mean[1], 0.2, 0.004);
+        check_near("the paths alone (noisier)", mean[2], 0.2, 0.012);
+        check("NEE's noise a fraction of the paths' alone (under a fifth)", sqrt(var[0]) < 0.2 * sqrt(var[2]) && sqrt(var[1]) < 0.2 * sqrt(var[2]));
+        // a glowing box instead, turned: NEE and the paths alone agree
+        Mat3 turn = quat_to_mat3(quat_axis_angle(v_norm(vec3(1, 2, 0.5f)), 0.7f));
+        scene_move_instance(&g, ball, xform_axes(turn, vec3(12, 8, 10), vec3(0, 50, 0)));
+        g.insts[ball].mesh = INST_BOX;
+        scene_update_instances(&g, NULL);
+        check("a box is one too", g.nemitters == 1);
+        double mb[2], vb[2];
+        for (int mode = 0; mode < 2; mode++){
+            TraceParams tp = trace_default_params();
+            tp.sampler = 0;
+            g.nemitters = mode ? 0 : 1;
+            Rng rng;
+            rng_seed(&rng, 99, 7);
+            double sum = 0, sum2 = 0;
+            for (int k = 0; k < N; k++){ double v = trace_path_ex(&g, r, &rng, &tp).x; sum += v; sum2 += v * v; }
+            mb[mode] = sum / N;
+            vb[mode] = sum2 / N - mb[mode] * mb[mode];
+        }
+        printf("   box: means %.5f %.5f, standard deviations %.4f %.4f\n", mb[0], mb[1], sqrt(vb[0]), sqrt(vb[1]));
+        check_near("the box: NEE's mean, the paths' alone", mb[0] - mb[1], 0, 3 * sqrt(vb[1] / N) + 3 * sqrt(vb[0] / N));
+        check("... NEE's noise under half (a face by its area: half of them turned away)", sqrt(vb[0]) < sqrt(vb[1]) / 2);
+        // stretched, a ball is not sampled
+        scene_move_instance(&g, ball, xform_axes(mat3_identity(), vec3(10, 20, 10), vec3(0, 50, 0)));
+        g.insts[ball].mesh = INST_SPHERE;
+        scene_update_instances(&g, NULL);
+        check("a stretched ball: not a light", g.nemitters == 0);
+        scene_free(&g);
+    }
     if (failures){ printf("%d FAILED\n", failures); return 1; }
     printf("all passed\n");
     return 0;

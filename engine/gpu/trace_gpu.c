@@ -129,6 +129,8 @@ typedef struct {
     float sky[4];
     uint32_t txl[4];
     float mats[MAX_MATS][16];          // albedo, emission, pbr, tex (uint32 bits)
+    uint32_t em[4];                    // the glowing shapes sampled as lights: how many
+    uint32_t emi[MAX_EMITTERS];        // ... their instances
 } GTP;
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
 // aligned (WebGPU's minimum offset alignment for uniform bindings)
@@ -1558,6 +1560,11 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
         memcpy(&P.mats[m][12], tx, 16);
     }
     P.txl[0] = t->uvtri_at; P.txl[1] = t->uv_at; P.txl[2] = t->textured ? 1u : 0u;
+    // the glowing shapes (Scene.emitters, found again: the scene's may wait for its top level)
+    int em[MAX_EMITTERS];
+    int ne = s->ninsts == t->ninst ? scene_find_emitters(s, em) : 0;
+    P.em[0] = (uint32_t)ne;
+    for (int k = 0; k < ne; k++) P.emi[k] = (uint32_t)em[k];
     *Pp = P;
 }
 

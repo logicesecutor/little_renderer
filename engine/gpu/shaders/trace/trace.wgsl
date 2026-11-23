@@ -27,6 +27,8 @@ struct TP {
     txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
                       triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
     mats: array<TMat, 16>,
+    em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many */
+    emi: array<vec4u, 4>,   /* ... their instances, 4 to an entry */
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
 @group(0) @binding(4) var<uniform> T: TP;
@@ -762,6 +764,139 @@ fn sky_u(sm: Smp, depth: i32, rng: ptr<function, u32>) -> vec2f {
     return vec2f(a, rnd(rng));
 }
 
+/* ---- the glowing shapes as lights (rt/tracer.c: emit_sample, emit_pdf) ----
+   One of them picked uniformly; a ball by the cone it fills, a box by area. With none
+   (T.em.x = 0) nothing here runs and no number is drawn. */
+fn em_inst(k: u32) -> u32 { return T.emi[k >> 2u][k & 3u]; }
+fn em_slot(inst: u32) -> u32 {
+    for (var k = 0u; k < T.em.x; k++) { if (em_inst(k) == inst) { return k; } }
+    return NONE;
+}
+struct Em { ball: bool, c: vec3f, a0: vec3f, a1: vec3f, a2: vec3f, r: f32, area: f32, le: vec3f };
+fn emitter(i: u32) -> Em {
+    let x = prims[T.ins.y + 2u * i].v;      /* object -> world, by rows */
+    let y = prims[T.ins.y + 2u * i].n;
+    let z = prims[T.ins.y + 2u * i].w;
+    let md = prims[T.ins.y + 2u * i + 1u].c;   /* (its mesh, material, kind) */
+    var e: Em;
+    e.ball = bitcast<u32>(md.z) == UNIT_SPHERE;
+    e.c = vec3f(x.w, y.w, z.w);
+    e.a0 = vec3f(x.x, y.x, z.x);
+    e.a1 = vec3f(x.y, y.y, z.y);
+    e.a2 = vec3f(x.z, y.z, z.z);
+    e.le = T.mats[bitcast<u32>(md.y)].emission.rgb;
+    e.r = length(e.a0);
+    if (e.ball) { e.area = 4.0 * PI_ * e.r * e.r; }
+    else { e.area = 8.0 * (length(cross(e.a1, e.a2)) + length(cross(e.a0, e.a2)) + length(cross(e.a0, e.a1))); }
+    return e;
+}
+/* 1 - cos_max of a ball of radius r, its centre dist2 away (squared); 0 from inside */
+fn ball_cone(r: f32, dist2: f32) -> f32 {
+    let s2v = r * r / dist2;
+    if (!(s2v < 1.0)) { return 0.0; }
+    return s2v / (1.0 + sqrt(1.0 - s2v));
+}
+/* the density (per unit solid angle, the pick included) of reaching the shape's point t along
+   unit d from p, its outward normal n there; 0: NEE could not have */
+fn em_pdf(k: u32, p: vec3f, d: vec3f, t: f32, n: vec3f) -> f32 {
+    let e = emitter(em_inst(k));
+    let cnt = f32(T.em.x);
+    if (e.ball) {
+        let om = ball_cone(e.r, dot(e.c - p, e.c - p));
+        return select(0.0, 1.0 / (2.0 * PI_ * om * cnt), om > 0.0);
+    }
+    let cl = -dot(n, d);
+    return select(0.0, t * t / (cl * e.area * cnt), cl > 0.0);
+}
+struct ES { wi: vec3f, dist: f32, pdf: f32, le: vec3f };
+/* a point of one of them seen from p (pdf 0: none) */
+fn em_sample(p: vec3f, u0: f32, ua: f32, ub: f32) -> ES {
+    var r = ES(vec3f(0.0), 0.0, 0.0, vec3f(0.0));
+    let k = min(u32(u0 * f32(T.em.x)), T.em.x - 1u);
+    let e = emitter(em_inst(k));
+    let cnt = f32(T.em.x);
+    r.le = e.le;
+    if (e.ball) {
+        let to = e.c - p;
+        let d2 = dot(to, to);
+        let om = ball_cone(e.r, d2);
+        if (!(om > 0.0)) { return r; }
+        let dc = sqrt(d2);
+        let ct = 1.0 - ua * om;
+        let st = sqrt(max(0.0, 1.0 - ct * ct));
+        let ph = 2.0 * PI_ * ub;
+        let w = to / dc;
+        let tb = onb(w);
+        r.wi = w * ct + tb[0] * (st * cos(ph)) + tb[1] * (st * sin(ph));
+        r.dist = dc * ct - sqrt(max(0.0, e.r * e.r - d2 * st * st));
+        if (!(r.dist > 0.0)) { return r; }
+        r.pdf = 1.0 / (2.0 * PI_ * om * cnt);
+        return r;
+    }
+    let ax = array<vec3f, 3>(e.a0, e.a1, e.a2);
+    var fa = vec3f(4.0 * length(cross(e.a1, e.a2)), 4.0 * length(cross(e.a2, e.a0)), 4.0 * length(cross(e.a0, e.a1)));
+    var x = ua * e.area;
+    var f = 0u;
+    while (f < 5u && x >= fa[f >> 1u]) { x -= fa[f >> 1u]; f++; }
+    let i = f >> 1u;
+    let sg = select(1.0, -1.0, (f & 1u) != 0u);
+    let aj = ax[(i + 1u) % 3u];
+    let ak = ax[(i + 2u) % 3u];
+    let uu = min(x / fa[i], 1.0) * 2.0 - 1.0;
+    let vv = ub * 2.0 - 1.0;
+    let q = e.c + ax[i] * sg + aj * uu + ak * vv;
+    var n = normalize(cross(aj, ak)) * sg;
+    if (dot(n, ax[i]) * sg < 0.0) { n = -n; }
+    let to = q - p;
+    let d2 = dot(to, to);
+    r.dist = sqrt(d2);
+    r.wi = to / r.dist;
+    let cl = -dot(n, r.wi);
+    if (!(cl > 0.0)) { r.dist = 0.0; return r; }
+    r.pdf = d2 / (cl * e.area * cnt);
+    return r;
+}
+/* next event estimation of them at a surface (as direct_surface) */
+fn direct_emit(h: Hit, b: ptr<function, Bsdf>, v: vec3f, rng: ptr<function, u32>) -> vec3f {
+    let u0 = rnd(rng);
+    let ua = rnd(rng);
+    let ub = rnd(rng);
+    let es = em_sample(h.p, u0, ua, ub);
+    if (!(es.pdf > 0.0)) { return vec3f(0.0); }
+    let fp = bsdf_eval(b, h.n, v, es.wi);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return vec3f(0.0); }
+    let shadow = Ray(h.p, es.wi);
+    if (traverse(shadow, T.f.y, es.dist - T.f.z, true).id != NONE) { return vec3f(0.0); }
+    var g = abs(dot(h.n, es.wi)) / es.pdf;
+    if (T.cnt.w > 0u) { g *= transmittance(shadow, 0.0, es.dist, rng); }
+    if (T.opt.y != 0u) { g *= power_heuristic(es.pdf, fp.w); }
+    return fp.xyz * es.le * g;
+}
+/* ... and from a point in a medium (the phase function for the BSDF) */
+fn direct_emit_medium(p: vec3f, d: vec3f, gg: f32, rng: ptr<function, u32>) -> vec3f {
+    let u0 = rnd(rng);
+    let ua = rnd(rng);
+    let ub = rnd(rng);
+    let es = em_sample(p, u0, ua, ub);
+    if (!(es.pdf > 0.0)) { return vec3f(0.0); }
+    let shadow = Ray(p, es.wi);
+    if (traverse(shadow, T.f.y, es.dist - T.f.z, true).id != NONE) { return vec3f(0.0); }
+    let ph = hg(dot(d, es.wi), gg);
+    var w = ph * transmittance(shadow, 0.0, es.dist, rng) / es.pdf;
+    if (T.opt.y != 0u) { w *= power_heuristic(es.pdf, ph); }
+    return es.le * w;
+}
+/* the weight of a glowing surface's light found by a path (emit: 0 fully, 1 NEE had it, 2
+   against NEE): 1 but for a glowing shape NEE could have reached from the last vertex o */
+fn emit_weight(f: Found, h: Hit, o: vec3f, d: vec3f, emit: i32, bounce_pdf: f32, sel: f32) -> f32 {
+    if (T.em.x == 0u || emit == 0 || f.inst == NONE || !h.front) { return 1.0; }
+    let k = em_slot(f.inst);
+    if (k == NONE) { return 1.0; }
+    let pe = sel * em_pdf(k, o, d, h.t, h.ng);
+    if (!(pe > 0.0)) { return 1.0; }
+    return select(0.0, power_heuristic(bounce_pdf, pe), emit == 2);
+}
+
 /* a material's BSDF (GPU_WGSL_BSDF), seen from the side `outside` says */
 fn mat_bsdf(m: TMat, outside: bool) -> Bsdf {
     return bsdf_make(m.albedo.rgb, m.pbr.x, m.pbr.y, m.emission.w, m.pbr.z, outside);
@@ -977,6 +1112,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
                 let dd = 3u * u32(depth);
                 radiance += thr * direct_medium(p, ray.d, vol.p.x, s2(sm, 1u + dd, rng), rng);
                 if (sky_on()) { radiance += thr * direct_sky_medium(p, ray.d, vol.p.x, sky_u(sm, depth, rng), rng); }
+                if (T.em.x > 0u) { radiance += thr * direct_emit_medium(p, ray.d, vol.p.x, rng); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, rng));
                 bounce_pdf = hg(dot(ray.d, nd), vol.p.x);
                 ray = Ray(p, nd);
@@ -997,8 +1133,9 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
-        /* a glowing surface (glTF's emissive): found by the paths that hit it, not sampled */
-        if (kind != 3u) { radiance += thr * m.emission.rgb; }
+        /* a glowing surface (glTF's emissive): found by the paths that hit it; a glowing shape
+           sampled as a light: weighted against that (emit_weight) */
+        if (kind != 3u) { radiance += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, bounce_pdf, 1.0); }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -1023,6 +1160,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         if (bsdf_rough_part(&b)) {
             radiance += thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng);
             if (sky_on()) { radiance += thr * direct_sky(h, &b, v, sky_u(sm, depth, rng), rng); }
+            if (T.em.x > 0u) { radiance += thr * direct_emit(h, &b, v, rng); }
         }
         if (!bo.s.ok) { break; }
         thr *= bo.s.w;

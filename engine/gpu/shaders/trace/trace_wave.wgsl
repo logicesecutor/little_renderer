@@ -98,7 +98,37 @@ fn wf_shadow_ray(p: u32, o: vec3f, wi: vec3f, dist: f32, c: vec3f, seed: u32) {
    lamp and a sky, one of the two, each half the time (its light twice, its density in MIS
    half: wf_sel) */
 struct LS { wi: vec3f, dist: f32, c: vec3f };
-fn wf_sel() -> f32 { return select(1.0, 0.5, T.opt.w != NONE && sky_on()); }
+/* With glowing shapes (T.em.x > 0) they are a third choice: wf_esel of the time, as one of
+   the lights there are; the lamp and the sky share the rest (with none: all, as before) */
+fn wf_esel() -> f32 { return 1.0 / (1.0 + select(0.0, 1.0, T.opt.w != NONE) + select(0.0, 1.0, sky_on())); }
+fn wf_sel() -> f32 { return select(1.0, 0.5, T.opt.w != NONE && sky_on()) * select(1.0, 1.0 - wf_esel(), T.em.x > 0u); }
+fn wf_emit(p: vec3f, rng: ptr<function, u32>) -> ES {
+    let u0 = rnd(rng);
+    let ua = rnd(rng);
+    let ub = rnd(rng);
+    var es = em_sample(p, u0, ua, ub);
+    es.pdf *= wf_esel();
+    return es;
+}
+fn wf_emit_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, rng: ptr<function, u32>) -> LS {
+    var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
+    let es = wf_emit(h.p, rng);
+    if (!(es.pdf > 0.0)) { return r; }
+    let fp = bsdf_eval(b, h.n, v, es.wi);
+    if (!(max(fp.x, max(fp.y, fp.z)) > 0.0)) { return r; }
+    var g = abs(dot(h.n, es.wi)) / es.pdf;
+    if (T.opt.y != 0u) { g *= power_heuristic(es.pdf, fp.w); }
+    return LS(es.wi, es.dist, fp.xyz * es.le * g);
+}
+fn wf_emit_medium(p: vec3f, d: vec3f, gg: f32, rng: ptr<function, u32>) -> LS {
+    var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
+    let es = wf_emit(p, rng);
+    if (!(es.pdf > 0.0)) { return r; }
+    let ph = hg(dot(d, es.wi), gg);
+    var w = ph / es.pdf;
+    if (T.opt.y != 0u) { w *= power_heuristic(es.pdf, ph); }
+    return LS(es.wi, es.dist, es.le * w);
+}
 fn wf_sky_surface(h: Hit, b: ptr<function, Bsdf>, v: vec3f, u: vec2f) -> LS {
     var r = LS(vec3f(0.0), 0.0, vec3f(0.0));
     let sp = sky_sample(u);
@@ -200,7 +230,8 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 thr *= vol.albedo.xyz;
                 let dd = 3u * u32(depth);
                 var ls: LS;
-                if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_medium(pp, ray.d, vol.p.x, sky_u(sm, depth, &rng)); }
+                if (T.em.x > 0u && rnd(&rng) < wf_esel()) { ls = wf_emit_medium(pp, ray.d, vol.p.x, &rng); }
+                else if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_medium(pp, ray.d, vol.p.x, sky_u(sm, depth, &rng)); }
                 else { ls = wf_light_medium(pp, ray.d, vol.p.x, s2(sm, 1u + dd, &rng)); }
                 if (ls.dist > 0.0) { wf_shadow_ray(p, pp, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, &rng));
@@ -220,7 +251,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
-        if (kind != 3u) { s.rad += thr * m.emission.rgb; }
+        if (kind != 3u) { s.rad += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, s.pdf, wf_esel()); }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
@@ -239,7 +270,8 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
             let bo = surface_bounce(&b, h, v, depth, sm, &rng);
             if (bsdf_rough_part(&b)) {
                 var ls: LS;
-                if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_surface(h, &b, v, sky_u(sm, depth, &rng)); }
+                if (T.em.x > 0u && rnd(&rng) < wf_esel()) { ls = wf_emit_surface(h, &b, v, &rng); }
+                else if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_surface(h, &b, v, sky_u(sm, depth, &rng)); }
                 else { ls = wf_light_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), &rng)); }
                 if (ls.dist > 0.0) { wf_shadow_ray(p, h.p, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
             }

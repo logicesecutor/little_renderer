@@ -879,3 +879,40 @@ int scene_mesh_simplify(const SceneMesh *m, int grid, Triangle **out_tris, int *
     *out_nnormals = nc;
     return 0;
 }
+
+// ---- the glowing shapes, sampled as lights ---------------------------------------------------
+
+static Vec3 xf_axis(const Xform *x, int c){ return vec3(x->m[0][c], x->m[1][c], x->m[2][c]); }
+
+int scene_find_emitters(const Scene *s, int *out){
+    int n = 0;
+    for (int i = 0; i < s->ninsts && n < MAX_EMITTERS; i++){
+        const Instance *in = &s->insts[i];
+        if ((in->mesh != INST_SPHERE && in->mesh != INST_BOX) || in->material < 0 || in->material >= s->nmats) continue;
+        if (!material_glows(&s->mats[in->material])) continue;
+        if (in->mesh == INST_SPHERE){
+            real a = v_len(xf_axis(&in->xf, 0)), b = v_len(xf_axis(&in->xf, 1)), c = v_len(xf_axis(&in->xf, 2));
+            if (!(a > 0) || r_fabs(a - b) > 1e-4f * a || r_fabs(a - c) > 1e-4f * a) continue;   // (stretched: not a ball)
+        }
+        out[n++] = i;
+    }
+    return n;
+}
+
+Emitter scene_emitter(const Scene *s, int inst){
+    const Instance *in = &s->insts[inst];
+    Emitter e;
+    memset(&e, 0, sizeof(e));
+    e.ball = in->mesh == INST_SPHERE;
+    e.c = vec3(in->xf.m[0][3], in->xf.m[1][3], in->xf.m[2][3]);
+    for (int k = 0; k < 3; k++) e.a[k] = xf_axis(&in->xf, k);
+    e.le = s->mats[in->material].emission;
+    if (e.ball){
+        e.r = v_len(e.a[0]);
+        e.area = 4 * (real)PI * e.r * e.r;
+    } else {
+        // the six faces: two of each, 2 a_j by 2 a_k
+        e.area = 8 * (v_len(v_cross(e.a[1], e.a[2])) + v_len(v_cross(e.a[0], e.a[2])) + v_len(v_cross(e.a[0], e.a[1])));
+    }
+    return e;
+}

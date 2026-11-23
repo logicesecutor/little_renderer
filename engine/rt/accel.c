@@ -189,6 +189,7 @@ void scene_set_accel(Scene *s, AccelKind kind, const AccelParams *p){
     a->build_ms = clock_ms() - t0;
     a->kind = kind;
     build_tlas(a, s, p);
+    s->nemitters = scene_find_emitters(s, s->emitters);
     s->accel = a;
     s->accel_free = rt_accel_free;
 }
@@ -199,7 +200,10 @@ void scene_update_instances(Scene *s, const AccelParams *p){
     if (!s->accel || s->accel_free != rt_accel_free){ scene_set_accel(s, ACCEL_NONE, p); return; }
     prepare_meshes(s, p);
     RtAccel *a = s->accel;
-    if (a->tlas_n != s->ninsts || a->tlas_version != s->inst_version) build_tlas(a, s, p);
+    if (a->tlas_n != s->ninsts || a->tlas_version != s->inst_version){
+        build_tlas(a, s, p);
+        s->nemitters = scene_find_emitters(s, s->emitters);   // (with the instances: added, moved, removed, re-coloured)
+    }
 }
 
 const Bvh *scene_tlas(const Scene *s){

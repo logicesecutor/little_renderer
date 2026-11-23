@@ -116,6 +116,118 @@ static Vec3 sample_env_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int mis
     return v_scale(le, w);
 }
 
+// ---- the glowing shapes as lights (Scene.emitters) ---------------------------------------
+//
+// A small, bright glowing ball (a lamp's bulb) lit the scene only through the paths that
+// happened to hit it: a few found it, most did not, and the floor around it was full of
+// fireflies. Next event estimation aims at it, as at the lamp: one of the glowing shapes,
+// picked uniformly (1 / n), then
+//   a ball: a direction in the cone it fills seen from p (Shirley et al. 1996), density
+//           1 / (2 pi (1 - cos_max)) per unit solid angle, cos_max = sqrt(1 - r^2 / d^2);
+//   a box:  a point on its surface, a face by its area: density d^2 / (cos_light * area).
+// With MIS a path that hits one after a rough bounce is weighted against this (emit_pdf),
+// without it not counted (NEE has it). The numbers come from the plain random stream, and
+// only in a scene with such shapes: other scenes' images stay as they were, to the bit.
+
+static int emitter_slot(const Scene *s, int inst){
+    for (int k = 0; k < s->nemitters; k++) if (s->emitters[k] == inst) return k;
+    return -1;
+}
+
+// 1 - cos_max of a ball of radius r whose centre is dist2 away (squared), without the
+// cancellation of 1 - sqrt(1 - x) for a small, far ball; 0 from inside
+static real ball_cone(real r, real dist2){
+    real sin2 = r * r / dist2;
+    if (!(sin2 < 1)) return 0;
+    return sin2 / (1 + r_sqrt(1 - sin2));
+}
+
+// the density (per unit solid angle, the pick included) of reaching the shape's point at
+// distance t along unit d from p, its outward normal n there; 0: NEE could not have
+static real emit_pdf(const Scene *s, int k, Vec3 p, Vec3 d, real t, Vec3 n){
+    Emitter e = scene_emitter(s, s->emitters[k]);
+    if (e.ball){
+        Vec3 to = v_sub(e.c, p);
+        real om = ball_cone(e.r, v_dot(to, to));
+        return om > 0 ? 1 / (2 * (real)PI * om * s->nemitters) : 0;
+    }
+    real cl = -v_dot(n, d);
+    return cl > 0 ? t * t / (cl * e.area * s->nemitters) : 0;
+}
+
+// a point of a glowing shape seen from p: the direction, distance and density (per unit solid
+// angle, the pick included), and what it sends; 0 if none (p inside it, or the face turned away)
+static int emit_sample(const Scene *s, Vec3 p, real u0, real ua, real ub, Vec3 *wi, real *dist, real *pdf, Vec3 *le){
+    int k = (int)(u0 * s->nemitters);
+    if (k >= s->nemitters) k = s->nemitters - 1;
+    Emitter e = scene_emitter(s, s->emitters[k]);
+    *le = e.le;
+    if (e.ball){
+        Vec3 to = v_sub(e.c, p);
+        real d2 = v_dot(to, to), om = ball_cone(e.r, d2);
+        if (!(om > 0)) return 0;
+        real dc = r_sqrt(d2), cos_t = 1 - ua * om, sin_t = r_sqrt(r_fmax(0, 1 - cos_t * cos_t)), ph = 2 * (real)PI * ub;
+        Vec3 w = v_scale(to, 1 / dc), t, b;
+        onb_from_normal(w, &t, &b);
+        *wi = v_add(v_scale(w, cos_t), v_add(v_scale(t, sin_t * r_cos(ph)), v_scale(b, sin_t * r_sin(ph))));
+        real disc = e.r * e.r - d2 * sin_t * sin_t;           // (the near side of the ball along wi)
+        *dist = dc * cos_t - r_sqrt(r_fmax(0, disc));
+        *pdf = 1 / (2 * (real)PI * om * s->nemitters);
+        return *dist > 0;
+    }
+    // a box: a face by its area (two of each axis i, 2 a_j by 2 a_k), a point on it
+    real fa[3];
+    for (int i = 0; i < 3; i++) fa[i] = 4 * v_len(v_cross(e.a[(i + 1) % 3], e.a[(i + 2) % 3]));
+    real x = ua * e.area;
+    int f = 0;
+    while (f < 5 && x >= fa[f >> 1]){ x -= fa[f >> 1]; f++; }
+    int i = f >> 1;
+    real sg = f & 1 ? -1 : 1, uu = r_fmin(x / fa[i], 1) * 2 - 1, vv = ub * 2 - 1;
+    Vec3 aj = e.a[(i + 1) % 3], ak = e.a[(i + 2) % 3];
+    Vec3 q = v_add(e.c, v_add(v_scale(e.a[i], sg), v_add(v_scale(aj, uu), v_scale(ak, vv))));
+    Vec3 n = v_scale(v_norm(v_cross(aj, ak)), sg);
+    if (v_dot(n, e.a[i]) * sg < 0) n = v_neg(n);              // (outward, whatever the axes' handedness)
+    Vec3 to = v_sub(q, p);
+    real d2 = v_dot(to, to);
+    *dist = r_sqrt(d2);
+    *wi = v_scale(to, 1 / *dist);
+    real cl = -v_dot(n, *wi);
+    if (!(cl > 0)) return 0;
+    *pdf = d2 / (cl * e.area * s->nemitters);
+    return 1;
+}
+
+// next event estimation of the glowing shapes at a surface (as sample_direct_light)
+static Vec3 sample_direct_emit(const Scene *s, const Hit *h, Bsdf *b, Vec3 v, int mis, Rng *rng){
+    real u0 = rng_real(rng), ua = rng_real(rng), ub = rng_real(rng);
+    Vec3 wi, le;
+    real dist, pdf;
+    if (!emit_sample(s, h->p, u0, ua, ub, &wi, &dist, &pdf, &le)) return vec3(0, 0, 0);
+    real bpdf;
+    Vec3 f = bsdf_eval(b, h->n, v, wi, &bpdf);
+    if (!(v_max(f) > 0)) return vec3(0, 0, 0);
+    Ray shadow = {h->p, wi};
+    if (scene_occluded(s, &shadow, RT_EPS, dist - RT_SHADOW_MARGIN)) return vec3(0, 0, 0);
+    real g = r_fabs(v_dot(h->n, wi)) / pdf;
+    if (s->nvolumes) g *= scene_medium_transmittance(s, &shadow, 0, dist, rng);
+    if (mis) g *= power_heuristic(pdf, bpdf);
+    return v_scale(v_mul(f, le), g);
+}
+// ... and from a point in a medium (the phase function for the BSDF)
+static Vec3 sample_emit_in_medium(const Scene *s, Vec3 p, Vec3 d, real g, int mis, Rng *rng){
+    real u0 = rng_real(rng), ua = rng_real(rng), ub = rng_real(rng);
+    Vec3 wi, le;
+    real dist, pdf;
+    if (!emit_sample(s, p, u0, ua, ub, &wi, &dist, &pdf, &le)) return vec3(0, 0, 0);
+    Ray shadow = {p, wi};
+    if (scene_occluded(s, &shadow, RT_EPS, dist - RT_SHADOW_MARGIN)) return vec3(0, 0, 0);
+    real tr = scene_medium_transmittance(s, &shadow, 0, dist, rng);
+    real ph = phase_hg(v_dot(d, wi), g);
+    real w = ph * tr / pdf;
+    if (mis) w *= power_heuristic(pdf, ph);
+    return v_scale(le, w);
+}
+
 // the numbers for the sky's sample: the lamp's pair when there is no lamp, else plain ones
 static void env_numbers(const Scene *s, Sampler *sm, int depth, real *ua, real *ub){
     if (s->light < 0) sampler_2d(sm, SAMPLE_LIGHT(depth), ua, ub);
@@ -282,6 +394,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
                 env_numbers(s, sm, depth, &la, &lb);
                 radiance = v_add(radiance, v_mul(throughput, sample_env_in_medium(s, p, ray.d, vol->g, mis, la, lb, rng)));
             }
+            if (s->nemitters) radiance = v_add(radiance, v_mul(throughput, sample_emit_in_medium(s, p, ray.d, vol->g, mis, rng)));
             // 2. continue in a direction drawn from the phase function. Its pdf equals the
             //    phase function, so the weight phase / pdf is 1: throughput is unchanged.
             real da, db;
@@ -326,8 +439,16 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             }
             break;
         }
-        // a glowing surface (glTF's emissive): found by the paths that hit it, not sampled
-        if (material_glows(m)) radiance = v_add(radiance, v_mul(throughput, m->emission));
+        // a glowing surface (glTF's emissive): found by the paths that hit it; a glowing shape
+        // after a rough bounce (or a medium's) was sampled as a light: weighted against that,
+        // or (without MIS) counted there already. (From inside it, or one NEE could not reach
+        // from the last vertex: counted here, whole.)
+        if (material_glows(m)){
+            int k = s->nemitters && emit != EMIT_FULL && h.inst >= 0 ? emitter_slot(s, h.inst) : -1;
+            real pe = k >= 0 && h.front_face ? emit_pdf(s, k, ray.o, v_norm(ray.d), h.t * v_len(ray.d), h.ng) : 0;
+            if (!(pe > 0)) radiance = v_add(radiance, v_mul(throughput, m->emission));
+            else if (emit == EMIT_MIS) radiance = v_add(radiance, v_mul(throughput, v_scale(m->emission, power_heuristic(bounce_pdf, pe))));
+        }
         if (depth >= max_depth) break;
 
         // the surface's BSDF (scene/brdf.h), seen from v (back along the ray)
@@ -344,6 +465,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
                 env_numbers(s, sm, depth, &la, &lb);
                 radiance = v_add(radiance, v_mul(throughput, sample_direct_env(s, &h, &b, v, mis, la, lb, rng)));
             }
+            if (s->nemitters) radiance = v_add(radiance, v_mul(throughput, sample_direct_emit(s, &h, &b, v, mis, rng)));
         }
         // 2. continue the path in a direction drawn from the BSDF: its weight f cos / pdf.
         //    (The numbers only when they are used: SAMPLE_MISC's pair for Russian roulette
