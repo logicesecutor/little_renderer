@@ -489,8 +489,7 @@
     const files = [...e.target.files];
     e.target.value = '';
     if (!files.length || !ui.ready) return;
-    const c = $('canvas');
-    dropFiles(files, c.width / 2, c.height / 2);
+    dropFiles(files, 0.5, 0.5);                     // (the middle of the frame)
   });
   $('open-scene').addEventListener('click', () => { closeSave(); if (ui.sample || simHolds()) return; $('open-file').click(); });
 
