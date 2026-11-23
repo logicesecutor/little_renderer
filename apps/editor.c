@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "app/viewer.h"
 #include "lr.h"
@@ -1650,6 +1651,205 @@ EXPORT int lr_frame_object(int id){
 #define EXT_BODIES "KHR_physics_rigid_bodies"
 #define EXT_SHAPES "KHR_collision_shapes"
 #define EXT_SCENE "LR_scene"
+
+// ---- OpenUSD (.usda): the scene as text, for Blender, usdview, Omniverse... -----------------
+// Units as the editor's (metersPerUnit 0.01: centimetres), Y up. Each object an Xform of its
+// parts, each a Mesh placed by its instance's transform: the unit box [-1, 1]^3, the unit ball
+// (32 x 16), or a mesh's triangles with their normals and texture coordinates (a part of
+// several materials a GeomSubset for each). The materials UsdPreviewSurface
+// (colour, roughness, metallic, emission, glass as opacity and ior); images are not written
+// (the .glb has them). The ground a Mesh of its quad; the sky's file, if it has one, a DomeLight.
+#define M_PI_LR 3.14159265358979323846
+static void usd_name(char *out, size_t n, const char *name, int id){
+    size_t k = 0;
+    if (!(isalpha((unsigned char)name[0]) || name[0] == '_') && k + 1 < n) out[k++] = '_';
+    for (const char *c = name; *c && k + 12 < n; c++) out[k++] = isalnum((unsigned char)*c) ? *c : '_';
+    snprintf(out + k, n - k, "_%d", id);
+}
+static void usd_matrix(FILE *f, const Xform *x){
+    // (USD's rows are the axes and then the place: the transpose of ours)
+    fprintf(f, "( (%.6g, %.6g, %.6g, 0), (%.6g, %.6g, %.6g, 0), (%.6g, %.6g, %.6g, 0), (%.6g, %.6g, %.6g, 1) )",
+            (double)x->m[0][0], (double)x->m[1][0], (double)x->m[2][0], (double)x->m[0][1], (double)x->m[1][1], (double)x->m[2][1],
+            (double)x->m[0][2], (double)x->m[1][2], (double)x->m[2][2], (double)x->m[0][3], (double)x->m[1][3], (double)x->m[2][3]);
+}
+static void usd_mesh(FILE *f, const SceneMesh *m, const char *ind){
+    fprintf(f, "%sint[] faceVertexCounts = [", ind);
+    for (int t = 0; t < m->ntris; t++) fprintf(f, t ? ", 3" : "3");
+    fprintf(f, "]\n%sint[] faceVertexIndices = [", ind);
+    for (int t = 0; t < 3 * m->ntris; t++) fprintf(f, t ? ", %d" : "%d", t);
+    fprintf(f, "]\n%spoint3f[] points = [", ind);
+    for (int t = 0; t < m->ntris; t++){
+        const Triangle *tr = &m->tris[t];
+        Vec3 p[3] = {tr->q, v_add(tr->q, tr->u), v_add(tr->q, tr->v)};
+        for (int k = 0; k < 3; k++) fprintf(f, "%s(%.6g, %.6g, %.6g)", t || k ? ", " : "", (double)p[k].x, (double)p[k].y, (double)p[k].z);
+    }
+    fprintf(f, "]\n");
+    int nrm = m->ntris > 0 && m->nnormals > 0, uv = m->ntris > 0 && m->nuvs > 0;
+    for (int t = 0; t < m->ntris && (nrm || uv); t++){
+        if (m->tris[t].n[0] < 0) nrm = 0;
+        if (m->tris[t].t[0] < 0) uv = 0;
+    }
+    if (nrm){
+        fprintf(f, "%snormal3f[] normals = [", ind);
+        for (int t = 0; t < m->ntris; t++)
+            for (int k = 0; k < 3; k++){ Vec3 n = m->normals[m->tris[t].n[k]]; fprintf(f, "%s(%.5f, %.5f, %.5f)", t || k ? ", " : "", (double)n.x, (double)n.y, (double)n.z); }
+        fprintf(f, "] (\n%s    interpolation = \"faceVarying\"\n%s)\n", ind, ind);
+    }
+    if (uv){
+        // (glTF's v runs down the image, USD's up)
+        fprintf(f, "%stexCoord2f[] primvars:st = [", ind);
+        for (int t = 0; t < m->ntris; t++)
+            for (int k = 0; k < 3; k++){ Vec2 c = m->uvs[m->tris[t].t[k]]; fprintf(f, "%s(%.5f, %.5f)", t || k ? ", " : "", (double)c.x, 1.0 - (double)c.y); }
+        fprintf(f, "] (\n%s    interpolation = \"faceVarying\"\n%s)\n", ind, ind);
+    }
+    fprintf(f, "%suniform token subdivisionScheme = \"none\"\n", ind);
+}
+// the unit box [-1, 1]^3 (each face its own 4 points: flat normals) and the unit ball (32 x 16),
+// as meshes: importers take a Mesh's material where some drop a Cube's or a Sphere's
+static void usd_box(FILE *f, const char *ind){
+    fprintf(f, "%sint[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n%sint[] faceVertexIndices = [", ind, ind);
+    for (int i = 0; i < 24; i++) fprintf(f, i ? ", %d" : "%d", i);
+    fprintf(f, "]\n%spoint3f[] points = [", ind);
+    Vec3 nrm[6];
+    for (int k = 0; k < 6; k++){
+        Primitive q = unit_box_face(k, 0);
+        Vec3 c[4] = {q.q, v_add(q.q, q.u), v_add(v_add(q.q, q.u), q.v), v_add(q.q, q.v)};
+        for (int j = 0; j < 4; j++) fprintf(f, "%s(%g, %g, %g)", k || j ? ", " : "", (double)c[j].x, (double)c[j].y, (double)c[j].z);
+        nrm[k] = q.normal;
+    }
+    fprintf(f, "]\n%snormal3f[] normals = [", ind);
+    for (int k = 0; k < 6; k++) for (int j = 0; j < 4; j++) fprintf(f, "%s(%g, %g, %g)", k || j ? ", " : "", (double)nrm[k].x, (double)nrm[k].y, (double)nrm[k].z);
+    fprintf(f, "] (\n%s    interpolation = \"faceVarying\"\n%s)\n%suniform token subdivisionScheme = \"none\"\n", ind, ind, ind);
+}
+static void usd_ball(FILE *f, const char *ind){
+    enum { NU = 32, NV = 16 };
+    fprintf(f, "%sint[] faceVertexCounts = [", ind);
+    for (int i = 0; i < NU * NV; i++) fprintf(f, i ? ", 4" : "4");
+    fprintf(f, "]\n%sint[] faceVertexIndices = [", ind);
+    for (int v = 0; v < NV; v++)
+        for (int u = 0; u < NU; u++){
+            int a = v * (NU + 1) + u, b = a + NU + 1;
+            fprintf(f, "%s%d, %d, %d, %d", v || u ? ", " : "", a, b, b + 1, a + 1);
+        }
+    fprintf(f, "]\n%spoint3f[] points = [", ind);
+    for (int v = 0; v <= NV; v++)
+        for (int u = 0; u <= NU; u++){
+            double th = M_PI_LR * v / NV, ph = 2 * M_PI_LR * u / NU;
+            fprintf(f, "%s(%.6f, %.6f, %.6f)", v || u ? ", " : "", sin(th) * sin(ph), cos(th), sin(th) * cos(ph));
+        }
+    fprintf(f, "]\n%snormal3f[] normals = [", ind);
+    for (int v = 0; v <= NV; v++)
+        for (int u = 0; u <= NU; u++){
+            double th = M_PI_LR * v / NV, ph = 2 * M_PI_LR * u / NU;
+            fprintf(f, "%s(%.6f, %.6f, %.6f)", v || u ? ", " : "", sin(th) * sin(ph), cos(th), sin(th) * cos(ph));
+        }
+    fprintf(f, "] (\n%s    interpolation = \"vertex\"\n%s)\n%suniform token subdivisionScheme = \"none\"\n", ind, ind, ind);
+}
+static void usd_bind(FILE *f, const char *ind, int mat){
+    if (mat >= 0) fprintf(f, "%srel material:binding = </Scene/Looks/M%d>\n", ind, mat);
+}
+// 0 = written
+EXPORT int lr_save_usda(const char *path){
+    if (E.sample) return 1;
+    Scene *s = viewer_scene();
+    FILE *f = fopen(path, "w");
+    if (!f) return 1;
+    fprintf(f, "#usda 1.0\n(\n    defaultPrim = \"Scene\"\n    metersPerUnit = 0.01\n    upAxis = \"Y\"\n    doc = \"Kiln (little_renderer's editor)\"\n)\n\n");
+    fprintf(f, "def Xform \"Scene\"\n{\n");
+    // the materials the objects use, and the ground's
+    int used[MAX_MATS] = {0};
+    for (int i = 0; i < E.nobjs; i++)
+        for (int k = 0; k < E.objs[i].ninst; k++){
+            const Instance *in = &s->insts[E.objs[i].inst[k]];
+            if (in->material >= 0 && in->material < MAX_MATS) used[in->material] = 1;
+            else if (in->mesh >= 0)
+                for (int t = 0; t < s->meshes[in->mesh].ntris; t++){
+                    int m = s->meshes[in->mesh].tris[t].material;
+                    if (m >= 0 && m < MAX_MATS) used[m] = 1;
+                }
+        }
+    for (int p = 0; p < s->nprims; p++) if (s->prims[p].material >= 0 && s->prims[p].material < MAX_MATS) used[s->prims[p].material] = 1;
+    fprintf(f, "    def Scope \"Looks\"\n    {\n");
+    for (int m = 0; m < s->nmats; m++){
+        if (!used[m]) continue;
+        Material r = material_resolved(&s->mats[m]);
+        fprintf(f, "        def Material \"M%d\"\n        {\n", m);
+        fprintf(f, "            token outputs:surface.connect = </Scene/Looks/M%d/Surface.outputs:surface>\n", m);
+        fprintf(f, "            def Shader \"Surface\"\n            {\n                uniform token info:id = \"UsdPreviewSurface\"\n");
+        fprintf(f, "                color3f inputs:diffuseColor = (%.4f, %.4f, %.4f)\n", (double)r.albedo.x, (double)r.albedo.y, (double)r.albedo.z);
+        fprintf(f, "                float inputs:roughness = %.3f\n                float inputs:metallic = %.3f\n", (double)r.roughness, (double)r.metallic);
+        if (r.emission.x > 0 || r.emission.y > 0 || r.emission.z > 0)
+            fprintf(f, "                color3f inputs:emissiveColor = (%.4f, %.4f, %.4f)\n", (double)r.emission.x, (double)r.emission.y, (double)r.emission.z);
+        if (r.transmission > 0)
+            fprintf(f, "                float inputs:opacity = %.3f\n                float inputs:ior = %.3f\n", 1.0 - 0.9 * (double)r.transmission, (double)r.ior);
+        if (s->mats[m].tex_base) fprintf(f, "                # (its base colour has an image: in the .glb)\n");
+        fprintf(f, "                token outputs:surface\n            }\n        }\n");
+    }
+    fprintf(f, "    }\n\n");
+    // the objects
+    for (int i = 0; i < E.nobjs; i++){
+        const EdObject *o = &E.objs[i];
+        char nm[96];
+        usd_name(nm, sizeof(nm), o->name, o->id);
+        fprintf(f, "    def Xform \"%s\" (\n        customData = { string kilnKind = \"%s\" }\n    )\n    {\n", nm, KIND_NAMES[o->kind]);
+        for (int k = 0; k < o->ninst; k++){
+            const Instance *in = &s->insts[o->inst[k]];
+            const char *type = "Mesh";
+            fprintf(f, "        def %s \"part_%d\" (\n            prepend apiSchemas = [\"MaterialBindingAPI\"]\n        )\n        {\n"
+                       "            matrix4d xformOp:transform = ", type, k + 1);
+            usd_matrix(f, &in->xf);
+            fprintf(f, "\n            uniform token[] xformOpOrder = [\"xformOp:transform\"]\n");
+            if (in->mesh == INST_BOX) usd_box(f, "            ");
+            else if (in->mesh == INST_SPHERE) usd_ball(f, "            ");
+            if (in->mesh >= 0){
+                const SceneMesh *m = &s->meshes[in->mesh];
+                usd_mesh(f, m, "            ");
+                if (in->material >= 0) usd_bind(f, "            ", in->material);
+                else {
+                    // (its triangles' materials: one, or a subset for each)
+                    int first = m->ntris ? m->tris[0].material : -1, one = 1;
+                    for (int t = 1; t < m->ntris; t++) one &= m->tris[t].material == first;
+                    if (one) usd_bind(f, "            ", first);
+                    else for (int mm = 0; mm < MAX_MATS; mm++){
+                        int any = 0;
+                        for (int t = 0; t < m->ntris && !any; t++) any = m->tris[t].material == mm;
+                        if (!any) continue;
+                        fprintf(f, "            def GeomSubset \"material_%d\" (\n                prepend apiSchemas = [\"MaterialBindingAPI\"]\n            )\n"
+                                   "            {\n                uniform token elementType = \"face\"\n"
+                                   "                uniform token familyName = \"materialBind\"\n                int[] indices = [", mm);
+                        int c = 0;
+                        for (int t = 0; t < m->ntris; t++) if (m->tris[t].material == mm) fprintf(f, c++ ? ", %d" : "%d", t);
+                        fprintf(f, "]\n");
+                        usd_bind(f, "                ", mm);
+                        fprintf(f, "            }\n");
+                    }
+                }
+            } else usd_bind(f, "            ", in->material);
+            fprintf(f, "        }\n");
+        }
+        fprintf(f, "    }\n");
+    }
+    // the ground (the scene's quads)
+    for (int p = 0; p < s->nprims; p++){
+        const Primitive *q = &s->prims[p];
+        if (q->type != PRIM_QUAD) continue;
+        Vec3 a = q->q, b = v_add(q->q, q->u), c = v_add(v_add(q->q, q->u), q->v), d = v_add(q->q, q->v);
+        fprintf(f, "    def Mesh \"Ground_%d\" (\n        prepend apiSchemas = [\"MaterialBindingAPI\"]\n    )\n    {\n        int[] faceVertexCounts = [4]\n        int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                   "        point3f[] points = [(%.6g, %.6g, %.6g), (%.6g, %.6g, %.6g), (%.6g, %.6g, %.6g), (%.6g, %.6g, %.6g)]\n"
+                   "        uniform token subdivisionScheme = \"none\"\n", p, (double)a.x, (double)a.y, (double)a.z, (double)b.x, (double)b.y,
+                (double)b.z, (double)c.x, (double)c.y, (double)c.z, (double)d.x, (double)d.y, (double)d.z);
+        usd_bind(f, "        ", q->material);
+        fprintf(f, "    }\n");
+    }
+    if (E.sky == SKY_FILE && E.sky_path[0]){
+        const char *b = strrchr(E.sky_path, '/');
+        fprintf(f, "    def DomeLight \"Sky\"\n    {\n        asset inputs:texture:file = @%s@\n        token inputs:texture:format = \"latlong\"\n    }\n", b ? b + 1 : E.sky_path);
+    } else fprintf(f, "    # the sky: %s (made by the editor; not written)\n", E.sky_name);
+    fprintf(f, "}\n");
+    int bad = ferror(f);
+    if (fclose(f) || bad) return 1;
+    return 0;
+}
 
 EXPORT int lr_save_gltf(const char *path){
     if (E.sample) return 1;                          // (a sample is the engine's: nothing of the editor's to save)

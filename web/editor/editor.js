@@ -1018,6 +1018,28 @@
     toast('Saved ' + name);
   });
 
+  // ---- exporting: the scene as OpenUSD text (.usda), downloaded ----
+  $('save-usd').addEventListener('click', () => {
+    closeSave();
+    if (!ui.ready || ui.sample) return;
+    const name = (ui.sceneFile && /\.glb$/i.test(ui.sceneFile) ? ui.sceneFile.replace(/\.glb$/i, '') : 'untitled_scene') + '.usda';
+    try { Module.FS.mkdir('/save'); } catch (e) { /* (there already) */ }
+    const r = Module.ccall('lr_save_usda', 'number', ['string'], ['/save/' + name]);
+    log('lr_save_usda("' + name + '")');
+    if (r) { toast('Could not export the scene'); return; }
+    const data = Module.FS.readFile('/save/' + name);
+    const url = URL.createObjectURL(new Blob([data], { type: 'model/vnd.usda' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    window.__lastExport = data;                      // (for a test to look at)
+    toast('Exported ' + name);
+  });
+
   // ---- the renderer switch (5.5) ----
   $('renderer').addEventListener('click', (e) => {
     const b = e.target.closest('button');
