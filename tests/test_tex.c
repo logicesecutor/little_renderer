@@ -16,12 +16,20 @@
 //    the top of each brick leans up the image, the bottom down.
 // 5. Materials: material_at applies the base colour (times the factor), metallic and
 //    roughness (green and blue, as glTF) and uv_scale; scene_texture loads a name once.
+// 6. Artists' maps made into glTF's (scene/pbr_maps.h, PBR7): a height ramp rising to the
+//    right gives normals leaning left by atan(strength / 2) per texel step (a ramp up the
+//    image: leaning down), a flat height a flat normal, the same tilt from a wider map over
+//    the same part of the image; normal maps combined (a flat detail leaves the base, a flat
+//    base gives the detail, two tilts add up); green turned over; roughness and metallic
+//    packed into green and blue (the larger size, the missing one white); and through
+//    material_normal the baked bump bends a quad's normal the way the height rises.
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
 #include "scene/texture.h"
 #include "scene/scene.h"
+#include "scene/pbr_maps.h"
 #include "base/rng.h"
 #include "test_util.h"
 
@@ -209,11 +217,111 @@ static void test_materials(void){
     free(s);
 }
 
+// a w x h grey map, its value f(x, y) 0..1
+static void grey_map(TexMap *t, int w, int h, real (*f)(int, int, int, int)){
+    unsigned char *p = malloc((size_t)w * h * 4);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++){
+            real v = f(x, y, w, h);
+            int c = (int)(v * 255 + 0.5f);
+            unsigned char *o = p + 4 * ((size_t)y * w + x);
+            o[0] = o[1] = o[2] = (unsigned char)(c < 0 ? 0 : c > 255 ? 255 : c);
+            o[3] = 255;
+        }
+    texmap_make(t, p, w, h, 0);
+    free(p);
+}
+static real ramp_x(int x, int y, int w, int h){ (void)y; (void)h; return (real)x / (w - 1); }       // (wraps at the edge: read inside)
+// (the same ramp on a map twice as wide, over the same part of the image)
+static real ramp_up(int x, int y, int w, int h){ (void)x; (void)w; return 1 - (real)y / (h - 1); }
+static real flat_half(int x, int y, int w, int h){ (void)x; (void)y; (void)w; (void)h; return 0.5f; }
+static real tri_x(int x, int y, int w, int h){ (void)y; (void)w; (void)h; return (real)(x % 32) / 32; }
+// texel (x, y) of a normal map, decoded to -1..1
+static Vec3 nrm_at(const TexMap *t, int x, int y){
+    Vec4 c = texmap_texel(t, 0, x, y);
+    return vec3(2 * c.x - 1, 2 * c.y - 1, 2 * c.z - 1);
+}
+static void test_pbr_maps(void){
+    printf("6. artists' maps (pbr_maps.h)\n");
+    TexMap h, n, f, c, g, ro, me, mr, h2, n3;
+    // a ramp to the right on a 256-wide map: a step of 1/255 per texel
+    grey_map(&h, 256, 64, ramp_x);
+    check("a height map made into a normal map", pbr_bump_to_normal(&n, &h, 32) == 0 && n.w == 256 && n.h == 64);
+    Vec3 a = nrm_at(&n, 100, 30);
+    // slope 32 * (1/255) (a step of 1/255 per texel; strength 32, 256 wide): tilt atan(32 / 255)
+    real want = (real)atan(32.0 / 255);
+    check_near("a ramp rising to the right: leans left (-x) by atan(32 / 255)", (real)atan2(-a.x, a.z), want, 0.006);
+    check_near("... and not up or down", a.y, 0, 0.01);
+    grey_map(&h2, 512, 64, ramp_x);                 // the same ramp over the same part of the image, twice as wide
+    pbr_bump_to_normal(&n3, &h2, 32);
+    Vec3 a2 = nrm_at(&n3, 200, 30);
+    check_near("a map twice as wide, the same ramp: the same tilt", (real)atan2(-a2.x, a2.z), (real)atan2(-a.x, a.z), 0.006);
+    texmap_free(&h2); texmap_free(&n3);
+    TexMap hu, nu;
+    grey_map(&hu, 64, 256, ramp_up);
+    pbr_bump_to_normal(&nu, &hu, 32);
+    Vec3 b = nrm_at(&nu, 30, 100);
+    check_near("a ramp rising up the image (64 x 256): leans down (-y) as much", (real)atan2(-b.y, b.z), want, 0.006);
+    check("... and not sideways", fabs(b.x) < 0.01);
+    texmap_free(&hu); texmap_free(&nu);
+    grey_map(&f, 32, 32, flat_half);
+    pbr_bump_to_normal(&c, &f, 4);
+    Vec3 fl = nrm_at(&c, 10, 10);
+    check("a flat height: a flat normal", fabs(fl.x) < 0.01 && fabs(fl.y) < 0.01 && fl.z > 0.99);
+    // combined: a flat detail leaves the base; a flat base gives the detail; tilts add up
+    check("normal maps combined", pbr_combine_normals(&g, &n, &c) == 0 && g.w == 256);
+    Vec3 g1 = nrm_at(&g, 100, 30);
+    check("a flat detail on top: the base as it was", fabs(g1.x - a.x) < 0.012 && fabs(g1.y - a.y) < 0.012);
+    TexMap g2;
+    pbr_combine_normals(&g2, &c, &n);
+    Vec3 g2v = nrm_at(&g2, 100, 30);
+    check("a flat base: the detail as it was", fabs(g2v.x - a.x) < 0.012 && fabs(g2v.y - a.y) < 0.012);
+    TexMap steep, ns, both;
+    grey_map(&steep, 256, 64, tri_x);                // a saw: 1/32 per texel
+    pbr_bump_to_normal(&ns, &steep, 4);
+    pbr_combine_normals(&both, &ns, &ns);
+    Vec3 s1 = nrm_at(&ns, 40, 30), s2 = nrm_at(&both, 40, 30);
+    real t1 = (real)atan2(-s1.x, s1.z), t2 = (real)atan2(-s2.x, s2.z);
+    check_near("the same tilt twice: twice the tilt", t2, 2 * t1, 0.02);
+    texmap_free(&g2); texmap_free(&steep); texmap_free(&ns); texmap_free(&both);
+    // green turned over
+    TexMap fg;
+    pbr_flip_green(&fg, &n);
+    Vec4 o = texmap_texel(&n, 0, 7, 9), q = texmap_texel(&fg, 0, 7, 9);
+    check("flip green: green 1 - green, red and blue kept", fabs(q.y - (1 - o.y)) < 0.003 && q.x == o.x && q.z == o.z);
+    texmap_free(&fg);
+    // roughness and metallic packed
+    grey_map(&ro, 128, 128, ramp_x);
+    grey_map(&me, 64, 64, flat_half);
+    check("roughness and metallic packed (the larger size)", pbr_pack_mr(&mr, &ro, &me) == 0 && mr.w == 128 && mr.h == 128);
+    Vec4 m1 = texmap_texel(&mr, 0, 64, 64), r1 = texmap_texel(&ro, 0, 64, 64);
+    check_near("roughness in green", m1.y, r1.x, 0.003);
+    check_near("metallic in blue", m1.z, 0.5f, 0.004);
+    check("red white", m1.x == 1);
+    TexMap mr2;
+    pbr_pack_mr(&mr2, NULL, &me);
+    check("a metallic map alone: roughness white (the factor alone)", texmap_texel(&mr2, 0, 3, 3).y == 1 && mr2.w == 64);
+    check("neither: refused", pbr_pack_mr(&mr, NULL, NULL) != 0);
+    texmap_free(&mr2);
+    // through material_normal: a quad's normal bends away from where the height rises
+    Scene *sc = calloc(1, sizeof(Scene));
+    TexMap nn;
+    pbr_bump_to_normal(&nn, &h, 8);
+    Material m = material_pbr(vec3(1, 1, 1), 0, 0.5f, 1.5f, 0);
+    m.tex_normal = scene_add_texmap(sc, &nn);
+    Vec3 bent = material_normal(sc, &m, vec2(0.4f, 0.5f), MATERIAL_LOD0, vec3(0, 0, 1), (Vec4){1, 0, 0, 1});
+    check("a quad facing +z, u along +x, height rising to +x: its normal leans to -x", bent.x < -0.01f && bent.z > 0.9f);
+    scene_free(sc);
+    free(sc);
+    texmap_free(&h); texmap_free(&n); texmap_free(&f); texmap_free(&c); texmap_free(&g); texmap_free(&ro); texmap_free(&me);
+}
+
 int main(void){
     test_mips();
     test_lookups();
     test_tangents_normals();
     test_materials();
+    test_pbr_maps();
     if (failures){ printf("test_tex: %d FAILED\n", failures); return 1; }
     printf("test_tex: all passed\n");
     return 0;

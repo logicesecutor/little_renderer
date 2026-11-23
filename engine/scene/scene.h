@@ -245,6 +245,13 @@ typedef struct {
     // as mesh_tex also takes the bricks' normal and metal-roughness maps) and their scale
     const char *mesh_tex, *mesh_mr, *mesh_normal;
     real mesh_uv_scale;
+    // ... and the rest of a texture set (scene/pbr_maps.h, PBR7): a bump (height) map and its
+    // strength (0 = 1), roughness and metallic maps apart (packed into glTF's), the occlusion,
+    // the emission (its colour; times mesh_emissive_strength, 0 = 1), the normal map's
+    // strength (0 = 1) and whether its green points down (DirectX's)
+    const char *mesh_bump, *mesh_rough_map, *mesh_metal_map, *mesh_ao, *mesh_emissive;
+    real mesh_bump_scale, mesh_normal_scale, mesh_emissive_strength;
+    int mesh_normal_flip;
     // the sky (any scene; the room's open front lets it in): a Radiance .hdr file, or
     // "procedural"; NULL = none (black), except SCENE_SKY (procedural). sky_scale multiplies
     // it (0 = 1), sky_rot turns it about the vertical axis (degrees)
@@ -396,6 +403,11 @@ Aabb scene_shape_bounds(const Scene *s, int id);
 int scene_texture(Scene *s, const char *name, int srgb);
 // a texture made elsewhere (a glTF model's), taken over by the scene: 1 + its index
 int scene_add_texmap(Scene *s, const TexMap *t);
+// texture tex (1 + its index) made t (taken over; the old one freed): a map made again (the
+// editor's bump strength changed) keeps its place, so no material needs to change and the
+// scene does not fill with copies. The GPU's atlas follows (tex_version). tex, or 0 if no such
+// texture
+int scene_replace_texmap(Scene *s, int tex, const TexMap *t);
 // The material at texture coordinates uv (Material.uv_scale applied here): its textures
 // applied, as a MAT_PBR (or MAT_LIGHT) material without textures. uv_lod: log2 of the
 // footprint in texture coordinates (material_uv_lod; MATERIAL_LOD0: no filtering, level 0)

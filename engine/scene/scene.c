@@ -1,4 +1,5 @@
 #include "scene/scene.h"
+#include "scene/pbr_maps.h"
 #include "base/mem.h"
 #include "scene/gltf.h"
 
@@ -210,6 +211,14 @@ int scene_add_texmap(Scene *s, const TexMap *t){
     return ++s->ntexmaps;
 }
 
+int scene_replace_texmap(Scene *s, int tex, const TexMap *t){
+    if (tex <= 0 || tex > s->ntexmaps) return 0;
+    texmap_free(&s->texmaps[tex - 1]);
+    s->texmaps[tex - 1] = *t;
+    s->tex_version = next_tex_version();
+    return tex;
+}
+
 static inline Vec2 uv_scaled(const Material *m, Vec2 uv){
     real k = m->uv_scale > 0 ? m->uv_scale : 1;
     return vec2(uv.x * k, uv.y * k);
@@ -289,17 +298,36 @@ static Material mesh_material(MatType t){
 
 Material scene_mesh_material_tex(Scene *s, const SceneOptions *opt){
     Material m = scene_mesh_material(opt);
-    if (!opt->mesh_tex && !opt->mesh_mr && !opt->mesh_normal) return m;
-    if (!(opt->mesh_set & MESH_SET_BASE) && m.type != MAT_GLASS) m.albedo = vec3(1, 1, 1);   // the texture's colour as it is
+    if (!opt->mesh_tex && !opt->mesh_mr && !opt->mesh_normal && !opt->mesh_bump && !opt->mesh_rough_map &&
+        !opt->mesh_metal_map && !opt->mesh_ao && !opt->mesh_emissive) return m;
+    if (opt->mesh_tex && !(opt->mesh_set & MESH_SET_BASE) && m.type != MAT_GLASS) m.albedo = vec3(1, 1, 1);   // the texture's colour as it is
     int bricks = opt->mesh_tex && !strcmp(opt->mesh_tex, "bricks");
-    m.tex_base = scene_texture(s, opt->mesh_tex, 1);
-    m.tex_mr = scene_texture(s, opt->mesh_mr ? opt->mesh_mr : (bricks ? "bricks_mr" : NULL), 0);
-    m.tex_normal = scene_texture(s, opt->mesh_normal ? opt->mesh_normal : (bricks ? "bricks_normal" : NULL), 0);
+    PbrMapSet ms = {
+        .base = scene_texture(s, opt->mesh_tex, 1),
+        .normal = scene_texture(s, opt->mesh_normal ? opt->mesh_normal : (bricks ? "bricks_normal" : NULL), 0),
+        .bump = scene_texture(s, opt->mesh_bump, 0),
+        .rough = scene_texture(s, opt->mesh_rough_map, 0),
+        .metal = scene_texture(s, opt->mesh_metal_map, 0),
+        .mr = scene_texture(s, opt->mesh_mr ? opt->mesh_mr : (bricks ? "bricks_mr" : NULL), 0),
+        .ao = scene_texture(s, opt->mesh_ao, 0),
+        .emissive = scene_texture(s, opt->mesh_emissive, 1),
+        .bump_strength = opt->mesh_bump_scale > 0 ? opt->mesh_bump_scale : 1,
+        .flip_green = opt->mesh_normal_flip,
+    };
+    pbr_apply(s, &m, &ms, NULL, NULL);
+    if (opt->mesh_normal_scale > 0) m.normal_scale = opt->mesh_normal_scale;
+    if (m.tex_emissive){                       // the glow: the map's colour times the strength
+        real k = opt->mesh_emissive_strength > 0 ? opt->mesh_emissive_strength : 1;
+        m = material_resolved(&m);
+        m.type = MAT_PBR;
+        m.emission = vec3(k, k, k);
+    }
     if (m.tex_mr){                             // its factors: the texture's values as they are
         m = material_resolved(&m);
         m.type = MAT_PBR;
-        if (!(opt->mesh_set & MESH_SET_METAL)) m.metallic = 1;
-        if (!(opt->mesh_set & MESH_SET_ROUGH)) m.roughness = 1;
+        const int packed = !ms.rough && !ms.metal;   // (glTF's map: both channels; apart: only those given)
+        if ((packed || ms.metal) && !(opt->mesh_set & MESH_SET_METAL)) m.metallic = 1;
+        if ((packed || ms.rough) && !(opt->mesh_set & MESH_SET_ROUGH)) m.roughness = 1;
     }
     m.uv_scale = opt->mesh_uv_scale;
     return m;

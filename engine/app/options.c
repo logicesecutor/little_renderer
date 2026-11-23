@@ -215,6 +215,20 @@ static const Opt OPTS[] = {
     {"-mrmap", K_STR, .off = F(scene.mesh_mr), .def = "",
      .text = "its metal-roughness (glTF: G rough, B metal) and\nnormal maps; names made here: bricks_mr, plate_mr, bricks_normal"},
     {"-normalmap", K_STR, .join = 1, .off = F(scene.mesh_normal), .arg = "file.png|name"},
+    {"-normalscale", K_REAL, .off = F(scene.mesh_normal_scale), .arg = "k", .ok = positive, .bad = "-normalscale must be > 0, got",
+     .text = "the normal map's strength (its tilt times k)", .def = "1"},
+    ONOFF("-normalflip", scene.mesh_normal_flip, "the normal map's green points down (DirectX's): turned over"),
+    {"-bumpmap", K_STR, .off = F(scene.mesh_bump), .arg = "file.png",
+     .text = "a bump (height: white high) map, made into a normal map\n(on top of -normalmap if there is one)", .def = ""},
+    {"-bumpscale", K_REAL, .off = F(scene.mesh_bump_scale), .arg = "s", .ok = positive, .bad = "-bumpscale must be > 0, got",
+     .text = "how steep: a step from black to white over 1/256 of the\nimage tilts it by atan(s / 2)", .def = "1"},
+    {"-roughmap", K_STR, .off = F(scene.mesh_rough_map), .def = "",
+     .text = "roughness and metallic maps apart (grey), packed into\nglTF's metal-roughness (in place of -mrmap)"},
+    {"-metalmap", K_STR, .join = 1, .off = F(scene.mesh_metal_map), .arg = "file.png"},
+    {"-aomap", K_STR, .off = F(scene.mesh_ao), .arg = "file.png", .text = "its ambient occlusion (red: how much light from around reaches)", .def = ""},
+    {"-emissivemap", K_STR, .off = F(scene.mesh_emissive), .arg = "file.png", .text = "its glow's colour (times -emissive)", .def = ""},
+    {"-emissive", K_REAL, .off = F(scene.mesh_emissive_strength), .arg = "k", .ok = positive, .bad = "-emissive must be > 0, got",
+     .text = "how bright the glow is (radiance of white)", .def = "1"},
     {"-uvscale", K_REAL, .off = F(scene.mesh_uv_scale), .arg = "k", .ok = positive, .bad = "-uvscale must be > 0, got",
      .text = "its texture coordinates times k", .def = "1"},
     REAL("-rot", scene.rot_deg, "degrees", "turn the model around the vertical axis"),
@@ -688,6 +702,15 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
         if (so->mesh_tex) put_path(f, "-tex", so->mesh_tex);
         if (so->mesh_mr) put_path(f, "-mrmap", so->mesh_mr);
         if (so->mesh_normal) put_path(f, "-normalmap", so->mesh_normal);
+        if (so->mesh_normal_scale > 0) fprintf(f, " -normalscale %g", (double)so->mesh_normal_scale);
+        if (so->mesh_normal_flip) fprintf(f, " -normalflip on");
+        if (so->mesh_bump) put_path(f, "-bumpmap", so->mesh_bump);
+        if (so->mesh_bump_scale > 0) fprintf(f, " -bumpscale %g", (double)so->mesh_bump_scale);
+        if (so->mesh_rough_map) put_path(f, "-roughmap", so->mesh_rough_map);
+        if (so->mesh_metal_map) put_path(f, "-metalmap", so->mesh_metal_map);
+        if (so->mesh_ao) put_path(f, "-aomap", so->mesh_ao);
+        if (so->mesh_emissive) put_path(f, "-emissivemap", so->mesh_emissive);
+        if (so->mesh_emissive_strength > 0) fprintf(f, " -emissive %g", (double)so->mesh_emissive_strength);
         if (so->mesh_uv_scale > 0) fprintf(f, " -uvscale %g", (double)so->mesh_uv_scale);
     }
     if (o->use_cloud || o->scene.kind == SCENE_CLOUD || o->scene.kind == SCENE_SHOWCASE){
