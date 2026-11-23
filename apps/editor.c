@@ -712,12 +712,51 @@ static Vec3 metres(double x, double y, double z){
 
 // a shape standing at (x, y, z) (the middle of its bottom), on `support` (0: the ground);
 // static, at its own size. Returns its id (0: none).
+// ---- placement: a new object never inside what is there ------------------------------------
+// (A shape or model put on the ground next to another landed half inside it.) Boxes in world
+// units, a centimetre smaller each way: touching is not inside.
+static int boxes_overlap(Aabb a, Aabb b){
+    const real e = 1;
+    return a.lo.x + e < b.hi.x && b.lo.x + e < a.hi.x && a.lo.y + e < b.hi.y && b.lo.y + e < a.hi.y &&
+           a.lo.z + e < b.hi.z && b.lo.z + e < a.hi.z;
+}
+// the box against every object but `skip` (0: none)
+static int box_free(Aabb b, int skip){
+    for (int i = 0; i < E.nobjs; i++)
+        if (E.objs[i].id != skip && boxes_overlap(b, object_box(&E.objs[i]))) return 0;
+    return 1;
+}
+// The nearest way along the ground (x, z) to move box b so that it is free: rings round where
+// it is, a step apart (a quarter of its smaller side, at least 10 cm), 8 more points on each
+// ring than the one before, up to 40 rings. (0, 0, 0) if it is free already or nothing is.
+static Vec3 free_shift(Aabb b, int skip){
+    if (box_free(b, skip)) return vec3(0, 0, 0);
+    real step = r_fmax(10, 0.25f * r_fmin(b.hi.x - b.lo.x, b.hi.z - b.lo.z));
+    for (int k = 1; k <= 40; k++){
+        const int n = 8 * k;
+        for (int j = 0; j < n; j++){
+            real a = (real)(6.283185307179586 * j / n);
+            Vec3 d = vec3(r_cos(a) * step * k, 0, r_sin(a) * step * k);
+            Aabb m = {v_add(b.lo, d), v_add(b.hi, d)};
+            if (box_free(m, skip)) return d;
+        }
+    }
+    return vec3(0, 0, 0);
+}
+// a new object on the ground (support 0) moved off what it went into
+static void place_free(int id){
+    EdObject *o = object_find(id);
+    if (!o || o->support) return;
+    Vec3 d = free_shift(object_box(o), id);
+    if (d.x != 0 || d.z != 0) object_shift(id, d, 0);
+}
 EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
     static const struct { EdKind kind; int mat; const char *label; } SH[NSHAPES] = {
         {ED_BOX, 0, NULL}, {ED_SPHERE, 1, NULL}, {ED_SPHERE, 6, "Glass ball"}, {ED_ROCK, 2, NULL}, {ED_LAMP, 7, NULL}};
     if (shape < 0 || shape >= NSHAPES || editing_off()) return 0;
     if (support && !object_find(support)) support = 0;
     int id = object_add(SH[shape].kind, SH[shape].mat, -1, metres(x, y, z), 1, 0, support, SH[shape].label);
+    place_free(id);
     changed();
     return id;
 }
@@ -825,6 +864,7 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
     if (support && !object_find(support)) support = 0;
     const char *file = strrchr(path, '/');
     int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    place_free(id);
     changed();
     return id;
 }
@@ -862,6 +902,7 @@ EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int su
     if (support && !object_find(support)) support = 0;
     const char *file = strrchr(path, '/');
     int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    place_free(id);
     changed();
     return id;
 }
@@ -1454,6 +1495,17 @@ EXPORT const char *lr_project(double x, double y, double z){
 
 // the camera, for the page's gizmo: {"pos":[m],"fwd":[...],"right":[...],"up":[...],"fov":40,
 // "w":1920,"h":1080} (fov: the vertical, degrees)
+// For the page (a stack of boxes before they are made): where on the ground a box of half
+// sizes hx, hz and height h (metres, its middle at x, z) touches nothing, the nearest to there:
+// [x, z] in metres
+EXPORT const char *lr_free_spot(double x, double z, double hx, double hz, double h){
+    Aabb b = {metres(x - hx, 0, z - hz), metres(x + hx, h, z + hz)};
+    Vec3 d = free_shift(b, 0);
+    jlen = 0;
+    jprintf("[%.4f,%.4f]", x + (double)d.x / UNITS_PER_M, z + (double)d.z / UNITS_PER_M);
+    return json_buf;
+}
+
 EXPORT const char *lr_camera(void){
     View v = viewer_view();
     ViewerStatus st;

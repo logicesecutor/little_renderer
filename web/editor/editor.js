@@ -1421,18 +1421,22 @@
     if (!cam || cam.fwd[1] > -0.02) { toast('Point the camera at the ground first'); return 0; }
     const d = -cam.pos[1] / cam.fwd[1], gx = cam.pos[0] + cam.fwd[0] * d, gz = cam.pos[2] + cam.fwd[2] * d;
     if (!(d > 0 && d < 200)) { toast('Point the camera at the ground first'); return 0; }
+    // across the view, along the ground's nearer axis (the boxes are square to the axes: on a
+    // slant, neighbours would go into each other), where it touches nothing (lr_free_spot)
+    const r = Math.abs(cam.fwd[2]) >= Math.abs(cam.fwd[0]) ? [Math.sign(cam.fwd[2]) || 1, 0] : [0, Math.sign(-cam.fwd[0]) || 1];
+    const spot = engineText('lr_free_spot', gx, gz, Math.abs(r[0]) * 2.075 + Math.abs(r[1]) * 0.5, Math.abs(r[1]) * 2.075 + Math.abs(r[0]) * 0.5, 4);
+    const [sx, sz] = spot || [gx, gz];
     quiet('lr_checkpoint');
-    const rl = Math.hypot(cam.fwd[0], cam.fwd[2]) || 1, r = [-cam.fwd[2] / rl, cam.fwd[0] / rl];
     let first = 0;
     for (let c = 0; c < 4; c++) {
-      const off = (c - 1.5) * 1.05, x = gx + r[0] * off, z = gz + r[1] * off;
+      const off = (c - 1.5) * 1.05, x = sx + r[0] * off, z = sz + r[1] * off;
       let below = 0;
       for (let l = 0; l < 4; l++) {
         below = quiet('lr_add_shape', SHAPE_INDEX.box, x, l, z, below);
         if (!first) first = below;
       }
     }
-    log('a stack of 4 x 4 boxes at ' + where([gx, 0, gz]));
+    log('a stack of 4 x 4 boxes at ' + where([sx, 0, sz]));
     refreshScene();
     select(first);
     return first;
