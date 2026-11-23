@@ -446,12 +446,12 @@
   let dropDir = false;
   async function dropFiles(files, sx, sy) {
     const model = files.find((f) => /\.(glb|gltf|obj|ply)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
-    const img = files.find((f) => /\.(png|jpe?g)$/i.test(f.name));
-    if (!model && !hdr && img) {                      // (an image: onto the object it was dropped on)
+    const imgs = files.filter((f) => /\.(png|jpe?g)$/i.test(f.name));
+    if (!model && !hdr && imgs.length) {              // (images: onto the object they were dropped on)
       const pk = pick(sx, sy, 0);
       if (!pk || !pk.hit || !pk.id) { toast('Drop an image onto an object'); return; }
       select(pk.id);
-      await lookImage(pk.id, img);
+      await lookDrop(pk.id, imgs);
       return;
     }
     if (!model && !hdr) { toast('Drop .glb, .gltf, .obj, .hdr files, or an image onto an object'); return; }
@@ -651,8 +651,49 @@
 
   // ---- the object card (5.9): next to the selection ----
   const card = $('card');
-  // its own material (the card's Own): colour, roughness, metallic, an image
-  const look = { open: false, drag: false, raf: 0, id: 0 };
+  // its own material (the card's Own): colour, roughness, metallic, and its maps (PBR: the
+  // engine's pbr_apply makes glTF's set of them: a bump into a normal map, roughness and
+  // metallic apart packed into one)
+  const look = { open: false, drag: false, raf: 0, id: 0, slot: 0 };
+  const LOOK_SLOTS = [['base', 'Base colour'], ['normal', 'Normal'], ['bump', 'Bump'], ['roughness', 'Roughness'],
+    ['metallic', 'Metallic'], ['orm', 'Packed ORM'], ['ao', 'AO'], ['emissive', 'Emissive']];
+  const LOOK_K = [['look-bump', 'bump', 1], ['look-normal', 'normal', 2], ['look-ao', 'ao', 2], ['look-glow', 'glow', 1]];
+  // which slot an image's name says (texture sets' usual words: brick_Normal_DX.png,
+  // wood_roughness.jpg, metal_ORM.png, Rock_AmbientOcclusion.png); -1: none
+  function lookSlotOf(name) {
+    const t = name.replace(/\.[^.]*$/, '').replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/);
+    const has = (...w) => w.some((x) => t.includes(x));
+    if (has('orm', 'arm', 'rma', 'mra') || (has('metallic', 'metalness') && has('roughness'))) return 5;
+    if (has('normal', 'normals', 'nrm', 'nor', 'norm', 'nml', 'normalgl', 'normaldx')) return 1;
+    if (has('height', 'bump', 'disp', 'displacement', 'heightmap')) return 2;
+    if (has('roughness', 'rough', 'rgh')) return 3;
+    if (has('metallic', 'metal', 'metalness', 'mtl')) return 4;
+    if (has('ao', 'occlusion', 'occ', 'ambientocclusion')) return 6;
+    if (has('emissive', 'emission', 'emit', 'glow')) return 7;
+    if (has('base', 'basecolor', 'albedo', 'diffuse', 'diff', 'color', 'colour', 'col')) return 0;
+    return -1;
+  }
+  window.__lookSlotOf = lookSlotOf;                  // (for a test to ask)
+  const lookDx = (name) => /(^|[^a-z])(dx|directx)([^a-z]|$)|normaldx/i.test(name.replace(/\.[^.]*$/, ''));
+  // the slots' rows, made once
+  for (let i = 0; i < LOOK_SLOTS.length; i++) {
+    const row = document.createElement('div');
+    row.className = 'look-map';
+    row.setAttribute('role', 'listitem');
+    row.innerHTML = '<span class="secondary"></span><span class="look-map-name mono small"></span>' +
+      '<button type="button" class="look-btn">Choose…</button><button type="button" class="look-btn look-x">×</button>';
+    row.children[0].textContent = LOOK_SLOTS[i][1];
+    row.children[2].setAttribute('aria-label', 'Choose a ' + LOOK_SLOTS[i][1].toLowerCase() + ' map');
+    row.children[3].setAttribute('aria-label', 'Remove the ' + LOOK_SLOTS[i][1].toLowerCase() + ' map');
+    row.children[2].addEventListener('click', () => { look.slot = i; $('look-file').click(); });
+    row.children[3].addEventListener('click', () => {
+      if (!ui.sel) return;
+      quiet('lr_checkpoint');
+      lookResult(Module.ccall('lr_set_look_map', 'number', ['number', 'number', 'string'], [ui.sel, i, '']));
+      refreshScene();
+    });
+    $('look-maps').appendChild(row);
+  }
   function lookNow() {
     return [parseInt($('look-rgb').value.slice(1), 16), Number($('look-rough').value), Number($('look-metal').value)];
   }
@@ -666,13 +707,24 @@
       if (document.activeElement !== $('look-rgb')) $('look-rgb').value = o.look.rgb.toLowerCase();
       $('look-rough').value = String(o.look.roughness);
       $('look-metal').value = String(o.look.metallic);
+      for (const [id, key] of LOOK_K) if (o.look[key] !== undefined) $(id).value = String(o.look[key]);
+      $('look-flip').checked = !!o.look.flipGreen;
     }
     const v = lookNow();
     $('look-rgb-v').textContent = $('look-rgb').value.toUpperCase().slice(1);
     $('look-rough-v').textContent = v[1].toFixed(2);
     $('look-metal-v').textContent = v[2].toFixed(2);
-    $('look-image-name').textContent = own && o.look.image ? o.look.image : 'none';
-    $('look-image-off').hidden = !(own && o.look.image);
+    for (const [id, , d] of LOOK_K) $(id + '-v').textContent = Number($(id).value).toFixed(d);
+    const maps = (own && o.look.maps) || {};
+    const rows = $('look-maps').children;
+    for (let i = 0; i < LOOK_SLOTS.length; i++) {
+      const nm = maps[LOOK_SLOTS[i][0]] || '';
+      rows[i].children[1].textContent = nm || 'none';
+      rows[i].children[1].title = nm;
+      rows[i].children[1].classList.toggle('none', !nm);
+      rows[i].children[3].style.visibility = nm ? '' : 'hidden';   // (its place kept: the rows line up)
+    }
+    $('look-more').hidden = !LOOK_SLOTS.some(([k], i) => i > 0 && maps[k]);
   }
   function lookResult(r) {
     if (r === 2) toast('No room for another material: a scene has 64 at most');
@@ -709,29 +761,66 @@
     });
     $(id).addEventListener('change', () => { look.drag = false; sendLook(true); });
   }
-  // an image for its base colour: into the page's file system, then onto it
-  async function lookImage(id, file) {
+  // images into the page's file system, then into its slots: one undo step for them all
+  async function lookMaps(id, list) {
     if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
-    Module.FS.writeFile('/drop/' + file.name, new Uint8Array(await file.arrayBuffer()));
     quiet('lr_checkpoint');
-    const r = Module.ccall('lr_set_look_image', 'number', ['number', 'string'], [id, '/drop/' + file.name]);
-    log('lr_set_look_image(' + id + ', "/drop/' + file.name + '") -> ' + r);
-    if (r) { quiet('lr_forget_checkpoint'); if (r === 1) toast('Could not read ' + file.name); else lookResult(r); }
-    else { look.id = id; look.open = true; }
+    let done = 0;
+    for (const [slot, file] of list) {
+      Module.FS.writeFile('/drop/' + file.name, new Uint8Array(await file.arrayBuffer()));
+      const r = Module.ccall('lr_set_look_map', 'number', ['number', 'number', 'string'], [id, slot, '/drop/' + file.name]);
+      log('lr_set_look_map(' + id + ', ' + slot + ' /* ' + LOOK_SLOTS[slot][0] + ' */, "/drop/' + file.name + '") -> ' + r);
+      if (r === 1) toast('Could not read ' + file.name);
+      else if (r) { lookResult(r); break; }
+      else done++;
+    }
+    if (!done) quiet('lr_forget_checkpoint');
+    else {
+      look.id = id; look.open = true;
+      // a normal map named for DirectX (green down): turned over
+      const dx = list.some(([slot, f]) => slot === 1 && lookDx(f.name));
+      if (dx) { refreshScene(); const o = obj(id); if (o && o.look) quiet('lr_set_look_strengths', id, ...lookK(o.look), 1); }
+    }
     refreshScene();
+    return done;
   }
-  $('look-image').addEventListener('click', () => $('look-file').click());
+  const lookK = (lk) => [lk.bump ?? 1, lk.normal ?? 1, lk.ao ?? 1, lk.glow ?? 1];
+  // images dropped on it: each to the slot its name says (one with no such word: the base
+  // colour, if that is not taken)
+  async function lookDrop(id, files) {
+    const list = [], taken = new Set(), unknown = [];
+    for (const f of files) {
+      const slot = lookSlotOf(f.name);
+      if (slot < 0 || taken.has(slot)) unknown.push(f);
+      else { list.push([slot, f]); taken.add(slot); }
+    }
+    if (unknown.length && !taken.has(0)) { list.push([0, unknown.shift()]); taken.add(0); }
+    if (unknown.length) toast('Not used (its name says no map): ' + unknown.map((f) => f.name).join(', '));
+    if (list.length) await lookMaps(id, list);
+  }
   $('look-file').addEventListener('change', () => {
     const f = $('look-file').files[0];
-    if (f && ui.sel) lookImage(ui.sel, f);
+    if (f && ui.sel) lookMaps(ui.sel, [[look.slot, f]]);
     $('look-file').value = '';
   });
-  $('look-image-off').addEventListener('click', () => {
-    if (!ui.sel) return;
-    quiet('lr_checkpoint');
-    lookResult(Module.ccall('lr_set_look_image', 'number', ['number', 'string'], [ui.sel, '']));
-    refreshScene();
-  });
+  // the maps' strengths: a drag is one undo step
+  function sendStrengths(final) {
+    const o = obj(ui.sel);
+    if (!o) return;
+    const k = LOOK_K.map(([id]) => Math.max(0.01, Number($(id).value))), flip = $('look-flip').checked ? 1 : 0;
+    const r = quiet('lr_set_look_strengths', o.id, ...k, flip);
+    if (final) log('lr_set_look_strengths(' + o.id + ', ' + k.map((x) => x.toFixed(2)).join(', ') + ', ' + flip + ')' + (r ? ' -> ' + r : ''));
+    if (final) refreshScene();
+  }
+  for (const [id] of LOOK_K) {
+    $(id).addEventListener('input', () => {
+      if (!look.drag) { quiet('lr_checkpoint'); look.drag = true; }
+      renderLook(obj(ui.sel) || { material: '' });
+      if (!look.raf) look.raf = requestAnimationFrame(() => { look.raf = 0; if (look.drag) sendStrengths(false); });
+    });
+    $(id).addEventListener('change', () => { look.drag = false; sendStrengths(true); });
+  }
+  $('look-flip').addEventListener('change', () => { quiet('lr_checkpoint'); sendStrengths(true); });
 
   function renderCard() {
     const o = obj(ui.sel);
@@ -739,7 +828,7 @@
     if (!o) return;
     const own = o.material === 'own' && o.look;
     const m = own ? { label: 'Its own' + (o.look.image ? ' · ' + o.look.image : ''), base: o.look.rgb } : MATERIALS[o.material] || { label: 'From the file', base: '#B8AFA3' };
-    $('card-mat-hint').textContent = own ? 'A colour, roughness and image of its own' : 'Drag a material onto the object to change it';
+    $('card-mat-hint').textContent = own ? 'A colour, roughness and maps of its own' : 'Drag a material onto the object to change it';
     renderLook(o);
     $('card-name').textContent = o.name;
     card.setAttribute('aria-label', o.name + ' properties');

@@ -24,6 +24,7 @@
 #include "scene/camera.h"
 #include "scene/gltf.h"
 #include "scene/gltf_write.h"
+#include "scene/pbr_maps.h"
 #include "phys/world.h"
 #include "formats/json.h"
 #include "base/file.h"
@@ -91,9 +92,19 @@ typedef struct {
     int look;
     unsigned look_rgb;
     real look_rough, look_metal;
-    int look_tex;
-    char look_tex_name[64];
+    // its maps (PBR7: LOOK_BASE..., 1 + an index into Scene.texmaps, 0: none) and their files'
+    // names (to show), the bump's strength, the normal map's, the occlusion's, the glow's
+    // brightness (with an emissive map), whether the normal map's green points down; what was
+    // made from them (pbr_apply: the normal from normal and bump, roughness and metallic
+    // packed), kept in place
+    int look_map[8];
+    char look_map_name[8][48];
+    real look_bump, look_normal_k, look_ao_k, look_glow;
+    int look_flip;
+    int look_made_normal, look_made_mr;
 } EdObject;
+enum { LOOK_BASE, LOOK_NORMAL, LOOK_BUMP, LOOK_ROUGH, LOOK_METAL, LOOK_ORM, LOOK_AO, LOOK_EMISSIVE, NLOOK };
+static const char *const LOOK_KEYS[NLOOK] = {"base", "normal", "bump", "roughness", "metallic", "orm", "ao", "emissive"};
 #define MAT_OWN (-2)
 
 // a model read from a file: its parts as the file places them, at its own size, the middle
@@ -837,12 +848,65 @@ EXPORT int lr_set_transform(int id, double x, double y, double z, double qw, dou
     return 0;
 }
 
+// its look as JSON: {"rgb", "roughness", "metallic", "image" (the base colour's file),
+// "maps" {slot: file}, "bump", "normal", "ao", "glow", "flipGreen"} (names: made safe for
+// JSON when they were set)
+static void look_json(char *b, size_t n, const EdObject *o){
+    size_t k = (size_t)snprintf(b, n, "{\"rgb\":\"#%06X\",\"roughness\":%.3f,\"metallic\":%.3f,\"image\":\"%s\",\"maps\":{",
+                                o->look_rgb, (double)o->look_rough, (double)o->look_metal, o->look_map[LOOK_BASE] ? o->look_map_name[LOOK_BASE] : "");
+    int first = 1;
+    for (int i = 0; i < NLOOK && k < n; i++){
+        if (!o->look_map[i]) continue;
+        k += (size_t)snprintf(b + k, n - k, "%s\"%s\":\"%s\"", first ? "" : ",", LOOK_KEYS[i], o->look_map_name[i]);
+        first = 0;
+    }
+    if (k < n) snprintf(b + k, n - k, "},\"bump\":%.3f,\"normal\":%.3f,\"ao\":%.3f,\"glow\":%.3f,\"flipGreen\":%d}",
+                        (double)(o->look_bump > 0 ? o->look_bump : 1), (double)(o->look_normal_k > 0 ? o->look_normal_k : 1),
+                        (double)(o->look_ao_k > 0 ? o->look_ao_k : 1), (double)(o->look_glow > 0 ? o->look_glow : 1), o->look_flip);
+}
+
+// What each texture the looks made holds (E.made: its sources then), so that a look made again
+// (a colour dragged, an undo) makes its normal or its packed roughness again only when what
+// they come from changed: a 2048 x 2048 bump takes a moment
+typedef struct { int tex; int k[4]; real strength; } Made;
+static Made *made_list;
+static int nmade, cap_made;
+static Made *made_of(int tex){
+    for (int i = 0; i < nmade; i++) if (made_list[i].tex == tex) return &made_list[i];
+    return NULL;
+}
+static void made_note(int tex, const int k[4], real strength){
+    Made *m = made_of(tex);
+    if (!m){ made_list = lr_grow(made_list, sizeof(Made), &cap_made, nmade + 1, 16); m = &made_list[nmade++]; m->tex = tex; }
+    memcpy(m->k, k, sizeof(m->k));
+    m->strength = strength;
+}
+static int made_same(int tex, const int k[4], real strength){
+    const Made *m = tex > 0 ? made_of(tex) : NULL;
+    return m && !memcmp(m->k, k, sizeof(m->k)) && m->strength == strength;
+}
+
 // its own material made (or made again) from its look fields. 1 = no room for another
 // material in the scene (MAX_MATS)
 static int look_sync(EdObject *o){
     Scene *s = viewer_scene();
     Material m = material_pbr(srgb_hex(o->look_rgb), o->look_metal, o->look_rough, 1.5, 0);
-    m.tex_base = o->look_tex > 0 && o->look_tex <= s->ntexmaps ? o->look_tex : 0;
+    const int *mp = o->look_map;
+    PbrMapSet ms = {.base = mp[LOOK_BASE], .normal = mp[LOOK_NORMAL], .bump = mp[LOOK_BUMP], .rough = mp[LOOK_ROUGH],
+                    .metal = mp[LOOK_METAL], .mr = mp[LOOK_ORM], .ao = mp[LOOK_AO], .emissive = mp[LOOK_EMISSIVE],
+                    .bump_strength = o->look_bump > 0 ? o->look_bump : 1, .flip_green = o->look_flip};
+    // (what was made already, from the same sources: taken as it is)
+    const int nk[4] = {mp[LOOK_NORMAL], mp[LOOK_BUMP], o->look_flip, 0}, mk[4] = {mp[LOOK_ROUGH], mp[LOOK_METAL], 0, 0};
+    const int need_n = mp[LOOK_BUMP] || (mp[LOOK_NORMAL] && o->look_flip), need_mr = mp[LOOK_ROUGH] || mp[LOOK_METAL];
+    if (need_n && made_same(o->look_made_normal, nk, ms.bump_strength)){ ms.normal = o->look_made_normal; ms.bump = 0; ms.flip_green = 0; }
+    if (need_mr && made_same(o->look_made_mr, mk, 0)){ ms.mr = o->look_made_mr; ms.rough = ms.metal = 0; }
+    int made_n = o->look_made_normal, made_mr = o->look_made_mr;
+    pbr_apply(s, &m, &ms, &made_n, &made_mr);
+    if (ms.bump || ms.flip_green){ o->look_made_normal = made_n; made_note(made_n, nk, ms.bump_strength); }
+    if (ms.rough || ms.metal){ o->look_made_mr = made_mr; made_note(made_mr, mk, 0); }
+    m.normal_scale = o->look_normal_k > 0 ? o->look_normal_k : 1;
+    m.occlusion = o->look_ao_k > 0 ? o->look_ao_k : 1;
+    if (m.tex_emissive){ real g = o->look_glow > 0 ? o->look_glow : 1; m.emission = vec3(g, g, g); }
     if (o->look < 0){
         if (s->nmats >= MAX_MATS) return 1;
         o->look = scene_add_material(s, m);
@@ -873,23 +937,53 @@ EXPORT int lr_set_look(int id, int rgb, double roughness, double metallic){
     changed();
     return 0;
 }
-// An image (.png, .jpg: a file the page put in its file system) as its base colour, on its own
-// material (from its material now, its colour white so the image shows as it is); "" takes
-// the image off. 0 = done, 1 = no such object or image, 2 = no room for another material
-EXPORT int lr_set_look_image(int id, const char *path){
+// A map (.png, .jpg: a file the page put in its file system) for one of its look's slots (0
+// base colour ... 7 emissive: LOOK_KEYS), on its own material (from its material now; a base
+// colour image makes the colour white, so it shows as it is; a roughness, metallic or packed
+// map makes those factors 1, so the map's values are as they are); "" takes the map off.
+// 0 = done, 1 = no such object, slot or image, 2 = no room for another material
+EXPORT int lr_set_look_map(int id, int slot, const char *path){
     EdObject *o = object_find(id);
-    if (!o || editing_off()) return 1;
+    if (!o || editing_off() || slot < 0 || slot >= NLOOK) return 1;
     EdObject was = *o;
     int t = 0;
-    if (path && *path && !(t = scene_texture(viewer_scene(), path, 1))) return 1;
-    if (t && o->mat != MAT_OWN){ look_from_now(o); o->look_rgb = 0xffffff; }
-    if (!t && o->mat != MAT_OWN) look_from_now(o);
-    o->look_tex = t;
+    const int colour = slot == LOOK_BASE || slot == LOOK_EMISSIVE;   // (sRGB; the rest are data)
+    if (path && *path && !(t = scene_texture(viewer_scene(), path, colour))) return 1;
+    if (o->mat != MAT_OWN) look_from_now(o);
+    if (t && !o->look_map[slot]){
+        if (slot == LOOK_BASE) o->look_rgb = 0xffffff;
+        if (slot == LOOK_ROUGH || slot == LOOK_ORM) o->look_rough = 1;
+        if (slot == LOOK_METAL || slot == LOOK_ORM) o->look_metal = 1;
+    }
+    // a metallic map taken off (and no packed one, or the other way round): not metal then
+    // (its 1 was the map's, which said where)
+    if (!t && o->look_map[slot] && ((slot == LOOK_METAL && !o->look_map[LOOK_ORM]) || (slot == LOOK_ORM && !o->look_map[LOOK_METAL])))
+        o->look_metal = 0;
+    o->look_map[slot] = t;
     const char *f = path ? strrchr(path, '/') : NULL;
-    snprintf(o->look_tex_name, sizeof(o->look_tex_name), "%s", t ? (f ? f + 1 : path) : "");
-    for (char *c = o->look_tex_name; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';   // (it goes into JSON)
+    char *nm = o->look_map_name[slot];
+    snprintf(nm, sizeof(o->look_map_name[slot]), "%s", t ? (f ? f + 1 : path) : "");
+    for (char *c = nm; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';   // (it goes into JSON)
     if (look_sync(o)){ *o = was; return 2; }
     o->mat = MAT_OWN;
+    object_update(o);
+    changed();
+    return 0;
+}
+// (the base colour's: as before)
+EXPORT int lr_set_look_image(int id, const char *path){ return lr_set_look_map(id, LOOK_BASE, path); }
+// The maps' strengths: the bump's (pbr_bump_to_normal's, 0 = 1), the normal map's (its tilt
+// times k), the occlusion's (0..1), the glow's brightness (an emissive map's white), and
+// whether the normal map's green points down (DirectX's). 0 = done
+EXPORT int lr_set_look_strengths(int id, double bump, double normal_k, double ao_k, double glow, int flip){
+    EdObject *o = object_find(id);
+    if (!o || editing_off() || o->mat != MAT_OWN) return 1;
+    o->look_bump = (real)fmin(32, fmax(0.01, bump));
+    o->look_normal_k = (real)fmin(4, fmax(0.01, normal_k));
+    o->look_ao_k = (real)fmin(1, fmax(0.01, ao_k));
+    o->look_glow = (real)fmin(1000, fmax(0.01, glow));
+    o->look_flip = flip != 0;
+    look_sync(o);
     object_update(o);
     changed();
     return 0;
@@ -1501,9 +1595,9 @@ EXPORT const char *lr_scene(void){
                 (double)o->rot.w, (double)o->rot.x, (double)o->rot.y, (double)o->rot.z, (double)o->stretch.x, (double)o->stretch.y, (double)o->stretch.z,
                 (double)c.x / UNITS_PER_M, (double)c.y / UNITS_PER_M, (double)c.z / UNITS_PER_M, o->support);
         if (o->mat == MAT_OWN){
-            jprintf(",\"look\":{\"rgb\":\"#%06X\",\"roughness\":%.3f,\"metallic\":%.3f,\"image\":", o->look_rgb, (double)o->look_rough, (double)o->look_metal);
-            jstring(o->look_tex_name);
-            jprintf("}");
+            char lk[1024];
+            look_json(lk, sizeof(lk), o);
+            jprintf(",\"look\":%s", lk);
         }
         jprintf("}");
     }
@@ -1873,7 +1967,7 @@ EXPORT int lr_save_gltf(const char *path){
     if (!geo){ gltf_writer_free(w); return 1; }
     for (int i = 0; i < s->nmeshes + 2; i++) geo[i] = -1;
     int nodes = 0, ok = 1;
-    char ext[512], extras[256];
+    char ext[2048], extras[256];
     for (int i = 0; i < E.nobjs && ok; i++){
         const EdObject *o = &E.objs[i];
         kids = lr_grow(kids, sizeof(int), &kcap, o->ninst, 8);
@@ -1901,9 +1995,11 @@ EXPORT int lr_save_gltf(const char *path){
         int n = 0;
         n += snprintf(ext + n, sizeof(ext) - (size_t)n, "\"" EXT_SCENE "\":{\"id\":%d,\"kind\":\"%s\"", o->id, KIND_NAMES[o->kind]);
         if (o->mat >= 0) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"%s\"", MATERIALS[o->mat].key);
-        else if (o->mat == MAT_OWN)
-            n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"own\",\"look\":{\"rgb\":\"#%06X\",\"roughness\":%.3f,\"metallic\":%.3f,\"image\":\"%s\"}",
-                          o->look_rgb, (double)o->look_rough, (double)o->look_metal, o->look_tex_name);
+        else if (o->mat == MAT_OWN){
+            char lk[1024];
+            look_json(lk, sizeof(lk), o);
+            n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"material\":\"own\",\"look\":%s", lk);
+        }
         else if (o->kind == ED_MODEL && E.models[o->model].clay) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"clay\":true");
         if (sup) n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"restsOn\":%d", sup->id);
         n += snprintf(ext + n, sizeof(ext) - (size_t)n, ",\"pos\":[%.6f,%.6f,%.6f],\"rot\":[%.8f,%.8f,%.8f,%.8f],\"stretch\":[%.6f,%.6f,%.6f]}",
@@ -2144,11 +2240,30 @@ EXPORT const char *lr_open_scene(const char *path){
             o->look_rgb = (unsigned)strtoul(hex[0] == '#' ? hex + 1 : hex, NULL, 16) & 0xffffffu;
             o->look_rough = (real)json_num(json_get(lk, "roughness"), 0.7);
             o->look_metal = (real)json_num(json_get(lk, "metallic"), 0);
-            snprintf(o->look_tex_name, sizeof(o->look_tex_name), "%s", json_str(json_get(lk, "image"), ""));
-            for (char *c = o->look_tex_name; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';
-            const int fm = file_mat;                    // (its own material, as the file has it: its image too)
-            o->look_tex = fm >= 0 ? s->mats[fm].tex_base : 0;
-            if (!o->look_tex) o->look_tex_name[0] = 0;
+            o->look_bump = (real)json_num(json_get(lk, "bump"), 1);
+            o->look_normal_k = (real)json_num(json_get(lk, "normal"), 1);
+            o->look_ao_k = (real)json_num(json_get(lk, "ao"), 1);
+            o->look_glow = (real)json_num(json_get(lk, "glow"), 1);
+            o->look_flip = 0;                            // (the file's normal map is turned over already)
+            // its maps as the file has them: what was made from a bump or roughness and metallic
+            // apart is one normal map and glTF's packed map now (their files' names kept)
+            const int fm = file_mat;
+            const Material *f = fm >= 0 ? &s->mats[fm] : NULL;
+            const Json *mn = json_get(lk, "maps");
+            const char *base_name = json_str(json_get(lk, "image"), "");
+            int got_map[NLOOK] = {0};
+            if (f){
+                got_map[LOOK_BASE] = f->tex_base; got_map[LOOK_NORMAL] = f->tex_normal; got_map[LOOK_ORM] = f->tex_mr;
+                got_map[LOOK_AO] = f->tex_occlusion; got_map[LOOK_EMISSIVE] = f->tex_emissive;
+            }
+            for (int q = 0; q < NLOOK; q++){
+                o->look_map[q] = got_map[q] > 0 && got_map[q] <= s->ntexmaps ? got_map[q] : 0;
+                const char *nm = json_str(json_get(mn, LOOK_KEYS[q]), q == LOOK_BASE ? base_name : "");
+                if (q == LOOK_NORMAL && !*nm) nm = json_str(json_get(mn, "bump"), "");
+                if (q == LOOK_ORM && !*nm) nm = json_str(json_get(mn, "roughness"), json_str(json_get(mn, "metallic"), ""));
+                snprintf(o->look_map_name[q], sizeof(o->look_map_name[q]), "%s", o->look_map[q] ? (*nm ? nm : "from the file") : "");
+                for (char *c = o->look_map_name[q]; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';
+            }
             o->look = fm;
             if (look_sync(o) == 0) o->mat = MAT_OWN;
         }
