@@ -295,6 +295,9 @@ typedef struct {
     Camera gpu_cam;            // and its camera, and bounces
     int gpu_depth;
     int gpu_scene_moved;       // the physics moved the scene since that image began
+    int gpu_scene_edited;      // an edit (viewer_scene_edited) since the last move
+    int edit_pending;          // edits came, the image is to start over once they stop
+    double edit_t;             // (when the last one came)
     int gpu_shown_passes;      // its samples per pixel when it was last shown
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
@@ -546,6 +549,11 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // many (-history, 32); with the physics running the light changes too (shadows, the cloud),
 // so fewer, and a change shows within a few frames.
 #define GPU_HISTORY_PHYSICS 12
+// An edit (viewer_scene_edited) changes light on surfaces that did not move, which the samples
+// carried over cannot tell: a pixel keeps one at most while edits come, and the image starts
+// over once none came for EDIT_SETTLE seconds (the old shadow gone at once, not fading out).
+#define GPU_HISTORY_EDIT 1
+#define EDIT_SETTLE 0.12
 
 // rt mode with the GPU: path traced every frame, whatever moves. A new camera or the
 // physics' new state carry the image over (each pixel keeps the samples of its surface,
@@ -553,15 +561,17 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // 0 = this GPU cannot hold the scene: the CPU path traces from now on.
 static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
     V.gpu_scene_moved |= V.sim_moved;
+    if (V.edit_pending && clock_s() - V.edit_t >= EDIT_SETTLE){ V.edit_pending = 0; V.reset = 1; }
     if (!V.gpu_tracing || V.reset || depth != V.gpu_depth){
         if (!gpu_trace_begin(cam, at, depth)) return 0;
-        V.gpu_scene_moved = 0;
+        V.gpu_scene_moved = V.gpu_scene_edited = 0;
     } else if ((V.gpu_scene_moved || memcmp(cam, &V.gpu_cam, sizeof(*cam)) != 0) && !gpu_view_trace_busy(V.gview)){
         // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
         // last image as it is, with the raster of its own camera, not a newer one)
         GpuTraceParams tp = trace_params(cam, depth);
         int keep = V.gpu_scene_moved && V.o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : V.o.history;
-        V.gpu_scene_moved = 0;
+        if (V.gpu_scene_edited && keep > GPU_HISTORY_EDIT) keep = GPU_HISTORY_EDIT;
+        V.gpu_scene_moved = V.gpu_scene_edited = 0;
         int moved;
         if (gpu_view_trace_reads_tlas(V.gview, &V.scene)) scene_trees();
         PROF(PROF_MOVE, moved = gpu_view_trace_move(V.gview, &V.scene, &tp, keep));
@@ -1292,6 +1302,11 @@ void viewer_set_view(const View *v){
 }
 void viewer_set_home(const View *v){ V.home = *v; }
 
+void viewer_scene_edited(void){
+    V.gpu_scene_edited = V.edit_pending = 1;
+    V.edit_t = clock_s();
+    viewer_scene_changed(0);
+}
 void viewer_scene_changed(int restart){
     if (restart) V.reset = 1;                  // the path traced image starts over
     else V.gpu_scene_moved = 1;                // the GPU's carries its samples where nothing changed

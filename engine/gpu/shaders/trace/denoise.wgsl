@@ -43,11 +43,14 @@ fn get_g(p: vec2u) -> G {
     return g;
 }
 
+/* the guide's kind (its 4th plane's w also says which object: trace.wgsl, gpack) */
+fn gkind(w: f32) -> f32 { return w - 4.0 * floor(w * 0.25); }
+
 fn irradiance(k: u32, N: u32) -> vec3f {
     let a = px[k];
     let g = px[3u * N + k];
     let mean = a.rgb / max(a.w, 1.0);
-    return select(mean, mean / max(g.xyz, vec3f(1e-3)), g.w == 0.0);
+    return select(mean, mean / max(g.xyz, vec3f(1e-3)), gkind(g.w) == 0.0);
 }
 
 @compute @workgroup_size(64)
@@ -60,11 +63,12 @@ fn prep(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let a = px[k];
     let g = px[3u * N + k];
     let n = px[2u * N + k];
-    let e = select(select(-(n.w + 1.0), -2e38, g.w == 1.0), n.w, g.w == 0.0);
+    let gk = gkind(g.w);
+    let e = select(select(-(n.w + 1.0), -2e38, gk == 1.0), n.w, gk == 0.0);
     gd[k] = vec2u(pack2x16snorm(oct(n.xyz)), bitcast<u32>(e));
     if (a.w == 0.0) { dst[k] = put_iv(vec3f(0.0), -1.0); return; }
     let irr = irradiance(k, N);
-    if (g.w == 1.0) { dst[k] = put_iv(irr, 0.0); return; }
+    if (gk == 1.0) { dst[k] = put_iv(irr, 0.0); return; }
     var v = 0.0;
     if (a.w >= 4.0) {
         let m = px[N + k];
@@ -83,8 +87,8 @@ fn prep(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
                 let qy = y + dy;
                 if (qx < 0 || qy < 0 || qx >= i32(W) || qy >= i32(H)) { continue; }
                 let q = u32(qy) * W + u32(qx);
-                if (px[q].w == 0.0 || px[3u * N + q].w != g.w) { continue; }
-                if (g.w == 0.0 && dot(px[2u * N + q].xyz, n.xyz) < 0.9) { continue; }
+                if (px[q].w == 0.0 || gkind(px[3u * N + q].w) != gk) { continue; }
+                if (gk == 0.0 && dot(px[2u * N + q].xyz, n.xyz) < 0.9) { continue; }
                 let l = luma(irradiance(q, N));
                 s1 += l;
                 s2 += l * l;

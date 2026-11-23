@@ -38,7 +38,7 @@ GPU_WGSL(TRACE, trace);
 // point (along the pixel's ray, at the distance of its first diffuse surface: through a
 // mirror, the point behind it, which moves as the reflection does) is projected into the old
 // camera; of the 4 old pixels around it (bilinear weights), those that saw the same thing
-// count: same kind, a normal within ~25 degrees, a distance from the old eye within 2% (25%
+// count: same kind and same object, a normal within ~25 degrees, a distance from the old eye within 2% (25%
 // in a medium: its distance is a noisy estimate, and its light smooth) plus how much it changes from that old pixel to
 // the next (on a wall seen edgewise it changes a lot within a pixel; the smaller of the two
 // sides, so that an edge next to the pixel does not count). A pixel that matches none (it was hidden, or

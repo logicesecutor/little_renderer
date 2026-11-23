@@ -368,7 +368,7 @@ fn wf_resolve(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups
     if (T.f.w > 0.5) {
         let N = T.dims.x * T.dims.y;
         let ga = accum[3u * N + k];
-        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), ga.w == 0.0));
-        if (!((WF[st + 3u].w & (1u << 20u)) != 0u && ga.w == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
+        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), gkind(ga.w) == 0.0));
+        if (!((WF[st + 3u].w & (1u << 20u)) != 0u && gkind(ga.w) == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
     }
 }

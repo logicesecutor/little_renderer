@@ -1018,11 +1018,18 @@ fn surface_bounce(b: ptr<function, Bsdf>, h: Hit, v: vec3f, depth: i32, sm: Smp,
    surface, through mirrors and glass (refracting, unless the glass reflects all), with the
    albedo of the whole way to it. A medium that hides it (transmittance under 1/2, the mean
    of 4 ratio tracking estimates) makes the pixel a medium's. */
-struct Guide { n: vec3f, z: f32, a: vec3f, kind: f32, pos: vec3f, pt: f32 };
+struct Guide { n: vec3f, z: f32, a: vec3f, kind: f32, pos: vec3f, pt: f32, inst: u32 };
+/* The guide's 4th plane's w: its kind (0 a surface, 1 the sky or a lamp, 2 a medium) plus 4
+   times the instance seen + 1 (0: none), so that reprojection keeps a pixel's samples only if it
+   still sees the same object (a body moving over another at the same distance does not smear
+   its light onto it). Exact in f32 up to 2^22 instances. gkind: the kind alone. */
+fn gpack(kind: f32, inst: u32) -> f32 { return kind + 4.0 * f32(select(0u, (inst & 0x3fffffu) + 1u, inst != NONE)); }
+fn gkind(w: f32) -> f32 { return w - 4.0 * floor(w * 0.25); }
 fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
     var g: Guide;
     g.n = vec3f(0.0); g.z = 1e30; g.a = vec3f(1.0); g.kind = 1.0;
     g.pos = vec3f(0.0); g.pt = 0.0;      /* the camera's first hit, if diffuse: where to look up caustics */
+    g.inst = NONE;
     var ray = ray0;
     var a = vec3f(1.0);
     var dist = 0.0;
@@ -1058,10 +1065,10 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
            paper under a light of 1 (a lamp's bulb): the denoiser leaves it as it is, and does not
            mix it into its neighbours (thousands of times brighter, it left a halo of speckles
            round it); a dimmer glow (a glTF's emissive details) is denoised with its surface */
-        if (kind == 3u || glow_bright(m.emission.rgb)) { g.n = h.n; g.z = dist + h.t; break; }
+        if (kind == 3u || glow_bright(m.emission.rgb)) { g.n = h.n; g.z = dist + h.t; g.inst = f.inst; break; }
         var b = mat_bsdf(m, h.front);
         if (bsdf_rough_part(&b)) {     /* a surface the light scatters on (not only a mirror or glass) */
-            g.n = h.n; g.z = dist + h.t; g.a = a * m.albedo.rgb; g.kind = 0.0;
+            g.n = h.n; g.z = dist + h.t; g.a = a * m.albedo.rgb; g.kind = 0.0; g.inst = f.inst;
             if (i == 0) { g.pos = h.p; g.pt = max(tr, 1e-6); }
             break;
         }
@@ -1225,8 +1232,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     if (T.f.w > 0.5) {
         let N = W * T.dims.y;
         let ga = accum[3u * N + k];           /* the guide, made by gbuf before the first sample */
-        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), ga.w == 0.0));
-        if (!(cam_glow && ga.w == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
+        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), gkind(ga.w) == 0.0));
+        if (!(cam_glow && gkind(ga.w) == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
     }
 }
 
@@ -1248,7 +1255,7 @@ fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     accum[k] = vec4f(0.0);
     accum[N + k] = vec4f(0.0);
     accum[2u * N + k] = vec4f(g.n, g.z);
-    accum[3u * N + k] = vec4f(g.a, g.kind);
+    accum[3u * N + k] = vec4f(g.a, gpack(g.kind, g.inst));
     accum[4u * N + k] = vec4f(g.pos, g.pt);
 }
 

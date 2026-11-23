@@ -17,6 +17,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     if (k >= N) { return; }
     let g2 = cur[2u * N + k];
     let g3 = cur[3u * N + k];
+    let gk = g3.w - 4.0 * floor(g3.w * 0.25);         /* its kind (w also says which object: trace.wgsl, gpack) */
     let x = f32(k % W);
     let y = f32(k / W);
     let d = normalize(R.nul.xyz + R.nh.xyz * ((x + 0.5) / f32(W)) - R.nv.xyz * ((y + 0.5) / f32(H)) - R.no.xyz);
@@ -47,7 +48,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
             let s = old[o];
             if (s.w == 0.0) { continue; }
             let o3 = old[3u * N + o];
-            if (o3.w != g3.w) { continue; }
+            if (o3.w != g3.w) { continue; }               /* (the same kind, and the same object) */
             let o2 = old[2u * N + o];
             if (!far) {
                 let ux = u32(tx);
@@ -57,9 +58,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
                 let zu = old[2u * N + o - select(0u, W, uy > 0u)].w;
                 let zd = old[2u * N + o + select(0u, W, uy + 1u < H)].w;
                 let grad = min(abs(zl - o2.w), abs(zr - o2.w)) + min(abs(zu - o2.w), abs(zd - o2.w));
-                if (abs(o2.w - dist) > select(0.02, 0.25, g3.w == 2.0) * dist + grad) { continue; }
+                if (abs(o2.w - dist) > select(0.02, 0.25, gk == 2.0) * dist + grad) { continue; }
             }
-            if (g3.w == 0.0 && dot(o2.xyz, g2.xyz) < 0.9) { continue; }
+            if (gk == 0.0 && dot(o2.xyz, g2.xyz) < 0.9) { continue; }
             let w = (1.0 - abs(fx - tx)) * (1.0 - abs(fy - ty));
             acc0 += w * s / s.w;
             acc1 += w * old[N + o] / s.w;

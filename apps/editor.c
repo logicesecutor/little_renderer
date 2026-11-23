@@ -699,7 +699,7 @@ static void relight_step(void){
 // a change made: what shows follows (the path traced image keeps what did not change), the
 // light is made again
 static void changed(void){
-    viewer_scene_changed(0);
+    viewer_scene_edited();
     relight_start();
 }
 

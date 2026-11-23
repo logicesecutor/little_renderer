@@ -49,6 +49,11 @@ void viewer_set_home(const View *v);  // where R goes back to
 // follows. restart: the path traced image starts over; else the GPU's keeps the samples of
 // what did not change (the CPU's always starts over).
 void viewer_scene_changed(int restart);
+// The person editing changed the scene (moved, added, removed, painted an object): what shows
+// follows, and the light the change moves (a shadow, a reflection, the light bounced off it)
+// goes with it. On the GPU, samples carried over keep a surface's old light, so while edits
+// come (a drag) each pixel keeps at most one, and once they stop the image starts over.
+void viewer_scene_edited(void);
 void viewer_relight(void);       // the rasterizer's light probe made again (key L)
 // The rasterizer's light changed (the program made the probe again itself): its image is drawn
 // again; the path traced image carries on.
