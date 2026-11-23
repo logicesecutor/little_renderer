@@ -23,6 +23,7 @@
 #include "scene/camera.h"
 #include "scene/gltf.h"
 #include "scene/gltf_write.h"
+#include "phys/world.h"
 #include "rt/probe.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -117,6 +118,7 @@ typedef struct {
 } Editor;
 
 static Editor E;
+static int editing_off(void);    // (a sample shows, or a simulation holds the objects)
 
 static int object_parts(const EdObject *o){
     return o->kind == ED_LAMP ? 3 : o->kind == ED_MODEL ? E.models[o->model].nparts : 1;
@@ -598,7 +600,7 @@ static Vec3 metres(double x, double y, double z){
 EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
     static const struct { EdKind kind; int mat; const char *label; } SH[NSHAPES] = {
         {ED_BOX, 0, NULL}, {ED_SPHERE, 1, NULL}, {ED_SPHERE, 6, "Glass ball"}, {ED_ROCK, 2, NULL}, {ED_LAMP, 7, NULL}};
-    if (shape < 0 || shape >= NSHAPES || E.sample) return 0;
+    if (shape < 0 || shape >= NSHAPES || editing_off()) return 0;
     if (support && !object_find(support)) support = 0;
     int id = object_add(SH[shape].kind, SH[shape].mat, -1, metres(x, y, z), 1, 0, support, SH[shape].label);
     changed();
@@ -608,6 +610,7 @@ EXPORT int lr_add_shape(int shape, double x, double y, double z, int support){
 // moved to stand at (x, y, z) on `support` (0: the ground), what rests on it with it; not onto
 // itself or what rests on it. 0 = done.
 EXPORT int lr_move_object(int id, double x, double y, double z, int support){
+    if (editing_off()) return 1;
     EdObject *o = object_find(id);
     if (!o || (support && (!object_find(support) || in_stack(support, id)))) return 1;
     o->support = support;
@@ -618,6 +621,7 @@ EXPORT int lr_move_object(int id, double x, double y, double z, int support){
 
 // its size (1: its own), what rests on it raised or lowered with its top
 EXPORT int lr_scale_object(int id, double scale){
+    if (editing_off()) return 1;
     EdObject *o = object_find(id);
     if (!o || !(scale >= 0.05 && scale <= 20)) return 1;
     real top = object_top(o);
@@ -647,6 +651,7 @@ static void object_carry(int id, Vec3 from, Vec3 to, Quat turn, real lift, int d
 }
 EXPORT int lr_set_transform(int id, double x, double y, double z, double qw, double qx, double qy, double qz,
                             double sx, double sy, double sz){
+    if (editing_off()) return 1;
     EdObject *o = object_find(id);
     if (!o || !(sx > 0.01 && sy > 0.01 && sz > 0.01 && sx < 100 && sy < 100 && sz < 100)) return 1;
     Quat q = quat_norm(quat((real)qw, (real)qx, (real)qy, (real)qz));
@@ -681,7 +686,7 @@ EXPORT int lr_set_material(int id, int mat){
 // real size (glTF's metres), standing at (x, y, z) on `support`. Returns its id (0: it could
 // not be read).
 EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int support){
-    if (E.sample) return 0;
+    if (editing_off()) return 0;
     Scene *s = viewer_scene();
     int n0 = s->ninsts;
     int n = scene_load_gltf(s, path, (real)-UNITS_PER_M, vec3(0, 0, 0), 0);
@@ -713,7 +718,7 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
 // no sense: it is fitted to 1 m (lr_last_import_fitted says so). Returns its id (0: it could
 // not be read).
 EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int support){
-    if (E.sample) return 0;
+    if (editing_off()) return 0;
     Mesh *mesh = mesh_load(path);
     if (!mesh) return 0;
     Vec3 lo = vec3(1e30f, 1e30f, 1e30f), hi = vec3(-1e30f, -1e30f, -1e30f);
@@ -762,6 +767,7 @@ EXPORT int lr_load_sky(const char *path, const char *name){
 }
 
 EXPORT int lr_set_body(int id, int dynamic){
+    if (editing_off()) return 1;
     EdObject *o = object_find(id);
     if (!o) return 1;
     o->dynamic = dynamic != 0;
@@ -770,6 +776,7 @@ EXPORT int lr_set_body(int id, int dynamic){
 
 // removed; what rested on it comes down to where it stood, onto what it stood on
 EXPORT int lr_remove_object(int id){
+    if (editing_off()) return 1;
     EdObject *o = object_find(id);
     if (!o) return 1;
     Vec3 base = o->pos;
@@ -848,6 +855,7 @@ static void snapshot_apply(const Snapshot *sn){
 
 // before a change (an add, a move, a size, a material, a body, a removal): the scene as it is
 EXPORT void lr_checkpoint(void){
+    if (editing_off()) return;
     snapshot_push(undo_st, &nundo, snapshot_take());
     while (nredo > 0) free(redo_st[--nredo].objs);
 }
@@ -856,6 +864,7 @@ EXPORT void lr_forget_checkpoint(void){
     if (nundo > 0) free(undo_st[--nundo].objs);
 }
 EXPORT int lr_undo(void){
+    if (editing_off()) return 0;
     if (nundo == 0) return 0;
     snapshot_push(redo_st, &nredo, snapshot_take());
     Snapshot sn = undo_st[--nundo];
@@ -864,6 +873,7 @@ EXPORT int lr_undo(void){
     return 1;
 }
 EXPORT int lr_redo(void){
+    if (editing_off()) return 0;
     if (nredo == 0) return 0;
     snapshot_push(undo_st, &nundo, snapshot_take());
     Snapshot sn = redo_st[--nredo];
@@ -917,13 +927,244 @@ static void jstring(const char *t){
     jprintf("\"");
 }
 
+// ---- the editor's own simulation (the Simulate tab): its objects as rigid bodies -----------
+// Play makes a world of them: a box a box, a sphere a ball (stretched: its hull), anything
+// else (a lamp, a rock, a model) the convex hull of its parts, or, when it is static, its
+// triangles. Static objects stay where they are; dynamic ones fall, roll and stack; the
+// floor and the ground's edge (FLOOR_M) are the room's walls. Steps of a fixed SIM_DT, as
+// many as the time that went by asks (at most SIM_MAX_STEPS a frame): the same scene gives
+// the same motion at any frame rate. While a simulation is made the objects are its: the
+// editing calls do nothing until Reset (back to the scene before Play) or Keep (its pose
+// kept, one undo step).
+#define SIM_DT (1.0 / 120)
+#define SIM_MAX_STEPS 8
+#define SIM_DENSITY 1.0f       // g / cm^3: everything weighs like water (the materials don't say)
+
+typedef struct { int obj;        // the object's id
+                 int body;       // its body
+                 int hull;       // a hull or mesh body (its pose: body_mesh_xform), else a shape
+                 Vec3 c;         // a shape's middle in the object's own frame, sized
+               } SimLink;
+static struct {
+    int on, paused;
+    PhysWorld pw;
+    SimLink *links;
+    int nlinks;
+    Snapshot before;           // the scene at Play (Reset: back to it)
+    double acc;                // time not stepped yet
+    long steps;
+} S;
+
+static Quat quat_of_mat3(Mat3 m){              // (a rotation's quaternion: Shepperd's way)
+    real tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
+    Quat q;
+    if (tr > 0){
+        real k = 0.5f / r_sqrt(tr + 1);
+        q = quat(0.25f / k, (m.m[2][1] - m.m[1][2]) * k, (m.m[0][2] - m.m[2][0]) * k, (m.m[1][0] - m.m[0][1]) * k);
+    } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]){
+        real k = 2 * r_sqrt(1 + m.m[0][0] - m.m[1][1] - m.m[2][2]);
+        q = quat((m.m[2][1] - m.m[1][2]) / k, 0.25f * k, (m.m[0][1] + m.m[1][0]) / k, (m.m[0][2] + m.m[2][0]) / k);
+    } else if (m.m[1][1] > m.m[2][2]){
+        real k = 2 * r_sqrt(1 + m.m[1][1] - m.m[0][0] - m.m[2][2]);
+        q = quat((m.m[0][2] - m.m[2][0]) / k, (m.m[0][1] + m.m[1][0]) / k, 0.25f * k, (m.m[1][2] + m.m[2][1]) / k);
+    } else {
+        real k = 2 * r_sqrt(1 + m.m[2][2] - m.m[0][0] - m.m[1][1]);
+        q = quat((m.m[1][0] - m.m[0][1]) / k, (m.m[0][2] + m.m[2][0]) / k, (m.m[1][2] + m.m[2][1]) / k, 0.25f * k);
+    }
+    return quat_norm(q);
+}
+
+typedef struct { Triangle *t; int n, cap; } TriList;
+static void tri_add(TriList *l, Vec3 a, Vec3 b, Vec3 c){
+    l->t = lr_grow(l->t, sizeof(Triangle), &l->cap, l->n + 1, 64);
+    Triangle *t = &l->t[l->n++];
+    memset(t, 0, sizeof(*t));
+    t->q = a;
+    t->u = v_sub(b, a);
+    t->v = v_sub(c, a);
+    t->n[0] = t->n[1] = t->n[2] = t->t[0] = t->t[1] = t->t[2] = -1;
+}
+// the object's parts as triangles in its own frame, sized (scale and stretch), not turned
+static TriList object_tris(const EdObject *o){
+    TriList l = {0};
+    const Scene *s = viewer_scene();
+    Vec3 k = v_scale(o->stretch, o->scale);
+    for (int i = 0; i < object_parts(o); i++){
+        Xform L = object_part_local(o, i);
+        #define AT(p) v_mul(xform_point(&L, (p)), k)
+        int m = part_mesh(o, i);
+        if (m == INST_BOX){
+            static const int F[6][4] = {{0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1}, {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+            Vec3 c[8];
+            for (int j = 0; j < 8; j++) c[j] = AT(vec3(j & 4 ? 1 : -1, j & 2 ? 1 : -1, j & 1 ? 1 : -1));
+            for (int f = 0; f < 6; f++){ tri_add(&l, c[F[f][0]], c[F[f][1]], c[F[f][2]]); tri_add(&l, c[F[f][0]], c[F[f][2]], c[F[f][3]]); }
+        } else if (m == INST_SPHERE){
+            enum { LAT = 8, LON = 12 };
+            for (int a = 0; a < LAT; a++)
+                for (int b = 0; b < LON; b++){
+                    Vec3 p[4];
+                    for (int q = 0; q < 4; q++){
+                        real th = (real)PI * (a + (q >> 1)) / LAT, ph = 2 * (real)PI * (b + ((q ^ (q >> 1)) & 1)) / LON;
+                        p[q] = AT(vec3(r_sin(th) * r_cos(ph), r_cos(th), r_sin(th) * r_sin(ph)));
+                    }
+                    tri_add(&l, p[0], p[1], p[2]);
+                    tri_add(&l, p[0], p[2], p[3]);
+                }
+        } else if (m >= 0 && m < s->nmeshes){
+            const SceneMesh *sm = &s->meshes[m];
+            for (int j = 0; j < sm->ntris; j++){
+                const Triangle *t = &sm->tris[j];
+                tri_add(&l, AT(t->q), AT(v_add(t->q, t->u)), AT(v_add(t->q, t->v)));
+            }
+        }
+        #undef AT
+    }
+    return l;
+}
+
+static void sim_free_world(void){
+    phys_free(&S.pw);
+    free(S.links);
+    S.links = NULL;
+    S.nlinks = 0;
+}
+
+// the world made of the objects as they are now
+static void sim_build(void){
+    memset(&S.pw, 0, sizeof(S.pw));
+    phys_init(&S.pw);
+    real edge = (real)(FLOOR_M * UNITS_PER_M);
+    rigid_set_room(&S.pw.rigid, (Aabb){vec3(-edge, 0, -edge), vec3(edge, 1e7f, edge)});
+    S.links = calloc((size_t)(E.nobjs > 0 ? E.nobjs : 1), sizeof(SimLink));
+    if (!S.links) lr_oom("editor");
+    RigidWorld *w = &S.pw.rigid;
+    for (int i = 0; i < E.nobjs; i++){
+        const EdObject *o = &E.objs[i];
+        Vec3 k = v_scale(o->stretch, o->scale);
+        Mat3 R = quat_to_mat3(o->rot);
+        SimLink L = {o->id, -1, 0, vec3(0, 0, 0)};
+        int uniform = r_fabs(k.x - k.y) < 1e-4f * k.x && r_fabs(k.x - k.z) < 1e-4f * k.x;
+        if (o->kind == ED_BOX){
+            L.c = vec3(0, 50 * k.y, 0);
+            L.body = rigid_add_box(w, v_add(o->pos, mat3_mul_vec(R, L.c)), v_scale(k, 50), o->rot, SIM_DENSITY);
+        } else if (o->kind == ED_SPHERE && uniform){
+            L.c = vec3(0, 50 * k.y, 0);
+            L.body = rigid_add_sphere(w, v_add(o->pos, mat3_mul_vec(R, L.c)), 50 * k.x, SIM_DENSITY);
+            if (L.body >= 0) w->bodies[L.body].rot = o->rot;
+        } else {
+            TriList t = object_tris(o);
+            Xform place = xform_make(o->pos, R.m, 1);
+            if (o->dynamic){
+                int g = t.n ? rigid_geom_hull(w, t.t, t.n, 0) : -1;
+                L.body = g >= 0 ? rigid_add_hull_body(w, g, place, SIM_DENSITY) : -1;
+            } else {
+                int g = t.n ? rigid_geom_mesh(w, t.t, t.n) : -1;
+                L.body = g >= 0 ? rigid_add_mesh_collider(w, g, place) : -1;
+            }
+            L.hull = 1;
+            free(t.t);
+        }
+        if (L.body < 0) continue;
+        Body *b = &w->bodies[L.body];
+        if (!o->dynamic){ b->inv_mass = 0; b->inv_inertia = vec3(0, 0, 0); }   // (fixed: nothing moves it)
+        S.links[S.nlinks++] = L;
+    }
+}
+
+// the dynamic objects where their bodies are (those at rest left as they are)
+static void sim_apply(void){
+    int moved = 0;
+    for (int i = 0; i < S.nlinks; i++){
+        const SimLink *L = &S.links[i];
+        const Body *b = &S.pw.rigid.bodies[L->body];
+        EdObject *o = object_find(L->obj);
+        if (!o || !o->dynamic || b->inv_mass == 0) continue;
+        Vec3 pos;
+        Quat rot;
+        if (L->hull){
+            Xform x = body_mesh_xform(b);
+            pos = vec3(x.m[0][3], x.m[1][3], x.m[2][3]);
+            Mat3 r;
+            for (int u = 0; u < 3; u++) for (int v = 0; v < 3; v++) r.m[u][v] = x.m[u][v];
+            rot = quat_of_mat3(r);
+        } else {
+            rot = b->rot;
+            pos = v_sub(b->pos, mat3_mul_vec(quat_to_mat3(rot), L->c));
+        }
+        if (!memcmp(&pos, &o->pos, sizeof(pos)) && !memcmp(&rot, &o->rot, sizeof(rot))) continue;
+        o->pos = pos;
+        o->rot = rot;
+        o->support = 0;                              // (what it rests on now is the physics' to say)
+        object_update(o);
+        moved = 1;
+    }
+    if (moved) viewer_scene_changed(0);
+}
+
+static void sim_frame(double dt){
+    if (!S.on || S.paused) return;
+    S.acc += dt;
+    int n = 0;
+    while (S.acc >= SIM_DT && n < SIM_MAX_STEPS){ phys_step(&S.pw, (real)SIM_DT); S.acc -= SIM_DT; S.steps++; n++; }
+    if (n == SIM_MAX_STEPS) S.acc = 0;               // (a slow frame: the simulation slows down, it doesn't pile up)
+    if (n) sim_apply();
+}
+static int sim_dynamic_count(void){
+    int n = 0;
+    for (int i = 0; i < E.nobjs; i++) n += E.objs[i].dynamic != 0;
+    return n;
+}
+// editing: not while a sample shows, nor while a simulation holds the objects
+static int editing_off(void){ return E.sample || S.on; }
+
+static void sim_end(void){
+    sim_free_world();
+    S.on = S.paused = 0;
+    S.acc = 0;
+    S.steps = 0;
+}
+static void sim_reset(void){                         // back to the scene at Play
+    if (!S.on) return;
+    sim_end();
+    snapshot_apply(&S.before);
+    free(S.before.objs);
+    S.before.objs = NULL;
+}
+static void sim_keep(void){                          // its pose kept: undo goes back to before Play
+    if (!S.on) return;
+    sim_end();
+    snapshot_push(undo_st, &nundo, S.before);
+    S.before.objs = NULL;
+    while (nredo > 0) free(redo_st[--nredo].objs);
+    changed();
+}
+
 // ---- the simulation (the Simulate tab): the physics demo's, when it runs (-sim on) ----------
+// (a sample: the physics demo's; the editor's own scene: its simulation, made at the first Play)
 EXPORT int lr_sim_play(int play){                    // 1 runs, 0 pauses; 0 = done
-    if (!viewer_sim_on()) return 1;
-    viewer_sim_pause(!play);
+    if (E.sample){
+        if (!viewer_sim_on()) return 1;
+        viewer_sim_pause(!play);
+        return 0;
+    }
+    if (!S.on){
+        if (!play) return 0;
+        S.before = snapshot_take();
+        sim_build();
+        S.on = 1;
+        S.acc = 0;
+        S.steps = 0;
+        if (E.relight){ probe_job_free(E.relight); E.relight = NULL; }   // (the light is made again after)
+    }
+    S.paused = !play;
     return 0;
 }
-EXPORT int lr_sim_reset(void){ return viewer_sim_restart(); }   // from t = 0, as it was set up; 0 = done
+EXPORT int lr_sim_reset(void){                       // from t = 0, as it was set up; 0 = done
+    if (E.sample) return viewer_sim_restart();
+    sim_reset();
+    return 0;
+}
+EXPORT int lr_sim_keep(void){ if (E.sample || !S.on) return 1; sim_keep(); return 0; }
 
 EXPORT const char *lr_status(void){
     ViewerStatus st;
@@ -938,7 +1179,20 @@ EXPORT const char *lr_status(void){
     if (viewer_sim_on()){                            // the simulation: its time, its bodies so far
         char line[200];
         viewer_sim_line(line, sizeof(line));
-        jprintf(",\"sim\":{\"paused\":%d,\"t\":%.3f,\"bodies\":%d,\"line\":", viewer_sim_paused(), viewer_sim_time(), viewer_sim_bodies());
+        jprintf(",\"sim\":{\"own\":0,\"on\":1,\"paused\":%d,\"t\":%.3f,\"bodies\":%d,\"line\":", viewer_sim_paused(), viewer_sim_time(), viewer_sim_bodies());
+        jstring(line);
+        jprintf("}");
+    } else if (!E.sample){                           // the editor's own: made at Play (on), its bodies
+        int awake = 0;
+        for (int i = 0; i < S.nlinks; i++){
+            const Body *b = &S.pw.rigid.bodies[S.links[i].body];
+            awake += b->inv_mass > 0 && !b->sleeping;
+        }
+        char line[200];
+        snprintf(line, sizeof(line), "t %.2f s | %d bodies, %d moving, %d contacts | rigid %.2f ms",
+                 S.steps * SIM_DT, S.nlinks, awake, S.pw.rigid.ncontacts, S.pw.ms_rigid);
+        jprintf(",\"sim\":{\"own\":1,\"on\":%d,\"paused\":%d,\"t\":%.3f,\"bodies\":%d,\"moving\":%d,\"line\":",
+                S.on, !S.on || S.paused, S.steps * SIM_DT, sim_dynamic_count(), awake);
         jstring(line);
         jprintf("}");
     }
@@ -1188,6 +1442,7 @@ static int editor_frame(void){
     double t = clock_s(), dt = fmin(t - E.t_prev, 0.1);
     E.t_prev = t;
     fly_step(dt);
+    sim_frame(dt);
     relight_step();
     return viewer_frame();
 }
