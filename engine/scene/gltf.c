@@ -487,7 +487,7 @@ static void node_local(const Json *nd, double *m){
     m[12] = t[0]; m[13] = t[1]; m[14] = t[2]; m[15] = 1;
 }
 
-typedef struct { int mesh; double m[16]; } Placed;
+typedef struct { int mesh, node; double m[16]; } Placed;
 
 static void visit(G *g, int ni, const double *parent, int depth, Vec *out){
     const Json *nd = json_at(json_get(g->j, "nodes"), ni);
@@ -506,6 +506,7 @@ static void visit(G *g, int ni, const double *parent, int depth, Vec *out){
         if (sm >= 0){
             Placed p;
             p.mesh = sm;
+            p.node = ni;
             memcpy(p.m, world, sizeof(world));
             vec_push(out, &p);
         }
@@ -524,7 +525,9 @@ static void g_free(G *g){
     free(g->file);
 }
 
-int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y_deg){
+// placed: where the file puts its nodes, scaled by -size (no fitting, no moving); node_of: the
+// node of each instance added (a new array), or NULL
+static int load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y_deg, int placed_as_is, int **node_of){
     G gg, *g = &gg;
     memset(g, 0, sizeof(*g));
     g->path = path;
@@ -626,6 +629,15 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
     root[12] = base.x - k * (ca * cx + sa * cz);
     root[13] = base.y - k * lo[1];
     root[14] = base.z - k * (-sa * cx + ca * cz);
+    if (placed_as_is){                                       // (as the file has it, only scaled)
+        memset(root, 0, sizeof(root));
+        root[0] = root[5] = root[10] = -size;
+        root[15] = 1;
+    }
+    if (node_of){
+        *node_of = malloc(sizeof(int) * (size_t)placed.n);
+        if (!*node_of){ free(placed.p); g_free(g); return fail(path, "out of memory"); }
+    }
     int added = 0;
     for (int i = 0; i < placed.n; i++){
         const Placed *p = (const Placed *)placed.p + i;
@@ -638,9 +650,19 @@ int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y
         for (int r = 0; r < 3; r++)
             for (int c = 0; c < 4; c++) xf.m[r][c] = (real)m[c * 4 + r];
         scene_add_instance(s, p->mesh, xf, -1);
+        if (node_of) (*node_of)[added] = p->node;
         added++;
     }
     free(placed.p);
     g_free(g);
     return added;
+}
+
+int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y_deg){
+    return load_gltf(s, path, size, base, rot_y_deg, 0, NULL);
+}
+
+int scene_load_gltf_placed(Scene *s, const char *path, real unit, int **node_of){
+    if (node_of) *node_of = NULL;
+    return load_gltf(s, path, -unit, vec3(0, 0, 0), 0, 1, node_of);
 }

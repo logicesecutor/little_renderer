@@ -27,5 +27,10 @@
 // the rest share the last). Returns the instances added, -1 on failure (a message on stderr).
 // The scene's acceleration structure must be (re)built afterwards.
 int scene_load_gltf(Scene *s, const char *path, real size, Vec3 base, real rot_y_deg);
+// The file's nodes where the file puts them (no fitting, no moving), scaled by `unit` (100:
+// glTF's metres in units of 1 cm), e.g. to open again a scene saved with scene/gltf_write.h.
+// node_of (or NULL): *node_of gets a new array (free it), the file's node of each instance
+// added, in order. Returns the instances added, -1 on failure.
+int scene_load_gltf_placed(Scene *s, const char *path, real unit, int **node_of);
 
 #endif

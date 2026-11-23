@@ -14,7 +14,8 @@
 // 3. Broken files are refused, not crashed on.
 // 4. A scene written as .glb by the engine (scene/gltf_write.h: the model, a glowing box, a
 //    glass sphere, in metres) and read back: where everything stands, its triangles, its
-//    materials and their extensions, the texture's pixels, the extensions in the file.
+//    materials and their extensions, the texture's pixels, the extensions in the file; read
+//    as placed (scene_load_gltf_placed): where the file put them, and the node of each.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,6 +265,24 @@ static void check_written(void){
         check("the box glows 8, 4, 2 (factor x KHR_materials_emissive_strength)", near(g->emission.x, 8, 1e-4) && near(g->emission.y, 4, 1e-4) && near(g->roughness, 0.6, 1e-6));
         check("the sphere: transmission 1, ior 1.33 (KHR_materials_transmission, _ior)", near(gl->transmission, 1, 1e-6) && near(gl->ior, 1.33, 1e-6) && near(gl->roughness, 0.05, 1e-6));
     }
+    // read back as placed (scene_load_gltf_placed): exactly where they were, not moved to the
+    // floor, and the node each came from (the group's two: 3 and 4)
+    Scene c;
+    memset(&c, 0, sizeof(c));
+    scene_add_material(&c, material_diffuse(vec3(1, 1, 1)));
+    int *node_of = NULL;
+    int np = ok ? scene_load_gltf_placed(&c, "out/test_gltf_written.glb", 100, &node_of) : -1;
+    int nodes_ok = np == 5 && node_of;
+    real worst_p = 0;
+    for (int i = 0; nodes_ok && i < 5; i++){
+        nodes_ok &= node_of[i] == i;
+        Aabb ba = a.insts[i].box, bc = c.insts[i].box;
+        worst_p = r_fmax(worst_p, r_fmax(v_len(v_sub(ba.lo, bc.lo)), v_len(v_sub(ba.hi, bc.hi))));
+    }
+    check("read as placed: 5 instances, each with its node (0..4)", nodes_ok);
+    check_near("... where they were, not moved (worst box corner, units)", worst_p, 0, 0.6);
+    free(node_of);
+    scene_free(&c);
     FILE *f = fopen("out/test_gltf_written.glb", "rb");
     char head[4096] = {0};
     size_t got = f ? fread(head, 1, sizeof(head) - 1, f) : 0;
