@@ -304,7 +304,15 @@
   // the keys (6.5): Delete removes the selection, Esc deselects (and closes a popover), F
   // frames it, Ctrl Z / Ctrl Shift Z undo and redo; not while typing in a field
   window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && ui.synced) { e.preventDefault(); if (paletteOpen()) closePalette(); else openPalette(); return; }
+    if (paletteOpen()) return;                       // (the palette's own field has the keys)
     if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
+    if (ui.mode === 'play') {                        // (the game's keys, and no others: Stop first)
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (playKey(e, true)) e.preventDefault();
+      else if (e.key.toLowerCase() === 'b' && !e.repeat) { e.preventDefault(); throwBall(); }
+      return;
+    }
     if (ui.flying && !e.ctrlKey && !e.metaKey && flyKey(e, true)) { e.preventDefault(); return; }
     const k = e.key.toLowerCase();
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
@@ -314,10 +322,11 @@
     if (e.key === 'Escape') { if (!closePopovers()) { if (ui.tool !== 'drag') setTool('drag'); else select(null); } return; }
     if (ui.sel && (k === 'w' || k === 'e' || k === 'r')) { e.preventDefault(); setTool({ w: 'move', e: 'rotate', r: 'scale' }[k]); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && ui.sel) { e.preventDefault(); removeSelected(); return; }
-    if (k === 'f' && ui.sel) { e.preventDefault(); call('lr_frame_object', [ui.sel]); }
+    if (k === 'f' && ui.sel) { e.preventDefault(); call('lr_frame_object', [ui.sel]); return; }
+    if (!e.repeat && ['1', '2', '3', '4'].includes(e.key)) { setMode(['build', 'light', 'simulate', 'play'][Number(e.key) - 1]); return; }
   });
-  window.addEventListener('keyup', (e) => { if (ui.flying) flyKey(e, false); });
-  window.addEventListener('blur', () => { if (ui.flying) { ui.flyKeys = 0; quiet('lr_camera_fly', 0); } });
+  window.addEventListener('keyup', (e) => { if (ui.mode === 'play') playKey(e, false); else if (ui.flying) flyKey(e, false); });
+  window.addEventListener('blur', () => { if (ui.flying || ui.playKeys) { ui.flyKeys = ui.playKeys = 0; quiet('lr_camera_fly', 0); } });
 
   // ---- the objects: picking, adding, moving, removing (the engine does it; the page asks) ----
   function engineText(name, ...a) {
@@ -329,6 +338,7 @@
   function refreshScene() {
     ui.scene = engineJSON('lr_scene');
     if (ui.sel && !obj(ui.sel)) ui.sel = null;
+    if (ui.mode === 'light' && typeof renderLight === 'function') renderLight(true);
     renderScene();
     renderHistory();
     renderCard();
@@ -1209,22 +1219,38 @@
     setMode(a.dataset.mode);
   });
   const simHolds = () => !!(ui.status && ui.status.sim && ui.status.sim.own && ui.status.sim.on);   // (a simulation holds the objects)
-  function setMode(m) {
-    if ((ui.sample || simHolds()) && m === 'build') return;
+  // which modes can be gone to now (and why not): a sample is shown and simulated only;
+  // while a simulation holds the objects (not Reset or Kept), Build waits; Play leaves by Stop
+  function modeBlock(m, leavingPlay) {
+    if (ui.mode === 'play' && m !== 'play') return leavingPlay ? '' : 'Stop the game first';   // (Stop puts all back)
+    if (ui.sample && (m === 'build' || m === 'light' || m === 'play')) return ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited';
+    if (m === 'build' && simHolds()) return 'Reset or Keep the simulation to edit again';
+    return '';
+  }
+  function setMode(m, stopping) {                    // (stopping: Play's Stop, the one way out of it)
+    if (m === ui.mode || modeBlock(m, stopping)) return;
+    const from = ui.mode;
+    if (from === 'play') exitPlay();
     ui.mode = m;
     if (m !== 'build') { if (ui.tool !== 'drag') setTool('drag'); select(null); closePopovers(); }
+    if (m === 'play') enterPlay();
+    if (m === 'light') renderLight(true);
     renderModes();
   }
+  const MODE_TITLES = { build: '', light: 'Light: the sun, the sky, the exposure', simulate: 'Simulate: run the physics', play: 'Play: walk the scene while it runs' };
   function renderModes() {
     for (const a of document.querySelectorAll('.modes a[data-mode]')) {
-      if (a.dataset.mode === ui.mode) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-      if (a.dataset.mode !== 'build') continue;
-      if (ui.sample) { a.setAttribute('aria-disabled', 'true'); a.title = ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited'; }
-      else if (simHolds()) { a.setAttribute('aria-disabled', 'true'); a.title = 'Reset or Keep the simulation to edit again'; }
-      else { a.removeAttribute('aria-disabled'); a.title = ''; }
+      const m = a.dataset.mode, why = m === ui.mode ? '' : modeBlock(m);
+      if (m === ui.mode) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+      if (why) a.setAttribute('aria-disabled', 'true'); else a.removeAttribute('aria-disabled');
+      a.title = why || MODE_TITLES[m];
     }
-    document.querySelector('.tray:not(.sim-bar)').hidden = ui.mode !== 'build';
+    document.body.classList.toggle('playing', ui.mode === 'play');
+    document.querySelector('.tray:not(.sim-bar):not(.time-bar)').hidden = ui.mode !== 'build';
     $('sim-bar').hidden = ui.mode !== 'simulate';
+    $('light-panel').hidden = $('time-bar').hidden = ui.mode !== 'light';
+    $('play-pill').hidden = $('play-help').hidden = ui.mode !== 'play';
+    if (ui.mode !== 'play') { $('publish-sheet').hidden = true; $('play-publish').setAttribute('aria-expanded', 'false'); }
     $('sim-controls').hidden = false;
     $('sim-samples').hidden = !!ui.sample;
     if (ui.sample) {
@@ -1234,6 +1260,314 @@
     }
     renderSim();
   }
+
+  // ---- Light (the design's StageLight): the sun sky made by the engine (lr_set_sun) ----
+  const LIGHT_PRESETS = [['Night', 0.05], ['Twilight', 0.25], ['Dusk', 0.35], ['Golden', 0.5], ['Noon', 1]];
+  const lightIn = { t: $('l-time'), intensity: $('l-int'), size: $('l-size'), az: $('l-az'), haze: $('l-haze'), warm: $('l-warm'), ev: $('l-ev') };
+  const clockOf = (t) => { const m = Math.round((21.5 - t * 8.5) * 60); return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
+  for (const [label, t] of LIGHT_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.dataset.t = String(t);
+    b.addEventListener('click', () => { lightIn.t.value = String(t); quiet('lr_checkpoint'); sendSun(0); refreshScene(); });
+    $('l-presets').appendChild(b);
+  }
+  let lightDrag = false, lightRaf = 0;
+  function sunNow() {
+    return [Number(lightIn.t.value), Number(lightIn.intensity.value), Number(lightIn.size.value), Number(lightIn.haze.value),
+      Number(lightIn.az.value), lightIn.warm.checked ? 1 : 0];
+  }
+  function sendSun(quick) {
+    const v = sunNow();
+    const r = call('lr_set_sun', [...v, quick], 'lr_set_sun(' + v.map((x) => Number(x).toFixed(2)).join(', ') + (quick ? ', quick' : '') + ')');
+    if (r) toast('Could not make that sky');
+    if (ui.scene) { ui.scene.skyKey = 'sun'; ui.scene.sky = 'Sun ' + clockOf(v[0]); }
+    renderLight(false);
+  }
+  // the panel from the scene (when it opens, after an undo), or just its labels (while dragging)
+  function renderLight(fromScene) {
+    const sc = ui.scene;
+    if (fromScene && sc && sc.sun && !lightDrag) {
+      lightIn.t.value = sc.sun.t; lightIn.intensity.value = sc.sun.intensity; lightIn.size.value = sc.sun.size;
+      lightIn.haze.value = sc.sun.haze; lightIn.az.value = sc.sun.az; lightIn.warm.checked = !!sc.sun.warm;
+    }
+    const v = sunNow();
+    $('l-clock').textContent = clockOf(v[0]);
+    $('l-int-v').textContent = v[1].toFixed(2);
+    $('l-size-v').textContent = v[2].toFixed(2) + '°';
+    $('l-az-v').textContent = Math.round(v[4]) + '°';
+    $('l-haze-v').textContent = v[3].toFixed(1);
+    const ev = Number(lightIn.ev.value);
+    $('l-ev-v').textContent = (ev > 0 ? '+' : '') + ev.toFixed(1) + ' EV';
+    for (const b of $('l-presets').children) b.setAttribute('aria-pressed', Math.abs(Number(b.dataset.t) - v[0]) < 0.005 ? 'true' : 'false');
+    const warm = v[5] ? Math.min(1, Math.max(0, (v[0] * 68 - 8) / 35)) : 1;      // (the sun's colour, as the engine makes it)
+    $('l-chip').style.background = 'rgb(255,' + Math.round(115 + 130 * warm) + ',' + Math.round(46 + 184 * warm) + ')';
+    const isSun = sc && sc.skyKey === 'sun';
+    $('light-note').hidden = !!isSun;
+    $('light-sky').textContent = sc ? sc.sky : '';
+    $('light-internals').hidden = !ui.internals;
+    if (ui.internals) $('light-internals').innerHTML = '<div><span>sun elevation</span><span>' + (v[0] * 68 - 8).toFixed(1) + '°</span></div>' +
+      '<div><span>sky map</span><span>' + (lightDrag ? '256 × 128 (dragging)' : '1024 × 512') + '</span></div><div><span>light probe</span><span>' +
+      (ui.status && ui.status.relighting ? 'relighting ' + Math.round(100 * ui.status.relight) + '%' : 'up to date') + '</span></div>';
+  }
+  for (const k of ['t', 'intensity', 'size', 'az', 'haze']) {
+    lightIn[k].addEventListener('input', () => {
+      if (!lightDrag) { quiet('lr_checkpoint'); lightDrag = true; }            // (the whole drag: one undo step)
+      renderLight(false);
+      if (!lightRaf) lightRaf = requestAnimationFrame(() => { lightRaf = 0; if (lightDrag) sendSun(1); });
+    });
+    lightIn[k].addEventListener('change', () => { lightDrag = false; sendSun(0); refreshScene(); });
+  }
+  lightIn.warm.addEventListener('change', () => { quiet('lr_checkpoint'); sendSun(0); refreshScene(); });
+  // exposure: the picture on screen, brighter or darker (a CSS filter: the engine's image is as it was)
+  lightIn.ev.addEventListener('input', () => {
+    const ev = Number(lightIn.ev.value);
+    $('canvas').style.filter = ev ? 'brightness(' + Math.pow(2, ev).toFixed(3) + ')' : '';
+    renderLight(false);
+  });
+
+  // ---- Play (StagePlay): the scene runs, the camera walks, the editor is one pill ----
+  const PLAY_KEYS = { w: 1, a: 2, s: 4, d: 8, shift: 64, ' ': 128 };
+  ui.playKeys = 0;
+  function enterPlay() {
+    quiet('lr_camera_save');
+    quiet('lr_camera_walk', 1);
+    ui.playKeys = 0;
+    if (!ui.sample) call('lr_sim_play', [1], 'lr_sim_play(1)');
+    $('play-name').textContent = document.querySelector('.scene-name').textContent;
+    $('pub-title').value = $('play-name').textContent.replace(/_/g, ' ');
+    $('play-internals').setAttribute('aria-pressed', ui.internals ? 'true' : 'false');
+  }
+  function exitPlay() {
+    if (document.pointerLockElement === view) document.exitPointerLock();
+    quiet('lr_camera_walk', 0);
+    quiet('lr_camera_fly', 0);
+    ui.playKeys = 0;
+    if (!ui.sample) call('lr_sim_reset', [], 'lr_sim_reset()');
+    quiet('lr_camera_restore');
+    if (ui.status && ui.status.sim) { ui.status.sim.on = false; ui.status.sim.paused = true; ui.status.sim.t = 0; }
+    refreshScene();
+  }
+  $('play-stop').addEventListener('click', () => setMode('build', true));
+  $('play-restart').addEventListener('click', () => {
+    call('lr_sim_reset', [], 'lr_sim_reset()');
+    quiet('lr_camera_restore');
+    quiet('lr_camera_walk', 1);
+    call('lr_sim_play', [1], 'lr_sim_play(1)');
+    refreshScene();
+  });
+  $('play-internals').addEventListener('click', () => { $('internals').click(); $('play-internals').setAttribute('aria-pressed', ui.internals ? 'true' : 'false'); renderPlayStats(); });
+  $('play-publish').addEventListener('click', () => {
+    const open = $('publish-sheet').hidden;
+    $('publish-sheet').hidden = !open;
+    $('play-publish').setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && document.pointerLockElement === view) document.exitPointerLock();
+  });
+  $('pub-download').addEventListener('click', () => {
+    const t = ($('pub-title').value || 'untitled').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'untitled';
+    ui.sceneFile = t + '.glb';
+    $('save-glb').click();
+  });
+  function renderPlayStats() {
+    const st = ui.status;
+    $('play-stats').hidden = !ui.internals || !st;
+    if (st && ui.internals) $('play-stats').textContent = (st.tracing ? 'path traced' : 'raster') + ' · ' + (st.fps > 0 ? (1000 / st.fps).toFixed(1) : '–') + ' ms';
+  }
+  function throwBall() {
+    const id = call('lr_sim_throw', [1500], 'lr_sim_throw(15 m/s)');
+    if (id) refreshScene();
+    return id;
+  }
+  // the mouse looks round once the pointer is locked (a click on the view); Esc frees it
+  view.addEventListener('pointerdown', (e) => {
+    if (ui.mode !== 'play') return;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    if (!$('publish-sheet').hidden) return;
+    try { const p = view.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (err) { /* (no lock: the keys still walk) */ }
+  }, true);
+  view.addEventListener('pointermove', (e) => {
+    if (ui.mode === 'play' && document.pointerLockElement === view) quiet('lr_camera_look', e.movementX || 0, e.movementY || 0);
+  });
+  function playKey(e, down) {
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+    const bit = PLAY_KEYS[k];
+    if (!bit) return false;
+    ui.playKeys = down ? ui.playKeys | bit : ui.playKeys & ~bit;
+    quiet('lr_camera_fly', ui.playKeys);
+    return true;
+  }
+
+  // ---- Ctrl K (StageCommand): add, find, run ----
+  const PAL_IC = {
+    stack: 'M4 15l8 4 8-4M4 11l8 4 8-4M12 3l8 4-8 4-8-4z', frame: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 12h6',
+    ball: 'M12 9a4 4 0 1 0 0 8a4 4 0 1 0 0-8zM12 2v4M9 4l3 2 3-2M6 21h12', ray: 'M3 21l7-7M14 4l6 6M10 14l4-10 6 6-10 4z',
+    mode: 'M4 6h16M4 12h10M4 18h6', save: 'M5 3h11l3 3v15H5zM8 3v6h8V3M8 21v-7h8v7', open: 'M3 7h6l2 2h10v10H3z',
+    undo: 'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3', redo: 'M15 14l5-5-5-5M20 9H10a6 6 0 0 0 0 12h3', play: 'M8 5.5v13l10.5-6.5z',
+    gauge: 'M4 18a8 8 0 1 1 16 0M12 18l4-6', obj: 'M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z', sample: 'M4 5h16v12H4zM8 21h8',
+  };
+  const PAL_TONES = { amber: ['#F2A65A26', '#F2A65A'], blue: ['#8FB8FF26', '#8FB8FF'], grey: ['#FFFFFF14', '#C9CCD3'] };
+  const PAL_GROUPS = ['Add', 'Scene', 'Commands', 'Internals'];
+  const pal = { list: [], active: 0 };
+  // a point where the camera looks: the middle of the frame, or lower down if that is sky
+  function lookPoint() {
+    for (const y of [0.5, 0.62, 0.75, 0.9]) { const pk = pick(0.5, y, 0); if (pk && pk.hit) return [0.5, y]; }
+    return null;
+  }
+  function addStack() {                            // 4 x 4 boxes: four columns side by side, four high
+    // (on the ground where the view's middle meets it, whatever stands in front)
+    const cam = engineJSON('lr_camera');
+    if (!cam || cam.fwd[1] > -0.02) { toast('Point the camera at the ground first'); return 0; }
+    const d = -cam.pos[1] / cam.fwd[1], gx = cam.pos[0] + cam.fwd[0] * d, gz = cam.pos[2] + cam.fwd[2] * d;
+    if (!(d > 0 && d < 200)) { toast('Point the camera at the ground first'); return 0; }
+    quiet('lr_checkpoint');
+    const rl = Math.hypot(cam.fwd[0], cam.fwd[2]) || 1, r = [-cam.fwd[2] / rl, cam.fwd[0] / rl];
+    let first = 0;
+    for (let c = 0; c < 4; c++) {
+      const off = (c - 1.5) * 1.05, x = gx + r[0] * off, z = gz + r[1] * off;
+      let below = 0;
+      for (let l = 0; l < 4; l++) {
+        below = quiet('lr_add_shape', SHAPE_INDEX.box, x, l, z, below);
+        if (!first) first = below;
+      }
+    }
+    log('a stack of 4 x 4 boxes at ' + where([gx, 0, gz]));
+    refreshScene();
+    select(first);
+    return first;
+  }
+  function palItems() {
+    const st = ui.status, sim = st && st.sim, items = [];
+    const add = (o) => items.push(Object.assign({ tone: 'grey', sub: '', kbd: '', kw: '' }, o));
+    const editing = ui.mode === 'build' && !ui.sample && !simHolds();
+    if (editing) {
+      for (const [key, label, color, icon] of SHAPES)
+        add({ g: 'Add', label, sub: { box: '1 × 1 × 1 m', sphere: '1 m across', glassball: 'glass, 1 m', rock: '1.1 m', lamp: 'glows · 1.1 m' }[key], kw: key + ' add shape',
+          icon, tone: 'amber', desc: 'A ' + label.toLowerCase() + ', static, where the camera looks (on what is there). Make it dynamic in its card to let it fall in Simulate.',
+          action: 'add to scene', keep: true, run: () => { const at = lookPoint(); if (!at || !addShapeAt(key, at[0], at[1])) toast('Point the camera at the ground first'); } });
+      add({ g: 'Add', label: 'Box stack', sub: '4 × 4 boxes', kw: 'box stack tower pile wall', icon: PAL_IC.stack, tone: 'amber', keep: true,
+        desc: 'Sixteen boxes, four columns four high, where the camera looks. Make them dynamic to knock them over.', action: 'add to scene', run: addStack });
+    }
+    if (ui.scene && !ui.sample && ui.mode === 'build')
+      for (const o of ui.scene.objects)
+        add({ g: 'Scene', label: o.name, sub: o.kind + (o.material ? ' · ' + o.material : '') + (o.dynamic ? ' · dynamic' : ''), kw: 'object find select ' + o.kind,
+          icon: PAL_IC.obj, tone: 'blue', desc: 'Selects it and moves the camera so that it fills the view.', action: 'select and frame',
+          run: () => { select(o.id); call('lr_frame_object', [o.id]); } });
+    if (ui.sel) add({ g: 'Commands', label: 'Frame the selection', sub: obj(ui.sel) ? obj(ui.sel).name : '', kw: 'frame focus camera', kbd: 'F', icon: PAL_IC.frame,
+      desc: 'Moves the camera so the selected object fills the view.', action: 'run', run: () => call('lr_frame_object', [ui.sel]) });
+    if (sim && sim.own && sim.on) add({ g: 'Commands', label: 'Throw a ball from the camera', kw: 'ball drop throw poke', kbd: ui.mode === 'play' ? 'B' : '', icon: PAL_IC.ball,
+      desc: 'Throws a rubber ball from where you are looking into the running simulation: the quickest way to poke the scene.', action: 'run', run: throwBall });
+    if (ui.mode === 'simulate' && sim) add({ g: 'Commands', label: sim.paused ? 'Play the simulation' : 'Pause the simulation', kw: 'simulate play pause run', kbd: 'Space', icon: PAL_IC.play,
+      desc: sim.paused ? 'Runs the physics from where it is.' : 'Holds the physics where it is; the path traced image refines.', action: 'run', run: simPlay });
+    for (const [b, label, kw] of [[0, 'Switch to path tracing', 'path trace render'], [1, 'Switch to raster', 'raster render fast'], [2, 'Switch to Auto', 'auto hybrid render']])
+      if (b !== ui.backend) add({ g: 'Commands', label, kw, icon: PAL_IC.ray,
+        desc: ['The path tracer: every light, shadow and reflection, refining as you wait.', 'The rasterizer: quick, approximate light, never noisy.', 'Raster while you move, path traced once still.'][b],
+        action: 'run', run: () => document.querySelector('#renderer button[data-backend="' + b + '"]').click() });
+    for (const [m, label, n] of [['build', 'Build', 1], ['light', 'Light', 2], ['simulate', 'Simulate', 3], ['play', 'Play', 4]])
+      if (m !== ui.mode && !modeBlock(m)) add({ g: 'Commands', label: 'Go to ' + label, kw: 'mode ' + m, kbd: String(n), icon: PAL_IC.mode,
+        desc: { build: 'Shapes, materials, skies; select and move.', light: 'The sun, the time of day, the sky and the exposure.', simulate: 'Run the physics on the dynamic objects, or open a sample.', play: 'Walk the scene while it runs: WASD, Space, B.' }[m],
+        action: 'run', run: () => setMode(m) });
+    if (!ui.sample) {
+      add({ g: 'Commands', label: 'Save the scene', sub: '.glb', kw: 'save download export gltf', icon: PAL_IC.save, desc: 'Downloads the scene as glTF 2.0 (.glb): it opens again here, and in Blender.', action: 'run', run: () => $('save-glb').click() });
+      if (ui.mode === 'build' && !simHolds()) add({ g: 'Commands', label: 'Open a scene…', sub: '.glb', kw: 'open load import file', icon: PAL_IC.open, desc: 'A scene saved here, in place of this one (one undo step); other files come in as models.', action: 'run', run: () => $('open-file').click() });
+      if (ui.scene && ui.scene.undo) add({ g: 'Commands', label: 'Undo', kw: 'undo back', kbd: 'Ctrl Z', icon: PAL_IC.undo, desc: 'Takes the last change back.', action: 'run', run: undo });
+      if (ui.scene && ui.scene.redo) add({ g: 'Commands', label: 'Redo', kw: 'redo again', kbd: 'Ctrl Shift Z', icon: PAL_IC.redo, desc: 'Does the change you took back again.', action: 'run', run: redo });
+      add({ g: 'Commands', label: 'Open the Sky rain sample', sub: 'new tab', kw: 'sample demo sky rain physics', icon: PAL_IC.sample, desc: '2000 bodies rain onto brick paving under an HDR sky: the engine\'s physics demo, in a new tab.', action: 'run', run: () => $('open-sample').click() });
+    }
+    add({ g: 'Internals', label: ui.internals ? 'Hide the internals' : 'Show the internals', kw: 'internals debug calls timings gpu', icon: PAL_IC.gauge,
+      desc: 'The engine\'s calls, the renderer, the frame time and what the GPU is doing, beside the view.', action: 'run', run: () => $('internals').click() });
+    return items;
+  }
+  function palVisible() {
+    const q = $('pal-q').value.trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean);
+    return palItems().filter((it) => words.every((w) => (it.label + ' ' + it.sub + ' ' + it.kw).toLowerCase().includes(w)))
+      .sort((a, b) => PAL_GROUPS.indexOf(a.g) - PAL_GROUPS.indexOf(b.g));
+  }
+  function svgIcon(d, size, color, sw) {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="' + sw +
+      '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"/></svg>';
+  }
+  function renderPalette() {
+    pal.list = palVisible();
+    pal.active = Math.min(pal.active, Math.max(0, pal.list.length - 1));
+    const el = $('pal-list');
+    el.innerHTML = '';
+    let group = '';
+    pal.list.forEach((it, i) => {
+      if (it.g !== group) {
+        group = it.g;
+        const h = document.createElement('div');
+        h.className = 'pal-group';
+        h.textContent = group;
+        el.appendChild(h);
+      }
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pal-item';
+      b.setAttribute('role', 'option');
+      b.setAttribute('aria-selected', i === pal.active ? 'true' : 'false');
+      const tone = PAL_TONES[it.tone];
+      b.innerHTML = '<span class="pal-icon" style="background:' + tone[0] + '">' + svgIcon(it.icon, 17, tone[1], 1.8) +
+        '</span><span class="pal-text"><span class="pal-label"></span><span class="pal-sub"></span></span><span class="pal-kbd"></span>';
+      b.querySelector('.pal-label').textContent = it.label;
+      b.querySelector('.pal-sub').textContent = it.sub;
+      b.querySelector('.pal-kbd').textContent = it.kbd;
+      b.addEventListener('mousemove', () => { if (pal.active !== i) { pal.active = i; markActive(); } });
+      b.addEventListener('click', (e) => runPal(i, e.shiftKey));
+      el.appendChild(b);
+    });
+    if (!pal.list.length) {
+      const d = document.createElement('div');
+      d.className = 'pal-empty';
+      d.textContent = 'Nothing matches “' + $('pal-q').value.trim() + '”.';
+      el.appendChild(d);
+    }
+    renderPalPreview();
+  }
+  function markActive() {
+    let i = 0;
+    for (const b of $('pal-list').querySelectorAll('.pal-item')) { b.setAttribute('aria-selected', i === pal.active ? 'true' : 'false'); if (i === pal.active) b.scrollIntoView({ block: 'nearest' }); i++; }
+    renderPalPreview();
+  }
+  function renderPalPreview() {
+    const it = pal.list[pal.active];
+    $('pal-art').innerHTML = it ? svgIcon(it.icon, 72, PAL_TONES[it.tone][1], 1) : '';
+    $('pal-title').textContent = it ? it.label : '';
+    $('pal-desc').textContent = it ? it.desc : '';
+    $('pal-action').textContent = it ? it.action : '';
+  }
+  function runPal(i, keep) {
+    const it = pal.list[i];
+    if (!it) return;
+    if (!(keep && it.keep)) closePalette();
+    it.run();
+    if (keep && it.keep) { renderPalette(); $('pal-q').focus(); }
+  }
+  function openPalette() {
+    if (ui.mode === 'play' && document.pointerLockElement === view) document.exitPointerLock();
+    closePopovers();
+    $('palette').hidden = $('palette-veil').hidden = false;
+    $('pal-q').value = '';
+    pal.active = 0;
+    renderPalette();
+    $('pal-q').focus();
+  }
+  function closePalette() {
+    $('palette').hidden = $('palette-veil').hidden = true;
+    if (document.activeElement === $('pal-q')) $('pal-q').blur();
+  }
+  const paletteOpen = () => !$('palette').hidden;
+  $('pal-q').addEventListener('input', () => { pal.active = 0; renderPalette(); });
+  $('pal-q').addEventListener('keydown', (e) => {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) e.stopPropagation();
+    if (e.key === 'ArrowDown') { e.preventDefault(); pal.active = Math.min(pal.active + 1, pal.list.length - 1); markActive(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); pal.active = Math.max(pal.active - 1, 0); markActive(); }
+    else if (e.key === 'Enter') { e.preventDefault(); runPal(pal.active, e.shiftKey); }
+    else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); closePalette(); }
+  });
+  $('palette-veil').addEventListener('click', closePalette);
   function renderSim() {
     const sim = ui.status && ui.status.sim, paused = !sim || sim.paused;
     const own = !ui.sample, on = !!(sim && sim.on), was = $('sim-keep').hidden;
@@ -1304,6 +1638,8 @@
     }
     renderStatus();
     renderSim();
+    if (ui.mode === 'play') renderPlayStats();
+    if (ui.mode === 'light' && ui.internals) renderLight(false);
   }, 100);
 
   renderAll();
