@@ -666,11 +666,24 @@
     const b = ui.sel && ui.boxes[ui.sel];
     if (card.hidden || !b) { if (!card.hidden && !b) card.style.visibility = 'hidden'; return; }
     card.style.visibility = '';
+    card.style.maxHeight = '';                     // (measured at its own height)
     const q = px(b), W = window.innerWidth, H = window.innerHeight, ch = card.offsetHeight;
     let left = R.left + q.left + q.w + 28;
     if (left + 316 > W - 24) left = R.left + q.left - 28 - 316;
     left = Math.max(24, Math.min(W - 24 - 316, left));
-    const top = Math.max(88, Math.min(H - 24 - ch, R.top + q.top - 20));
+    // (not over the tray or the status card below it: above them, or, in a window too short
+    // for that, as tall as there is room for, scrolling inside)
+    let bound = H - 24;
+    for (const el of [document.querySelector('.tray:not([hidden])'), document.querySelector('.status')]) {
+      if (!el || el.hidden) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width && left < r.right && left + 316 > r.left) bound = Math.min(bound, r.top - 12);
+    }
+    const room = bound - 88;
+    card.style.maxHeight = ch > room && room >= 160 ? room + 'px' : '';
+    card.style.overflowY = ch > room && room >= 160 ? 'auto' : '';
+    const h = Math.min(ch, room >= 160 ? room : ch);
+    const top = Math.max(88, Math.min(bound - h, R.top + q.top - 20));
     card.style.left = Math.round(left) + 'px';
     card.style.top = Math.round(top) + 'px';
   }
