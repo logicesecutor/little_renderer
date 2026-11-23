@@ -439,6 +439,13 @@
     if (!dropDir) { try { Module.FS.mkdir('/drop'); } catch (e) { /* (there already) */ } dropDir = true; }
     // all of them (a .gltf names its buffers and images, beside it)
     for (const f of files) Module.FS.writeFile('/drop/' + f.name, new Uint8Array(await f.arrayBuffer()));
+    // a scene saved here (its root says LR_scene): opened in place of this one, one undo step
+    if (model && /\.(glb|gltf)$/i.test(model.name)) {
+      const r = JSON.parse(Module.ccall('lr_open_scene', 'string', ['string'], ['/drop/' + model.name]));
+      log('lr_open_scene("/drop/' + model.name + '") -> ' + JSON.stringify(r));
+      if (r.opened === 1) { openedScene(r, model.name, hdr); return; }
+      if (r.opened < 0) { toast('Could not read ' + model.name); return; }
+    }
     if (model) {
       const pk = pick(sx, sy, 0);
       if (!pk || !pk.hit) { toast('Drop it on the ground or on an object'); return; }
@@ -461,6 +468,31 @@
       refreshScene();
     }
   }
+
+  function openedScene(r, name, hdr) {
+    let note = '';
+    if (r.skyFile && hdr) {                         // (its sky's .hdr dropped with it)
+      const k = Module.ccall('lr_load_sky', 'number', ['string', 'string'], ['/drop/' + hdr.name, hdr.name]);
+      log('lr_load_sky("/drop/' + hdr.name + '")');
+      if (k) note = ' Could not read ' + hdr.name + '.';
+    } else if (r.skyFile) note = ' Its sky was ' + r.skyFile + ': drop that .hdr to bring it back.';
+    const b = { 'path traced': 0, raster: 1, auto: 2 }[r.renderer];
+    if (b !== undefined && b !== ui.backend) { ui.backend = b; call('lr_set_backend', [b], 'lr_set_backend(' + BACKEND_NAME[b] + ')'); renderRenderer(); }
+    ui.sceneFile = name;
+    document.querySelector('.scene-name').textContent = name.replace(/\.(glb|gltf)$/i, '');
+    select(null);
+    refreshScene();
+    toast('Opened ' + name + ': ' + r.objects + ' object' + (r.objects === 1 ? '' : 's') + '. Undo goes back.' + note);
+  }
+  // "Open scene…" (the Save menu): the files as if dropped in the middle of the view
+  $('open-file').addEventListener('change', (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (!files.length || !ui.ready) return;
+    const c = $('canvas');
+    dropFiles(files, c.width / 2, c.height / 2);
+  });
+  $('open-scene').addEventListener('click', () => { closeSave(); if (ui.sample || simHolds()) return; $('open-file').click(); });
 
   // ---- what is dragged into the view (6.4): a preview where it would land or what it
   // would change, and its label ----
@@ -853,7 +885,7 @@
   $('save-glb').addEventListener('click', () => {
     closeSave();
     if (!ui.ready) return;
-    const name = 'untitled_scene.glb';
+    const name = ui.sceneFile && /\.glb$/i.test(ui.sceneFile) ? ui.sceneFile : 'untitled_scene.glb';   // (an opened scene: its name)
     try { Module.FS.mkdir('/save'); } catch (e) { /* (there already) */ }
     const r = Module.ccall('lr_save_gltf', 'number', ['string'], ['/save/' + name]);
     log('lr_save_gltf("' + name + '")');
