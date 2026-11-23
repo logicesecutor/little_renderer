@@ -163,6 +163,7 @@ static const Opt OPTS[] = {
     {"-s", K_INT, P_R | P_S, 1, .off = F(spp), .arg = "samples", .text = "samples (light paths) per pixel"},
     INT("-d", max_depth, "bounces", "maximum bounces per light path"),
     DBL("-clamp", clamp, "max", "firefly clamp, 0 = off (biased if on)"),
+    DBL("-iclamp", iclamp, "max", "indirect clamp: each light a path brings after its first rough\nbounce, at most this much (the sun's disc found by chance:\nfireflies), 0 = off (biased; default: 4 in the viewer, else off)"),
     ONOFF("-denoise", denoise, "path tracing on the GPU: denoise the image"),
     ONOFF("-wavefront", wavefront, "path tracing on the GPU: small kernels, one step of all paths at a time"),
     INT("-threads", threads, "n", "CPU threads, 0 = all cores"),
@@ -295,6 +296,7 @@ static void defaults(Options *o, Program prog){
     o->spp = prog == PROG_VIEW ? 4096 : (prog == PROG_SIM ? 32 : 128);
     o->max_depth = 50;
     o->mis = 1;
+    o->iclamp = prog == PROG_VIEW ? 4 : 0;
     o->sampler = 1;
     o->caustics_lt = prog != PROG_SIM;     // (the CPU viewer path traces them whatever this says)
     o->photons = 1;
@@ -556,6 +558,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->spp <= 0) fail(prog, "samples must be positive", "-s");
     if (o->max_depth <= 0) fail(prog, "bounces must be positive", "-d");
     if (o->clamp < 0) fail(prog, "clamp must be >= 0", "-clamp");
+    if (o->iclamp < 0) fail(prog, "iclamp must be >= 0", "-iclamp");
     if (o->threads < 0) fail(prog, "threads must be >= 0 (0 = all cores)", "-threads");
     if (o->ap.oct_depth < 0) fail(prog, "octree depth must be >= 0 (0 = automatic)", "-octdepth");
     if (o->scene.instances < 0) fail(prog, "instances must be >= 0", "-instances");
@@ -714,6 +717,7 @@ void options_print_command(const Options *o, Vec3 cam, Vec3 look, double fov, FI
     if (!o->mis) fprintf(f, " -mis off");
     if (!o->sampler) fprintf(f, " -sampler random");
     if (o->clamp > 0) fprintf(f, " -clamp %g", o->clamp);
+    if (o->iclamp > 0) fprintf(f, " -iclamp %g", o->iclamp);
     if (!o->caustics_lt) fprintf(f, " -caustics pt");
     if (o->photons != 1) fprintf(f, " -photons %g", (double)o->photons);
     if (o->accel >= 0) fprintf(f, " -accel %s", ACCELS[o->accel + 1]);

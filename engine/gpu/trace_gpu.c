@@ -1564,6 +1564,8 @@ static void fill_params(GpuTrace *t, GTP *Pp, const Scene *s, const GpuTracePara
     int em[MAX_EMITTERS];
     int ne = s->ninsts == t->ninst ? scene_find_emitters(s, em) : 0;
     P.em[0] = (uint32_t)ne;
+    float ic = (float)tp->indirect_clamp;
+    memcpy(&P.em[1], &ic, sizeof(ic));        // (T.em.y: the indirect clamp's bits)
     for (int k = 0; k < ne; k++) P.emi[k] = (uint32_t)em[k];
     *Pp = P;
 }

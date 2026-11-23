@@ -27,7 +27,8 @@ struct TP {
     txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
                       triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
     mats: array<TMat, 16>,
-    em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many */
+    em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many; y: the
+                      indirect clamp's bits (indirect_cap) */
     emi: array<vec4u, 4>,   /* ... their instances, 4 to an entry */
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -1096,6 +1097,13 @@ fn guide(ray0: Ray, rng: ptr<function, u32>) -> Guide {
    spreading what looks like a firefly, left a halo of speckles round a bulb) */
 var<private> cam_glow: bool;
 fn glow_bright(e: vec3f) -> bool { return max(e.r, max(e.g, e.b)) >= 1.0; }
+/* TraceParams.indirect_clamp (rt/tracer.c): after a path's first rough bounce (on), each light
+   it brings is held to this much (its largest channel); 0 = no limit */
+fn indirect_cap(c: vec3f, on: bool) -> vec3f {
+    let k = bitcast<f32>(T.em.y);
+    let m = max(c.r, max(c.g, c.b));
+    return select(c, c * (k / m), on && k > 0.0 && m > k);
+}
 
 /* the radiance arriving along one camera ray */
 fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
@@ -1112,6 +1120,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
        reaches the lamp right after a mirror / glass (spec): light tracing adds that one */
     var chain = false;
     var spec = false;
+    var rough = false;          /* a rough bounce (or a medium's) so far: indirect_cap */
     for (var depth = 0; depth < 4096; depth++) {
         let f = traverse(ray, T.f.y, 1e30, false);
         let found = f.id != NONE;
@@ -1129,14 +1138,15 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
                 let p = ray.o + ray.d * ts;
                 thr *= vol.albedo.xyz;
                 let dd = 3u * u32(depth);
-                radiance += thr * direct_medium(p, ray.d, vol.p.x, s2(sm, 1u + dd, rng), rng);
-                if (sky_on()) { radiance += thr * direct_sky_medium(p, ray.d, vol.p.x, sky_u(sm, depth, rng), rng); }
-                if (T.em.x > 0u) { radiance += thr * direct_emit_medium(p, ray.d, vol.p.x, rng); }
+                radiance += indirect_cap(thr * direct_medium(p, ray.d, vol.p.x, s2(sm, 1u + dd, rng), rng), rough);
+                if (sky_on()) { radiance += indirect_cap(thr * direct_sky_medium(p, ray.d, vol.p.x, sky_u(sm, depth, rng), rng), rough); }
+                if (T.em.x > 0u) { radiance += indirect_cap(thr * direct_emit_medium(p, ray.d, vol.p.x, rng), rough); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, rng));
                 bounce_pdf = hg(dot(ray.d, nd), vol.p.x);
                 ray = Ray(p, nd);
                 emit = after_bounce;
                 chain = false;
+                rough = true;
                 if (!roulette(&thr, depth, sm, rng)) { break; }
                 continue;
             }
@@ -1145,7 +1155,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
             if (sky_on() && emit != 1) {
                 var le = sky_eval(ray.d);
                 if (emit == 2) { le *= power_heuristic(bounce_pdf, sky_pdf(ray.d)); }
-                radiance += thr * le;
+                radiance += indirect_cap(thr * le, rough);
             }
             break;
         }
@@ -1155,18 +1165,18 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         /* a glowing surface (glTF's emissive): found by the paths that hit it; a glowing shape
            sampled as a light: weighted against that (emit_weight) */
         if (kind != 3u) {
-            radiance += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, bounce_pdf, 1.0);
+            radiance += indirect_cap(thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, bounce_pdf, 1.0), rough);
             if (depth == 0 && glow_bright(m.emission.rgb)) { cam_glow = true; }
         }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
-                    radiance += thr * m.emission.rgb;
+                    radiance += indirect_cap(thr * m.emission.rgb, rough);
                 } else if (emit == 2 && f.id == T.opt.w) {
                     let lt = prims[T.opt.w];
                     let cos_light = -dot(lt.n.xyz, ray.d);
                     if (cos_light > 0.0) {
-                        radiance += thr * m.emission.rgb * power_heuristic(bounce_pdf, light_pdf(lt.v.w, h.t * h.t, cos_light));
+                        radiance += indirect_cap(thr * m.emission.rgb * power_heuristic(bounce_pdf, light_pdf(lt.v.w, h.t * h.t, cos_light)), rough);
                     }
                 }
             }
@@ -1180,9 +1190,9 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
         var b = mat_bsdf(m, h.front);
         let bo = surface_bounce(&b, h, v, depth, sm, rng);
         if (bsdf_rough_part(&b)) {
-            radiance += thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng);
-            if (sky_on()) { radiance += thr * direct_sky(h, &b, v, sky_u(sm, depth, rng), rng); }
-            if (T.em.x > 0u) { radiance += thr * direct_emit(h, &b, v, rng); }
+            radiance += indirect_cap(thr * direct_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), rng), rng), rough);
+            if (sky_on()) { radiance += indirect_cap(thr * direct_sky(h, &b, v, sky_u(sm, depth, rng), rng), rough); }
+            if (T.em.x > 0u) { radiance += indirect_cap(thr * direct_emit(h, &b, v, rng), rough); }
         }
         if (!bo.s.ok) { break; }
         thr *= bo.s.w;
@@ -1194,6 +1204,7 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
             emit = after_bounce;
             if (depth == 0) { chain = T.ext.z != 0u; }
             spec = false;
+            rough = true;
         }
         if (!roulette_u(&thr, depth, bo.ur)) { break; }
         ray = Ray(h.p, normalize(bo.s.l));

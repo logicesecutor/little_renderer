@@ -304,7 +304,7 @@ static int russian_roulette(Vec3 *throughput, int depth, Sampler *sm){
 }
 
 TraceParams trace_default_params(void){
-    TraceParams p = {.max_depth = 50, .mis = 1, .skip_caustics = 0, .sampler = 1, .no_lamp_seen = 0, .no_sky_seen = 0};
+    TraceParams p = {.max_depth = 50, .mis = 1, .skip_caustics = 0, .sampler = 1, .no_lamp_seen = 0, .no_sky_seen = 0, .indirect_clamp = 0};
     return p;
 }
 
@@ -355,6 +355,12 @@ void trace_image(const Scene *s, const Camera *cam, const TraceParams *tp, int W
     }
 }
 
+// tp->indirect_clamp on a contribution c (on: it comes after a rough bounce)
+static inline Vec3 indirect_cap(Vec3 c, int on, const TraceParams *tp){
+    real m = v_max(c);
+    return on && tp->indirect_clamp > 0 && m > tp->indirect_clamp ? v_scale(c, tp->indirect_clamp / m) : c;
+}
+
 Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams *tp){
     Rng *rng = sm->rng;
     const int max_depth = tp->max_depth, mis = tp->mis;
@@ -367,6 +373,9 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
     // one. If such a path reaches the lamp right after mirror / glass (camera -> D ... S -> lamp),
     // light tracing has it covered.
     int caustic_chain = 0, caustic_spec = 0;
+    // rough: a rough bounce (or a medium's) so far: what the path brings from then on is
+    // indirect light, each part held to tp->indirect_clamp
+    int rough = 0;
     const int media = s->nvolumes > 0;
     if (media || mis) ray.d = v_norm(ray.d); // distances and pdfs below need a unit direction
 
@@ -388,13 +397,13 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             real la, lb;
             if (s->light >= 0){
                 sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
-                radiance = v_add(radiance, v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, lb, la, rng)));
+                radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_light_in_medium(s, p, ray.d, vol->g, mis, lb, la, rng)), rough, tp));
             }
             if (s->env){
                 env_numbers(s, sm, depth, &la, &lb);
-                radiance = v_add(radiance, v_mul(throughput, sample_env_in_medium(s, p, ray.d, vol->g, mis, la, lb, rng)));
+                radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_env_in_medium(s, p, ray.d, vol->g, mis, la, lb, rng)), rough, tp));
             }
-            if (s->nemitters) radiance = v_add(radiance, v_mul(throughput, sample_emit_in_medium(s, p, ray.d, vol->g, mis, rng)));
+            if (s->nemitters) radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_emit_in_medium(s, p, ray.d, vol->g, mis, rng)), rough, tp));
             // 2. continue in a direction drawn from the phase function. Its pdf equals the
             //    phase function, so the weight phase / pdf is 1: throughput is unchanged.
             real da, db;
@@ -405,6 +414,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             ray.d = nd;
             emit = mis ? EMIT_MIS : EMIT_NONE;
             caustic_chain = 0;
+            rough = 1;
             if (!russian_roulette(&throughput, depth, sm)) break;
             continue;
         }
@@ -412,7 +422,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             if (s->env && emit != EMIT_NONE && !(depth == 0 && tp->no_sky_seen)){
                 Vec3 le = env_eval(s->env, ray.d);
                 if (emit == EMIT_MIS) le = v_scale(le, power_heuristic(bounce_pdf, env_pdf(s->env, ray.d)));
-                radiance = v_add(radiance, v_mul(throughput, le));
+                radiance = v_add(radiance, indirect_cap(v_mul(throughput, le), rough, tp));
             }
             break;
         }
@@ -423,14 +433,14 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         if (m->type == MAT_LIGHT){
             if (h.front_face && !(caustic_chain && caustic_spec) && !(depth == 0 && tp->no_lamp_seen)){
                 if (emit == EMIT_FULL){
-                    radiance = v_add(radiance, v_mul(throughput, m->emission));
+                    radiance = v_add(radiance, indirect_cap(v_mul(throughput, m->emission), rough, tp));
                 } else if (emit == EMIT_MIS && h.inst < 0 && h.prim == s->light){
                     // the bounce found the lamp: weight against next event estimation
                     const Primitive *l = &s->prims[s->light];
                     real cos_light = -v_dot(l->normal, ray.d);
                     if (cos_light > 0){
                         real w = power_heuristic(bounce_pdf, light_pdf(l, h.t * h.t, cos_light));
-                        radiance = v_add(radiance, v_mul(throughput, v_scale(m->emission, w)));
+                        radiance = v_add(radiance, indirect_cap(v_mul(throughput, v_scale(m->emission, w)), rough, tp));
                     }
                 }
                 // EMIT_NONE: the light was already counted by next event estimation; adding
@@ -446,8 +456,8 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         if (material_glows(m)){
             int k = s->nemitters && emit != EMIT_FULL && h.inst >= 0 ? emitter_slot(s, h.inst) : -1;
             real pe = k >= 0 && h.front_face ? emit_pdf(s, k, ray.o, v_norm(ray.d), h.t * v_len(ray.d), h.ng) : 0;
-            if (!(pe > 0)) radiance = v_add(radiance, v_mul(throughput, m->emission));
-            else if (emit == EMIT_MIS) radiance = v_add(radiance, v_mul(throughput, v_scale(m->emission, power_heuristic(bounce_pdf, pe))));
+            if (!(pe > 0)) radiance = v_add(radiance, indirect_cap(v_mul(throughput, m->emission), rough, tp));
+            else if (emit == EMIT_MIS) radiance = v_add(radiance, indirect_cap(v_mul(throughput, v_scale(m->emission, power_heuristic(bounce_pdf, pe))), rough, tp));
         }
         if (depth >= max_depth) break;
 
@@ -459,13 +469,13 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
             real la, lb;
             if (s->light >= 0){
                 sampler_2d(sm, SAMPLE_LIGHT(depth), &la, &lb);
-                radiance = v_add(radiance, v_mul(throughput, sample_direct_light(s, &h, &b, v, mis, lb, la, rng)));
+                radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_direct_light(s, &h, &b, v, mis, lb, la, rng)), rough, tp));
             }
             if (s->env){
                 env_numbers(s, sm, depth, &la, &lb);
-                radiance = v_add(radiance, v_mul(throughput, sample_direct_env(s, &h, &b, v, mis, la, lb, rng)));
+                radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_direct_env(s, &h, &b, v, mis, la, lb, rng)), rough, tp));
             }
-            if (s->nemitters) radiance = v_add(radiance, v_mul(throughput, sample_direct_emit(s, &h, &b, v, mis, rng)));
+            if (s->nemitters) radiance = v_add(radiance, indirect_cap(v_mul(throughput, sample_direct_emit(s, &h, &b, v, mis, rng)), rough, tp));
         }
         // 2. continue the path in a direction drawn from the BSDF: its weight f cos / pdf.
         //    (The numbers only when they are used: SAMPLE_MISC's pair for Russian roulette
@@ -485,6 +495,7 @@ Vec3 trace_path_sampled(const Scene *s, Ray ray, Sampler *sm, const TraceParams 
         } else {
             bounce_pdf = bs.pdf;
             emit = mis ? EMIT_MIS : EMIT_NONE;
+            rough = 1;
             if (depth == 0) caustic_chain = tp->skip_caustics;
             caustic_spec = 0;
         }

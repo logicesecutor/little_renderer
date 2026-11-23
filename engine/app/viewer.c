@@ -120,8 +120,9 @@ static void accum_reset(Accum *a, int scale){
 
 // one new sample for every pixel in rows [y0, y1) of the internal image
 static void render_rows(const Scene *s, const Camera *cam, Accum *a, int y0, int y1, int max_depth, int mis, real clamp,
-                        int sampler){
+                        int sampler, real iclamp){
     TraceParams tp = trace_default_params();
+    tp.indirect_clamp = iclamp;
     tp.max_depth = max_depth;
     tp.mis = mis;
     tp.sampler = sampler;
@@ -513,7 +514,8 @@ static void print_view_command(void){
 
 // the GPU path tracer's parameters for this camera, from the options
 static GpuTraceParams trace_params(const Camera *cam, int depth){
-    GpuTraceParams tp = {*cam, depth, V.o.mis, (real)V.o.clamp, !V.o.sampler, V.o.caustics_lt ? (real)V.o.photons : 0, V.o.photon_cache};
+    GpuTraceParams tp = {*cam, depth, V.o.mis, (real)V.o.clamp, !V.o.sampler, V.o.caustics_lt ? (real)V.o.photons : 0, V.o.photon_cache,
+                         (real)V.o.iclamp};
     return tp;
 }
 
@@ -962,7 +964,7 @@ static void viewer_render(Frame *fr){
         accum_reset(&V.acc, sc);
         scene_trees();
         V.pass_t0 = clock_s();
-        for (int i = 0; i < V.o.move_spp; i++) render_rows(&V.scene, &fr->cam, &V.acc, 0, V.acc.rh, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler);
+        for (int i = 0; i < V.o.move_spp; i++) render_rows(&V.scene, &fr->cam, &V.acc, 0, V.acc.rh, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler, (real)V.o.iclamp);
         V.acc.passes = V.o.move_spp;
         V.pass_ms = (clock_s() - V.pass_t0) * 1000.0;
         ema_update(&V.ema, &V.acc, V.fb, fr->changed);
@@ -979,7 +981,7 @@ static void viewer_render(Frame *fr){
         V.pass_t0 = clock_s();
         if (fr->changed){
             int n = sc > 1 ? V.o.move_spp : 1;          // -movespp: less grain, slower
-            for (int i = 0; i < n; i++) render_rows(&V.scene, &fr->cam, &V.acc, 0, V.acc.rh, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler);
+            for (int i = 0; i < n; i++) render_rows(&V.scene, &fr->cam, &V.acc, 0, V.acc.rh, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler, (real)V.o.iclamp);
             V.acc.passes = n;
             V.pass_ms = (clock_s() - V.pass_t0) * 1000.0;
             V.pass_t0 = clock_s();
@@ -992,7 +994,7 @@ static void viewer_render(Frame *fr){
         scene_trees();               // (after a pause or a change of mode: made once)
         double b0 = clock_s();
         int y1 = V.acc.band_y + V.band < V.acc.rh ? V.acc.band_y + V.band : V.acc.rh;
-        render_rows(&V.scene, &fr->cam, &V.acc, V.acc.band_y, y1, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler);
+        render_rows(&V.scene, &fr->cam, &V.acc, V.acc.band_y, y1, V.max_depth, V.o.mis, (real)V.o.clamp, V.o.sampler, (real)V.o.iclamp);
         double bt = clock_s() - b0;
         if (bt < 0.010 && V.band < V.acc.rh) V.band *= 2;
         else if (bt > 0.040 && V.band > 1) V.band /= 2;

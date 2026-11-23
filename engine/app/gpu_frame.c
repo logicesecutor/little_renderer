@@ -49,7 +49,7 @@ static void on_samples(void *user, const float *sc, int w, int h){
 int gpu_frame_trace(Gpu *gpu, GpuView *view, const Scene *s, const Camera *cam, const RenderParams *rp,
                     const MarchParams *mp, int spp, int max_depth, int mis, real clamp, int sampler, real photons,
                     Image *img, int progress){
-    GpuTraceParams tp = {*cam, max_depth, mis, clamp, !sampler, photons, 0};
+    GpuTraceParams tp = {*cam, max_depth, mis, clamp, !sampler, photons, 0, 0};
     if (!gpu_view_trace_start(view, s, &tp)) return 1;
     gpu_view_trace_limit(view, spp);          // exactly spp: the same image every time
     int shown = -1, p1 = -1;

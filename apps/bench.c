@@ -221,7 +221,7 @@ static void case_trace(const Case *c, Res *r, int reps){
     if (!v){ teardown(&o, &s, &SIM); skip(r, "no view"); return; }
     gpu_view_trace_denoise(v, 0);
     RenderParams rp = scene_params(&o, &s);
-    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0, (real)o.iclamp};
     const int warm = 4, passes = full ? 48 : 24;
     for (int k = 0; k < reps; k++){
         if (!gpu_view_trace_start(v, &s, &tp)){ skip(r, "the GPU cannot hold the scene"); break; }
@@ -322,7 +322,7 @@ static void case_denoise(const Case *c, Res *r, int reps){
     scene_set_accel(&s, ACCEL_BVH, &o.ap);
     GpuView *v = gpu_view_create(g, o.width, o.height);
     RenderParams rp = scene_params(&o, &s);
-    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0, (real)o.iclamp};
     if (!v || !gpu_view_trace_denoise(v, 1) || !gpu_view_trace_start(v, &s, &tp)) skip(r, "no denoiser here");
     else if (gpu_view_trace_limit(v, 4), !trace_until(g, v, &s, &rp, &o.march, 4)) skip(r, "the GPU path tracer failed");
     else {
@@ -380,7 +380,7 @@ static void case_moving_trace(const Case *c, Res *r, int reps){
     GpuView *v = gpu_view_create(g, o.width, o.height);
     gpu_view_trace_denoise(v, 0);
     RenderParams rp = scene_params(&o, &s);
-    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0, (real)o.iclamp};
     const int moved = c->a < s.ninsts ? c->a : s.ninsts, frames = full ? 40 : 20;
     if (!v || !gpu_view_trace_start(v, &s, &tp)) skip(r, "the GPU cannot hold the scene");
     else {
@@ -526,7 +526,7 @@ static void case_first_frame(const Case *c, Res *r, int reps){
         gpu_ready_wait(g);
         GpuView *v = g && gpu_state(g) == GPU_READY ? gpu_view_create(g, o.width, o.height) : NULL;
         RenderParams rp = scene_params(&o, &s);
-        GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+        GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0, (real)o.iclamp};
         int ok = v && gpu_view_present_scene(v, &s, &rp, &o.march, 0) && gpu_view_trace_start(v, &s, &tp);
         if (ok){ gpu_view_trace_limit(v, 1); ok = trace_until(g, v, &s, &rp, &o.march, 1); gpu_wait(g); }
         double ms = (clock_s() - t0) * 1000.0;
@@ -556,7 +556,7 @@ static void case_compile_frames(const Case *c, Res *r, int reps){
     gpu_ready_wait(g);
     GpuView *v = g && gpu_state(g) == GPU_READY ? gpu_view_create(g, o.width, o.height) : NULL;
     RenderParams rp = scene_params(&o, &s);
-    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0};
+    GpuTraceParams tp = {scene_camera(&s, o.width, o.height), o.max_depth, o.mis, (real)o.clamp, !o.sampler, 0, 0, (real)o.iclamp};
     double t0 = clock_s(), worst = 0;
     int frames = 0;
     if (v){

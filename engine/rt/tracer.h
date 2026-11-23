@@ -27,6 +27,12 @@ typedef struct {
     // 1 = the same for the sky: not counted where the ray itself leaves the scene (the
     // irradiance grid samples the sky's direct light on its own)
     int no_sky_seen;
+    // > 0: after a path's first rough bounce (indirect light), each light it brings (a lamp,
+    // the sky, a glowing surface, by next event estimation or found) is held to this much
+    // (its largest channel). The rare paths that find the sun's tiny disc (through glass, off
+    // a glossy coat) are otherwise fireflies, which the denoiser spreads into
+    // blobs. Biased: such light comes out dimmer. 0 = off (as Cycles' "clamp indirect").
+    real indirect_clamp;
 } TraceParams;
 
 TraceParams trace_default_params(void);   // max_depth 50, mis on, skip_caustics off, sampler on

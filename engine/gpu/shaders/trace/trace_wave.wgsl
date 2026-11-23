@@ -31,7 +31,7 @@ fn q_set(which: u32, i: u32, v: u32) { WF[wf_q(which) + i / 4u][i % 4u] = v; }
 
 /* a path: its ray, the pdf of the bounce that made it, its pixel, throughput, random state,
    radiance so far, and flags: depth (bits 0-15), emit (16-17), chain (18), spec (19), the
-   camera ray found a bright glow (20: cam_glow) */
+   camera ray found a bright glow (20: cam_glow), a rough bounce so far (21: indirect_cap) */
 struct PS { o: vec3f, pdf: f32, d: vec3f, pix: u32, thr: vec3f, rng: u32, rad: vec3f, fl: u32 };
 fn ps_load(p: u32) -> PS {
     let s = wf_st(p);
@@ -204,6 +204,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
     var emit = i32((s.fl >> 16u) & 3u);
     var chain = (s.fl & (1u << 18u)) != 0u;
     var spec = (s.fl & (1u << 19u)) != 0u;
+    var rough = (s.fl & (1u << 21u)) != 0u;
     var thr = s.thr;
     var ray = Ray(s.o, s.d);
     let max_depth = i32(T.opt.x);
@@ -234,11 +235,12 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 if (T.em.x > 0u && rnd(&rng) < wf_esel()) { ls = wf_emit_medium(pp, ray.d, vol.p.x, &rng); }
                 else if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_medium(pp, ray.d, vol.p.x, sky_u(sm, depth, &rng)); }
                 else { ls = wf_light_medium(pp, ray.d, vol.p.x, s2(sm, 1u + dd, &rng)); }
-                if (ls.dist > 0.0) { wf_shadow_ray(p, pp, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
+                if (ls.dist > 0.0) { wf_shadow_ray(p, pp, ls.wi, ls.dist, indirect_cap(thr * ls.c, rough), hash32(rng ^ 0x68bc21ebu)); }
                 let nd = sample_phase(ray.d, vol.p.x, s2(sm, 2u + dd, &rng));
                 s.pdf = hg(dot(ray.d, nd), vol.p.x);
                 emit = after_bounce;
                 chain = false;
+                rough = true;
                 if (roulette(&thr, depth, sm, &rng)) { go_on = true; nxt_o = pp; nxt_d = nd; }
             }
         }
@@ -246,25 +248,25 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
     if (!done && !found && sky_on() && emit != 1) {   /* escaped: the sky */
         var le = sky_eval(ray.d);
         if (emit == 2) { le *= power_heuristic(s.pdf, wf_sel() * sky_pdf(ray.d)); }
-        s.rad += thr * le;
+        s.rad += indirect_cap(thr * le, rough);
     }
     if (!done && found) {
         var h = make_hit(ray, f);
         let m = shade_tex(T.mats[hit_mat(f)], ray, f, &h);
         let kind = u32(m.albedo.w);
         if (kind != 3u) {
-            s.rad += thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, s.pdf, wf_esel());
+            s.rad += indirect_cap(thr * m.emission.rgb * emit_weight(f, h, ray.o, ray.d, emit, s.pdf, wf_esel()), rough);
             if (depth == 0 && glow_bright(m.emission.rgb)) { s.fl |= 1u << 20u; }
         }
         if (kind == 3u) {
             if (h.front && !(chain && spec)) {
                 if (emit == 0) {
-                    s.rad += thr * m.emission.rgb;
+                    s.rad += indirect_cap(thr * m.emission.rgb, rough);
                 } else if (emit == 2 && f.id == T.opt.w) {
                     let lt = prims[T.opt.w];
                     let cos_light = -dot(lt.n.xyz, ray.d);
                     if (cos_light > 0.0) {
-                        s.rad += thr * m.emission.rgb * power_heuristic(s.pdf, wf_sel() * light_pdf(lt.v.w, h.t * h.t, cos_light));
+                        s.rad += indirect_cap(thr * m.emission.rgb * power_heuristic(s.pdf, wf_sel() * light_pdf(lt.v.w, h.t * h.t, cos_light)), rough);
                     }
                 }
             }
@@ -277,7 +279,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                 if (T.em.x > 0u && rnd(&rng) < wf_esel()) { ls = wf_emit_surface(h, &b, v, &rng); }
                 else if (sky_on() && (T.opt.w == NONE || rnd(&rng) < 0.5)) { ls = wf_sky_surface(h, &b, v, sky_u(sm, depth, &rng)); }
                 else { ls = wf_light_surface(h, &b, v, s2(sm, 1u + 3u * u32(depth), &rng)); }
-                if (ls.dist > 0.0) { wf_shadow_ray(p, h.p, ls.wi, ls.dist, thr * ls.c, hash32(rng ^ 0x68bc21ebu)); }
+                if (ls.dist > 0.0) { wf_shadow_ray(p, h.p, ls.wi, ls.dist, indirect_cap(thr * ls.c, rough), hash32(rng ^ 0x68bc21ebu)); }
             }
             if (bo.s.ok) {
                 thr *= bo.s.w;
@@ -289,6 +291,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
                     emit = after_bounce;
                     if (depth == 0) { chain = T.ext.z != 0u; }
                     spec = false;
+                    rough = true;
                 }
                 if (roulette_u(&thr, depth, bo.ur)) { go_on = true; nxt_o = h.p; nxt_d = normalize(bo.s.l); }
             }
@@ -296,7 +299,7 @@ fn wf_shade(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) 
     }
     s.thr = thr;
     s.rng = rng;
-    s.fl = u32(depth + 1) | (u32(emit) << 16u) | select(0u, 1u << 18u, chain) | select(0u, 1u << 19u, spec) | (s.fl & (1u << 20u));
+    s.fl = u32(depth + 1) | (u32(emit) << 16u) | select(0u, 1u << 18u, chain) | select(0u, 1u << 19u, spec) | (s.fl & (1u << 20u)) | select(0u, 1u << 21u, rough);
     if (go_on) {
         s.o = nxt_o;
         s.d = nxt_d;

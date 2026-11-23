@@ -58,6 +58,7 @@ typedef struct {
     int spp;               // render: samples per pixel; view: stop refining after this many
     int max_depth;         // maximum bounces per path
     double clamp;          // firefly clamp, 0 = off
+    double iclamp;         // indirect clamp: each light a path brings after its first rough bounce, 0 = off
     int threads;           // 0 = all cores
     const char *out;       // render: output file; view: screenshot file prefix
 
