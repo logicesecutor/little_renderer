@@ -698,6 +698,7 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
     E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
     EdModel *m = &E.models[E.nmodels];
     m->nparts = s->ninsts - n0;
+    m->clay = 0;                                     // (its own materials: the slot is not cleared)
     m->parts = malloc((size_t)m->nparts * sizeof(EdPart));
     if (!m->parts) lr_oom("editor");
     m->box = (Aabb){vec3(1e30f, 1e30f, 1e30f), vec3(-1e30f, -1e30f, -1e30f)};
