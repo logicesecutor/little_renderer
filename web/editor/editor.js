@@ -60,7 +60,7 @@
   const SAMPLES = {
     skyrain: {
       name: 'Sky rain', file: 'sky_rain',
-      args: ['-sim', 'on', '-demo', 'sky', '-sky', SKY_RAIN_HDR, '-backend', 'rt', '-s', '256'],
+      args: ['-sim', 'on', '-demo', 'sky', '-sky', SKY_RAIN_HDR, '-backend', 'rt', '-s', '256', '-simfixed', 'on'],   // (fixed steps: every run the same)
       files: ['models/dragon_recon/dragon_vrip_res4.ply', 'models/torus.obj', SKY_RAIN_HDR],
     },
   };

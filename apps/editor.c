@@ -1166,6 +1166,13 @@ EXPORT int lr_sim_reset(void){                       // from t = 0, as it was se
     sim_reset();
     return 0;
 }
+// (tests: the sample paused at simulated time t, and where its instances are then, as hex)
+EXPORT void lr_sim_pause_at(double t){ if (E.sample) viewer_sim_pause_at(t); }
+EXPORT const char *lr_sim_digest(void){
+    jlen = 0;
+    jprintf("%016llx", E.sample ? viewer_sim_digest() : 0ULL);
+    return json_buf;
+}
 EXPORT int lr_sim_keep(void){ if (E.sample || !S.on) return 1; sim_keep(); return 0; }
 
 EXPORT const char *lr_status(void){
