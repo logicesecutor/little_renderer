@@ -247,7 +247,7 @@
     if ((e.button === 0 && e.shiftKey) || e.button === 1) drag = { mode: 'pan' };
     else if (e.button === 0) {
       const [sx, sy] = toFrame(e.clientX, e.clientY);
-      const pk = pick(sx, sy, 0);
+      const pk = ui.mode === 'build' ? pick(sx, sy, 0) : null;     // (objects are picked in Build only)
       drag = { mode: pk && pk.id ? 'press-object' : 'press', obj: pk && pk.id };
     } else if (e.button === 2) {
       drag = { mode: 'fly' };
@@ -310,7 +310,7 @@
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === ' ' && ui.sample && e.target.tagName !== 'BUTTON') { e.preventDefault(); simPlay(); return; }
+    if (e.key === ' ' && (ui.sample || ui.mode === 'simulate') && e.target.tagName !== 'BUTTON') { e.preventDefault(); simPlay(); return; }
     if (e.key === 'Escape') { if (!closePopovers()) { if (ui.tool !== 'drag') setTool('drag'); else select(null); } return; }
     if (ui.sel && (k === 'w' || k === 'e' || k === 'r')) { e.preventDefault(); setTool({ w: 'move', e: 'rotate', r: 'scale' }[k]); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && ui.sel) { e.preventDefault(); removeSelected(); return; }
@@ -335,6 +335,7 @@
     renderTiles();
   }
   function select(id) {
+    if (id && ui.mode !== 'build') return;          // (objects are chosen and edited in Build)
     ui.sel = id && obj(id) ? id : null;
     renderScene();
     renderCard();
@@ -1104,7 +1105,7 @@
       note: (st.relighting ? 'Relighting: the light probe is being rebuilt after the change.' : 'Light probe up to date. Hard shadows, no bounced light.') + cpu,
     };
     const done = st.spp >= st.target;
-    if (st.sim && !st.sim.paused) return {
+    if (st.sim && st.sim.on && !st.sim.paused && (!st.sim.own || st.sim.moving > 0)) return {
       title: 'Simulating · path traced', right: Math.min(st.spp, st.target) + ' / ' + st.target + ' spp',
       pct: Math.round(100 * Math.min(1, st.spp / Math.max(1, st.target))), green: false,
       note: 'Each step of the bodies starts the samples again; pause to let the image refine.' + cpu,
@@ -1163,8 +1164,9 @@
     if (a.getAttribute('aria-disabled') === 'true' || !a.dataset.mode) return;
     setMode(a.dataset.mode);
   });
+  const simHolds = () => !!(ui.status && ui.status.sim && ui.status.sim.own && ui.status.sim.on);   // (a simulation holds the objects)
   function setMode(m) {
-    if (ui.sample && m === 'build') return;
+    if ((ui.sample || simHolds()) && m === 'build') return;
     ui.mode = m;
     if (m !== 'build') { if (ui.tool !== 'drag') setTool('drag'); select(null); closePopovers(); }
     renderModes();
@@ -1172,11 +1174,14 @@
   function renderModes() {
     for (const a of document.querySelectorAll('.modes a[data-mode]')) {
       if (a.dataset.mode === ui.mode) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-      if (ui.sample && a.dataset.mode === 'build') { a.setAttribute('aria-disabled', 'true'); a.title = ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited'; }
+      if (a.dataset.mode !== 'build') continue;
+      if (ui.sample) { a.setAttribute('aria-disabled', 'true'); a.title = ui.sample.name + ' is the engine\'s sample: shown and simulated, not edited'; }
+      else if (simHolds()) { a.setAttribute('aria-disabled', 'true'); a.title = 'Reset or Keep the simulation to edit again'; }
+      else { a.removeAttribute('aria-disabled'); a.title = ''; }
     }
     document.querySelector('.tray:not(.sim-bar)').hidden = ui.mode !== 'build';
     $('sim-bar').hidden = ui.mode !== 'simulate';
-    $('sim-controls').hidden = !ui.sample;
+    $('sim-controls').hidden = false;
     $('sim-samples').hidden = !!ui.sample;
     if (ui.sample) {
       document.querySelector('.scene-name').textContent = ui.sample.file + ' · sample';
@@ -1186,13 +1191,23 @@
     renderSim();
   }
   function renderSim() {
-    if (!ui.sample) return;
     const sim = ui.status && ui.status.sim, paused = !sim || sim.paused;
+    const own = !ui.sample, on = !!(sim && sim.on), was = $('sim-keep').hidden;
+    $('sim-keep').hidden = !(own && on);
+    if (own && was === on) renderModes();                         // (a simulation made or ended: Build off or on again)
     $('sim-play').setAttribute('aria-label', paused ? 'Play' : 'Pause');
     $('sim-icon-play').toggleAttribute('hidden', !paused);
     $('sim-icon-pause').toggleAttribute('hidden', paused);
     $('sim-time').textContent = (sim ? sim.t : 0).toFixed(2) + ' s';
-    $('sim-bodies').textContent = sim && ui.scene && ui.scene.sample ? sim.bodies + ' of ' + ui.scene.sample.bodies + ' bodies' : '';
+    $('sim-reset').disabled = own && !on;
+    if (own) {
+      const n = sim ? sim.bodies : 0;
+      $('sim-bodies').textContent = !n ? 'Nothing is dynamic yet' : on ? sim.moving + ' of ' + n + ' dynamic moving' : n + ' dynamic object' + (n === 1 ? '' : 's');
+      $('sim-note').innerHTML = !n ? 'Make an object <b>Dynamic</b> in its card (Build), then Play: it falls and collides.'
+        : '<span class="mono key">Space</span> plays and pauses. Reset puts everything back; Keep keeps the pose.';
+    } else {
+      $('sim-bodies').textContent = sim && ui.scene && ui.scene.sample ? sim.bodies + ' of ' + ui.scene.sample.bodies + ' bodies' : '';
+    }
     // (the list as it is now: the instances grow as the bodies come; the props are the rest)
     const sm = ui.scene && ui.scene.sample;
     if (sim && sm && (sm.instances !== ui.status.instances || sm.props !== ui.status.instances - sim.bodies)) {
@@ -1209,7 +1224,18 @@
     renderSim();
   }
   $('sim-play').addEventListener('click', simPlay);
-  $('sim-reset').addEventListener('click', () => { if (ui.status && ui.status.sim) call('lr_sim_reset', [], 'lr_sim_reset()'); });
+  $('sim-reset').addEventListener('click', () => {
+    if (!ui.status || !ui.status.sim) return;
+    call('lr_sim_reset', [], 'lr_sim_reset()');
+    if (!ui.sample) { ui.status.sim.on = false; ui.status.sim.paused = true; ui.status.sim.t = 0; refreshScene(); renderSim(); }
+  });
+  $('sim-keep').addEventListener('click', () => {
+    call('lr_sim_keep', [], 'lr_sim_keep()');
+    if (ui.status && ui.status.sim) { ui.status.sim.on = false; ui.status.sim.paused = true; ui.status.sim.t = 0; }
+    refreshScene();
+    renderSim();
+    toast('Kept the pose. Undo goes back to before Play.');
+  });
   $('open-sample').addEventListener('click', () => window.open(location.pathname + '?sample=skyrain', '_blank'));
 
   function renderAll() {

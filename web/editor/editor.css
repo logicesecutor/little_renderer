@@ -176,6 +176,8 @@ a { color: var(--accent-amber); }
 .sim-play { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--accent-ivory); color: var(--ink-on-light); }
 .sim-reset { height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-radius: 999px; background: var(--fill-hover); color: var(--text-primary); font-weight: 500; }
 .sim-reset:hover { background: var(--fill-selected-quiet); }
+.sim-reset:disabled { opacity: 0.4; }
+.sim-bar:has(#sim-samples:not([hidden])) { display: flex; flex-direction: column; gap: 10px; }
 .sim-time { display: flex; flex-direction: column; gap: 2px; min-width: 132px; }
 .sim-clock { font-size: 18px; color: var(--text-strong); }
 .sim-sep { width: 1px; height: 32px; background: var(--border-hairline); }

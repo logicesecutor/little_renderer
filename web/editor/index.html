@@ -189,8 +189,12 @@
       <span class="mono sim-clock" id="sim-time" aria-label="Simulated time">0.00 s</span>
       <span class="muted small" id="sim-bodies"></span>
     </div>
+    <button type="button" id="sim-keep" class="sim-reset" title="End the simulation, keeping where everything is (one undo step)" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+      Keep
+    </button>
     <span class="sim-sep" aria-hidden="true"></span>
-    <span class="caption sim-note"><span class="mono key">Space</span> plays and pauses. Paused, the path traced image refines.</span>
+    <span class="caption sim-note" id="sim-note"><span class="mono key">Space</span> plays and pauses. Paused, the path traced image refines.</span>
   </div>
   <div id="sim-samples" class="sim-samples" hidden>
     <div class="sample-card">
@@ -201,7 +205,7 @@
       </div>
       <button type="button" class="primary" id="open-sample">Open sample</button>
     </div>
-    <span class="caption">It opens in a new tab, so this scene stays as it is. Simulating your own dynamic objects comes later.</span>
+    <span class="caption">Samples open in a new tab, so this scene stays as it is.</span>
   </div>
 </div>
 
