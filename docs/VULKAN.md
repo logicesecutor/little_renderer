@@ -29,7 +29,7 @@ natively (their browser still has WebGPU).
 | bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | done |
 | WGSL → SPIR-V (`webgpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
-| render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored) | done |
+| render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored), several targets, their timestamps (since 2026-11-24) | done |
 | the window's surface (Win32 swapchain; X11 since 2026-11-18, `VK_KHR_xlib_surface`): an image waited for on the CPU (a fence), presented after a small submission moves it to PRESENT_SRC; the display's refresh rate from the monitor's mode (Win32; X11 by XRandR, loaded when there) | done (X11: built, not yet run on a Linux GPU) |
 | acceleration structures and ray queries (R6): our extension of webgpu.h (`webgpu/vk/webgpu_rt.h`), the compiler's `ray_query`, `bin/test_gpu_rt`; the path tracer's `traverse()` on them | done (below) |
 

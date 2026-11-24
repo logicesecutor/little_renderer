@@ -260,6 +260,24 @@ no outside denoiser is used.
   few frames, and the blur of blending 4 pixels again every frame stays short. Taking the
   nearest old pixel instead does not blur, but it duplicates pixels under subpixel motion
   and the noise lines up in streaks; it measured worse.
+- **Temporal gradients** (`-gradients`, on; A-SVGF, Schied et al. 2018): one cap for every
+  pixel is a compromise, the shadows lag a little and the rest of the image is noisier than
+  it could be. While the physics runs, each pixel now keeps as many samples as its own light
+  allows, up to `-history`. Per tile of 4 × 4 pixels, one pixel that saw the same surface
+  before has its old pixel's last sample traced again in the new scene, with the same random
+  numbers (each pixel keeps its last sample's value and number in plane 1, the samples'
+  second plane) through the same point of the surface; their difference, λ = |new − old| /
+  max(new, old), is filtered over the tiles (3 à-trous passes weighted by distance and
+  normal), and a pixel keeps (1 − λ) / λ samples' worth, the weight A-SVGF's blend gives what
+  was there: all of them where nothing changed, none where a shadow moved; the time-bound cap
+  above where no tile near could tell (`trace_reproject.wgsl` gmatch, gfilter;
+  `trace.wgsl` main with `txl.w` = 1). A box sliding under the lamp, one pass a frame, 320 × 240, the
+  raw image against the truth (RMS): where the light changed 0.0072 (a fixed history of 8,
+  the page's: 0.0080; 12, native: 0.0082; 32: 0.0117), where it did not 0.0081 (8: 0.0148,
+  12: 0.0128, 32: 0.0080): the shadows follow as fast as with the shortest history, the rest
+  is as quiet as with the longest. It costs a sixteenth of a pass per image: 7% of the GPU's
+  time in the editor's Play, the path tracer's share 25.1 -> 23.0%. Edits keep their history
+  of 1 and the restart once they stop; the camera alone moving keeps `-history` everywhere.
 - **Then** the frame's new samples are added (as many passes as fit in ~10 ms) and the
   denoiser smooths the result. A band of samples never waits for another: on a GPU too slow
   for a whole pass per frame, the bands go on round the image, and a move waits until the
@@ -449,6 +467,17 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
   across visits and restarts (a warm start's first pass 0.8 s after the page; a cold one
   12-17 s). Until they are ready the editor draws raster and says so ("Compiling the path
   tracer", the seconds so far): `lr_status`'s `trace.compiling` (`gpu_view_trace_compiling`).
+- **The guide rasterized, when cheaper** (`-rguide`, on): a new image's guide (each pixel's
+  first surface) can be drawn by the rasterizer into a G-buffer (`raster_gpu.c`
+  gpu_raster_guide; its depth reversed, without a far plane) and copied into the guide's
+  planes (`trace_guide.wgsl`), traced only behind mirrors and glass and where there are media.
+  Which costs less depends: natively without ray queries 2.2 -> 1.1 ms an image (spheres,
+  2560 × 1440), with them tracing is the cheaper (0.82 against 0.98); in Chrome the editor's
+  Play is cheaper traced (5.2% of the GPU against 6.6%: there the guide's cost is mostly
+  writing its planes), the Sky rain sample rasterized (31.5% against 29.0%: its bodies are
+  mirrors, traced either way). So the view measures both in turns and takes the cheaper
+  (`trace.rguide` in lr_status; Internals). Moving, the guide no longer clears the samples the
+  reprojection then writes: the rasterized guide 0.93 -> 0.64 ms.
 - **Where the time goes** (`lr_profile`, summed since the start for the page to take
   differences of): the editor's parts on the CPU (its simulation's steps and moving the
   objects, relighting, the viewer's frame), the viewer's (physics, trees, GPU scene, trace

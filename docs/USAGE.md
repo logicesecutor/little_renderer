@@ -365,7 +365,9 @@ statistics (nodes, leaves, depth, build time) at start-up. The BVH is built in p
 | `-simhz n` | with `-sim on`: physics steps per second at most; faster frames step every few and those between refine the same image (each step takes all the time since the last, so slower frames step every frame); 0 = a step every frame | 60 |
 | `-denoisemove n` | GPU denoiser while things move: its a-trous passes, 1-5 (a footprint of 5, 9, 17, 33, 65 pixels), fewer cost less and smooth less; still images keep 5; 0 = 5 | 3 |
 | `-aa fxaa\|off` | GPU: anti-aliasing of the rasterized frames shown (and their screenshots): FXAA after the composite, one more full-screen pass (0.05 ms at 1280x720 on an RTX 3070); the path traced ones are left as they are, their samples already spread over each pixel | fxaa |
-| `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); while the physics runs at most what the path tracer makes in 0.28 s (12 natively on an RTX 3070 at 1440p, ~8 in a browser), never under 2; 0 = start over on every move | 32 |
+| `-history n` | GPU path tracing while moving: samples per pixel carried from one frame to the next (reprojected); while the physics runs each pixel's own (`-gradients`), else at most what the path tracer makes in 0.28 s (12 natively on an RTX 3070 at 1440p, ~8 in a browser), never under 2; 0 = start over on every move | 32 |
+| `-gradients on\|off` | GPU path tracing while the physics runs: temporal gradients (A-SVGF) judge each pixel's history, up to `-history` where its light did not change, none where a shadow moved (WEB.md 2.5); off: the time-bound history for every pixel | on |
+| `-rguide on\|off` | GPU path tracing: a new image's guide (each pixel's first surface) rasterized when that costs less GPU time than tracing it, as measured; off: always traced (WEB.md 2.9) | on |
 | `-gpu on\|off\|offscreen` | render and simulate on the GPU (WebGPU: browser builds, and natively unless built with `NOGPU=1`). `offscreen`: draw into a texture read back to the window (WEB.md 2.1) | on when the build has a GPU |
 | `-gpufluid on\|off` | with `-sim on` and the GPU: simulate the air and the cloud there | on |
 | `-gpurigid on\|off` | with `-sim on` (and `sim`) and the GPU: simulate the rigid bodies there (PHYSICS.md 1.4) | on |
@@ -417,6 +419,7 @@ engine reads them through base/envvar.h, where they are used):
 | variable | effect |
 |---|---|
 | `LR_GPU_TIMING=1` | native GPU builds: time every GPU pass (path tracer per pass, rigid bodies per stage), printed at the end |
+| `LR_GPU_RGUIDE=0\|1\|2` | the guide traced always (0), the cheaper as measured (1, the default with `-rguide on`), rasterized always (2) |
 | `LR_WF_PROFILE=1` | with `-wavefront on` and `LR_GPU_TIMING=1`: the time of each wavefront kernel |
 | `LR_VK_DUMP=dir` | our Vulkan layer: each WGSL module it compiles, and its SPIR-V, saved into `dir` (numbered in order), to check with `spirv-val` |
 | `LR_GPU_WIDE=1` | the GPU path tracer walks the CPU's 4-wide trees (default: binary; without it the 4-wide walk is not compiled in) |
