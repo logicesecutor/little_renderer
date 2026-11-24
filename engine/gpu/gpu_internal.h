@@ -196,6 +196,9 @@ WGPUTextureView gpu_raster_depth(GpuRaster *r);
 // the pass timed under stage. 0 = not drawn (not ready, or the scene not on the GPU).
 int gpu_raster_guide(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const Camera *cam, GpuTimer *timer, int stage);
 void gpu_raster_guide_views(GpuRaster *r, WGPUTextureView views[3]);
+// the guide's four full-size targets let go (made again by the next gpu_raster_guide): for a
+// view whose guide is traced now
+void gpu_raster_guide_release(GpuRaster *r);
 void gpu_raster_destroy(GpuRaster *r);
 
 // The GPU path tracer (gpu/trace_gpu.c): samples added to an accumulation buffer, w * h

@@ -236,6 +236,15 @@ static int tmp_reserve(GpuRaster *r, size_t verts){
     return 1;
 }
 
+// a set's buffers and bind group let go (the set empty again)
+static void geo_free(Geo *geo){
+    if (geo->bg) wgpuBindGroupRelease(geo->bg);
+    if (geo->pos){ wgpuBufferDestroy(geo->pos); wgpuBufferRelease(geo->pos); }
+    if (geo->nrm){ wgpuBufferDestroy(geo->nrm); wgpuBufferRelease(geo->nrm); }
+    if (geo->tex){ wgpuBufferDestroy(geo->tex); wgpuBufferRelease(geo->tex); }
+    memset(geo, 0, sizeof(*geo));
+}
+
 static void geo_bind(GpuRaster *r, Geo *geo){
     if (geo->bg) wgpuBindGroupRelease(geo->bg);
     geo->bg = NULL;
@@ -454,6 +463,13 @@ static int upload_instances(GpuRaster *r, const Scene *s){
         r->mg = mg;
         memset(r->mg + r->nmg, 0, (size_t)(s->nmeshes - r->nmg) * sizeof(r->mg[0]));
         r->nmg = s->nmeshes;
+    }
+    // (fewer meshes than it holds: a smaller scene, a model removed: the others' buffers are
+    // let go; the list only grew, and kept them until the view was destroyed)
+    for (; r->nmg > s->nmeshes; r->nmg--){
+        geo_free(&r->mg[r->nmg - 1].geo);
+        for (int l = 0; l < LODS - 1; l++) geo_free(&r->mg[r->nmg - 1].lod[l]);
+        memset(&r->mg[r->nmg - 1], 0, sizeof(r->mg[0]));
     }
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
@@ -790,6 +806,15 @@ int gpu_raster_guide(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const
     return 1;
 }
 
+void gpu_raster_guide_release(GpuRaster *r){
+    for (int k = 0; r && k < 4; k++){
+        if (r->gview[k]) wgpuTextureViewRelease(r->gview[k]);
+        if (r->gtex[k]){ wgpuTextureDestroy(r->gtex[k]); wgpuTextureRelease(r->gtex[k]); }
+        r->gview[k] = NULL;
+        r->gtex[k] = NULL;
+    }
+}
+
 void gpu_raster_guide_views(GpuRaster *r, WGPUTextureView views[3]){
     for (int k = 0; k < 3; k++) views[k] = r ? r->gview[k] : NULL;
 }
@@ -802,10 +827,7 @@ void gpu_raster_destroy(GpuRaster *r){
         int j = k - 4;
         Geo *geo = k == 0 ? &r->prims : (k == 1 ? &r->mesh : (k < 4 ? &r->unit[k - 2]
                  : (j % LODS ? &r->mg[j / LODS].lod[j % LODS - 1] : &r->mg[j / LODS].geo)));
-        if (geo->bg) wgpuBindGroupRelease(geo->bg);
-        if (geo->pos){ wgpuBufferDestroy(geo->pos); wgpuBufferRelease(geo->pos); }
-        if (geo->nrm){ wgpuBufferDestroy(geo->nrm); wgpuBufferRelease(geo->nrm); }
-        if (geo->tex){ wgpuBufferDestroy(geo->tex); wgpuBufferRelease(geo->tex); }
+        geo_free(geo);
     }
     free(r->mg);
     free(r->rec);
@@ -818,10 +840,7 @@ void gpu_raster_destroy(GpuRaster *r){
     if (r->wire) wgpuRenderPipelineRelease(r->wire);
     if (r->sky) wgpuRenderPipelineRelease(r->sky);
     if (r->guide) wgpuRenderPipelineRelease(r->guide);
-    for (int k = 0; k < 4; k++){
-        if (r->gview[k]) wgpuTextureViewRelease(r->gview[k]);
-        if (r->gtex[k]){ wgpuTextureDestroy(r->gtex[k]); wgpuTextureRelease(r->gtex[k]); }
-    }
+    gpu_raster_guide_release(r);
     if (r->lv){ wgpuBufferDestroy(r->lv); wgpuBufferRelease(r->lv); }
     if (r->ig){ wgpuBufferDestroy(r->ig); wgpuBufferRelease(r->ig); }
     if (r->txt){ wgpuBufferDestroy(r->txt); wgpuBufferRelease(r->txt); }

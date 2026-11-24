@@ -171,6 +171,7 @@ struct GpuView {
     int t_rguided;              // ... and the last one's was rasterized
     // rguide 1: each way's GPU time per image (its timers), measured in turns; the way chosen
     int rg_way, rg_phase, rg_images;
+    int rg_idle;                // images in a row whose guide was traced (RG_IDLE: the rasterizer's targets let go)
     double rg_sum[2];
     int rg_n[2];
     int t_gpu_timed;            // t_gpu_pass_ms comes from the GPU's timer
@@ -1046,6 +1047,7 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
 #define RG_SETTLE 6
 #define RG_IMAGES 24
 #define RG_HOLD 900
+#define RG_IDLE 64
 static int rguide_way(GpuView *v){
     if (v->rguide != 1) return v->rguide == 2;
     GpuTimer *t = gpu_trace_timer(v->trace);
@@ -1106,6 +1108,11 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
             rgp = rg;
         }
         v->t_rguided = rgp != NULL;
+        // the guide traced for RG_IDLE images in a row (the traced way chosen, media in the
+        // scene, a view told to trace it): the rasterizer's four full-size targets are let go
+        // (they stayed for good, 44 bytes a pixel); made again when the guide is rasterized again
+        if (rgp) v->rg_idle = 0;
+        else if (++v->rg_idle == RG_IDLE) gpu_raster_guide_release(v->raster);
         gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0,
                               v->t_prep == 2 ? v->t_hmax : 0, v->t_prep == 2 && v->t_hedit, v->t_index, nvol,
                               &media, rgp);

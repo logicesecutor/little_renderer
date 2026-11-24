@@ -2049,6 +2049,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
     // the guide: from the rasterizer's G-buffer where it has it (no media: their guide is
     // traced), then traced where it left the pixel to gbuf (a mirror or glass first)
     t->guide_skip = rguide && rguide[0] && rguide[1] && rguide[2] && t->gc_pipe && nvolumes == 0;
+    if (!t->guide_skip) gpu_bind_cache_clear(&t->bc_gcopy);   // (it holds the rasterizer's guide's views: let go with them)
     if (t->guide_skip){
         float C[5][4];
         memset(C, 0, sizeof(C));
