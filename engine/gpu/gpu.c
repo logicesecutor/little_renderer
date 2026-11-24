@@ -95,20 +95,25 @@ GPU_WGSL_EXPORT(GPU_WGSL_UTIL, util);
 // ---- the objects alive (gpu_internal.h): views, fluids, rigid worlds, timers and the Gpu
 // itself (a device-lost callback can arrive after gpu_destroy) ----
 #define GPU_LIVE_MAX 256
-static struct { int kind; const void *p; } live[GPU_LIVE_MAX];
+static struct { int kind; const void *p; uintptr_t ticket; } live[GPU_LIVE_MAX];
+static uintptr_t live_tickets;         // the last ticket given (0: none yet; never given again)
 
-int gpu_live_add(int kind, const void *p){
+uintptr_t gpu_live_add(int kind, const void *p){
     for (int i = 0; i < GPU_LIVE_MAX; i++)
-        if (!live[i].p){ live[i].kind = kind; live[i].p = p; return 1; }
+        if (!live[i].p){
+            if (!++live_tickets) ++live_tickets;     // (0 means "not in the list")
+            live[i].kind = kind; live[i].p = p; live[i].ticket = live_tickets;
+            return live_tickets;
+        }
     fprintf(stderr, "GPU: %d objects (views, fluids, rigid-body worlds, timers) already: no more\n", GPU_LIVE_MAX);
     return 0;
 }
 void gpu_live_remove(int kind, const void *p){
     for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) live[i].p = NULL;
 }
-int gpu_live_has(int kind, const void *p){
-    if (!p) return 0;
-    for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) return 1;
+int gpu_live_has(int kind, const void *p, uintptr_t ticket){
+    if (!p || !ticket) return 0;
+    for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) return live[i].ticket == ticket;
     return 0;
 }
 int gpu_live_count(void){
@@ -116,7 +121,8 @@ int gpu_live_count(void){
     for (int i = 0; i < GPU_LIVE_MAX; i++) n += live[i].p != NULL;
     return n;
 }
-static int is_live(const Gpu *g){ return gpu_live_has(GPU_LIVE_GPU, g); }
+// (u2: the ticket a callback was given with the Gpu)
+static int is_live(const Gpu *g, void *u2){ return gpu_live_has(GPU_LIVE_GPU, g, (uintptr_t)u2); }
 
 char *gpu_wgsl_join(const char *const *parts, int n){
     size_t len = 1;
@@ -138,9 +144,9 @@ WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes){
 }
 
 static void on_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView msg, void *u1, void *u2){
-    (void)device; (void)u2;
+    (void)device;
     Gpu *g = u1;
-    if (!is_live(g)) return;   // our own gpu_destroy
+    if (!is_live(g, u2)) return;   // our own gpu_destroy
     // "destroyed" while we still use it: the browser took the device away (its GPU process
     // was reset, the tab was moved to another GPU...)
     fail(g, reason == WGPUDeviceLostReason_Destroyed ? "device destroyed by the browser" : "device lost", msg);
@@ -301,6 +307,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     dd.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
     dd.deviceLostCallbackInfo.callback = on_lost;
     dd.deviceLostCallbackInfo.userdata1 = g;
+    dd.deviceLostCallbackInfo.userdata2 = gpu_live_ticket(g->live);
     WGPURequestDeviceCallbackInfo cb;
     memset(&cb, 0, sizeof(cb));
     cb.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -347,7 +354,8 @@ static Gpu *create(const char *canvas, void *display, uint64_t window, int width
     g->native_display = display;
     g->native_window = window;
     snprintf(g->canvas, sizeof(g->canvas), "%s", canvas ? canvas : "");
-    gpu_live_add(GPU_LIVE_GPU, g);
+    g->live = gpu_live_add(GPU_LIVE_GPU, g);
+    if (!g->live){ free(g); return NULL; }     // (its callbacks could not tell it is alive)
     snprintf(g->message, sizeof(g->message), "starting");
     g->instance = wgpuCreateInstance(NULL);
     if (!g->instance){ snprintf(g->message, sizeof(g->message), "no WebGPU instance"); g->state = GPU_FAILED; return g; }
@@ -386,11 +394,18 @@ void gpu_poll(Gpu *g){
 }
 
 #if !defined(__EMSCRIPTEN__) || defined(LR_WEB_WAIT)
-// u1 the Gpu, u2 the round << 1 | the queue (0 the main one, 1 the physics')
+// u1 the Gpu, u2 the round << 1 | the queue (0 the main one, 1 the physics'). (No ticket: u2
+// is taken. The rounds are numbered for all the GPUs together, so a late one of a GPU that
+// was destroyed, come to another at its address, is older than any round this one waits for.)
+static uint32_t wait_seq;
+static int gpu_live_at(int kind, const void *p){       // (by its address alone)
+    for (int i = 0; p && i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) return 1;
+    return 0;
+}
 static void on_idle(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
     (void)status; (void)msg;
     Gpu *g = u1;
-    if (!is_live(g)) return;                  // after gpu_destroy
+    if (!gpu_live_at(GPU_LIVE_GPU, g)) return;   // after gpu_destroy
     const uint32_t seq = (uint32_t)((uintptr_t)u2 >> 1);
     const int q = (int)((uintptr_t)u2 & 1);
     if ((int32_t)(seq - g->idle_seq[q]) > 0) g->idle_seq[q] = seq;   // (a late one of an earlier round: older)
@@ -402,7 +417,7 @@ static int waited(const Gpu *g, uint32_t seq, int q){ return (int32_t)(g->idle_s
 void gpu_wait(Gpu *g){
 #ifndef __EMSCRIPTEN__
     if (!g || g->state != GPU_READY) return;
-    const uint32_t seq = ++g->wait_seq;
+    const uint32_t seq = ++wait_seq;
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowProcessEvents;
@@ -424,7 +439,7 @@ void gpu_wait(Gpu *g){
 #elif defined(LR_WEB_WAIT)
     // a page that can wait (built with -sJSPI: bin/bench's): until the queue is done
     if (!g || g->state != GPU_READY) return;
-    const uint32_t seq = ++g->wait_seq;
+    const uint32_t seq = ++wait_seq;
     WGPUQueueWorkDoneCallbackInfo wd;
     memset(&wd, 0, sizeof(wd));
     wd.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -743,11 +758,12 @@ struct GpuTimer {
     double span_ns;              // from a round's first pass's start to its last one's end, summed
     long *calls;
     long rounds;
+    uintptr_t live;              // its ticket in the list of the objects alive
 };
 
 // (a readback's callback can arrive, cancelled, after gpu_timer_destroy: the list of the
 // objects alive)
-static int timer_is_live(const GpuTimer *t){ return gpu_live_has(GPU_LIVE_TIMER, t); }
+static int timer_is_live(const GpuTimer *t, void *u2){ return gpu_live_has(GPU_LIVE_TIMER, t, (uintptr_t)u2); }
 // a readback on its way waited for (at most 400 waits: a device that stopped answering)
 static void timer_settle(GpuTimer *t){ for (int k = 0; k < 400 && t->pending == 2; k++) gpu_wait(t->g); }
 
@@ -755,7 +771,7 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     if (!g || !g->timestamps || passes <= 0) return NULL;
     GpuTimer *t = calloc(1, sizeof(*t));
     if (!t) return NULL;
-    if (!gpu_live_add(GPU_LIVE_TIMER, t)){ free(t); return NULL; }   // (no timing: its callbacks would be ignored)
+    if (!(t->live = gpu_live_add(GPU_LIVE_TIMER, t))){ free(t); return NULL; }   // (no timing: its callbacks would be ignored)
     t->g = g;
     t->cap = passes;
     t->stages = stages;
@@ -796,9 +812,9 @@ const WGPUPassTimestampWrites *gpu_timer_next(GpuTimer *t, int stage){
 }
 
 static void on_times(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
+    (void)msg;
     GpuTimer *t = u1;
-    if (!timer_is_live(t)) return;                      // cancelled as it was destroyed: t is gone
+    if (!timer_is_live(t, u2)) return;                  // cancelled as it was destroyed: t is gone
     if (status != WGPUMapAsyncStatus_Success){ t->pending = 0; return; }   // nothing is mapped; the next round is timed
     const uint64_t *ts = wgpuBufferGetConstMappedRange(t->readback, 0, (size_t)t->npending * 16);
     if (ts){
@@ -837,6 +853,7 @@ static void timer_map(GpuTimer *t){
     mi.mode = WGPUCallbackMode_AllowSpontaneous;
     mi.callback = on_times;
     mi.userdata1 = t;
+    mi.userdata2 = gpu_live_ticket(t->live);
     wgpuBufferMapAsync(t->readback, WGPUMapMode_Read, 0, (size_t)t->npending * 16, mi);
 }
 

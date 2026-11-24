@@ -148,6 +148,7 @@ typedef struct {
 } GLevel;
 
 struct GpuFluid {
+    uintptr_t live;             // its ticket in the list of the objects alive (its callbacks' userdata2)
     Gpu *g;
     PhysWorld *pw;
     Fluid *f;
@@ -199,12 +200,12 @@ static const char *const FT_NAMES[NFT] = {"obstacles, forces, advection", "press
 #define MAX_OWED 0.1f
 
 // (a "work done" callback can arrive after the destroy: the list of the objects alive)
-static int is_live(const GpuFluid *gf){ return gpu_live_has(GPU_LIVE_FLUID, gf); }
+static int is_live(const GpuFluid *gf, void *u2){ return gpu_live_has(GPU_LIVE_FLUID, gf, (uintptr_t)u2); }   // (u2: its ticket)
 
 static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)status; (void)msg; (void)u2;
+    (void)status; (void)msg;
     GpuFluid *gf = u1;
-    if (is_live(gf) && gf->inflight > 0) gf->inflight--;
+    if (is_live(gf, u2) && gf->inflight > 0) gf->inflight--;
 }
 
 static size_t nu(const Fluid *f){ return (size_t)(f->nx + 1) * f->ny * f->nz; }
@@ -370,7 +371,7 @@ GpuFluid *gpu_fluid_create(Gpu *g, PhysWorld *pw){
     Fluid *f = pw->fluid;
     GpuFluid *gf = calloc(1, sizeof(*gf));
     if (!gf) return NULL;
-    if (!gpu_live_add(GPU_LIVE_FLUID, gf)){ free(gf); return NULL; }
+    if (!(gf->live = gpu_live_add(GPU_LIVE_FLUID, gf))){ free(gf); return NULL; }
     gf->g = g;
     gf->pw = pw;
     gf->f = f;
@@ -439,9 +440,9 @@ void gpu_fluid_attach_view(GpuFluid *gf, GpuView *v){
 // ---- readbacks ----------------------------------------------------------------------------------
 
 static void on_around(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
+    (void)msg;
     GpuFluid *gf = u1;
-    if (!is_live(gf)) return;                           // cancelled as it was destroyed: gf is gone
+    if (!is_live(gf, u2)) return;                       // cancelled as it was destroyed: gf is gone
     gf->around_pending = 0;                             // (also after a failure: the next step asks again)
     if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
     const float *a = wgpuBufferGetConstMappedRange(gf->around_rb, 0, (size_t)gf->around_n * 16);
@@ -460,9 +461,9 @@ static void on_around(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
 }
 
 static void on_cloud(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
+    (void)msg;
     GpuFluid *gf = u1;
-    if (!is_live(gf)) return;
+    if (!is_live(gf, u2)) return;
     gf->dens_pending = 0;
     if (status != WGPUMapAsyncStatus_Success) return;
     Volume *v = gf->cloud;
@@ -475,12 +476,13 @@ static void on_cloud(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, vo
     wgpuBufferUnmap(gf->dens_rb);
 }
 
-static void map_read(WGPUBuffer b, size_t bytes, WGPUBufferMapCallback cb, void *user){
+static void map_read(WGPUBuffer b, size_t bytes, WGPUBufferMapCallback cb, GpuFluid *user){
     WGPUBufferMapCallbackInfo mi;
     memset(&mi, 0, sizeof(mi));
     mi.mode = WGPUCallbackMode_AllowSpontaneous;
     mi.callback = cb;
     mi.userdata1 = user;
+    mi.userdata2 = gpu_live_ticket(user->live);
     wgpuBufferMapAsync(b, WGPUMapMode_Read, 0, bytes, mi);
 }
 
@@ -671,6 +673,7 @@ static void air_step(void *user, PhysWorld *pw, real dt){
     wd.mode = WGPUCallbackMode_AllowSpontaneous;
     wd.callback = on_done;
     wd.userdata1 = gf;
+    wd.userdata2 = gpu_live_ticket(gf->live);
     gf->inflight++;
     wgpuQueueOnSubmittedWorkDone(g->queue, wd);
     if (sample){

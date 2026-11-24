@@ -38,9 +38,12 @@ struct Gpu {
     int rt_offered;      // in a browser: its adapter offers "acceleration-structure" (gpu.c; not used yet)
     char canvas[64];
     struct GpuTextures *atlas;   // the materials' textures, shared by every user (tex_gpu.c)
-    // gpu_wait's rounds: the last one asked, and the last each queue finished (in here, not on
-    // gpu_wait's stack: a wait cut short by a lost device leaves its callbacks to come later)
-    uint32_t wait_seq, idle_seq[2];
+    // gpu_wait's rounds: the last each queue finished (in here, not on gpu_wait's stack: a wait
+    // cut short by a lost device leaves its callbacks to come later). The rounds are numbered
+    // for all the GPUs together (gpu.c wait_seq): a late callback of a GPU destroyed, come to
+    // another made at its address, is of an earlier round than any this one waits for
+    uint32_t idle_seq[2];
+    uintptr_t live;      // its ticket in the list of the objects alive (gpu_live_add)
 };
 
 // The shaders are files of their own, engine/gpu/shaders/<folder>/<file>.wgsl (common, view,
@@ -80,13 +83,17 @@ char *gpu_wgsl_join(const char *const *parts, int n);
 WGPUBuffer gpu_storage(Gpu *g, const char *label, size_t bytes);
 
 // The GPU objects alive: a callback (work done, a buffer mapped, a lost device) can arrive
-// after its object was destroyed, and must then not touch it. One list for every kind; an
-// object is looked for with its kind, so that one destroyed and another of another kind made
-// at the same address are not confused.
+// after its object was destroyed, and must then not touch it. One list for every kind. An
+// object is known by its ticket, a number no two objects ever share, given when it is added:
+// it is kept in the object and passed to its callbacks beside it (userdata2), and a callback
+// asks for the object of that kind, address and ticket. The address alone would not do: a
+// view destroyed and another made (a window resized) is often given the same one, and the
+// old view's late callbacks then acted on the new one.
 enum { GPU_LIVE_GPU, GPU_LIVE_VIEW, GPU_LIVE_FLUID, GPU_LIVE_RIGID, GPU_LIVE_TIMER };
-int gpu_live_add(int kind, const void *p);   // 0 if the list is full (said on stderr): then do not make it
+uintptr_t gpu_live_add(int kind, const void *p);   // its ticket; 0 if the list is full (said on stderr): then do not make it
 void gpu_live_remove(int kind, const void *p);
-int gpu_live_has(int kind, const void *p);
+int gpu_live_has(int kind, const void *p, uintptr_t ticket);
+static inline void *gpu_live_ticket(uintptr_t ticket){ return (void *)ticket; }   // (as a callback's userdata2)
 int gpu_live_count(void);                    // how many are alive (the tests: nothing is left behind)
 
 // (re)creates *buf if it is missing or smaller than size; returns 1 if it was recreated

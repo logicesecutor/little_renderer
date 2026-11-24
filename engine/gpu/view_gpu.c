@@ -112,6 +112,7 @@ typedef struct {
 struct GpuView {
     Gpu *g;
     int w, h;
+    uintptr_t live;          // its ticket in the list of the objects alive (its callbacks' userdata2)
     int wavefront;           // gpu_view_trace_wavefront
     WGPUBuffer frame_u, sel_u[GPU_MAX_VOLUMES];
     WGPUBuffer dens, bricks, light, color, depth;
@@ -205,7 +206,9 @@ struct GpuView {
 
 // a "work done" callback can arrive after gpu_view_destroy (creation is refused when the list
 // of the objects alive is full: one left out would have its callbacks ignored)
-static int view_is_live(const GpuView *v){ return gpu_live_has(GPU_LIVE_VIEW, v); }
+// (u2: the ticket the callback was given with the view; the address alone could be a later
+// view's, made where this one was: a window resized)
+static int view_is_live(const GpuView *v, void *u2){ return gpu_live_has(GPU_LIVE_VIEW, v, (uintptr_t)u2); }
 
 static void v4(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y; d[2] = (float)a.z; d[3] = w; }
 
@@ -221,7 +224,7 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     if (!g || g->state != GPU_READY || (!g->surface && !g->offscreen)) return NULL;
     GpuView *v = calloc(1, sizeof(*v));
     if (!v) return NULL;
-    if (!gpu_live_add(GPU_LIVE_VIEW, v)){ free(v); return NULL; }
+    if (!(v->live = gpu_live_add(GPU_LIVE_VIEW, v))){ free(v); return NULL; }
     v->g = g;
     v->w = width;
     v->h = height;
@@ -548,9 +551,8 @@ static int ensure_aa(GpuView *v){
 }
 
 static void on_capture_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)u2;
     GpuView *v = u1;
-    if (!view_is_live(v)) return;       // cancelled as the view was destroyed: v is gone
+    if (!view_is_live(v, u2)) return;   // cancelled as the view was destroyed: v is gone
     v->cap_pending = 0;                 // (also after a failure: the next frame can be asked for)
     if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
         if (status == WGPUMapAsyncStatus_Error)
@@ -783,6 +785,7 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
         mi.mode = WGPUCallbackMode_AllowSpontaneous;
         mi.callback = on_capture_mapped;
         mi.userdata1 = v;
+        mi.userdata2 = gpu_live_ticket(v->live);
         wgpuBufferMapAsync(v->cap_buf, WGPUMapMode_Read, 0, (size_t)v->cap_row * v->h, mi);
     }
     if (view){
@@ -941,9 +944,9 @@ static double frame_budget(const GpuView *v){
 // slow GPU responsive (and under the browser's watchdog); a fast GPU gets the whole image,
 // then several passes, per submit.
 static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)status; (void)msg; (void)u2;
+    (void)status; (void)msg;
     GpuView *v = u1;
-    if (!view_is_live(v)) return;
+    if (!view_is_live(v, u2)) return;
     v->t_inflight = 0;
     v->t_done = v->t_done_next;
     if (v->t_done > 0) v->t_hist = 1;
@@ -1117,6 +1120,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     wd.mode = WGPUCallbackMode_AllowSpontaneous;
     wd.callback = on_band_done;
     wd.userdata1 = v;
+    wd.userdata2 = gpu_live_ticket(v->live);
     wgpuQueueOnSubmittedWorkDone(g->queue, wd);
     v->t_y += rows;
     if (v->t_y >= v->h){
@@ -1146,9 +1150,8 @@ void gpu_view_gpu_totals(GpuView *v, double ms[8]){
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace, s); }
 
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)u2;
     GpuView *v = u1;
-    if (!view_is_live(v)) return;                       // cancelled as it was destroyed: v is gone
+    if (!view_is_live(v, u2)) return;                   // cancelled as it was destroyed: v is gone
     v->t_rb_pending = 0;                                // (also after a failure: it can be asked for again)
     if (status != WGPUMapAsyncStatus_Success){          // nothing is mapped
         if (status == WGPUMapAsyncStatus_Error)
@@ -1187,6 +1190,7 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
     mi.mode = WGPUCallbackMode_AllowSpontaneous;
     mi.callback = on_trace_mapped;
     mi.userdata1 = v;
+    mi.userdata2 = gpu_live_ticket(v->live);
     wgpuBufferMapAsync(v->t_rb, WGPUMapMode_Read, 0, bytes, mi);
     return 1;
 }

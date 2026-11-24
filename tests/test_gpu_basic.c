@@ -1,6 +1,7 @@
 // test_gpu_basic.c - the GPU layer's basics, whatever implements webgpu.h (natively our
 // Vulkan layer, in a page the browser's): buffer writes small and large, copies, clears, read back by
-// mapping, several submissions in flight, waiting for one of them. No shaders.
+// mapping, several submissions in flight, waiting for one of them. No shaders. And the list of
+// the objects alive (gpu_internal.h): an object is known by its ticket, not by its address.
 //
 // Part of make test. Without a GPU it says so and passes.
 #include <stdio.h>
@@ -67,6 +68,23 @@ int main(void){
     wgpuBufferDestroy(l); wgpuBufferRelease(l);
     wgpuBufferDestroy(c); wgpuBufferRelease(c);
     free(a); free(b);
+    // the list of the objects alive: one made where another was destroyed is not that one (a
+    // late callback of the first, given its ticket, finds nothing)
+    {
+        static int place;
+        const int n0 = gpu_live_count();
+        uintptr_t t1 = gpu_live_add(GPU_LIVE_VIEW, &place);
+        int had = gpu_live_has(GPU_LIVE_VIEW, &place, t1);
+        gpu_live_remove(GPU_LIVE_VIEW, &place);
+        int gone = !gpu_live_has(GPU_LIVE_VIEW, &place, t1);
+        uintptr_t t2 = gpu_live_add(GPU_LIVE_VIEW, &place);
+        check("an object alive is found by its ticket, not once destroyed", t1 && had && gone);
+        check("another made at its address is not it: the old ticket finds nothing", t2 && t2 != t1 &&
+              !gpu_live_has(GPU_LIVE_VIEW, &place, t1) && gpu_live_has(GPU_LIVE_VIEW, &place, t2) &&
+              !gpu_live_has(GPU_LIVE_TIMER, &place, t2) && !gpu_live_has(GPU_LIVE_VIEW, &place, 0));
+        gpu_live_remove(GPU_LIVE_VIEW, &place);
+        check("... and the list is as it was", gpu_live_count() == n0);
+    }
 #endif
     gpu_destroy(g);
     printf(failures ? "test_gpu_basic: %d FAILED\n" : "all GPU basics passed\n", failures);

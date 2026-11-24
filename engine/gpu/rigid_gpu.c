@@ -216,6 +216,7 @@ static const struct { const char *name, *types; const char **part[4]; } RK[NR] =
 #define MAX_INFLIGHT 2
 
 struct GpuRigid {
+    uintptr_t live;             // its ticket in the list of the objects alive (its callbacks' userdata2)
     Gpu *g;
     PhysWorld *pw;
     WGPUBindGroupLayout bgl[NR];
@@ -276,7 +277,7 @@ static const char *const RK_NAMES[NR] = {"grid: count", "grid: scan", "grid: pla
     "relax: targets", "relax: velocities", "sleep: quiet", "swept", "swept: moved"};
 
 // (a "work done" callback can arrive after the destroy: the list of the objects alive)
-static int is_live(const GpuRigid *gr){ return gpu_live_has(GPU_LIVE_RIGID, gr); }
+static int is_live(const GpuRigid *gr, void *u2){ return gpu_live_has(GPU_LIVE_RIGID, gr, (uintptr_t)u2); }   // (u2: its ticket)
 
 static void release(WGPUBuffer *b){ if (*b){ wgpuBufferDestroy(*b); wgpuBufferRelease(*b); *b = NULL; } }
 
@@ -523,9 +524,9 @@ static void pack_body(const RigidWorld *w, const Body *b, float *o){
 }
 
 static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
+    (void)msg;
     GpuRigid *gr = u1;
-    if (!is_live(gr)) return;                           // cancelled as it was destroyed: gr is gone
+    if (!is_live(gr, u2)) return;                       // cancelled as it was destroyed: gr is gone
     gr->rb_pending = 0;                                 // (also after a failure: the next step asks again)
     if (status != WGPUMapAsyncStatus_Success) return;   // nothing is mapped
     RigidWorld *w = &gr->pw->rigid;
@@ -558,9 +559,9 @@ static void on_bodies(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, v
 }
 
 static void on_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)status; (void)msg; (void)u2;
+    (void)status; (void)msg;
     GpuRigid *gr = u1;
-    if (is_live(gr) && gr->inflight > 0) gr->inflight--;
+    if (is_live(gr, u2) && gr->inflight > 0) gr->inflight--;
 }
 
 static void dispatch1(WGPUComputePassEncoder pass, GpuRigid *gr, int k, size_t threads){
@@ -806,6 +807,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
         mi.mode = WGPUCallbackMode_AllowSpontaneous;
         mi.callback = on_bodies;
         mi.userdata1 = gr;
+        mi.userdata2 = gpu_live_ticket(gr->live);
         wgpuBufferMapAsync(gr->rb, WGPUMapMode_Read, 0, (size_t)nb * BODY_BYTES + 16, mi);
     }
     WGPUQueueWorkDoneCallbackInfo wi;
@@ -813,6 +815,7 @@ static int rigid_step_gpu(void *user, PhysWorld *pw, real dt, int substeps, cons
     wi.mode = WGPUCallbackMode_AllowSpontaneous;
     wi.callback = on_done;
     wi.userdata1 = gr;
+    wi.userdata2 = gpu_live_ticket(gr->live);
     gr->inflight++;
     gr->step_no++;
     wgpuQueueOnSubmittedWorkDone(g->compute, wi);
@@ -824,7 +827,7 @@ GpuRigid *gpu_rigid_create(Gpu *g, PhysWorld *pw){
     if (!g || gpu_state(g) != GPU_READY || !pw) return NULL;
     GpuRigid *gr = calloc(1, sizeof(*gr));
     if (!gr) return NULL;
-    if (!gpu_live_add(GPU_LIVE_RIGID, gr)){ free(gr); return NULL; }
+    if (!(gr->live = gpu_live_add(GPU_LIVE_RIGID, gr))){ free(gr); return NULL; }
     gr->g = g;
     gr->pw = pw;
     for (int k = 0; k < NR; k++){
