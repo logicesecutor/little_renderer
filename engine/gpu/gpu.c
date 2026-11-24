@@ -788,6 +788,7 @@ struct GpuTimer {
     long *calls;
     long rounds;
     uintptr_t live;              // its ticket in the list of the objects alive
+    double tick_ns;              // what a timestamp counts in, in nanoseconds (1 in a browser; our layer: the GPU's ticks)
 };
 
 // (a readback's callback can arrive, cancelled, after gpu_timer_destroy: the list of the
@@ -802,6 +803,10 @@ GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages){
     if (!t) return NULL;
     if (!(t->live = gpu_live_add(GPU_LIVE_TIMER, t))){ free(t); return NULL; }   // (no timing: its callbacks would be ignored)
     t->g = g;
+    t->tick_ns = 1;
+#ifdef LR_VK
+    t->tick_ns = (double)lrQueueGetTimestampPeriod(g->queue);   // (1 on NVIDIA; others count in longer ticks)
+#endif
     t->cap = passes;
     t->stages = stages;
     t->stage_of = calloc((size_t)passes, sizeof(int));
@@ -851,13 +856,13 @@ static void on_times(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, vo
         for (int i = 0; i < t->npending; i++){
             int s = t->pending_stage[i];
             if (s < 0 || s >= t->stages || ts[2 * i + 1] < ts[2 * i]) continue;
-            t->ns[s] += (double)(ts[2 * i + 1] - ts[2 * i]);      // nanoseconds
+            t->ns[s] += (double)(ts[2 * i + 1] - ts[2 * i]) * t->tick_ns;   // nanoseconds
             t->units[s] += t->pending_units[i];
             t->calls[s]++;
             if (ts[2 * i] < first) first = ts[2 * i];
             if (ts[2 * i + 1] > last) last = ts[2 * i + 1];
         }
-        if (last > first) t->span_ns += (double)(last - first);
+        if (last > first) t->span_ns += (double)(last - first) * t->tick_ns;
         t->rounds++;
     }
     wgpuBufferUnmap(t->readback);
@@ -872,7 +877,7 @@ void gpu_timer_finish(GpuTimer *t, WGPUCommandEncoder enc){
     memcpy(t->pending_units, t->pass_units, (size_t)t->used * sizeof(double));
     t->npending = t->used;
     t->used = 0;
-    t->pending = 1;      // the map is asked for once the commands are submitted: gpu_timer_map
+    t->pending = 1;      // the map is asked for once the commands are submitted: gpu_timer_submitted
 }
 
 // (called after the submit that carries the resolve)

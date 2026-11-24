@@ -68,6 +68,14 @@ int main(void){
     wgpuBufferDestroy(l); wgpuBufferRelease(l);
     wgpuBufferDestroy(c); wgpuBufferRelease(c);
     free(a); free(b);
+#ifdef LR_VK
+    // our Vulkan layer's timestamps are the GPU's ticks: how long one lasts (1 ns on NVIDIA)
+    {
+        const float tick = lrQueueGetTimestampPeriod(g->queue);
+        printf("  a timestamp's tick on this GPU: %g ns\n", (double)tick);
+        check("the timestamps' tick is a length of time (over 0, under a millisecond)", tick > 0 && tick < 1e6f);
+    }
+#endif
     // the list of the objects alive: one made where another was destroyed is not that one (a
     // late callback of the first, given its ticket, finds nothing)
     {

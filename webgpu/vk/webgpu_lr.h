@@ -19,6 +19,13 @@ LRSubmissionIndex lrQueueSubmitForIndex(WGPUQueue queue, size_t commandCount, WG
 // submitted so far. Returns 1 when nothing submitted is still running.
 WGPUBool lrDevicePoll(WGPUDevice device, WGPUBool wait, LRSubmissionIndex const *submissionIndex);
 
+// ---- timestamps ----
+// What wgpuCommandEncoderResolveQuerySet writes here are the GPU's own ticks, not WebGPU's
+// nanoseconds (the resolve is a copy made by the GPU: nothing can scale them on the way). A
+// tick lasts this many nanoseconds (Vulkan's timestampPeriod: 1 on NVIDIA, 52.08 on some
+// Intel, 83.33 on some AMD): multiply by it, as with wgpu's Queue::get_timestamp_period.
+float lrQueueGetTimestampPeriod(WGPUQueue queue);
+
 // ---- features of our own, for WGPUDeviceDescriptor.requiredFeatures ----
 // (in a range of ours, like the SType values below: 0x4C52 is "LR")
 #define LRFeatureName_RayQuery ((WGPUFeatureName)0x4C520100)   // webgpu_rt.h

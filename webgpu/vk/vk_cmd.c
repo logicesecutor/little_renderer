@@ -148,7 +148,8 @@ WGPUQuerySet wgpuDeviceCreateQuerySet(WGPUDevice device, WGPUQuerySetDescriptor 
 
 void wgpuQuerySetRelease(WGPUQuerySet q){ if (q) obj_unref(&q->o); }
 
-// (Vulkan counts in ticks of timestampPeriod ns: 1 on NVIDIA; other GPUs would need a scale)
+// (Vulkan counts in ticks of timestampPeriod ns, and the copy is the GPU's: the values are
+// ticks, for the caller to scale by lrQueueGetTimestampPeriod, webgpu_lr.h)
 void wgpuCommandEncoderResolveQuerySet(WGPUCommandEncoder e, WGPUQuerySet q, uint32_t first, uint32_t count,
                                        WGPUBuffer dst, uint64_t offset){
     before(e);

@@ -616,6 +616,10 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
 WGPUQueue wgpuDeviceGetQueue(WGPUDevice device){ return &device->queues[0]; }
 WGPUQueue lrDeviceGetComputeQueue(WGPUDevice device){ return &device->queues[device->nqueues - 1]; }
 void wgpuQueueRelease(WGPUQueue queue){ (void)queue; }
+float lrQueueGetTimestampPeriod(WGPUQueue queue){
+    const float p = queue ? queue->dev->ad->props.limits.timestampPeriod : 0;
+    return p > 0 ? p : 1.0f;
+}
 void wgpuDeviceRelease(WGPUDevice device){ if (device) obj_unref(&device->o); }
 
 // ---- command buffers ----
