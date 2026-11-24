@@ -2184,8 +2184,11 @@ EXPORT const char *lr_open_scene(const char *path){
         const int own = mk && !strcmp(mk, "own");     // (its own material: the file's, and its look's numbers)
         if (k != ED_MODEL && mat < 0) mat = k == ED_ROCK ? 2 : k == ED_LAMP ? 7 : k == ED_SPHERE ? 1 : 0;
         int dynamic = json_get(json_get(json_get(nd, "extensions"), EXT_BODIES), "motion") != NULL;
+        // (the file's numbers are not trusted: its size within what the editor allows,
+        // lr_scale_object's range)
         real scale = (real)json_num(json_get(json_get(nd, "extras"), "scale"), 1);
         if (!(scale > 0)) scale = 1;
+        scale = r_fmin(r_fmax(scale, 0.05f), 20);
         // the instances of its parts, in the order of its children
         const Json *kids = json_get(nd, "children");
         int nk = json_len(kids), np = 0, *pi = malloc(sizeof(int) * (size_t)(nk > 0 ? nk : 1));
@@ -2225,6 +2228,15 @@ EXPORT const char *lr_open_scene(const char *path){
             for (int q = 0; q < np; q++){ b = box_grow(b, got[pi[q]].box.lo); b = box_grow(b, got[pi[q]].box.hi); }
             pos = vec3((b.lo.x + b.hi.x) / 2, b.lo.y, (b.lo.z + b.hi.z) / 2);
             stretch = vec3(1 / scale, 1 / scale, 1 / scale);
+        }
+        // its stretch within the gizmo's range (lr_set_transform), as its scale above: a 0 in
+        // the file made its parts' transforms infinite (L below divides by it), and a huge
+        // or negative one is no size either; not a number at all: 1
+        {
+            real *sv[3] = {&stretch.x, &stretch.y, &stretch.z};
+            for (int c = 0; c < 3; c++) *sv[c] = *sv[c] > 0 ? r_fmin(r_fmax(*sv[c], 0.01f), 100) : 1;
+            if (!(v_dot(pos, pos) < 1e30f)) pos = vec3(0, 0, 0);
+            if (!(rot.w * rot.w + rot.x * rot.x + rot.y * rot.y + rot.z * rot.z > 0.5f)) rot = quat_identity();   // (a zero turn, normalised: NaN)
         }
         int model = -1;
         if (k == ED_MODEL){                           // its parts in its own frame: L = diag(1/kk) R^T (W - pos)
@@ -2295,7 +2307,11 @@ EXPORT const char *lr_open_scene(const char *path){
                 snprintf(o->look_map_name[q], sizeof(o->look_map_name[q]), "%s", o->look_map[q] ? (*nm ? nm : "from the file") : "");
                 for (char *c = o->look_map_name[q]; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';
             }
+            // (its own material is the file's, made over in place; unless the file's is another
+            // object's already, two nodes of one material: then a copy, or editing one's look
+            // would change both)
             o->look = fm;
+            for (int q = 0; q < E.nobjs; q++) if (&E.objs[q] != o && E.objs[q].look == fm) o->look = -1;
             if (look_sync(o) == 0) o->mat = MAT_OWN;
         }
         object_update(o);
