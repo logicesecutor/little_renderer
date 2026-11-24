@@ -1424,9 +1424,12 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             float *o = rec + 48 * (size_t)i;
             for (int r = 0; r < 3; r++)
                 for (int k = 0; k < 4; k++){ o[4 * r + k] = (float)in->inv.m[r][k]; o[12 + 4 * r + k] = (float)in->xf.m[r][k]; }
-            // a mesh: its BVH's root, its index; a shape (scene.h INST_*): the kind the kernel tests
-            uint32_t kind = in->mesh >= 0 ? (uint32_t)in->mesh : (in->mesh == INST_SPHERE ? 0xfffffff0u : 0xfffffff1u);
-            uint32_t meta[4] = {in->mesh >= 0 ? t->mc[in->mesh].root : 0, in->material >= 0 ? (uint32_t)in->material : 0xffffffffu, kind, 0};
+            // its mesh's BVH's root; its material + 1 (0: its triangles' own); its kind: 0 a ball,
+            // 1 a box (scene.h INST_*), 2 + its mesh. Whole numbers' bits in f32 fields (the
+            // records are prims'): none a NaN's pattern, which a shader may not get back as it
+            // was written (trace.wgsl inst_kind, inst_mat)
+            uint32_t kind = in->mesh >= 0 ? 2u + (uint32_t)in->mesh : (in->mesh == INST_SPHERE ? 0u : 1u);
+            uint32_t meta[4] = {in->mesh >= 0 ? t->mc[in->mesh].root : 0, in->material >= 0 ? 1u + (uint32_t)in->material : 0u, kind, 0};
             memcpy(o + 24, meta, 16);
             put(o + 28, in->box.lo, 0);
             put(o + 32, in->box.hi, 0);

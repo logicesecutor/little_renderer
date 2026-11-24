@@ -17,7 +17,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
         } else {
             let i = c.instance_custom_data;
             let o = to_object(i, r);
-            if (bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z) == UNIT_SPHERE) { t = hit_unit_sphere(o, tmin, tm); }
+            if (inst_kind(i) == UNIT_SPHERE) { t = hit_unit_sphere(o, tmin, tm); }
             else { t = hit_unit_box(o, tmin, tm); }
         }
         if (t > 0.0) {
@@ -33,7 +33,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
     if (h.kind == RAY_QUERY_INTERSECTION_GENERATED) {
         if (h.instance_custom_data == HW_WPRIM) { return Found(h.t, h.primitive_index, vec2f(0.0), NONE); }
         let i = h.instance_custom_data;
-        return Found(h.t, bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z), vec2f(0.0), i);
+        return Found(h.t, inst_kind(i), vec2f(0.0), i);
     }
     return Found(tmax, NONE, vec2f(0.0), NONE);
 }

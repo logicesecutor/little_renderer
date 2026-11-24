@@ -223,6 +223,19 @@ fn inst_inv(i: u32, row: u32) -> vec4f {
     if (row == 1u) { return r.q; }
     return r.u;
 }
+/* An instance's second record, c: its mesh's root (x), its material + 1 (y; 0: its triangles'
+   own) and its kind (z; 0 a ball, 1 a box, 2 + its mesh): whole numbers kept as their bits in
+   f32 fields. None of them is a NaN's pattern (the 0xffffffff of "no material" and the
+   0xfffffff0 of a ball, stored as they were, are): WGSL lets an implementation assume no value
+   is a NaN, and what becomes of one's bits on the way to a bitcast is then its own business.
+   (The root's: a node number, with WIDE on top; a NaN's only from node 2 139 095 041 on.) */
+fn inst_kind(i: u32) -> u32 {                  /* UNIT_SPHERE, UNIT_BOX, or its mesh */
+    let k = bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z);
+    return select(k - 2u, UNIT_SPHERE + k, k < 2u);
+}
+fn inst_mat(i: u32) -> u32 {                   /* NONE: its triangles' own */
+    return bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.y) - 1u;
+}
 fn to_object(i: u32, r: Ray) -> Ray {
     let a = inst_inv(i, 0u);
     let b = inst_inv(i, 1u);
@@ -319,7 +332,7 @@ fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {
             if (cur == NONE && ni < T.ins.w) {
                 for (var k = 0u; k < count; k++) {
                     let i = aux[nd.a + k];
-                    let kind = bitcast<u32>(prims[T.ins.y + 2u * i + 1u].c.z);
+                    let kind = inst_kind(i);
                     if (kind >= UNIT_SPHERE) {
                         let o = to_object(i, r);
                         var t = -1.0;
@@ -389,7 +402,7 @@ fn shape_mat(id: u32) -> u32 {
 }
 fn hit_mat(f: Found) -> u32 {
     if (f.inst != NONE) {
-        let ov = bitcast<u32>(prims[T.ins.y + 2u * f.inst + 1u].c.y);
+        let ov = inst_mat(f.inst);
         if (ov != NONE) { return ov; }
     }
     return shape_mat(f.id);
@@ -782,14 +795,13 @@ fn emitter(i: u32) -> Em {
     let x = prims[T.ins.y + 2u * i].v;      /* object -> world, by rows */
     let y = prims[T.ins.y + 2u * i].n;
     let z = prims[T.ins.y + 2u * i].w;
-    let md = prims[T.ins.y + 2u * i + 1u].c;   /* (its mesh, material, kind) */
     var e: Em;
-    e.ball = bitcast<u32>(md.z) == UNIT_SPHERE;
+    e.ball = inst_kind(i) == UNIT_SPHERE;
     e.c = vec3f(x.w, y.w, z.w);
     e.a0 = vec3f(x.x, y.x, z.x);
     e.a1 = vec3f(x.y, y.y, z.y);
     e.a2 = vec3f(x.z, y.z, z.z);
-    e.le = T.mats[bitcast<u32>(md.y)].emission.rgb;
+    e.le = T.mats[inst_mat(i)].emission.rgb;       /* (a glowing shape has its material) */
     e.r = length(e.a0);
     if (e.ball) { e.area = 4.0 * PI_ * e.r * e.r; }
     else { e.area = 8.0 * (length(cross(e.a1, e.a2)) + length(cross(e.a0, e.a2)) + length(cross(e.a0, e.a1))); }
