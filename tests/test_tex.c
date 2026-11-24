@@ -324,6 +324,7 @@ static void test_pbr_maps(void){
     TexMap mr2;
     pbr_pack_mr(&mr2, NULL, &me);
     check("a metallic map alone: roughness white (the factor alone)", texmap_texel(&mr2, 0, 3, 3).y == 1 && mr2.w == 64);
+    texmap_free(&mr);                     // (the next call makes mr again: it would lose this one)
     check("neither: refused", pbr_pack_mr(&mr, NULL, NULL) != 0);
     texmap_free(&mr2);
     // through material_normal: a quad's normal bends away from where the height rises
