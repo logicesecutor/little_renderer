@@ -97,6 +97,8 @@ void gpu_view_trace_budget(GpuView *v, double ms);
 // max_ms), for frames that do not wait for the display: their fixed cost (the denoiser, the
 // composite) beside a short band left the GPU mostly not path tracing. 0 (the default): no.
 void gpu_view_trace_budget_pass(GpuView *v, double max_ms);
+// While things move (a new image every frame): this budget instead (0: the one above)
+void gpu_view_trace_budget_live(GpuView *v, double ms);
 int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finished
 double gpu_view_trace_work(const GpuView *v);       // passes' worth of work done since the view was made, all images
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU

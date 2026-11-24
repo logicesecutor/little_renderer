@@ -22,6 +22,7 @@ int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ (void)v; (void)s; return 0; }
 void gpu_view_trace_limit(GpuView *v, int spp){ (void)v; (void)spp; }
 void gpu_view_trace_budget(GpuView *v, double ms){ (void)v; (void)ms; }
+void gpu_view_trace_budget_live(GpuView *v, double ms){ (void)v; (void)ms; }
 void gpu_view_trace_budget_pass(GpuView *v, double max_ms){ (void)v; (void)max_ms; }
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){ (void)v; (void)s; (void)p; (void)mp; return 0; }
@@ -143,6 +144,7 @@ struct GpuView {
     int t_limit;                // gpu_view_trace_limit: the most passes of an image (0: no limit)
     double t_budget_ms;         // gpu_view_trace_budget: GPU time per frame (0: bands of 12-45 ms)
     double t_pass_max;          // gpu_view_trace_budget_pass: at least a whole pass a frame, up to this (0: no)
+    double t_live_ms;           // gpu_view_trace_budget_live: the budget while things move (0: t_budget_ms)
     int t_gpu_timed;            // t_gpu_pass_ms comes from the GPU's timer
     int t_passes;               // samples per pixel submitted
     double t_work;              // passes' worth of work done, all images (gpu_view_trace_work)
@@ -885,7 +887,7 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
 // cost (the denoiser, the composite, the bodies, the guide: ~9 ms at 1080p in the sky demo);
 // a band of 60% of a 165 Hz period beside it left the path tracer 39% of the GPU's time.
 static double frame_budget(const GpuView *v){
-    double b = v->t_budget_ms;
+    double b = v->t_live && v->t_live_ms > 0 ? v->t_live_ms : v->t_budget_ms;
     if (b > 0 && v->t_pass_max > 0 && v->t_gpu_pass_ms > 0){
         double p = 1.1 * v->t_gpu_pass_ms;
         if (p > v->t_pass_max) p = v->t_pass_max;
@@ -1031,6 +1033,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
 
 void gpu_view_trace_limit(GpuView *v, int spp){ if (v) v->t_limit = spp > 0 ? spp : 0; }
 void gpu_view_trace_budget(GpuView *v, double ms){ if (v) v->t_budget_ms = ms > 0 ? ms : 0; }
+void gpu_view_trace_budget_live(GpuView *v, double ms){ if (v) v->t_live_ms = ms > 0 ? ms : 0; }
 void gpu_view_trace_budget_pass(GpuView *v, double max_ms){ if (v) v->t_pass_max = max_ms > 0 ? max_ms : 0; }
 int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 double gpu_view_trace_work(const GpuView *v){ return v ? v->t_work : 0; }

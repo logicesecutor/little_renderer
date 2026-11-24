@@ -301,6 +301,7 @@ typedef struct {
     double edit_t;             // (when the last one came)
     int gpu_shown_passes;      // its samples per pixel when it was last shown
     long trace_starts, trace_moves;   // (viewer_status: images begun, and carried over a move)
+    double budget_t;           // (a browser: when the path tracer's budget was last set)
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
     RenderParams last_rp;      // the camera of the last raster frame, for the GPU march
@@ -659,16 +660,31 @@ typedef struct {
 
 // 0. The GPU starts asynchronously: wait for it (1: not yet), or fall back to the CPU; and
 // fall back too when the GPU is lost.
+// -maxfps on: the path tracer's work per frame within 60% of the display's period (or -band ms),
+// so frames keep coming while it refines; off: the bands of before (85% when the bands run
+// while the frame waits for the display: trace_overlaps). In a browser, still: as before
+// (85% of a 60 Hz frame: the image converges as fast); moving: 85% of the display's period
+// as measured (window_web.c, set again every second). It was sized for 60 Hz moving too: on
+// a 144 Hz screen 14 ms of work in each 7 ms frame, and the image followed the camera in one
+// frame of three.
+static void trace_budget(void){
+    const double share = trace_overlaps() ? 0.85 : 0.6;
+    gpu_view_trace_budget(V.gview, V.o.band_ms > 0 ? V.o.band_ms : !V.o.maxfps ? 0 : share * 1000.0 / window_refresh_hz(V.win));
+#ifdef __EMSCRIPTEN__
+    if (V.o.band_ms <= 0 && V.o.maxfps) gpu_view_trace_budget(V.gview, share * 1000.0 / 60);
+    gpu_view_trace_budget_live(V.gview, V.o.band_ms > 0 || !V.o.maxfps ? 0 : share * 1000.0 / window_refresh_hz(V.win));
+#endif
+}
+
 static int viewer_gpu(void){
+#ifdef __EMSCRIPTEN__
+    if (V.gview && clock_s() - V.budget_t > 1.0){ trace_budget(); V.budget_t = clock_s(); }
+#endif
     if (V.gpu && !V.gview){
         GpuState gs = gpu_state(V.gpu);
         if (gs == GPU_PENDING) return 1;
         if (gs == GPU_READY) V.gview = gpu_view_create(V.gpu, V.W, V.H);
-        // -maxfps on: the path tracer's work per frame within 60% of the display's period (or
-        // -band ms), so frames keep coming while it refines; off: the bands of before
-        // (85% when the bands run while the frame waits for the display: trace_overlaps)
-        if (V.gview) gpu_view_trace_budget(V.gview, V.o.band_ms > 0 ? V.o.band_ms : !V.o.maxfps ? 0 :
-                                                (trace_overlaps() ? 0.85 : 0.6) * 1000.0 / window_refresh_hz(V.win));
+        if (V.gview) trace_budget();
         // frames not waiting for the display (-vsync off, offscreen): at least a whole pass
         // each, up to 33 ms (30 frames/s), so the path tracer is most of the GPU's work, not
         // the denoiser and the composite every frame carries

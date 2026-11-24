@@ -148,7 +148,34 @@ void window_present(LrWindow *w, const Framebuffer *fb){
     js_present(w->rgba, w->w, w->h);
 }
 
-double window_refresh_hz(LrWindow *w){ (void)w; return 60.0; }   // (the page is paced by the browser)
+// The display's rate, as the browser's animation frames come: the shortest gap between two of
+// the last 600 (the page's own slow frames make longer ones, never shorter), once 30 came; 60
+// until then. (It was 60 always: on a 144 Hz screen the path tracer's band was sized for a
+// 60 Hz frame, 14 ms of GPU work in each 7 ms frame, and the image followed a moving camera
+// in one frame of two or three.)
+EM_JS(double, js_frame_gap_ms, (void), {
+    var s = Module.lrFrames;
+    if (!s){
+        s = Module.lrFrames = {last: 0, gaps: []};
+        var f = function(t){
+            if (s.last > 0){ s.gaps.push(t - s.last); if (s.gaps.length > 600) s.gaps.shift(); }
+            s.last = t;
+            requestAnimationFrame(f);
+        };
+        requestAnimationFrame(f);
+    }
+    if (s.gaps.length < 30) return 0;
+    var m = 1e9;
+    for (var i = 0; i < s.gaps.length; i++) if (s.gaps[i] > 1 && s.gaps[i] < m) m = s.gaps[i];
+    return m < 1e9 ? m : 0;
+});
+double window_refresh_hz(LrWindow *w){
+    (void)w;
+    double ms = js_frame_gap_ms();
+    if (ms <= 0) return 60.0;
+    double hz = 1000.0 / ms;
+    return hz < 30 ? 30 : hz > 360 ? 360 : hz;
+}
 
 int window_native(LrWindow *w, void **display, uintptr_t *window){
     (void)w;
