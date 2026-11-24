@@ -247,7 +247,7 @@ struct GpuTrace {
     size_t pl_cap;
     // LR_GPU_BVH_CHECK=1: the builds read back, checked (one tree over all the items) and
     // their cost (bvh_cost) and depth summed, by their order in the frame
-    int check, ck_count, ck_pending, ck_mapped, ck_n[8], ck_depth[8];
+    int check, ck_count, ck_pending, ck_n[8], ck_depth[8];
     uint32_t ck_node0[8];
     size_t ck_at[8], ck_cap;
     WGPUBuffer ck_buf;
@@ -770,25 +770,12 @@ static int check_tree(const uint32_t *w, int n, uint32_t node0, double *cost, in
     return ok && leaves == n;
 }
 
-static void on_check(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
-    ((GpuTrace *)u1)->ck_mapped = status == WGPUMapAsyncStatus_Success ? 1 : -1;
-}
-
 static void check_builds(GpuTrace *t){
     if (t->ck_pending != 1) return;
     t->ck_pending = 0;
     if (t->ck_count == 0) return;
     size_t total = t->ck_at[t->ck_count - 1] + (2 * (size_t)t->ck_n[t->ck_count - 1] - 1) * 32;
-    WGPUBufferMapCallbackInfo mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.mode = WGPUCallbackMode_AllowSpontaneous;
-    mi.callback = on_check;
-    mi.userdata1 = t;
-    t->ck_mapped = 0;
-    wgpuBufferMapAsync(t->ck_buf, WGPUMapMode_Read, 0, total, mi);
-    for (int k = 0; k < 4000 && t->ck_mapped == 0; k++) gpu_wait(t->g);
-    if (t->ck_mapped != 1) return;
+    if (!gpu_map_wait(t->g, t->ck_buf, total, 4000)) return;
     const uint32_t *w = wgpuBufferGetConstMappedRange(t->ck_buf, 0, total);
     for (int i = 0; w && i < t->ck_count; i++){
         double cost = 0;

@@ -234,6 +234,13 @@ void gpu_textures_free(GpuTextures *gt);
 void gpu_atlas_free(Gpu *g);                 // the shared atlas (gpu_destroy)
 // a unit direction as 2 floats (octahedral; WGSL oct_decode)
 void gpu_oct_encode(Vec3 d, float *out);
+// A buffer mapped for reading, waited for (the readbacks of the tests and the checks, which
+// want the answer before going on): 1 = it is mapped (read it with
+// wgpuBufferGetConstMappedRange, then wgpuBufferUnmap), 0 = it failed, or was not there after
+// `tries` waits (gpu_wait: at once in a page that cannot wait). What the map's callback
+// writes to is not the caller's: a callback that comes after the wait gave up (or after the
+// caller's object is gone) finds memory of its own, and frees it.
+int gpu_map_wait(Gpu *g, WGPUBuffer b, size_t bytes, int tries);
 // Submits one command buffer and returns a number for it (natively; 0 in a browser).
 // gpu_wait_for blocks until that submission is done (not the work submitted after it, as
 // gpu_wait would: the frame being drawn), then polls. In a browser it only polls.

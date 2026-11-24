@@ -215,8 +215,9 @@ void gpu_resize(Gpu *g, int width, int height){
 }
 
 static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView msg, void *u1, void *u2){
-    (void)u2;
     Gpu *g = u1;
+    // (in a browser the device comes later: the Gpu may have been destroyed meanwhile)
+    if (!is_live(g, u2)){ if (status == WGPURequestDeviceStatus_Success && device) wgpuDeviceRelease(device); return; }
     if (status != WGPURequestDeviceStatus_Success){ fail(g, "no device", msg); return; }
     g->device = device;
     g->queue = wgpuDeviceGetQueue(device);
@@ -265,8 +266,8 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
 }
 
 static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView msg, void *u1, void *u2){
-    (void)u2;
     Gpu *g = u1;
+    if (!is_live(g, u2)){ if (status == WGPURequestAdapterStatus_Success && adapter) wgpuAdapterRelease(adapter); return; }   // (as on_device)
     if (status != WGPURequestAdapterStatus_Success){ fail(g, "no GPU adapter (no WebGPU in this browser, or no GPU driver)", msg); return; }
     g->adapter = adapter;
     WGPULimits lim;
@@ -313,6 +314,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     cb.mode = WGPUCallbackMode_AllowSpontaneous;
     cb.callback = on_device;
     cb.userdata1 = g;
+    cb.userdata2 = u2;
     wgpuAdapterRequestDevice(adapter, &dd, cb);
 }
 
@@ -369,6 +371,7 @@ static Gpu *create(const char *canvas, void *display, uint64_t window, int width
     cb.mode = WGPUCallbackMode_AllowSpontaneous;
     cb.callback = on_adapter;
     cb.userdata1 = g;
+    cb.userdata2 = gpu_live_ticket(g->live);
     wgpuInstanceRequestAdapter(g->instance, &opt, cb);
     return g;
 }
@@ -491,6 +494,32 @@ void gpu_wait_for(Gpu *g, uint64_t submission){
     (void)submission;
 #endif
     gpu_poll(g);
+}
+
+// ---- a buffer mapped and waited for (gpu_internal.h) ----
+// state: 0 coming, 1 mapped, -1 failed; left: the wait gave up, the callback frees it
+typedef struct { int state, left; } MapWait;
+static void on_map_wait(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
+    (void)msg; (void)u2;
+    MapWait *w = u1;
+    if (w->left){ free(w); return; }
+    w->state = status == WGPUMapAsyncStatus_Success ? 1 : -1;
+}
+
+int gpu_map_wait(Gpu *g, WGPUBuffer b, size_t bytes, int tries){
+    MapWait *w = calloc(1, sizeof(*w));
+    if (!w || !b){ free(w); return 0; }
+    WGPUBufferMapCallbackInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.mode = WGPUCallbackMode_AllowSpontaneous;
+    mi.callback = on_map_wait;
+    mi.userdata1 = w;
+    wgpuBufferMapAsync(b, WGPUMapMode_Read, 0, bytes, mi);
+    for (int k = 0; k < tries && w->state == 0; k++) gpu_wait(g);
+    const int state = w->state;
+    if (state == 0) w->left = 1;        // (still coming: the callback's to free)
+    else free(w);
+    return state == 1;
 }
 
 GpuState gpu_state(Gpu *g){

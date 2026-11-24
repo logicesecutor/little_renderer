@@ -1209,10 +1209,6 @@ void gpu_view_trace_edited(GpuView *v, int on){ if (v) v->grad_edit = on != 0; }
 int gpu_view_trace_has_gradients(const GpuView *v){ return v && v->trace && gpu_trace_gradients_ok(v->trace); }
 int gpu_view_trace_raster_guided(const GpuView *v){ return v && v->t_rguided; }
 
-static void on_guide_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
-    *(int *)u1 = status == WGPUMapAsyncStatus_Success ? 1 : -1;
-}
 int gpu_view_trace_planes_read(GpuView *v, int first, int planes, float *out){
     if (!v || !v->trace || !gpu_trace_guided(v->trace) || first < 0 || planes < 1 || first + planes > 5) return 0;
     Gpu *g = v->g;
@@ -1226,15 +1222,7 @@ int gpu_view_trace_planes_read(GpuView *v, int first, int planes, float *out){
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
-    int done = 0;
-    WGPUBufferMapCallbackInfo mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.mode = WGPUCallbackMode_AllowProcessEvents;
-    mi.callback = on_guide_mapped;
-    mi.userdata1 = &done;
-    wgpuBufferMapAsync(rb, WGPUMapMode_Read, 0, n, mi);
-    for (int k = 0; k < 100000 && !done; k++) gpu_wait(g);
-    int ok = done == 1;
+    int ok = gpu_map_wait(g, rb, n, 100000);
     if (ok){
         const void *p = wgpuBufferGetConstMappedRange(rb, 0, n);
         ok = p != NULL;

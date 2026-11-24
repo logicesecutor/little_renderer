@@ -26,11 +26,6 @@ void gpu_bsdf_tables(float *out){
 // ---- the check: the WGSL on cases, against the C ----
 GPU_WGSL(CHECK, brdf_check);
 
-static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
-    (void)msg; (void)u2;
-    *(int *)u1 = status == WGPUMapAsyncStatus_Success ? 1 : -1;
-}
-
 int gpu_bsdf_run(Gpu *g, const float *in, int n, float *out){
     if (!g || g->state != GPU_READY || n <= 0) return 0;
     char size[64];
@@ -64,15 +59,7 @@ int gpu_bsdf_run(Gpu *g, const float *in, int n, float *out){
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
-    int mapped = 0;
-    WGPUBufferMapCallbackInfo mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.mode = WGPUCallbackMode_AllowSpontaneous;
-    mi.callback = on_mapped;
-    mi.userdata1 = &mapped;
-    wgpuBufferMapAsync(rb, WGPUMapMode_Read, 0, bout, mi);
-    for (int k = 0; k < 4000 && mapped == 0; k++) gpu_wait(g);
-    int ok = mapped == 1;
+    int ok = gpu_map_wait(g, rb, bout, 4000);
     if (ok){
         const float *r = wgpuBufferGetConstMappedRange(rb, 0, bout);
         if (r) memcpy(out, r, bout); else ok = 0;
