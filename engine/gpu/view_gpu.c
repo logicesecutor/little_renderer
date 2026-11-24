@@ -630,7 +630,9 @@ int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){
 
 // The first half of a frame: the camera and the lamp into the uniforms, and the media made
 // ready (densities, bricks and boxes, light grids), for the composite pass that follows.
-static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p,
+// Returns how many media it made ready (0 when they do not fit this GPU: what reads them
+// after must be given that count, not the scene's).
+static int frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p,
                         const MarchParams *mp, int volumes){
     Gpu *g = v->g;
     MarchParams def = march_default_params();
@@ -701,6 +703,7 @@ static void frame_begin(GpuView *v, WGPUCommandEncoder enc, const Scene *s, cons
         }
         v->light_valid = 1;
     }
+    return n;
 }
 
 // The second half: the composite pass (pipe, with the frame's inputs in bg, a kept one:
@@ -1084,9 +1087,11 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     v->t_ready_seen = 1;
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
+    // the media: densities, bricks and boxes up to date; as many as frame_begin made ready (none
+    // when they do not fit with their light grids: the kernels were given the scene's count,
+    // and read media that were never uploaded)
+    const int nvol = frame_begin(v, enc, s, p, mp, 1);
     const GpuMedia media = {v->frame_u, v->dens, v->bricks, v->vstat};   // (as frame_begin left them)
-    const int nvol = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
     v->t_sub_prep = v->t_prep != 0;
     if (v->t_prep){
         // the guide (each pixel's first surface) rasterized, where there are no media: it was a
