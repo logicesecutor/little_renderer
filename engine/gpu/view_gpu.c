@@ -9,6 +9,7 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
                       const MarchParams *mp, int volumes){ (void)v; (void)fb; (void)s; (void)p; (void)mp; (void)volumes; }
 void gpu_view_destroy(GpuView *v){ (void)v; }
 int gpu_view_ready(GpuView *v){ (void)v; return -1; }
+int gpu_view_trace_compiling(const GpuView *v){ (void)v; return 0; }
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){ (void)v; (void)argb; (void)w; (void)h; (void)x; (void)y; }
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
@@ -148,6 +149,7 @@ struct GpuView {
     double t_budget_ms;         // gpu_view_trace_budget: GPU time per frame (0: bands of 12-45 ms)
     double t_pass_max;          // gpu_view_trace_budget_pass: at least a whole pass a frame, up to this (0: no)
     double t_live_ms;           // gpu_view_trace_budget_live: the budget while things move (0: t_budget_ms)
+    int t_ready_seen;           // its pipelines were ready once (before: still compiling, in a browser)
     int t_gpu_timed;            // t_gpu_pass_ms comes from the GPU's timer
     int t_passes;               // samples per pixel submitted
     double t_work;              // passes' worth of work done, all images (gpu_view_trace_work)
@@ -975,6 +977,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     int ready = gpu_trace_ready(v->trace, s);                    // (in a browser: still compiling?)
     if (ready < 0){ v->trace_failed = 1; return 0; }
     if (!ready) return 1;
+    v->t_ready_seen = 1;
     Gpu *g = v->g;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     frame_begin(v, enc, s, p, mp, 1);         // the media: densities, bricks and boxes up to date
@@ -1063,6 +1066,7 @@ void gpu_view_trace_budget_pass(GpuView *v, double max_ms){ if (v) v->t_pass_max
 int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 double gpu_view_trace_work(const GpuView *v){ return v ? v->t_work : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
+int gpu_view_trace_compiling(const GpuView *v){ return v && v->trace && !v->trace_failed && !v->t_ready_seen; }
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace, s); }
 
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){

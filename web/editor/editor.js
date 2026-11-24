@@ -1388,6 +1388,13 @@
     if (st.gpuStarting) return { title: 'Starting the GPU', right: '', pct: 0, green: true, note: 'The CPU draws until the GPU is ready.' };
     const cpu = st.gpu ? '' : ' (on the CPU: this browser gave no WebGPU)';
     const auto = st.backend === BACKEND.HYBRID;
+    // the path tracer's shaders: compiled by the browser the first time (after an update of the
+    // engine's shaders, or a browser's own update), then kept in its cache for the next visits
+    if (st.backend !== BACKEND.RASTER && st.trace && st.trace.compiling) {
+      if (!ui.compileT0) ui.compileT0 = performance.now();
+      return { title: 'Compiling the path tracer', right: ((performance.now() - ui.compileT0) / 1000).toFixed(0) + ' s', pct: 0, green: true,
+        note: 'Once after each update: the browser keeps the compiled shaders for the next visits. Raster until then.' };
+    }
     if (!st.tracing) return {
       title: auto ? 'Auto · raster while moving' : 'Raster', right: st.relighting ? 'relighting' : 'real time',
       pct: st.relighting ? Math.round(100 * st.relight) : 100, green: true,

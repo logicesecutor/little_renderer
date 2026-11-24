@@ -1483,6 +1483,7 @@ void viewer_status(ViewerStatus *st){
     st->trace_pass_ms = V.gview ? gpu_view_trace_pass_ms(V.gview) : V.pass_ms;
     st->trace_work = V.gview ? gpu_view_trace_work(V.gview) : 0;
     st->trace_history = V.last_keep;
+    st->trace_compiling = V.gview && gpu_view_trace_compiling(V.gview);
     st->trace_rate = V.pass_rate;
     if (V.gview) gpu_view_trace_band(V.gview, &st->trace_rows, &st->trace_reps, &st->trace_budget_ms);
 }

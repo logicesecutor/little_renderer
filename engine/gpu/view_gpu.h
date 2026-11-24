@@ -106,6 +106,8 @@ void gpu_view_trace_budget_live(GpuView *v, double ms);
 int gpu_view_trace_passes(const GpuView *v);        // samples per pixel finished
 double gpu_view_trace_work(const GpuView *v);       // passes' worth of work done since the view was made, all images
 int gpu_view_trace_busy(const GpuView *v);          // a band is still running on the GPU
+// its pipelines asked for and not ready yet (a browser compiles them the first time: seconds)
+int gpu_view_trace_compiling(const GpuView *v);
 // Reads the image back (asynchronously, like gpu_view_capture): fn gets w * h values of
 // 4 floats, the sum of the samples (linear RGB) and their count. 0 if a read is already on
 // its way. The image at full precision, for saving (bin/render, bin/sim). If the read fails

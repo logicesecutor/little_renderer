@@ -1553,9 +1553,9 @@ EXPORT const char *lr_status(void){
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
             st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
     jprintf(",\"displayHz\":%.1f,\"frameCap\":%d", viewer_display_hz(), frame_cap_ms > 0 ? (int)(1000.0 / frame_cap_ms + 0.5) : 0);
-    jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f}",
+    jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f,\"compiling\":%d}",
             st.trace_starts, st.trace_moves, st.trace_pass_ms, st.trace_rows, st.trace_reps, st.trace_budget_ms, st.trace_work,
-            st.trace_history, st.trace_rate);
+            st.trace_history, st.trace_rate, st.trace_compiling);
     if (viewer_sim_on()){                            // the simulation: its time, its bodies so far
         char line[200];
         viewer_sim_line(line, sizeof(line));
