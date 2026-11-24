@@ -34,6 +34,8 @@ typedef struct {
     int srgb;                          // colour: the texels are sRGB, decoded when read
     int wrap_u, wrap_v;                // outside 0..1 (glTF's samplers): TEXMAP_REPEAT, _CLAMP, _MIRROR
     char name[64];                     // where it came from (a file, or a procedural one)
+    uint64_t hash;                     // of what it shows, for a picture the scene holds once (a file's, a
+                                       // model's: scene_share_texmap); 0: not shared (made here, may be made again)
 } TexMap;
 enum { TEXMAP_REPEAT, TEXMAP_CLAMP, TEXMAP_MIRROR };
 

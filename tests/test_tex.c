@@ -31,6 +31,7 @@
 #include "scene/scene.h"
 #include "scene/pbr_maps.h"
 #include "base/rng.h"
+#include "formats/png.h"
 #include "test_util.h"
 
 static void test_mips(void){
@@ -201,6 +202,28 @@ static void test_materials(void){
     int mr = scene_texture(s, "plate_mr", 0);
     check_near("scene_texture: a name is loaded once", c == c2 && c > 0 && mr > 0 && s->ntexmaps == 2, 1, 0);
     check_near("scene_texture: an unknown name -> 0", scene_texture(s, "no such texture", 1), 0, 0);
+    {
+        // a file is known by what it shows, not by its name: the same picture is held once
+        // (whatever the file is called), and a file of the same name with another picture is
+        // another texture (an image edited and dropped again in the editor was ignored)
+        Scene *fs = calloc(1, sizeof(Scene));
+        unsigned char red[4 * 4 * 3], green[4 * 4 * 3];
+        for (int i = 0; i < 16; i++){ red[3 * i] = 200; red[3 * i + 1] = 30; red[3 * i + 2] = 20; green[3 * i] = 20; green[3 * i + 1] = 200; green[3 * i + 2] = 30; }
+        int wrote = png_write("out/test_tex_a.png", 4, 4, 3, red) == 0 && png_write("out/test_tex_b.png", 4, 4, 3, red) == 0;
+        int a = scene_texture(fs, "out/test_tex_a.png", 1), a2 = scene_texture(fs, "out/test_tex_a.png", 1);
+        int b = scene_texture(fs, "out/test_tex_b.png", 1);
+        int data = scene_texture(fs, "out/test_tex_a.png", 0);
+        check("scene_texture: a file asked for twice, and the same picture under another name: one texture",
+              wrote && a > 0 && a2 == a && b == a && fs->ntexmaps == 2);
+        check("... as colour and as data: two", data > 0 && data != a);
+        wrote = png_write("out/test_tex_a.png", 4, 4, 3, green) == 0;
+        int g = scene_texture(fs, "out/test_tex_a.png", 1);
+        check("... the file written again with another picture: another texture", wrote && g > 0 && g != a && fs->ntexmaps == 3);
+        check("... which shows the new picture", g > 0 && texmap_texel(&fs->texmaps[g - 1], 0, 1, 1).y > 0.5f && texmap_texel(&fs->texmaps[a - 1], 0, 1, 1).x > 0.5f);
+        remove("out/test_tex_a.png"); remove("out/test_tex_b.png");
+        scene_free(fs);
+        free(fs);
+    }
     Material m = material_pbr(vec3(0.5f, 1, 1), 1, 1, 1.5f, 0);
     m.tex_base = c; m.tex_mr = mr;
     TexMap *tc = &s->texmaps[c - 1], *tm = &s->texmaps[mr - 1];

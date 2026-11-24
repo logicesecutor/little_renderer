@@ -188,20 +188,42 @@ static unsigned next_tex_version(void){
     return ++v;
 }
 
+// what a picture is: its size, kind, wrapping and level 0's texels (FNV-1a over the words); never 0
+static uint64_t texmap_hash(const TexMap *t){
+    uint64_t h = 1469598103934665603ull;
+    const uint32_t head[5] = {(uint32_t)t->w, (uint32_t)t->h, (uint32_t)t->srgb, (uint32_t)t->wrap_u, (uint32_t)t->wrap_v};
+    for (int i = 0; i < 5; i++) h = (h ^ head[i]) * 1099511628211ull;
+    const size_t n = (size_t)t->w * (size_t)t->h;
+    for (size_t i = 0; i < n; i++) h = (h ^ t->px[i]) * 1099511628211ull;
+    return h ? h : 1;
+}
+
+int scene_share_texmap(Scene *s, TexMap *t){
+    t->hash = texmap_hash(t);
+    for (int i = 0; i < s->ntexmaps; i++){
+        const TexMap *o = &s->texmaps[i];
+        if (o->hash != t->hash || o->w != t->w || o->h != t->h || o->srgb != t->srgb || o->wrap_u != t->wrap_u || o->wrap_v != t->wrap_v) continue;
+        if (memcmp(o->px, t->px, (size_t)t->w * (size_t)t->h * sizeof(uint32_t))) continue;   // (the same hash by chance)
+        texmap_free(t);
+        return i + 1;
+    }
+    return scene_add_texmap(s, t);
+}
+
 int scene_texture(Scene *s, const char *name, int srgb){
     if (!name || !*name) return 0;
-    for (int i = 0; i < s->ntexmaps; i++)
-        if (!strcmp(s->texmaps[i].name, name) && s->texmaps[i].srgb == srgb) return i + 1;
-    TexMap t;
     size_t len = strlen(name);
     int file = (len > 4 && (!strcmp(name + len - 4, ".png") || !strcmp(name + len - 4, ".jpg"))) || (len > 5 && !strcmp(name + len - 5, ".jpeg"));
+    // a procedural one is known by its name. A file is not (it was: an edited picture dropped
+    // again under its name, or another folder's of the same name, was taken for the first):
+    // read, and known by what it shows
+    for (int i = 0; i < s->ntexmaps && !file; i++)
+        if (!strcmp(s->texmaps[i].name, name) && s->texmaps[i].srgb == srgb) return i + 1;
+    TexMap t;
     int err = file ? texmap_load(&t, name, srgb) : texmap_procedural(&t, name);
     if (err) return 0;
     if (strlen(name) < sizeof(t.name)) snprintf(t.name, sizeof(t.name), "%s", name);
-    s->texmaps = lr_grow(s->texmaps, sizeof(TexMap), &s->cap_texmaps, s->ntexmaps + 1, 64);
-    s->texmaps[s->ntexmaps] = t;
-    s->tex_version = next_tex_version();
-    return ++s->ntexmaps;
+    return file ? scene_share_texmap(s, &t) : scene_add_texmap(s, &t);
 }
 
 int scene_add_texmap(Scene *s, const TexMap *t){

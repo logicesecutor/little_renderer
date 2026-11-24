@@ -397,10 +397,18 @@ static inline int scene_shape_material(const Scene *s, int id){
     return id < s->nprims ? s->prims[id].material : s->tris[id - s->nprims].material;
 }
 Aabb scene_shape_bounds(const Scene *s, int id);
-// A texture by name, loaded (or made) once: a .png file, else a procedural one
-// (texmap_procedural); srgb for colour. Returns 1 + its index (for Material.tex_*), 0 if it
-// cannot be had.
+// A texture by name: a .png or .jpg file, else a procedural one (texmap_procedural); srgb for
+// colour. A procedural one is made once. A file is read every time, and the scene keeps one
+// texture per picture (scene_share_texmap): the same file asked for again gives the texture
+// it gave, a file of that name with other contents (edited, or another folder's) a new one.
+// Returns 1 + its index (for Material.tex_*), 0 if it cannot be had.
 int scene_texture(Scene *s, const char *name, int srgb);
+// A texture made elsewhere from a picture (a file's, a glTF model's), taken over by the scene,
+// which holds each picture once: when it already has one of the same size, kind (srgb),
+// wrapping and texels, that one's 1 + index is returned and t is freed (a model imported
+// twice shares its textures); else t is added. Not for a map that will be made again in
+// place (scene_replace_texmap): that one is scene_add_texmap's.
+int scene_share_texmap(Scene *s, TexMap *t);
 // a texture made elsewhere (a glTF model's), taken over by the scene: 1 + its index
 int scene_add_texmap(Scene *s, const TexMap *t);
 // texture tex (1 + its index) made t (taken over; the old one freed): a map made again (the

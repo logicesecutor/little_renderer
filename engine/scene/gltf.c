@@ -256,7 +256,7 @@ static int texture_of(G *g, const Json *info, int srgb){
         fprintf(stderr, "gltf: texture coordinates other than 0 are not supported (0 used)\n");
     if (g->tex[ti][srgb]) return g->tex[ti][srgb] > 0 ? g->tex[ti][srgb] : 0;
     TexMap tm;
-    g->tex[ti][srgb] = decode_texture(g, ti, srgb, &tm) ? -1 : scene_add_texmap(g->s, &tm);
+    g->tex[ti][srgb] = decode_texture(g, ti, srgb, &tm) ? -1 : scene_share_texmap(g->s, &tm);
     return g->tex[ti][srgb] > 0 ? g->tex[ti][srgb] : 0;
 }
 
@@ -288,7 +288,7 @@ static void decode_textures(G *g){
 #endif
     for (int i = 0; i < nj; i++) jobs[i].err = decode_texture(g, jobs[i].ti, jobs[i].srgb, &jobs[i].tm);
     for (int i = 0; i < nj; i++)
-        g->tex[jobs[i].ti][jobs[i].srgb] = jobs[i].err ? -1 : scene_add_texmap(g->s, &jobs[i].tm);
+        g->tex[jobs[i].ti][jobs[i].srgb] = jobs[i].err ? -1 : scene_share_texmap(g->s, &jobs[i].tm);   // (a model read twice: one copy)
     free(jobs);
 }
 
