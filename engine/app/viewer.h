@@ -88,6 +88,8 @@ typedef struct {
     long trace_starts, trace_moves;
     double trace_pass_ms, trace_budget_ms;
     double trace_work;   // passes' worth of work the GPU has done, all images
+    int trace_history;   // samples a pixel kept at the last move
+    double trace_rate;   // passes a second, lately
     int trace_rows, trace_reps;
 } ViewerStatus;
 void viewer_status(ViewerStatus *st);

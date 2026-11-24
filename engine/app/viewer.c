@@ -302,6 +302,8 @@ typedef struct {
     int gpu_shown_passes;      // its samples per pixel when it was last shown
     long trace_starts, trace_moves;   // (viewer_status: images begun, and carried over a move)
     double budget_t;           // (a browser: when the path tracer's budget was last set)
+    double pass_rate, rate_t0, rate_w0;   // the GPU path tracer's passes a second (and since when, its work then)
+    int last_keep;             // the history the last move kept (viewer_status)
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
     RenderParams last_rp;      // the camera of the last raster frame, for the GPU march
@@ -562,6 +564,11 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // many (-history, 32); with the physics running the light changes too (shadows, the cloud),
 // so fewer, and a change shows within a few frames.
 #define GPU_HISTORY_PHYSICS 12
+// ... and at most what the GPU path traces in this long: what a pixel keeps then is the same
+// age everywhere, not the same count. 12 samples were 0.28 s of an RTX 3070's work natively at
+// 2560 x 1440 (43 passes/s with its ray queries) and 0.54 s in a browser (22 passes/s, the
+// compute BVH): the shadows of moving bodies lagged twice as long there.
+#define GPU_HISTORY_PHYSICS_S 0.28
 // An edit (viewer_scene_edited) changes light on surfaces that did not move, which the samples
 // carried over cannot tell: a pixel keeps one at most while edits come, and the image starts
 // over once none came for EDIT_SETTLE seconds (the old shadow gone at once, not fading out).
@@ -574,6 +581,17 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // 0 = this GPU cannot hold the scene: the CPU path traces from now on.
 static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
     V.gpu_scene_moved |= V.sim_moved;
+    // the passes it makes a second (measured every half second): how much history is how long
+    {
+        double now = clock_s(), w = gpu_view_trace_work(V.gview);
+        if (V.rate_t0 <= 0 || w < V.rate_w0){ V.rate_t0 = now; V.rate_w0 = w; }
+        else if (now - V.rate_t0 >= 0.5){
+            double r = (w - V.rate_w0) / (now - V.rate_t0);
+            V.pass_rate = V.pass_rate > 0 ? 0.5 * (V.pass_rate + r) : r;
+            V.rate_t0 = now;
+            V.rate_w0 = w;
+        }
+    }
     if (V.edit_pending && clock_s() - V.edit_t >= EDIT_SETTLE){ V.edit_pending = 0; V.reset = 1; }
     if (!V.gpu_tracing || V.reset || depth != V.gpu_depth){
         if (!gpu_trace_begin(cam, at, depth)) return 0;
@@ -582,11 +600,20 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
         // (a slow GPU still busy with a band: the move waits for it, and the frame shows the
         // last image as it is, with the raster of its own camera, not a newer one)
         GpuTraceParams tp = trace_params(cam, depth);
-        int keep = V.gpu_scene_moved && V.o.history > GPU_HISTORY_PHYSICS ? GPU_HISTORY_PHYSICS : V.o.history;
+        int phys = GPU_HISTORY_PHYSICS;
+        if (V.pass_rate > 0){
+            int k = (int)(V.pass_rate * GPU_HISTORY_PHYSICS_S + 0.5);
+            phys = k < 2 ? 2 : k < phys ? k : phys;
+        }
+        int keep = V.gpu_scene_moved && V.o.history > phys ? phys : V.o.history;
+        // fewer samples kept: a firefly is a bigger share of each pixel's mean, so the clamp
+        // while moving is lower by as much (the same share as it had with 12)
+        if (keep < GPU_HISTORY_PHYSICS && keep == phys) tp.indirect_clamp_move *= (real)keep / GPU_HISTORY_PHYSICS;
         if (V.gpu_scene_edited && keep > GPU_HISTORY_EDIT) keep = GPU_HISTORY_EDIT;
         V.gpu_scene_moved = V.gpu_scene_edited = 0;
         int moved;
         if (gpu_view_trace_reads_tlas(V.gview, &V.scene)) scene_trees();
+        V.last_keep = keep;
         PROF(PROF_MOVE, moved = gpu_view_trace_move(V.gview, &V.scene, &tp, keep));
         V.trace_moves++;
         if (!moved){
@@ -1448,5 +1475,7 @@ void viewer_status(ViewerStatus *st){
     st->trace_moves = V.trace_moves;
     st->trace_pass_ms = V.gview ? gpu_view_trace_pass_ms(V.gview) : V.pass_ms;
     st->trace_work = V.gview ? gpu_view_trace_work(V.gview) : 0;
+    st->trace_history = V.last_keep;
+    st->trace_rate = V.pass_rate;
     if (V.gview) gpu_view_trace_band(V.gview, &st->trace_rows, &st->trace_reps, &st->trace_budget_ms);
 }
