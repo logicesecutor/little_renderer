@@ -839,6 +839,10 @@ void gpu_timer_units(GpuTimer *t, double units){
     if (t && t->used > 0) t->pass_units[t->used - 1] += units;
 }
 
+double gpu_timer_total_ms(const GpuTimer *t, int stage){
+    return t && stage >= 0 && stage < t->stages ? t->ns[stage] / 1e6 : 0;   // (as read back so far: never waits)
+}
+
 double gpu_timer_ms_per_unit(GpuTimer *t, int stage){
     if (!t || stage < 0 || stage >= t->stages) return 0;
     timer_settle(t);

@@ -41,7 +41,12 @@ struct GpuDenoise {
     WGPUBuffer guide, out;         // the guide, packed; the image
     GpuBindCache bc[PASSES + 1];   // each pass's bind group, kept
     GpuBindCache bcl[PASSES];      // ... and as the last one
+    GpuTimer *timer;               // its pass's GPU time (NULL: no timestamps)
 };
+
+void gpu_denoise_before_submit(GpuDenoise *d, WGPUCommandEncoder enc){ if (d) gpu_timer_finish(d->timer, enc); }
+void gpu_denoise_after_submit(GpuDenoise *d){ if (d) gpu_timer_submitted(d->timer); }
+double gpu_denoise_total_ms(const GpuDenoise *d){ return d ? gpu_timer_total_ms(d->timer, 0) : 0; }
 
 GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
     if (!g || g->state != GPU_READY) return NULL;
@@ -61,6 +66,7 @@ GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
     d->b = gpu_buffer(g, "denoiser B", n * 8, WGPUBufferUsage_Storage);
     d->guide = gpu_buffer(g, "denoiser guide", n * 8, WGPUBufferUsage_Storage);
     d->out = gpu_buffer(g, "denoised image", n * 16, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
+    d->timer = gpu_timer_create(g, 4, 1);
     int ok = 1;
     for (int i = 0; i <= PASSES; i++){
         for (int last = 0; last < 2; last++){
@@ -81,7 +87,11 @@ GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height){
 void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels, int passes){
     Gpu *g = d->g;
     if (passes < 1 || passes > PASSES) passes = PASSES;
-    WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+    WGPUComputePassDescriptor pd;
+    memset(&pd, 0, sizeof(pd));
+    pd.timestampWrites = gpu_timer_next(d->timer, 0);
+    if (pd.timestampWrites) gpu_timer_units(d->timer, 1);
+    WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &pd);
     // prep: pixels -> a (and the guide); then a -> b, b -> a, ...; the last pass -> out
     for (int i = 0; i <= passes; i++){
         WGPUBuffer in = i == 0 ? d->b : (i % 2 ? d->a : d->b);
@@ -110,6 +120,7 @@ void gpu_denoise_destroy(GpuDenoise *d){
     if (d->prep) wgpuComputePipelineRelease(d->prep);
     if (d->atrous) wgpuComputePipelineRelease(d->atrous);
     if (d->bgl) wgpuBindGroupLayoutRelease(d->bgl);
+    gpu_timer_destroy(d->timer);
     free(d);
 }
 

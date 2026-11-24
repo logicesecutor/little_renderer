@@ -24,6 +24,9 @@
 #include "scene/camera.h"
 #include "scene/gltf.h"
 #include "scene/gltf_write.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "scene/pbr_maps.h"
 #include "phys/world.h"
 #include "formats/json.h"
@@ -1307,6 +1310,9 @@ static struct {
     long steps;
 } S;
 
+// the CPU's time per part of the editor's frames (ms, summed: lr_profile)
+static struct { double sim, apply, relight, viewer, frame; long frames, steps; } P;
+
 static Quat quat_of_mat3(Mat3 m){              // (a rotation's quaternion: Shepperd's way)
     real tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
     Quat q;
@@ -1459,7 +1465,10 @@ static void sim_frame(double dt){
     int n = 0;
     while (S.acc >= SIM_DT && n < SIM_MAX_STEPS){ phys_step(&S.pw, (real)SIM_DT); S.acc -= SIM_DT; S.steps++; n++; }
     if (n == SIM_MAX_STEPS) S.acc = 0;               // (a slow frame: the simulation slows down, it doesn't pile up)
+    P.steps += n;
+    double t0 = clock_s();
     if (n) sim_apply();
+    P.apply += (clock_s() - t0) * 1000;
 }
 static int sim_dynamic_count(void){
     int n = 0;
@@ -2330,9 +2339,36 @@ static int editor_frame(void){
     double t = clock_s(), dt = fmin(t - E.t_prev, 0.1);
     E.t_prev = t;
     fly_step(dt);
+    double t1 = clock_s();
     sim_frame(dt);
+    double t2 = clock_s();
     relight_step();
-    return viewer_frame();
+    double t3 = clock_s();
+    int r = viewer_frame();
+    double t4 = clock_s();
+    P.sim += (t2 - t1) * 1000; P.relight += (t3 - t2) * 1000; P.viewer += (t4 - t3) * 1000; P.frame += (t4 - t) * 1000;
+    P.frames++;
+    return r;
+}
+
+// where the time goes, summed since the start (ms), for the page to take differences of:
+// the editor's own parts on the CPU (its simulation: steps and moving the objects; relighting;
+// the viewer's frame), the viewer's parts, and the GPU's (its timers: path tracer, light
+// tracer, BVH builds, guide, reprojection, denoiser)
+EXPORT const char *lr_profile(void){
+    double cpu[8], gpu[6];
+    long vf = viewer_profile(cpu, gpu);
+    int threads = 1;
+#ifdef _OPENMP
+    threads = omp_get_max_threads();
+#endif
+    jlen = 0;
+    jprintf("{\"threads\":%d,\"frames\":%ld,\"steps\":%ld,\"cpu\":{\"frame\":%.3f,\"sim\":%.3f,\"simApply\":%.3f,\"relight\":%.3f,\"viewer\":%.3f},"
+            "\"viewerFrames\":%ld,\"viewer\":{\"physics\":%.3f,\"trees\":%.3f,\"gpuScene\":%.3f,\"traceSubmit\":%.3f,\"waitGpu\":%.3f,\"raster\":%.3f,\"present\":%.3f,\"frame\":%.3f},"
+            "\"gpu\":{\"trace\":%.3f,\"light\":%.3f,\"builds\":%.3f,\"guide\":%.3f,\"reproject\":%.3f,\"denoise\":%.3f}}",
+            threads, P.frames, P.steps, P.frame, P.sim, P.apply, P.relight, P.viewer,
+            vf, cpu[0], cpu[1], cpu[2], cpu[3], cpu[4], cpu[5], cpu[6], cpu[7], gpu[0], gpu[1], gpu[2], gpu[3], gpu[4], gpu[5]);
+    return json_buf;
 }
 
 #ifdef __EMSCRIPTEN__

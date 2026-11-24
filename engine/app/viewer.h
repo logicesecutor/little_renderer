@@ -45,6 +45,11 @@ void viewer_set_keep_trace(int on);
 // display's): the path tracer sizes its work per frame by it. And the display's rate as
 // measured (window_refresh_hz).
 void viewer_set_max_hz(double hz);
+// Where the time went since the start (ms, summed; after the first second): the CPU's parts
+// of a frame (cpu: [0] physics, 1 scene trees, 2 GPU scene update, 3 trace submit, 4 waiting
+// for the GPU, 5 raster, 6 present, 7 the whole frame) and the GPU's (gpu: gpu_view_gpu_totals);
+// the frames counted. For the page's profile (lr_profile).
+long viewer_profile(double cpu[8], double gpu[6]);
 double viewer_display_hz(void);
 void viewer_set_backend(Backend b);   // (to path tracing: its image starts over)
 Backend viewer_backend(void);

@@ -164,6 +164,7 @@ void gpu_timer_submitted(GpuTimer *t);   // after submitting the encoder gpu_tim
 // time per unit of work of a stage (only the timed passes count; 0 if none was)
 void gpu_timer_units(GpuTimer *t, double units);
 double gpu_timer_ms_per_unit(GpuTimer *t, int stage);
+double gpu_timer_total_ms(const GpuTimer *t, int stage);   // its GPU time summed, as read back so far (never waits)
 void gpu_timer_print(GpuTimer *t, const char *title, const char *const *names);
 void gpu_timer_reset(GpuTimer *t);              // (waits for the round on its way) all from 0
 double gpu_timer_recent_ms_per_unit(GpuTimer *t, int stage);   // since the last call (0: nothing new; never waits)
@@ -286,6 +287,15 @@ typedef struct GpuDenoise GpuDenoise;
 GpuDenoise *gpu_denoise_create(Gpu *g, int width, int height);
 // passes: the a-trous passes, 1 to 5 (a footprint of 5, 9, 17, 33, 65 pixels); 0: all 5
 void gpu_denoise_encode(GpuDenoise *d, WGPUCommandEncoder enc, WGPUBuffer pixels, int passes);
+// its own GPU timer (when the GPU has timestamps): the pass timed in the frame it is encoded
+// in, resolved before that frame's submit (gpu_denoise_before_submit / _after_submit), and the
+// time summed so far (ms; 0 where not timed)
+void gpu_denoise_before_submit(GpuDenoise *d, WGPUCommandEncoder enc);
+void gpu_denoise_after_submit(GpuDenoise *d);
+double gpu_denoise_total_ms(const GpuDenoise *d);
+// the path tracer's GPU time summed so far (ms; 0 where not timed): [0] path tracer, 1 light
+// tracer, 2 BVH builds, 3 guide, 4 reprojection, 5 (left to the caller: the denoiser's)
+void gpu_trace_gpu_totals(GpuTrace *t, double ms[6]);
 WGPUBuffer gpu_denoise_output(GpuDenoise *d);
 void gpu_denoise_destroy(GpuDenoise *d);
 

@@ -291,10 +291,10 @@ struct GpuTrace {
 // (the guide: an image's first hits for the denoiser and the reprojection, once per image;
 // timed apart, or every band that begins an image counts it as path tracing: while things
 // move, a pass seemed 2.7x cheaper than it was, and the bands were sized from that)
-enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_WF0, NTS = TS_WF0 + 6 };
+enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_WF0, TS_REPROJECT = TS_WF0 + 6, NTS };
 static const char *const TS_NAMES[NTS] = {"path tracer", "light tracer (caustics)", "BVH builds", "guide",
     "  wavefront: camera rays", "  wavefront: extend", "  wavefront: shade", "  wavefront: sizes", "  wavefront: shadow rays",
-    "  wavefront: into the image"};
+    "  wavefront: into the image", "reprojection"};
 
 // a compute pass, timed under `stage` when timing is on; `units`: the work it does
 static WGPUComputePassEncoder timed_pass(GpuTrace *t, WGPUCommandEncoder enc, int stage, double units){
@@ -1955,7 +1955,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
         wgpuQueueWriteBuffer(g->queue, t->rp_params, 0, &R, sizeof(R));
         WGPUBuffer b[3] = {t->rp_params, t->acc[1 - t->cur], t->acc[t->cur]};
         WGPUBindGroup bg = gpu_bind_cached_buffers(g, &t->bc_reproject, t->rp_bgl, b, 3);
-        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
+        WGPUComputePassEncoder pass = timed_pass(t, enc, TS_REPROJECT, 1);
         wgpuComputePassEncoderSetPipeline(pass, t->rp_pipe);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
         gpu_dispatch(pass, (size_t)t->w * t->h);
@@ -1967,6 +1967,12 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
 }
 
 GpuTimer *gpu_trace_timer(GpuTrace *t){ return t ? t->timer : NULL; }
+void gpu_trace_gpu_totals(GpuTrace *t, double ms[6]){
+    static const int st[5] = {TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_REPROJECT};
+    for (int k = 0; k < 5; k++) ms[k] = t ? gpu_timer_total_ms(t->timer, st[k]) : 0;
+    ms[5] = 0;
+    if (t && t->wavefront) for (int k = TS_WF0; k < TS_WF0 + 6; k++) ms[0] += gpu_timer_total_ms(t->timer, k);
+}
 
 void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;

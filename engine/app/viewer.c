@@ -1368,6 +1368,11 @@ void viewer_set_settle(double seconds){ V.settle = seconds; }
 void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
 void viewer_set_max_hz(double hz){ V.max_hz = hz > 0 ? hz : 0; V.budget_t = 0; if (V.gview) trace_budget(); }
 double viewer_display_hz(void){ return V.win ? window_refresh_hz(V.win) : 0; }
+long viewer_profile(double cpu[8], double gpu[6]){
+    for (int k = 0; k < 8; k++) cpu[k] = k < PROF_N ? V.prof[k] * 1000.0 : 0;
+    gpu_view_gpu_totals(V.gview, gpu);
+    return V.prof_frames;
+}
 
 void viewer_set_backend(Backend b){
     if (b == V.mode) return;

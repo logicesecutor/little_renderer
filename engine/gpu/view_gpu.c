@@ -10,6 +10,7 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 void gpu_view_destroy(GpuView *v){ (void)v; }
 int gpu_view_ready(GpuView *v){ (void)v; return -1; }
 int gpu_view_trace_compiling(const GpuView *v){ (void)v; return 0; }
+void gpu_view_gpu_totals(GpuView *v, double ms[6]){ (void)v; for (int k = 0; k < 6; k++) ms[k] = 0; }
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){ (void)v; (void)argb; (void)w; (void)h; (void)x; (void)y; }
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
@@ -752,8 +753,10 @@ static void frame_end(GpuView *v, WGPUCommandEncoder enc, WGPURenderPipeline pip
             wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &ext);
         }
     }
+    gpu_denoise_before_submit(v->den, enc);     // (its pass's time, if it ran in this frame)
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
+    gpu_denoise_after_submit(v->den);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     if (capture){
@@ -1067,6 +1070,10 @@ int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 double gpu_view_trace_work(const GpuView *v){ return v ? v->t_work : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
 int gpu_view_trace_compiling(const GpuView *v){ return v && v->trace && !v->trace_failed && !v->t_ready_seen; }
+void gpu_view_gpu_totals(GpuView *v, double ms[6]){
+    gpu_trace_gpu_totals(v ? v->trace : NULL, ms);
+    ms[5] = v ? gpu_denoise_total_ms(v->den) : 0;
+}
 int gpu_view_trace_reads_tlas(const GpuView *v, const Scene *s){ return !v || !v->trace || gpu_trace_reads_tlas(v->trace, s); }
 
 static void on_trace_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
@@ -1097,8 +1104,10 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     if (v->t_prep == 1) gpu_trace_clear(v->trace, enc);
     wgpuCommandEncoderCopyBufferToBuffer(enc, traced_image(v, enc), 0, v->t_rb, 0, bytes);
+    gpu_denoise_before_submit(v->den, enc);
     WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
     wgpuQueueSubmit(g->queue, 1, &cb);
+    gpu_denoise_after_submit(v->den);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
     v->t_read_fn = fn;

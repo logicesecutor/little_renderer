@@ -137,6 +137,9 @@ void gpu_view_destroy(GpuView *v);
 // since the last reset: what = 0 a pass (1 sample per pixel, the whole image), 1 the tree
 // builds of a frame that had some; 0 when not timed.
 double gpu_view_gpu_ms(GpuView *v, int what);
+// the GPU time summed since the start (its timers, as read back so far), ms: [0] path tracer,
+// 1 light tracer, 2 BVH builds, 3 guide, 4 reprojection, 5 denoiser (0 where not timed)
+void gpu_view_gpu_totals(GpuView *v, double ms[6]);
 void gpu_view_gpu_ms_reset(GpuView *v);
 // The denoiser run n times on the samples there are now (gpu_view_trace_denoise on, a pass
 // made), waited for: the milliseconds per run on the CPU's clock; < 0 if it cannot run.
