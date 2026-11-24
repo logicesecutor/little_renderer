@@ -77,9 +77,8 @@ typedef struct { uint32_t *w; size_t n, cap; } Words;
 static void put(Wgsl *W, Words *b, uint32_t x){
     if (b->n == b->cap){
         size_t cap = b->cap ? 2 * b->cap : 256;
-        uint32_t *v = realloc(b->w, cap * sizeof(uint32_t));
-        if (!v) wgsl_fail(W, 0, "out of memory");
-        b->w = v; b->cap = cap;
+        b->w = wgsl_grow(W, b->w, cap * sizeof(uint32_t));
+        b->cap = cap;
     }
     b->w[b->n++] = x;
 }
@@ -262,14 +261,13 @@ static uint32_t composite(Sp *S, Type *t, int lay){
         return id;
     }
     StructInfo *si = t->s;
-    uint32_t *m = malloc((size_t)(si->n ? si->n : 1) * sizeof(uint32_t));
-    if (!m) wgsl_fail(S->W, 0, "out of memory");
+    uint32_t *m = wgsl_grow(S->W, NULL, (size_t)(si->n ? si->n : 1) * sizeof(uint32_t));
     for (int i = 0; i < si->n; i++) m[i] = lay ? tid_l(S, si->mt[i]) : tid(S, si->mt[i]);
     id = new_id(S);
     put(S->W, &S->globals, ((uint32_t)(2 + si->n) << 16) | OpTypeStruct);
     put(S->W, &S->globals, id);
     for (int i = 0; i < si->n; i++) put(S->W, &S->globals, m[i]);
-    free(m);
+    wgsl_drop(S->W, m, 0);
     op_str(S, &S->names, OpName, 1, &id, si->name, si->nlen, 0, NULL);
     for (int i = 0; i < si->n; i++){
         uint32_t pre[2] = {id, (uint32_t)i};
@@ -337,9 +335,8 @@ static uint32_t const_bits(Sp *S, Type *t, uint64_t bits){
     else OP(S, &S->globals, OpConstant, ty, id, (uint32_t)bits);
     if (S->nconsts == S->cap_consts){
         int cap = S->cap_consts ? 2 * S->cap_consts : 64;
-        void *v = realloc(S->consts, (size_t)cap * sizeof(*S->consts));
-        if (!v) wgsl_fail(S->W, 0, "out of memory");
-        S->consts = v; S->cap_consts = cap;
+        S->consts = wgsl_grow(S->W, S->consts, (size_t)cap * sizeof(*S->consts));
+        S->cap_consts = cap;
     }
     S->consts[S->nconsts].t = t; S->consts[S->nconsts].bits = bits; S->consts[S->nconsts].id = id;
     S->nconsts++;
@@ -353,9 +350,8 @@ static uint32_t c_null(Sp *S, Type *t){
     OP(S, &S->globals, OpConstantNull, ty, id);
     if (S->nconsts == S->cap_consts){
         int cap = S->cap_consts ? 2 * S->cap_consts : 64;
-        void *v = realloc(S->consts, (size_t)cap * sizeof(*S->consts));
-        if (!v) wgsl_fail(S->W, 0, "out of memory");
-        S->consts = v; S->cap_consts = cap;
+        S->consts = wgsl_grow(S->W, S->consts, (size_t)cap * sizeof(*S->consts));
+        S->cap_consts = cap;
     }
     S->consts[S->nconsts].t = t; S->consts[S->nconsts].bits = ~0ull; S->consts[S->nconsts].id = id;
     S->nconsts++;
@@ -427,16 +423,13 @@ static Sp *SP(Cx *c){ return &c->sp; }
 static void sym_push(Cx *c, Sym s){
     if (c->nsyms == c->cap_syms){
         int cap = c->cap_syms ? 2 * c->cap_syms : 256;
-        Sym *v = realloc(c->syms, (size_t)cap * sizeof(Sym));
-        if (!v) wgsl_fail(c->W, 0, "out of memory");
-        c->syms = v; c->cap_syms = cap;
+        c->syms = wgsl_grow(c->W, c->syms, (size_t)cap * sizeof(Sym));
+        c->cap_syms = cap;
     }
     c->syms[c->nsyms++] = s;
 }
 static void scope_open(Cx *c){
-    int *v = realloc(c->scopes, (size_t)(c->nscopes + 1) * sizeof(int));
-    if (!v) wgsl_fail(c->W, 0, "out of memory");
-    c->scopes = v;
+    c->scopes = wgsl_grow(c->W, c->scopes, (size_t)(c->nscopes + 1) * sizeof(int));
     c->scopes[c->nscopes++] = c->nsyms;
 }
 static void scope_close(Cx *c){ c->nsyms = c->scopes[--c->nscopes]; }
@@ -595,9 +588,8 @@ static uint32_t const_id(Cx *c, Type *t, const double *cv){
     op(S, &S->globals, OpConstantComposite, 2 + t->n, a);
     if (S->ncc == S->cap_cc){
         int cap = S->cap_cc ? 2 * S->cap_cc : 64;
-        void *v = realloc(S->cc, (size_t)cap * sizeof(*S->cc));
-        if (!v) wgsl_fail(c->W, 0, "out of memory");
-        S->cc = v; S->cap_cc = cap;
+        S->cc = wgsl_grow(c->W, S->cc, (size_t)cap * sizeof(*S->cc));
+        S->cap_cc = cap;
     }
     S->cc[S->ncc].t = t; memcpy(S->cc[S->ncc].v, cv, sizeof(double) * (size_t)t->n); S->cc[S->ncc].id = id; S->ncc++;
     return id;
@@ -1275,6 +1267,15 @@ static int subgroup_builtin(Cx *c, Node *call, Val *out){
 #undef IS
 }
 
+// A builtin's arguments: lo to hi of them, or the compile fails here. Every block below asks
+// before it reads call->list (a missing argument was read past the list's end: a shader with
+// "dot(a)" read memory that was not the compiler's).
+static void need(Cx *c, const Node *call, int lo, int hi){
+    if (call->n >= lo && call->n <= hi) return;
+    if (lo == hi) wgsl_fail(c->W, call->line, "%.*s takes %d argument%s, not %d", call->nlen, call->name, lo, lo == 1 ? "" : "s", call->n);
+    wgsl_fail(c->W, call->line, "%.*s takes %d to %d arguments, not %d", call->nlen, call->name, lo, hi, call->n);
+}
+
 static int builtin(Cx *c, Node *call, Val *out){
     Sp *S = SP(c);
     const char *s = call->name; int l = call->nlen, n = call->n, line = call->line;
@@ -1299,6 +1300,8 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("min") || IS("max") || IS("clamp") || IS("abs") || IS("sign") || IS("mix") || IS("saturate")){
+        const int args = IS("min") || IS("max") ? 2 : IS("clamp") || IS("mix") ? 3 : 1;
+        need(c, call, args, args);
         for (int k = 0; k < n && k < 3; k++) v[k] = loaded(c, call->list[k]);
         common(c, v, n, line);
         int f = is_float(v[0].t), sg = is_sint(v[0].t);
@@ -1319,18 +1322,21 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("length") || IS("distance")){
+        need(c, call, IS("length") ? 1 : 2, IS("length") ? 1 : 2);
         for (int k = 0; k < n; k++) v[k] = loaded(c, call->list[k]);
         common(c, v, n, line);
         *out = gl(c, IS("length") ? G450_Length : G450_Distance, v, n, scalar_of(v[0].t));
         return 1;
     }
     if (IS("cross")){
+        need(c, call, 2, 2);
         v[0] = loaded(c, call->list[0]); v[1] = loaded(c, call->list[1]);
         common(c, v, 2, line);
         *out = gl(c, G450_Cross, v, 2, v[0].t);
         return 1;
     }
     if (IS("refract")){
+        need(c, call, 3, 3);
         v[0] = loaded(c, call->list[0]); v[1] = loaded(c, call->list[1]); v[2] = loaded(c, call->list[2]);
         common(c, v, 2, line);
         v[2] = as_type(c, v[2], scalar_of(v[0].t), line);
@@ -1338,6 +1344,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("dot")){
+        need(c, call, 2, 2);
         v[0] = loaded(c, call->list[0]); v[1] = loaded(c, call->list[1]);
         common(c, v, 2, line);
         if (!is_float(v[0].t)) wgsl_fail(c->W, line, "dot of integers is not supported");
@@ -1346,9 +1353,17 @@ static int builtin(Cx *c, Node *call, Val *out){
         *out = mkval(scalar_of(v[0].t), r);
         return 1;
     }
-    if (IS("determinant")){ v[0] = loaded(c, call->list[0]); *out = gl(c, G450_Determinant, v, 1, t_f32(S)); return 1; }
-    if (IS("transpose")){
+    if (IS("determinant")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
+        if (v[0].t->k != T_MAT) wgsl_fail(c->W, line, "determinant takes a matrix");
+        *out = gl(c, G450_Determinant, v, 1, t_f32(S));
+        return 1;
+    }
+    if (IS("transpose")){
+        need(c, call, 1, 1);
+        v[0] = loaded(c, call->list[0]);
+        if (v[0].t->k != T_MAT) wgsl_fail(c->W, line, "transpose takes a matrix");
         Type *rt = t_mat(S, v[0].t->e->n, v[0].t->n);
         uint32_t r = nid(c);
         E(c, OpTranspose, tid(S, rt), r, value(c, &v[0]));
@@ -1356,6 +1371,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("select")){
+        need(c, call, 3, 3);
         v[0] = loaded(c, call->list[0]); v[1] = loaded(c, call->list[1]); v[2] = loaded(c, call->list[2]);
         common(c, v, 2, line);
         if (!is_bool(v[2].t)) wgsl_fail(c->W, line, "select's condition must be bool");
@@ -1367,6 +1383,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("any") || IS("all")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         if (width_of(v[0].t) == 1){ *out = v[0]; return 1; }
         uint32_t r = nid(c);
@@ -1375,6 +1392,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("countOneBits") || IS("reverseBits")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         if (is_abstract(v[0].t)) v[0] = as_type(c, v[0], concrete(c, v[0].t), line);
         uint32_t r = nid(c);
@@ -1383,6 +1401,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("countLeadingZeros") || IS("countTrailingZeros") || IS("firstLeadingBit") || IS("firstTrailingBit")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         if (is_abstract(v[0].t)) v[0] = as_type(c, v[0], concrete(c, v[0].t), line);
         Type *t = v[0].t, *ut = t_vec(S, t_u32(S), width_of(t));
@@ -1404,6 +1423,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("pack2x16float") || IS("pack2x16snorm") || IS("pack2x16unorm") || IS("pack4x8snorm") || IS("pack4x8unorm")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         if (is_abstract(v[0].t)) v[0] = as_type(c, v[0], concrete(c, v[0].t), line);
         uint32_t inst = IS("pack2x16float") ? G450_PackHalf2x16 : IS("pack2x16snorm") ? G450_PackSnorm2x16 : IS("pack2x16unorm") ? G450_PackUnorm2x16 :
@@ -1412,6 +1432,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("unpack2x16float") || IS("unpack2x16snorm") || IS("unpack2x16unorm") || IS("unpack4x8snorm") || IS("unpack4x8unorm")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         v[0] = convert(c, v[0], t_u32(S), line);
         int four = s[6] == '4';
@@ -1421,6 +1442,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("dpdx") || IS("dpdy") || IS("fwidth") || IS("dpdxFine") || IS("dpdyFine") || IS("dpdxCoarse") || IS("dpdyCoarse")){
+        need(c, call, 1, 1);
         v[0] = loaded(c, call->list[0]);
         if (is_abstract(v[0].t)) v[0] = as_type(c, v[0], concrete(c, v[0].t), line);
         uint32_t o = IS("dpdx") ? OpDPdx : IS("dpdy") ? OpDPdy : IS("fwidth") ? OpFwidth : IS("dpdxFine") ? OpDPdxFine :
@@ -1432,6 +1454,8 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("bitcast")){
+        need(c, call, 1, 1);
+        if (!call->type || call->type->n < 1) wgsl_fail(c->W, line, "bitcast<T>(x)");
         Type *to = resolve_type(c, call->type->list[0]);
         v[0] = loaded(c, call->list[0]);
         if (is_abstract(v[0].t)) v[0] = as_type(c, v[0], concrete(c, v[0].t), line);
@@ -1443,6 +1467,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("workgroupBarrier") || IS("storageBarrier")){
+        need(c, call, 0, 0);
         // execution and memory: workgroup scope; storage: device memory made visible too
         int st = IS("storageBarrier");
         E(c, OpControlBarrier, c_u32(S, 2), c_u32(S, st ? 1 : 2), c_u32(S, st ? 0x48 : 0x108));
@@ -1451,6 +1476,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("workgroupUniformLoad")){
+        need(c, call, 1, 1);
         Val p = ptr_arg(c, call->list[0], line);
         E(c, OpControlBarrier, c_u32(S, 2), c_u32(S, 2), c_u32(S, 0x108));
         Val r; memset(&r, 0, sizeof(r)); r.t = p.t->e; r.id = p.id; r.ref = 1; r.sc = p.t->sc;
@@ -1464,6 +1490,8 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (l > 6 && !memcmp(s, "atomic", 6)){
+        const int args = IS("atomicLoad") ? 1 : IS("atomicCompareExchangeWeak") ? 3 : 2;
+        need(c, call, args, args);
         Val p = ptr_arg(c, call->list[0], line);
         if (p.t->e->k != T_ATOMIC) wgsl_fail(c->W, line, "%.*s needs a pointer to an atomic", l, s);
         Type *t = p.t->e->e;
@@ -1505,6 +1533,7 @@ static int builtin(Cx *c, Node *call, Val *out){
         return 1;
     }
     if (IS("arrayLength")){
+        need(c, call, 1, 1);
         Node *a = call->list[0];
         if (a->k != N_ADDR) wgsl_fail(c->W, line, "arrayLength(&buffer)");
         Node *x = a->a;
@@ -1529,6 +1558,7 @@ static int builtin(Cx *c, Node *call, Val *out){
     if (l > 8 && !memcmp(s, "rayQuery", 8)) return ray_query_builtin(c, call, out);
     if (l > 8 && !memcmp(s, "subgroup", 8)) return subgroup_builtin(c, call, out);
     if (IS("textureLoad") || IS("textureDimensions")){
+        if (IS("textureLoad")) need(c, call, 3, 3); else need(c, call, 1, 2);
         Val tex = eval(c, call->list[0]);
         if (!tex.ref || (tex.t->k != T_TEX && tex.t->k != T_TEXDEPTH)) wgsl_fail(c->W, line, "%.*s on a texture", l, s);
         int depth = tex.t->k == T_TEXDEPTH;
@@ -1886,7 +1916,7 @@ static void resolve_global(Cx *c, int i){
             if (v.t != t) wgsl_fail(c->W, d->line, "the const's value has another type");
         }
         if (!v.has_cv || S->fbody.n) wgsl_fail(c->W, d->line, "a const needs a constant value");
-        free(S->fbody.w);
+        wgsl_drop(c->W, S->fbody.w, 0);
         S->fbody = saved;
         g->cv = v;
         g->resolved = 1;
@@ -1934,7 +1964,7 @@ static void resolve_global(Cx *c, int i){
             Val v = eval(c, d->init);
             if (is_abstract(v.t)) v = as_type(c, v, t, d->line);
             if (!v.has_cv || S->fbody.n) wgsl_fail(c->W, d->line, "a module-scope var starts at a constant");
-            free(S->fbody.w);
+            wgsl_drop(c->W, S->fbody.w, 0);
             S->fbody = saved;
             init = const_id(c, t, v.cv);
         } else init = (sc != SC_Workgroup && (is_scalar(t) || t->k == T_VEC)) ? const_id(c, t, mkconst(t, 0).cv) : c_null(S, t);
@@ -1976,9 +2006,8 @@ static void resolve_fn(Cx *c, int i){
 static void iface_add(Cx *c, uint32_t var){
     if (c->niface == c->cap_iface){
         int cap = c->cap_iface ? 2 * c->cap_iface : 16;
-        uint32_t *v = realloc(c->iface, (size_t)cap * sizeof(uint32_t));
-        if (!v) wgsl_fail(c->W, 0, "out of memory");
-        c->iface = v; c->cap_iface = cap;
+        c->iface = wgsl_grow(c->W, c->iface, (size_t)cap * sizeof(uint32_t));
+        c->cap_iface = cap;
     }
     c->iface[c->niface++] = var;
 }
@@ -2134,26 +2163,26 @@ static void emit_fn(Cx *c, int i){
             for (uint32_t k = 0; k < len; k++) put(c->W, &S->fbody, body.w[at + k]);
             at += len ? len : 1;
         }
-        free(body.w);
+        wgsl_drop(c->W, body.w, 0);
         body = S->fbody;
     }
     for (size_t k = 0; k < S->fvars.n; k++) put(c->W, fw, S->fvars.w[k]);
     for (size_t k = 0; k < body.n; k++) put(c->W, fw, body.w[k]);
     OP(S, fw, OpFunctionEnd);
-    free(S->fvars.w); free(body.w);
+    wgsl_drop(c->W, S->fvars.w, 0); wgsl_drop(c->W, body.w, 0);
     memset(&S->fvars, 0, sizeof(S->fvars));
     memset(&S->fbody, 0, sizeof(S->fbody));
     // the entry point itself
     if (d->stage){
         f->io = wgsl_alloc(c->W, (size_t)(c->niface + 1) * sizeof(uint32_t));
-        memcpy(f->io, c->iface, (size_t)c->niface * sizeof(uint32_t));
+        if (c->niface) memcpy(f->io, c->iface, (size_t)c->niface * sizeof(uint32_t));   // (none: iface is NULL)
         f->nio = c->niface;
         if (d->stage == ST_COMPUTE){
             uint32_t wg[3] = {1, 1, 1};
             Words saved = S->fbody;
             memset(&S->fbody, 0, sizeof(S->fbody));
             for (int k = 0; k < 3; k++) if (d->wg[k]) wg[k] = (uint32_t)const_int(c, d->wg[k], d->line);
-            free(S->fbody.w);
+            wgsl_drop(c->W, S->fbody.w, 0);
             S->fbody = saved;
             OP(S, &S->modes, OpExecutionMode, f->id, 17, wg[0], wg[1], wg[2]);
         } else if (d->stage == ST_FRAGMENT){
@@ -2251,9 +2280,10 @@ void wgsl_emit(Wgsl *W, uint32_t **words, size_t *nwords){
         for (size_t k = 0; k < parts[p]->n; k++) put(W, &out, parts[p]->w[k]);
     out.w[3] = S->bound + 1;
     Words *all[] = {&S->caps, &S->ext, &S->mem, &S->entries, &S->modes, &S->names, &S->decos, &S->globals, &S->fns, &S->fvars, &S->fbody};
-    for (size_t p = 0; p < sizeof(all) / sizeof(all[0]); p++) free(all[p]->w);
-    free(S->consts); free(S->cc);
-    free(c->syms); free(c->scopes); free(c->iface);
+    for (size_t p = 0; p < sizeof(all) / sizeof(all[0]); p++) wgsl_drop(W, all[p]->w, 0);
+    wgsl_drop(W, S->consts, 0); wgsl_drop(W, S->cc, 0);
+    wgsl_drop(W, c->syms, 0); wgsl_drop(W, c->scopes, 0); wgsl_drop(W, c->iface, 0);
+    wgsl_drop(W, out.w, 1);                // (the caller's now)
     *words = out.w;
     *nwords = out.n;
 }

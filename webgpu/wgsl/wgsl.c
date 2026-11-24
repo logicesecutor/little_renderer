@@ -55,6 +55,8 @@ int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords,
     }
     for (int i = 0; i < w.nblocks; i++) free(w.blocks[i]);
     free(w.blocks);
+    for (int i = 0; i < w.nheap; i++) free(w.heap[i]);   // (after an error: what the emitter still held)
+    free(w.heap);
     free(w.toks);
     free(with);
     if (failed){ free(*words); *words = NULL; *nwords = 0; }

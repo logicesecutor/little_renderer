@@ -16,6 +16,28 @@ void *wgsl_alloc(Wgsl *w, size_t n){
     return p;
 }
 
+void *wgsl_grow(Wgsl *w, void *old, size_t n){
+    int at = -1;
+    for (int i = w->nheap - 1; old && i >= 0 && at < 0; i--) if (w->heap[i] == old) at = i;
+    if (at < 0 && w->nheap == w->cap_heap){          // (room for it first: nothing to undo if that fails)
+        int cap = w->cap_heap ? 2 * w->cap_heap : 32;
+        void **h = realloc(w->heap, (size_t)cap * sizeof(*h));
+        if (!h) wgsl_fail(w, 0, "out of memory");
+        w->heap = h; w->cap_heap = cap;
+    }
+    void *p = realloc(old, n ? n : 1);
+    if (!p) wgsl_fail(w, 0, "out of memory");          // (old is still held, and freed at the end)
+    if (at < 0) w->heap[w->nheap++] = p; else w->heap[at] = p;
+    return p;
+}
+
+void wgsl_drop(Wgsl *w, void *p, int keep){
+    if (!p) return;
+    for (int i = w->nheap - 1; i >= 0; i--)
+        if (w->heap[i] == p){ w->heap[i] = w->heap[--w->nheap]; break; }
+    if (!keep) free(p);
+}
+
 void wgsl_fail(Wgsl *w, int line, const char *fmt, ...){
     char msg[512];
     va_list ap;

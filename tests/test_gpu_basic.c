@@ -14,13 +14,57 @@
 #include "test_gpu_util.h"
 #endif
 
+#ifdef LR_VK
+// our WGSL compiler (webgpu/wgsl): 0 and the words, or 1 and a message
+int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
+
+// A builtin called with too few (or too many) arguments is refused with a message: the
+// compiler read the missing ones past the end of the call's list (a heap overflow, which
+// "make SAN=1" shows here). No GPU needed.
+static void wgsl_arguments(void){
+    static const char *const calls[] = {
+        "dot(a)", "dot()", "cross(a)", "refract(a, a)", "select(a, a)", "select()", "determinant()", "transpose()",
+        "any()", "all()", "min(a)", "max()", "clamp(a, a)", "mix(a)", "abs()", "length()", "distance(a)",
+        "countOneBits()", "reverseBits()", "firstLeadingBit()", "countTrailingZeros()", "pack4x8unorm()", "unpack4x8unorm()",
+        "bitcast<vec3u>()", "normalize()", "pow(a)", "atomicLoad()", "atomicStore(&n)", "atomicAdd(&n)",
+        "atomicCompareExchangeWeak(&n, 1u)", "arrayLength()", "workgroupBarrier(1)", "dot(a, a, a)", "clamp(a, a, a, a, a, a)",
+        "transpose(a)", "determinant(a)"};
+    int refused = 0, total = (int)(sizeof(calls) / sizeof(calls[0]));
+    for (int i = 0; i < total; i++){
+        char src[512], err[256] = "";
+        snprintf(src, sizeof(src), "struct B { v: array<f32> };\n@group(0) @binding(0) var<storage, read_write> b: B;\n"
+                 "@group(0) @binding(1) var<storage, read_write> n: atomic<u32>;\n"
+                 "@compute @workgroup_size(1) fn main() { let a = vec3f(b.v[0]); let x = %s; }\n", calls[i]);
+        uint32_t *w = NULL;
+        size_t nw = 0;
+        int r = wgsl_to_spirv(src, strlen(src), &w, &nw, err, sizeof(err));
+        if (r && err[0]) refused++;
+        else printf("    not refused: %s\n", calls[i]);
+        free(w);
+    }
+    char what[120];
+    snprintf(what, sizeof(what), "WGSL: %d of %d builtin calls with the wrong arguments refused with a message", refused, total);
+    check(what, refused == total);
+    const char *good = "struct B { v: array<f32> };\n@group(0) @binding(0) var<storage, read_write> b: B;\n"
+                       "@compute @workgroup_size(1) fn main() { let a = vec3f(b.v[0]); b.v[1] = dot(a, a) + select(1.0, 2.0, a.x > 0.0); }\n";
+    uint32_t *w = NULL;
+    size_t nw = 0;
+    char err[256] = "";
+    check("... and the same calls with theirs compile", wgsl_to_spirv(good, strlen(good), &w, &nw, err, sizeof(err)) == 0 && nw > 0);
+    free(w);
+}
+#endif
+
 int main(void){
+#ifdef LR_VK
+    wgsl_arguments();
+#endif
     Gpu *g = gpu_create(NULL, 64, 64);
     for (int k = 0; k < 20000 && g && gpu_state(g) == GPU_PENDING; k++) gpu_poll(g);
     if (!g || gpu_state(g) != GPU_READY){
         printf("test_gpu_basic: no GPU (%s): skipped\n", g ? gpu_message(g) : "none");
         if (g) gpu_destroy(g);
-        return 0;
+        return failures ? 1 : 0;
     }
 #ifdef LR_GPU
     printf("the GPU layer's basics: buffers, copies, clears, readback\n");

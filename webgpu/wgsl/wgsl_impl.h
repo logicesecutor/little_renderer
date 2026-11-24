@@ -110,12 +110,20 @@ typedef struct {
     FnDecl *fns; int nfns;
     // memory: everything comes from one arena, freed at the end
     void **blocks; int nblocks;
+    // ... and what grows (the emitter's word buffers and tables: wgsl_grow), freed there too if
+    // an error left before its owner did
+    void **heap; int nheap, cap_heap;
     // errors: the first one ends the compilation
     char *err; size_t errlen;
     jmp_buf fail;
 } Wgsl;
 
 void *wgsl_alloc(Wgsl *w, size_t n);                    // zeroed, freed with the compilation
+// Memory that grows, as realloc (old NULL: new), known to the compilation: what is still held
+// when it ends is freed (an error leaves by longjmp, from anywhere). Never NULL: fails
+// instead. wgsl_drop lets one go: freed, or (keep) left to the caller, the compilation's no more.
+void *wgsl_grow(Wgsl *w, void *old, size_t n);
+void wgsl_drop(Wgsl *w, void *p, int keep);
 void wgsl_fail(Wgsl *w, int line, const char *fmt, ...);  // reports and leaves (longjmp)
 void wgsl_lex(Wgsl *w);
 void wgsl_parse(Wgsl *w);
