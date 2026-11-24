@@ -67,6 +67,11 @@ the scene with the sky demo is made in 0.8 s instead of 4.1, the CPU path tracer
 - The GPU is used from the page's main thread only, as before.
 - To check that a static host still works: `node tools/serve.mjs web/build -noisolate` (the
   page then loads `index.js`).
+- **The editor** (`make web-editor`) is built both ways too: `engine.js` and `engine_mt.js`
+  (`-pthread`, OpenMP through `omp_web.c`, a worker per hardware thread). Its page loads
+  `engine_mt.js` when it is cross-origin isolated and `engine.js` otherwise (or with
+  `?threads=1`); Internals shows the CPU threads. A game exported from the editor carries both
+  and its README says which headers the threaded one needs.
 
 Click the image, then the keys of `bin/view` work (USAGE.md section 4). The page's links
 are presets; **any option of `bin/view` goes in the address**, `-name value` becoming
@@ -243,7 +248,14 @@ no outside denoiser is used.
   distance from the old eye within 2% (25% in a medium) plus how fast the distance changes
   there. A pixel that matches none (it was hidden, or off screen) starts from nothing and
   shows the rasterized scene until its first sample.
-- **History:** a pixel keeps at most `-history` samples (32), 12 while the physics runs.
+- **History:** a pixel keeps at most `-history` samples (32); while the physics runs, at most
+  what the path tracer makes in 0.28 s (`GPU_HISTORY_PHYSICS_S`, from its passes a second
+  measured every half second; between 2 and 12). 12 samples were 0.28 s natively (an RTX 3070
+  at 2560 × 1440: 43 passes/s with its ray queries) but 0.54 s in a browser (22 passes/s, the
+  compute BVH walk, and no faster display rate to spread over), so a moving body's shadow
+  trailed it twice as long in the page; now the page keeps ~8 at ~27 passes/s, the same age.
+  With fewer samples kept a firefly is a bigger share of a pixel's mean, so the clamp while
+  moving (`-iclampmove`, below) is lowered by as much (8/12 of it with 8): the same share.
   The cap ages old samples: a change of light (a moving shadow, the cloud) shows within a
   few frames, and the blur of blending 4 pixels again every frame stays short. Taking the
   nearest old pixel instead does not blur, but it duplicates pixels under subpixel motion
@@ -259,6 +271,16 @@ no outside denoiser is used.
   251; the passes per second while turning drop from 42 to 26, the image about as clean (the
   same 12 samples kept: RMS against the still image 1.23 -> 1.25 levels), and a still image
   converges as before (its band stays 85% of a 60 Hz frame).
+- **A frame rate cap** (`lr_set_frame_cap`, the editor's Display · 60 · 30 under the
+  resolution): a page cannot turn vsync off, the browser shows its frames in step with the
+  display (`requestAnimationFrame`, no present mode to choose). The cap is the page's
+  equivalent: the frames in between are skipped, and the path tracer sizes its band by the
+  capped rate (`viewer_set_max_hz`), 60% of the longer frame while moving (the rest for the
+  guide, reprojection, denoiser and composite a new image costs, ~6 ms at 2560 × 1440).
+  Turning at 2560 × 1440 on a ~140 Hz display: uncapped the image followed the camera in 148
+  of 252 frames (125 frames/s); at 60, in 95% of the frames shown (108 images in 2 s, 57
+  frames/s); at 30, in every one. The passes a second stay the same (27-28): the cap trades
+  frames for images that keep up, not path tracing.
 - **While things move** the indirect clamp is `-iclampmove` (1) instead of `-iclamp` (4):
   the samples a pixel keeps then are few, and a firefly the denoiser spreads stays a blotch as
   long as they are kept. In the editor's Play, turning, the red ball's light bounced off the
@@ -286,7 +308,10 @@ physics demo (`-sim on`, 11 bodies, air and cloud on the GPU) 50 frames/s, 35 at
 
 Try it: `bin/view -backend rt -scene spheres`, `bin/view -backend rt -sim on`, or in a
 browser `?backend=rt&sim=on`. In `hybrid` mode (the default) the rasterizer still draws while
-the camera moves, and the path tracer takes over once it settles.
+the camera moves, and the path tracer takes over once it settles. The editor's page offers
+Raster and Path traced only (Path traced by default); `hybrid` stays in the engine and the
+address (`?backend=hybrid` in the editor gets Path traced, a scene saved in Auto opens path
+traced).
 
 ### 2.6 Caustics on the GPU (`-caustics lt`, `-photoncache`)
 
@@ -419,6 +444,33 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
   the page instead of 16.6. The editor's light probe is made in steps between frames from the
   start (as after an edit), not before the first frame: the page drew 3.6 s after it was
   loaded, now 0.6 s.
+- **Compiling, said.** The path tracer's pipelines are compiled once per browser after each
+  change of the engine's shaders (or an update of the browser): Chrome keeps them in its cache
+  across visits and restarts (a warm start's first pass 0.8 s after the page; a cold one
+  12-17 s). Until they are ready the editor draws raster and says so ("Compiling the path
+  tracer", the seconds so far): `lr_status`'s `trace.compiling` (`gpu_view_trace_compiling`).
+- **Where the time goes** (`lr_profile`, summed since the start for the page to take
+  differences of): the editor's parts on the CPU (its simulation's steps and moving the
+  objects, relighting, the viewer's frame), the viewer's (physics, trees, GPU scene, trace
+  submit, waiting for the GPU, raster, present) and the GPU's own timers (path tracer, light
+  tracer, BVH builds, guide, reprojection; and the denoiser, on a timer of its own resolved
+  with the frame it runs in). At 2560 × 1440 in the editor (RTX 3070, Chrome, the threaded
+  page, 125 frames/s headless):
+
+  | | CPU per frame | frames/s | GPU's time |
+  |---|---|---|---|
+  | Play, 24 boxes and 30 balls thrown | 0.34 ms (all of it) | 125 | path tracer 35%, denoiser 21%, reprojection 10%, guide 5%; the rest (composite, raster) not timed |
+  | Sky rain, bodies on the GPU (the default) | 0.72 ms (trees 0.44) | 125 | guide 31%, path tracer 23%, denoiser 12%, reprojection 5% |
+  | Sky rain, bodies on the CPU, 12 threads | 88 ms, the physics (~2000 bodies, 7300 contacts) | 11 (the simulation falls behind) | idle |
+  | the same, 1 thread | 145 ms (~1500 bodies) | 7 | idle |
+
+  The top level's trees: 0.44 ms with threads, 1.6 ms without; the light probe's relight 1.50 s
+  instead of 5.30. In a small scene the threads cost more than they give (the trees 0.15 ms
+  with them, 0.02 ms without). So: with the bodies on the GPU the page is bound by the GPU,
+  where the guide (an image's traced first hits, as much as the path tracer in the sample:
+  a G-buffer rasterized instead) and the denoiser are the next time to win; the bodies on
+  the CPU are 1000 times their cost on the GPU here and stall the main thread (threads help
+  1.6x), so the GPU's stay the default and the CPU's would want a worker of their own.
 - **The CPU's code**: WebAssembly SIMD (`-msimd128`) in every web build (the CPU's trees
   1.5x faster, its rasterizer 1.15x), and the threaded page (section 1.1): the CPU's loops on
   all hardware threads.
