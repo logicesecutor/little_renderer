@@ -315,6 +315,17 @@ velocity kept: the next step's speculative contact stops or bounces it at the su
 (motion clamping, as Bullet does). A ball, a box and two balls head on, from 200 to 50000
 units/s, at a slab 4 units thick: all stopped, on the CPU and the GPU (`test_fast`). What it
 misses: the turn within a step, and a fast body that only grazes a corner with its edge.
+
+A body already touching what it would hit (nearer than `CONTACT_SLOP + SPECULATIVE_MIN` at
+the start: the wall, the sphere, or no face of the box or hull farther) is the contacts' job
+and is not swept. Before, a ball rolling faster than the sweep's threshold (half its inner
+radius per step: 9 m/s for the editor's 30 cm ball at 120 steps/s), a hair above the floor and
+pulled down a hair each step, was swept into the floor at once (a hit at t ~ 0): put back
+where it started, its speed kept, every step. The ball thrown in the editor's Play stood still
+on the ground while still "moving" at 10 m/s; one rolling on a box's top did the same. Now it
+rolls on (`test_fast_rolling`: thrown level at 15 m/s from 1.36 m, 23.7 m in 2 s instead of
+8.1; rolling on a box, 4.9 m in 0.5 s instead of 0.2), and a ball falling fast onto the floor
+from a little above is still stopped at it.
 On the GPU (`K_CCD`) each fast body goes through the others 64 at a time, read once per
 workgroup into shared memory.
 

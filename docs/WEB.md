@@ -252,6 +252,18 @@ no outside denoiser is used.
   denoiser smooths the result. A band of samples never waits for another: on a GPU too slow
   for a whole pass per frame, the bands go on round the image, and a move waits until the
   running band ends, so the frame shows the last image together with its own camera.
+- **In a browser** the band of a frame while things move is 85% of the display's real period,
+  measured from the page's animation frames (the shortest gap of the last 600; it was 60 Hz
+  always): on a 144 Hz screen the band was 14 ms of GPU work in a 7 ms frame, and the image
+  followed a turning camera in 93 frames of 252 (2560 × 1440, the editor's Play). Now 147 of
+  251; the passes per second while turning drop from 42 to 26, the image about as clean (the
+  same 12 samples kept: RMS against the still image 1.23 -> 1.25 levels), and a still image
+  converges as before (its band stays 85% of a 60 Hz frame).
+- **While things move** the indirect clamp is `-iclampmove` (1) instead of `-iclamp` (4):
+  the samples a pixel keeps then are few, and a firefly the denoiser spreads stays a blotch as
+  long as they are kept. In the editor's Play, turning, the red ball's light bounced off the
+  floor made red blotches all over it (829 pixels at 1440p; 48 to 119 now, by run). The
+  still image keeps `-iclamp` (its mean the same within 0.1%).
 - The physics moves its bodies every step: they are instances (2.7), so only their
   transforms are uploaded and the top level rebuilt; the scene's own BVH stays. The cloud
   stays on the GPU (`-gpufluid`), and so do the bodies (`-gpurigid`, 2.8).
@@ -399,6 +411,14 @@ Chrome's own GPU timers, against wgpu natively on the same GPU. What was found a
   view and after every small pipeline, and the viewer shows the rasterized scene until they
   are ready: 495 frames instead of 8 in that time, the first pass after 9.0 s instead of 10.3.
   The later visits find them in Chrome's cache (under 0.1 s).
+- **The frame's own pipelines** (the composite, the GPU rasterizer's) are made asynchronously
+  too in the viewer (`gpu_set_async_views`, `gpu_view_ready`): made at once, a cold start
+  compiled them in the browser's GPU process before it drew anything else, for every tab, so
+  the whole browser froze for 4-5 s (the editor at 2560 × 1440: one frame of 5.0 s). Now the
+  longest frame of a cold start is 0.45 s, and the first path traced pass comes 12.4 s after
+  the page instead of 16.6. The editor's light probe is made in steps between frames from the
+  start (as after an edit), not before the first frame: the page drew 3.6 s after it was
+  loaded, now 0.6 s.
 - **The CPU's code**: WebAssembly SIMD (`-msimd128`) in every web build (the CPU's trees
   1.5x faster, its rasterizer 1.15x), and the threaded page (section 1.1): the CPU's loops on
   all hardware threads.
