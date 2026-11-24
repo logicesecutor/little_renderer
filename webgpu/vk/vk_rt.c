@@ -1,8 +1,12 @@
 // vk_rt.c - acceleration structures for ray queries (webgpu_rt.h), on VK_KHR_acceleration_structure.
 //
-// Each structure has its own memory and its own scratch memory, sized once at creation (by
-// vkGetAccelerationStructureBuildSizesKHR for the largest it will hold) and kept, so building
-// again (a top level every frame) allocates nothing. A build is a command like any other:
+// Each structure has its own memory, sized once at creation (by
+// vkGetAccelerationStructureBuildSizesKHR for the largest it will hold). A build also needs
+// scratch memory, about as much again. A top level keeps its own, so building it again
+// (every frame) allocates nothing. A bottom level is mostly built once: its first build's
+// scratch belongs to that submission and is freed with it (kept, every static mesh held twice
+// its size for good); one built a second time (a mesh that changes) keeps its scratch from
+// then on. A build is a command like any other:
 // the barrier before it (vk_before) orders it after what wrote its inputs, and the one
 // before the next command orders the queries after it.
 #include "vk/vk_impl.h"
@@ -35,9 +39,29 @@ static void as_free(WGPUDevice dev, VkAs *a){
     memset(a, 0, sizeof(*a));
 }
 
-// the structure's memory and scratch for this build's sizes; 0 on failure
+// scratch memory for a build of a (a->scratch_size): the buffer, its memory, where it starts
+// (aligned); 0 on failure
+static int scratch_make(WGPUDevice dev, const VkAs *a, VkBuffer *buf, VkDeviceMemory *mem, VkDeviceAddress *at){
+    const uint32_t align = dev->ad->as_scratch_align;
+    if (!vk_alloc_buffer(dev, a->scratch_size + align,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buf, mem, NULL)) return 0;
+    *at = (raw_address(dev, *buf) + align - 1) / align * align;
+    return 1;
+}
+
+// one build's scratch, held by the command buffer that builds (freed when its submission is done)
+typedef struct { Obj o; WGPUDevice dev; VkBuffer buf; VkDeviceMemory mem; } Scratch;
+static void scratch_free(Obj *o){
+    Scratch *s = (Scratch *)o;
+    vk.vkDestroyBuffer(s->dev->vk, s->buf, NULL);
+    vk.vkFreeMemory(s->dev->vk, s->mem, NULL);
+    free(s);
+}
+
+// the structure's memory for this build's sizes, and (keep_scratch) its scratch; 0 on failure
 static int as_make(WGPUDevice dev, VkAs *a, uint32_t type, VkAccelerationStructureBuildGeometryInfoKHR *info,
-                   const uint32_t *max_counts){
+                   const uint32_t *max_counts, int keep_scratch){
     VkAccelerationStructureBuildSizesInfoKHR sz;
     memset(&sz, 0, sizeof(sz));
     sz.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
@@ -45,12 +69,8 @@ static int as_make(WGPUDevice dev, VkAs *a, uint32_t type, VkAccelerationStructu
     if (!vk_alloc_buffer(dev, sz.accelerationStructureSize,
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &a->buf, &a->mem, NULL)) return 0;
-    uint32_t align = dev->ad->as_scratch_align;
-    VkDeviceSize scratch = sz.buildScratchSize > sz.updateScratchSize ? sz.buildScratchSize : sz.updateScratchSize;
-    if (!vk_alloc_buffer(dev, scratch + align,
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &a->scratch, &a->smem, NULL)) return 0;
-    a->scratch_at = (raw_address(dev, a->scratch) + align - 1) / align * align;
+    a->scratch_size = sz.buildScratchSize > sz.updateScratchSize ? sz.buildScratchSize : sz.updateScratchSize;
+    if (keep_scratch && !scratch_make(dev, a, &a->scratch, &a->smem, &a->scratch_at)) return 0;
     VkAccelerationStructureCreateInfoKHR ci;
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -126,7 +146,7 @@ LRBlas lrDeviceCreateBlas(WGPUDevice device, LRBlasDescriptor const *d){
     info.flags = b->flags;
     info.geometryCount = b->ngeo;
     info.pGeometries = g;
-    int ok = as_make(device, &b->a, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, &info, counts);
+    int ok = as_make(device, &b->a, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, &info, counts, 0);
     free(g); free(counts);
     if (!ok){ vk_error(device, WGPUErrorType_OutOfMemory, "bottom-level acceleration structure: no memory"); blas_free(&b->o); return NULL; }
     return b;
@@ -138,6 +158,25 @@ void lrCommandEncoderBuildBlas(WGPUCommandEncoder e, LRBlas b){
     uint32_t *counts = calloc(b->ngeo, sizeof(*counts));
     VkAccelerationStructureBuildRangeInfoKHR *r = calloc(b->ngeo, sizeof(*r));
     if (!g || !counts || !r){ free(g); free(counts); free(r); return; }
+    // its scratch: its own once it has one (a second build on); the first build's is this
+    // submission's
+    VkDeviceAddress scratch_at = b->a.scratch_at;
+    if (!b->a.scratch){
+        VkBuffer sb = 0; VkDeviceMemory sm = 0;
+        Scratch *once = b->builds == 0 ? calloc(1, sizeof(*once)) : NULL;
+        if ((b->builds == 0 && !once) || !scratch_make(e->dev, &b->a, &sb, &sm, &scratch_at)){
+            vk_error(e->dev, WGPUErrorType_OutOfMemory, "bottom-level acceleration structure: no scratch memory to build it");
+            free(once); free(g); free(counts); free(r);
+            return;
+        }
+        if (once){
+            obj_init(&once->o, scratch_free);
+            once->dev = e->dev; once->buf = sb; once->mem = sm;
+            refs_add(&e->refs, &once->o);
+            obj_unref(&once->o);             // (the encoder's now)
+        } else { b->a.scratch = sb; b->a.smem = sm; b->a.scratch_at = scratch_at; }
+    }
+    b->builds++;
     geometries(b, g, counts);
     for (uint32_t i = 0; i < b->ngeo; i++){
         r[i].primitiveCount = counts[i];
@@ -153,7 +192,7 @@ void lrCommandEncoderBuildBlas(WGPUCommandEncoder e, LRBlas b){
     info.dstAccelerationStructure = b->a.as;
     info.geometryCount = b->ngeo;
     info.pGeometries = g;
-    info.scratchData.deviceAddress = b->a.scratch_at;
+    info.scratchData.deviceAddress = scratch_at;
     const VkAccelerationStructureBuildRangeInfoKHR *pr = r;
     vk_before(e, VK_CMD_BUILD);
     vk.vkCmdBuildAccelerationStructuresKHR(e->cb, 1, &info, &pr);
@@ -204,7 +243,7 @@ LRTlas lrDeviceCreateTlas(WGPUDevice device, uint32_t max, WGPUStringView label)
     VkAccelerationStructureBuildGeometryInfoKHR info;
     VkAccelerationStructureGeometryKHR g;
     tlas_info(&info, &g, 0);
-    if (!as_make(device, &t->a, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, &info, &t->max)){
+    if (!as_make(device, &t->a, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, &info, &t->max, 1)){
         vk_error(device, WGPUErrorType_OutOfMemory, "top-level acceleration structure: no memory");
         tlas_free(&t->o);
         return NULL;

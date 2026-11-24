@@ -146,13 +146,18 @@ int main(void){
     LRBlas bt = lrDeviceCreateBlas(g->device, &dt), bx = lrDeviceCreateBlas(g->device, &db);
     LRTlas tlas = lrDeviceCreateTlas(g->device, 8, gpu_str("test: instances"));
     check("acceleration structures made", bt && bx && tlas);
-    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    lrCommandEncoderBuildBlas(enc, bt);
-    lrCommandEncoderBuildBlas(enc, bx);
-    WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
-    wgpuQueueSubmit(g->queue, 1, &cb);
-    wgpuCommandBufferRelease(cb);
-    wgpuCommandEncoderRelease(enc);
+    // built, and the squares built a second time (a bottom level's first build has scratch
+    // memory of its submission's, freed with it; from the second on it keeps its own)
+    for (int round = 0; round < 2; round++){
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
+        lrCommandEncoderBuildBlas(enc, bt);
+        if (round == 0) lrCommandEncoderBuildBlas(enc, bx);
+        WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
+        wgpuQueueSubmit(g->queue, 1, &cb);
+        wgpuCommandBufferRelease(cb);
+        wgpuCommandEncoderRelease(enc);
+        gpu_wait(g);
+    }
 
     Inst in[3] = {{1, 0, 0, 5, 7, 0}, {2, 5, 0, 10, 9, 1}, {3, -5, 0, 20, 11, 0}};
     LRTlasInstance rec[3];

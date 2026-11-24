@@ -291,16 +291,19 @@ struct WGPUComputePassEncoderImpl {
 };
 
 // acceleration structures (vk_rt.c, webgpu_rt.h): the structure, its memory, its scratch
+// (scratch_size: what a build of it needs; scratch 0: none kept, a build brings its own)
 typedef struct {
     VkAccelerationStructureKHR as;
     VkBuffer buf; VkDeviceMemory mem;
     VkBuffer scratch; VkDeviceMemory smem; VkDeviceAddress scratch_at;
+    VkDeviceSize scratch_size;
     VkDeviceAddress addr;
 } VkAs;
 struct LRBlasImpl {
     Obj o;
     WGPUDevice dev;
     VkAs a;
+    int builds;                      // how many times it was built (from the second on it keeps its scratch)
     VkFlags flags;
     uint32_t ngeo;
     LRGeometry *geo;                 // (holding a reference to each buffer)
