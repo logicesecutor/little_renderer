@@ -151,3 +151,36 @@ API, but each deserves one line in a test (or to go, if it is not wanted).
 4. The ones that touch images or speed, each with the reference images and the perf suite: **D1**, **D3** with **S5**, **D5**, **D9**, **D14**, **S10**.
 5. The suspected bugs, each after a reproduction: **B10**, **B11**, **B12**, **B13**, **B14**, **B15**.
 6. The larger work, one step at a time: **S1** (the options table, which also closes the class of B1/B3), **S3**, **A1**, **A3**, **A6**.
+
+## 8. The review of `denoise` (6d70657, 2026-11-24): its bugs and leaks, fixed
+
+A second review, of the whole tree at 6d70657, with its own ids (its B1-B16 are not those of
+section 1). Its bugs and leaks were fixed in the branch `fixes` (from `editor`), one commit
+each; its design, dead-code, smell, folder and redundancy items are not done. Each finding was
+checked against the code first: all 23 held.
+
+| id | what was wrong | what was done |
+|---|---|---|
+| B1 | our Vulkan layer's timestamps are the GPU's ticks, the engine took them for nanoseconds (right only where `timestampPeriod` is 1: NVIDIA) | `lrQueueGetTimestampPeriod` (webgpu_lr.h); `GpuTimer` scales by it |
+| B2 | a top level means its bottom levels by address: `lrBlasRelease` freed them under a band still tracing | the last reference is given back when the submissions so far are done (`vk_free_later`) |
+| B3 | a BVH build queued by one sync and dropped by the next left a dynamic mesh marked built; more than 8 builds a frame dropped silently | `build_queue` says whether it queued; dropped builds are queued again; `GPU_MAX_BUILDS` |
+| B4 | one scene that did not fit switched GPU path tracing (and rasterizing) off for the session | "this GPU cannot" apart from "this scene does not fit": the scene is refused by what it is (`scene_sig`), another is tried; `gpu_view_trace_failed` |
+| B5 | the list of the objects alive knew them by address: a new view at an old one's address got its late callbacks | a ticket per object, passed to its callbacks |
+| B6 | the WGSL compiler read builtin arguments that were not there (heap overflow); a failed compile leaked | `need()` in every hand-written builtin; the emitter's buffers freed after an error (`wgsl_grow`) |
+| B7 | the editor took a dropped image for the one of the same name it already had | a texture file is known by its picture (`scene_share_texmap`), read every time |
+| B8 | photon cache slots were never given back while things move: the table filled, deposits were dropped | the fade gives a faded-out cell's slot back, from the end of its run |
+| B9 | the BVH walk's stack checked against the world's tree only, by a literal | `GPU_STACK` in C and the shader; the top level over a mesh's tree checked too |
+| B10 | a NaN in one channel of a sample could pass the guard (max of a NaN) | every channel asked |
+| B11 | pixel indices of gradient samples travel as f32 | no temporal gradients above 2^24 pixels |
+| B12 | a sky taller than wide overflowed its tables | refused on the GPU: the CPU path traces it |
+| B13 | readback callbacks wrote to a dead stack slot or a destroyed object | `gpu_map_wait` owns what its callback writes; `on_adapter`, `on_device` check their Gpu |
+| B14 | `lr_open_scene` trusted the file's stretch (0: infinite transforms) and shared one material between two objects | sizes bounded; the second object gets a copy |
+| B15 | instance records kept 0xffffffff and 0xfffffff0 in f32 fields: NaN patterns | material + 1 and kind 0, 1, 2 + mesh: no NaN pattern |
+| B16 | the path tracer was passed the scene's media count when none had been made ready | `frame_begin` returns the count it made ready |
+| L1 | the path tracer's `GpuTimer` destroyed only with the timing report on: every view leaked it, and a place in the list of the objects alive | destroyed always; `gpu_live_count` and a test of 300 views |
+| L2 | the editor only added to its scene; dropped files stayed in the page's file system | `scene_remove_mesh`, `_material`, `_texmap`; the editor collects what no object or undo step has; files unlinked once read |
+| L3 | staging memory only grew | kept up to 32 MB (`VK_STAGING_KEEP`), best fit |
+| L4 | every acceleration structure kept its build scratch | a bottom level's first build's scratch is its submission's; kept from the second build on |
+| L5 | the GPU rasterizer kept the buffers of meshes that were gone, and the guide's targets when the guide was traced | both let go |
+| L6 | tests/test_tex.c leaked a map | freed |
+| L7 | our layer's out-of-memory paths dropped references, submissions and callbacks; the loader was never closed | each gives back what it held or answers its callback; every instance closes the loader |

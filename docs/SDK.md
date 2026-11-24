@@ -105,7 +105,8 @@ steps: `Mesh *m = mesh_load(path); mesh_place(m, size, base, rot); scene_add_mes
 mesh_destroy(m);`.
 
 **Textures** (docs/PBR.md, PBR5): a material takes glTF's three, each `scene_texture`'s
-number (a `.png` file, or one made here; 0 = none; sRGB for colour only). Meshes need their
+number (a `.png` or `.jpg` file, or one made here; 0 = none; sRGB for colour only; a file is
+read each time and the scene holds each picture once, whatever the file is called). Meshes need their
 texture coordinates (`vt`); spheres, quads and boxes have their own. Every backend reads
 them through `material_at` / `material_normal`.
 

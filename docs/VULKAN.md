@@ -25,8 +25,8 @@ natively (their browser still has WebGPU).
 |---|---|
 | `webgpu/vk/vk.h`: our declarations of the Vulkan API (no SDK) | `tools/vk_check.py` checks every size, offset and constant against the official headers (899 checks, 0 differ) |
 | loader, instance, adapter, device, queue (timeline semaphore), submissions, polling, callbacks | done |
-| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above), copies, clears, readback by mapping | done: `bin/test_gpu_basic` passes |
-| bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps | done |
+| buffers (dedicated memory each, for now), uploads (`vkCmdUpdateBuffer` up to 64 KB, staging memory above: chunks used again, up to 32 MB of them kept), copies, clears, readback by mapping | done: `bin/test_gpu_basic` passes |
+| bind group layouts, bind groups (descriptor pools made as needed, dynamic offsets), pipeline layouts, compute pipelines, compute passes, timestamps (in the GPU's own ticks: `lrQueueGetTimestampPeriod` says how many nanoseconds one is, 1 on NVIDIA) | done |
 | WGSL → SPIR-V (`webgpu/wgsl`): every kernel the engine has compiles, `spirv-val` finds nothing | done |
 | textures (all in the GENERAL layout), texture writes, copies to and from buffers | done |
 | render pipelines and passes (dynamic rendering; WebGPU's y up and front faces mirrored), several targets, their timestamps (since 2026-11-24) | done |
@@ -54,6 +54,13 @@ chained bind group entries. The WGSL is wgpu's: `acceleration_structure`,
 `GetCommittedIntersection`, `RayDesc`, `RayIntersection`, the `RAY_*` constants. (The WebGPU
 proposals of October 2026, gpuweb #11054 and #11056, differ from it in places; what a page
 needs to use the same hardware path once a browser ships them: WEB.md 2.10.)
+
+Who holds what: a top level means its bottom levels only by their addresses, in its
+instance records, so no command buffer that traces through it holds them. `lrBlasRelease`
+therefore frees a bottom level when the submissions made so far are done, not at once; the
+top level must be built again, without it, before it is traced again. And scratch memory: a
+top level keeps its own (it is built every frame); a bottom level's first build has scratch
+of its submission's, freed with it, and only one that is built again keeps its own.
 
 The device asks for ray queries when the GPU has them (`LR_GPU_HWRT=0`: not). The path
 tracer then compiles a `traverse()` on ray queries in place of the BVH walk (the same

@@ -5,7 +5,9 @@ compiled to WebAssembly with **Emscripten**, draws on an HTML canvas, and uses t
 through **WebGPU**. The CPU backends are always there; the GPU takes over what it does
 (rasterizing the scene, path tracing it, raymarching clouds and fog, simulating the air,
 the cloud and the rigid bodies), and whatever it cannot take (a medium too big for its
-buffers, a pipeline that fails) stays on the CPU.
+buffers, a pipeline that fails) stays on the CPU. A scene that does not fit the GPU (a model
+too big for its buffers) is the CPU's only while it is that scene: the GPU is asked again when
+the scene has changed. A pipeline that fails is for good.
 
 | | native (Linux / Windows) | browser |
 |---|---|---|
@@ -381,7 +383,9 @@ traced).
 - **Cell sizes:** cells are the scene's size / 256, ×4 and ×16, per main normal axis. A
   pixel that sees a diffuse surface directly reads, bilinearly along that surface, the
   finest size holding at least 16 photons (adaptive density estimation). The grid fades by
-  0.9 each frame something moves, so what moved fades out.
+  0.9 each frame something moves, so what moved fades out, and a cell with no light left
+  gives its slot back (from the end of a run of them, so a cell is always found from its
+  hash).
 - **Standing still,** the exact light tracer takes over (weight P/(P+8) after P passes),
   and the image converges to the unbiased one.
 - **While moving** (`-orbit 15`, raw / denoised RMSE): photon cache 6.5 / 6.7, exact light
