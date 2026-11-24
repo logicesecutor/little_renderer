@@ -16,7 +16,11 @@
 //    0.5 * 10 * (10 / 50)^2 = 0.2. With next event estimation (MIS on and off) and found by
 //    the paths alone: the same mean, NEE's far less noisy. A glowing box: NEE and the paths
 //    alone agree. A stretched ball is not a light; a lamp-less scene with none is unchanged.
+// 6. Meshes, materials and textures removed (scene_remove_mesh, _material, _texmap): the last
+//    one takes the place of the one removed, and what the scene has of it follows (the
+//    instances' meshes, the triangles' and instances' materials, the materials' textures).
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "scene/scene.h"
@@ -174,6 +178,61 @@ int main(void){
         scene_update_instances(&g, NULL);
         check("a stretched ball: not a light", g.nemitters == 0);
         scene_free(&g);
+    }
+    printf("6. removing meshes, materials and textures\n");
+    {
+        // three materials, three meshes of one triangle each (of material 0, 1, 2), instances
+        // of the first and the last
+        Scene r;
+        memset(&r, 0, sizeof(r));
+        int m[3], mesh[3];
+        for (int k = 0; k < 3; k++){
+            m[k] = scene_add_material(&r, material_diffuse(vec3(0.2f + 0.3f * k, 0.5f, 0.5f)));
+            Triangle *t = calloc(1, sizeof(Triangle));
+            t->q = vec3(-20, -20, 0); t->u = vec3(40, 0, 0); t->v = vec3(0, 40, 0);
+            for (int c = 0; c < 3; c++){ t->n[c] = -1; t->t[c] = -1; }
+            t->material = m[k];
+            mesh[k] = scene_add_mesh_arrays(&r, t, 1, NULL, 0, NULL, NULL, 0);
+        }
+        scene_add_instance(&r, mesh[0], at(0, 1), -1);
+        int ic = scene_add_instance(&r, mesh[2], at(200, 1), -1);
+        scene_set_accel(&r, ACCEL_BVH, NULL);
+        check("three meshes, the ray at x = 200 hits the last one's instance", r.nmeshes == 3 && hit_inst(&r, 200) == ic);
+        check("a mesh with an instance is not removed", scene_remove_mesh(&r, mesh[0]) == -2 && r.nmeshes == 3);
+        unsigned id2 = r.meshes[2].id;
+        moved = scene_remove_mesh(&r, mesh[1]);
+        check("removing the middle one: the last moved into its place, its instance with it",
+              moved == 2 && r.nmeshes == 2 && r.meshes[1].id == id2 && r.insts[ic].mesh == 1);
+        scene_set_accel(&r, ACCEL_BVH, NULL);
+        check("... still hit at x = 200, of its material", hit_inst(&r, 200) == ic && scene_instance_material(&r, ic, 0) == m[2]);
+        // material 1 has no user now: the last (2) takes its number, in the mesh's triangles too
+        unsigned ver = r.meshes[1].version;
+        moved = scene_remove_material(&r, m[1]);
+        check("removing material 1: the last (2) is 1 now, and the triangles of it say so",
+              moved == 2 && r.nmats == 2 && r.meshes[1].tris[0].material == 1 && r.mats[1].albedo.x > 0.7f);
+        check("... the mesh has a new version, and its tree is still good", r.meshes[1].version != ver && scene_mesh_bvh(&r, 1) != NULL);
+        check("... the first mesh was not touched", r.meshes[0].tris[0].material == 0 && scene_mesh_bvh(&r, 0) != NULL);
+        check("removing the last material: nothing moved", scene_remove_material(&r, 1) == -1 && r.nmats == 1);
+        // three textures; material 0 has the first as its colour and the third as its normal map
+        unsigned char px[4 * 4 * 4];
+        int tex[3];
+        for (int k = 0; k < 3; k++){
+            TexMap tm;
+            memset(px, 40 + 60 * k, sizeof(px));
+            texmap_make(&tm, px, 4, 4, 0);
+            tex[k] = scene_add_texmap(&r, &tm);
+        }
+        r.mats[0].tex_base = tex[0];
+        r.mats[0].tex_normal = tex[2];
+        unsigned tv = r.tex_version;
+        moved = scene_remove_texmap(&r, tex[1]);
+        check("removing the middle texture: the last takes its number, the material follows",
+              moved == 3 && r.ntexmaps == 2 && r.mats[0].tex_normal == 2 && r.mats[0].tex_base == 1 && r.tex_version != tv);
+        check("... and shows what it showed", texmap_texel(&r.texmaps[1], 0, 1, 1).x > 0.55f);
+        moved = scene_remove_texmap(&r, 1);
+        check("removing a texture a material still has: it has none there", moved == 2 && r.ntexmaps == 1 && r.mats[0].tex_base == 0 && r.mats[0].tex_normal == 1);
+        check("a number out of range: nothing", scene_remove_texmap(&r, 5) == 0 && scene_remove_mesh(&r, 7) == -1 && scene_remove_material(&r, 9) == -1);
+        scene_free(&r);
     }
     if (failures){ printf("%d FAILED\n", failures); return 1; }
     printf("all passed\n");

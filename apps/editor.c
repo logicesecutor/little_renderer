@@ -133,6 +133,7 @@ typedef struct {
     int clay;                      // what a mesh file (.obj, .ply) is made of: it has no material
     int last_fitted;               // the last mesh file was fitted to 1 m (lr_import_mesh)
     int rock_mesh;                 // the rock's mesh (made here)
+    int base_mats, base_meshes, base_tex;   // what the scene had when it was built: never collected (collect)
     int sky;                       // the sky: a preset, SKY_SUN (sun), or SKY_FILE (sky_path)
     SunSky sun;                    // SKY_SUN's
     int sun_w;                     // ... made this wide (a slider being dragged: smaller, quicker)
@@ -157,6 +158,17 @@ typedef struct {
 
 static Editor E;
 static int editing_off(void);    // (a sample shows, or a simulation holds the objects)
+// something may have lost its last user (an object removed, an undo step forgotten, a map
+// taken off): collect() looks at the next checkpoint
+static int gc_dirty;
+
+// a place for a new model: one a collected model left (parts NULL), or a new one
+static int model_slot(void){
+    for (int i = 0; i < E.nmodels; i++) if (!E.models[i].parts) return i;
+    E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
+    memset(&E.models[E.nmodels], 0, sizeof(EdModel));
+    return E.nmodels++;
+}
 
 static int object_parts(const EdObject *o){
     return o->kind == ED_LAMP ? 3 : o->kind == ED_MODEL ? E.models[o->model].nparts : 1;
@@ -533,6 +545,9 @@ static int build_scene(Scene *s){
     s->cam_at = vec3(0, 50, 100);
     s->cam_up = vec3(0, 1, 0);
     s->cam_vfov_deg = 40;
+    E.base_mats = s->nmats;
+    E.base_meshes = s->nmeshes;
+    E.base_tex = s->ntexmaps;
     return 0;
 }
 
@@ -983,6 +998,7 @@ EXPORT int lr_set_look_map(int id, int slot, const char *path){
     for (char *c = nm; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_';   // (it goes into JSON)
     if (look_sync(o)){ *o = was; return 2; }
     o->mat = MAT_OWN;
+    gc_dirty = 1;                                // (the map it had there, or one it made from it)
     object_update(o);
     changed();
     return 0;
@@ -1028,8 +1044,8 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
     if (n <= 0) return 0;
     // its instances, as the file places them standing at the origin: the model's parts; they
     // become the object's (made again from the parts: the same, in the object's place)
-    E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
-    EdModel *m = &E.models[E.nmodels];
+    const int mi_slot = model_slot();
+    EdModel *m = &E.models[mi_slot];
     m->nparts = s->ninsts - n0;
     m->clay = 0;                                     // (its own materials: the slot is not cleared)
     m->parts = malloc((size_t)m->nparts * sizeof(EdPart));
@@ -1044,7 +1060,7 @@ EXPORT int lr_import_gltf(const char *path, double x, double y, double z, int su
     while (s->ninsts > n0) scene_remove_instance(s, s->ninsts - 1);
     if (support && !object_find(support)) support = 0;
     const char *file = strrchr(path, '/');
-    int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    int id = object_add(ED_MODEL, -1, mi_slot, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
     place_free(id);
     changed();
     return id;
@@ -1072,8 +1088,8 @@ EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int su
     int mi = scene_add_mesh_object(s, mesh, E.clay);
     mesh_destroy(mesh);
     if (mi < 0) return 0;
-    E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
-    EdModel *m = &E.models[E.nmodels];
+    const int mi_slot = model_slot();
+    EdModel *m = &E.models[mi_slot];
     m->nparts = 1;
     m->parts = malloc(sizeof(EdPart));
     if (!m->parts) lr_oom("editor");
@@ -1082,7 +1098,7 @@ EXPORT int lr_import_mesh(const char *path, double x, double y, double z, int su
     m->clay = 1;
     if (support && !object_find(support)) support = 0;
     const char *file = strrchr(path, '/');
-    int id = object_add(ED_MODEL, -1, E.nmodels++, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
+    int id = object_add(ED_MODEL, -1, mi_slot, metres(x, y, z), 1, 0, support, file ? file + 1 : path);
     place_free(id);
     changed();
     return id;
@@ -1142,6 +1158,7 @@ EXPORT int lr_remove_object(int id){
     int k = (int)(o - E.objs);
     memmove(&E.objs[k], &E.objs[k + 1], (size_t)(E.nobjs - k - 1) * sizeof(EdObject));
     E.nobjs--;
+    gc_dirty = 1;
     changed();
     return 0;
 }
@@ -1167,7 +1184,7 @@ static Snapshot snapshot_take(void){
     return sn;
 }
 static void snapshot_push(Snapshot *st, int *n, Snapshot sn){
-    if (*n == HISTORY){ free(st[0].objs); memmove(st, st + 1, (HISTORY - 1) * sizeof(Snapshot)); (*n)--; }
+    if (*n == HISTORY){ free(st[0].objs); memmove(st, st + 1, (HISTORY - 1) * sizeof(Snapshot)); (*n)--; gc_dirty = 1; }
     st[(*n)++] = sn;
 }
 
@@ -1200,6 +1217,7 @@ static void snapshot_apply(const Snapshot *sn){
         if (E.objs[j].ninst == 0) object_instances(&E.objs[j]);
         else object_update(&E.objs[j]);
     }
+    gc_dirty = 1;                                // (what this step made may now be in no step: the next checkpoint looks)
     if (sn->sky != E.sky || strcmp(sn->sky_path, E.sky_path) || (sn->sky == SKY_SUN && memcmp(&sn->sun, &E.sun, sizeof(SunSky)))){
         // (another sky: the path traced image starts over)
         E.sun = sn->sun;
@@ -1209,15 +1227,140 @@ static void snapshot_apply(const Snapshot *sn){
     changed();
 }
 
+// ---- what nothing uses any more is given back ------------------------------------------------
+// The editor only added to the scene: a model removed kept its meshes, its materials and its
+// textures for good, and the scene's room (64 materials, the 32 textures the GPU shows) and
+// the GPU's buffers filled with what was no longer there. A thing is still used while an
+// object has it, now or in an undo or redo step (so an undo brings it back). When nothing
+// does, it goes: the models first, then the meshes no model has, the materials nothing in
+// the scene or the editor names, the textures no material or look names. Each removal moves
+// the scene's last one of that kind into the gap (scene_remove_mesh, ...), and the indices
+// kept here follow: the models' parts, the objects' looks and maps (the snapshots' too), the
+// made maps' list. What the scene had when it was built (the catalogue's materials, the
+// rock) is never touched.
+
+// the objects as they are now and in every undo and redo step
+typedef struct { EdObject *o; int n; } ObjSpan;
+static int object_spans(ObjSpan *sp){
+    int k = 0;
+    sp[k++] = (ObjSpan){E.objs, E.nobjs};
+    for (int i = 0; i < nundo; i++) sp[k++] = (ObjSpan){undo_st[i].objs, undo_st[i].n};
+    for (int i = 0; i < nredo; i++) sp[k++] = (ObjSpan){redo_st[i].objs, redo_st[i].n};
+    return k;
+}
+
+static void collect(void){
+    if (!gc_dirty || editing_off()) return;
+    gc_dirty = 0;
+    Scene *s = viewer_scene();
+    static ObjSpan sp[1 + 2 * HISTORY];
+    const int nsp = object_spans(sp);
+    int gone = 0;
+    // the models no object is of (one array of marks: the models', then the meshes', then the textures')
+    const int nmesh0 = s->nmeshes;
+    unsigned char *used = calloc((size_t)E.nmodels + (size_t)nmesh0 + (size_t)s->ntexmaps + 3, 1);
+    if (!used) return;
+    for (int a = 0; a < nsp; a++)
+        for (int i = 0; i < sp[a].n; i++){
+            const EdObject *o = &sp[a].o[i];
+            if (o->kind == ED_MODEL && o->model >= 0 && o->model < E.nmodels) used[o->model] = 1;
+        }
+    for (int m = 0; m < E.nmodels; m++)
+        if (!used[m] && E.models[m].parts){
+            free(E.models[m].parts);
+            E.models[m].parts = NULL;
+            E.models[m].nparts = 0;
+        }
+    // the meshes no model has (the last mesh takes a removed one's place)
+    unsigned char *mesh_used = used + E.nmodels + 1;
+    for (int m = 0; m < E.nmodels; m++)
+        for (int q = 0; q < E.models[m].nparts; q++){
+            const int k = E.models[m].parts[q].mesh;
+            if (k >= 0 && k < s->nmeshes) mesh_used[k] = 1;
+        }
+    for (int m = s->nmeshes - 1; m >= E.base_meshes; m--){
+        if (mesh_used[m]) continue;
+        const int moved = scene_remove_mesh(s, m);
+        if (moved == -2) continue;                  // (an instance is of it, not an object's: it stays)
+        gone++;
+        if (moved < 0) continue;
+        for (int k = 0; k < E.nmodels; k++)
+            for (int q = 0; q < E.models[k].nparts; q++) if (E.models[k].parts[q].mesh == moved) E.models[k].parts[q].mesh = m;
+    }
+    // the materials nothing names: the scene's shapes, triangles and instances, the
+    // catalogue's, the models' parts', the objects' looks
+    int mat_used[MAX_MATS] = {0};
+#define MARK(i) do { const int mk_ = (i); if (mk_ >= 0 && mk_ < MAX_MATS) mat_used[mk_] = 1; } while (0)
+    for (int i = 0; i < s->nprims; i++) MARK(s->prims[i].material);
+    for (int i = 0; i < s->ntris; i++) MARK(s->tris[i].material);
+    for (int k = 0; k < s->nmeshes; k++)
+        for (int i = 0; i < s->meshes[k].ntris; i++) MARK(s->meshes[k].tris[i].material);
+    for (int i = 0; i < s->ninsts; i++) MARK(s->insts[i].material);
+    for (int m = 0; m < E.nmodels; m++)
+        for (int q = 0; q < E.models[m].nparts; q++) MARK(E.models[m].parts[q].material);
+    for (int a = 0; a < nsp; a++)
+        for (int i = 0; i < sp[a].n; i++) MARK(sp[a].o[i].look);
+#undef MARK
+    for (int m = s->nmats - 1; m >= E.base_mats; m--){
+        if (mat_used[m]) continue;
+        const int moved = scene_remove_material(s, m);
+        gone++;
+        if (moved < 0) continue;
+        for (int k = 0; k < E.nmodels; k++)
+            for (int q = 0; q < E.models[k].nparts; q++) if (E.models[k].parts[q].material == moved) E.models[k].parts[q].material = m;
+        for (int a = 0; a < nsp; a++)
+            for (int i = 0; i < sp[a].n; i++) if (sp[a].o[i].look == moved) sp[a].o[i].look = m;
+    }
+    // the textures no material and no look names (1 + index, as they are kept)
+    unsigned char *tex_used = mesh_used + nmesh0 + 1;
+    for (int i = 0; i < s->nmats; i++){
+        const Material *m = &s->mats[i];
+        const int t[5] = {m->tex_base, m->tex_mr, m->tex_normal, m->tex_emissive, m->tex_occlusion};
+        for (int k = 0; k < 5; k++) if (t[k] > 0 && t[k] <= s->ntexmaps) tex_used[t[k]] = 1;
+    }
+    for (int a = 0; a < nsp; a++)
+        for (int i = 0; i < sp[a].n; i++){
+            const EdObject *o = &sp[a].o[i];
+            for (int q = 0; q < NLOOK; q++) if (o->look_map[q] > 0 && o->look_map[q] <= s->ntexmaps) tex_used[o->look_map[q]] = 1;
+            if (o->look_made_normal > 0 && o->look_made_normal <= s->ntexmaps) tex_used[o->look_made_normal] = 1;
+            if (o->look_made_mr > 0 && o->look_made_mr <= s->ntexmaps) tex_used[o->look_made_mr] = 1;
+        }
+    for (int t = s->ntexmaps; t > E.base_tex; t--){
+        if (tex_used[t]) continue;
+        const int moved = scene_remove_texmap(s, t);
+        gone++;
+        // what was made from it or into it is no longer known; the moved one's follow it
+        for (int i = 0; i < nmade; ){
+            Made *md = &made_list[i];
+            if (md->tex == t){ *md = made_list[--nmade]; continue; }
+            for (int k = 0; k < 2; k++) md->k[k] = md->k[k] == t ? -1 : (moved && md->k[k] == moved ? t : md->k[k]);
+            if (moved && md->tex == moved) md->tex = t;
+            i++;
+        }
+        if (!moved) continue;
+        for (int a = 0; a < nsp; a++)
+            for (int i = 0; i < sp[a].n; i++){
+                EdObject *o = &sp[a].o[i];
+                for (int q = 0; q < NLOOK; q++) if (o->look_map[q] == moved) o->look_map[q] = t;
+                if (o->look_made_normal == moved) o->look_made_normal = t;
+                if (o->look_made_mr == moved) o->look_made_mr = t;
+            }
+    }
+    free(used);
+    if (gone) viewer_scene_changed(0);           // (the same picture: what holds a copy takes the scene again by its versions)
+}
+
 // before a change (an add, a move, a size, a material, a body, a removal): the scene as it is
 EXPORT void lr_checkpoint(void){
     if (editing_off()) return;
     snapshot_push(undo_st, &nundo, snapshot_take());
+    if (nredo > 0) gc_dirty = 1;
     while (nredo > 0) free(redo_st[--nredo].objs);
+    collect();
 }
 // the last checkpoint, when nothing changed after it after all (a press without a drag)
 EXPORT void lr_forget_checkpoint(void){
-    if (nundo > 0) free(undo_st[--nundo].objs);
+    if (nundo > 0){ free(undo_st[--nundo].objs); gc_dirty = 1; }
 }
 EXPORT int lr_undo(void){
     if (editing_off()) return 0;
@@ -2241,8 +2384,8 @@ EXPORT const char *lr_open_scene(const char *path){
         int model = -1;
         if (k == ED_MODEL){                           // its parts in its own frame: L = diag(1/kk) R^T (W - pos)
             if (np == 0){ free(pi); continue; }
-            E.models = lr_grow(E.models, sizeof(EdModel), &E.cap_models, E.nmodels + 1, 4);
-            EdModel *m = &E.models[E.nmodels];
+            model = model_slot();
+            EdModel *m = &E.models[model];
             m->nparts = np;
             m->clay = json_get(ls, "clay") != NULL;      // (a mesh file's: of clay, no material of its own)
             m->parts = malloc(sizeof(EdPart) * (size_t)np);
@@ -2264,7 +2407,6 @@ EXPORT const char *lr_open_scene(const char *path){
                 for (int c = 0; c < 8; c++)
                     m->box = box_grow(m->box, xform_point(&L, vec3(c & 1 ? mb.hi.x : mb.lo.x, c & 2 ? mb.hi.y : mb.lo.y, c & 4 ? mb.hi.z : mb.lo.z)));
             }
-            model = E.nmodels++;
         }
         // (the material the file has for its first part: the instance's, or its mesh's)
         int file_mat = np > 0 ? got[pi[0]].material : -1;
@@ -2350,6 +2492,7 @@ EXPORT const char *lr_open_scene(const char *path){
     free(got);
     free(node_of);
     json_free(j);
+    gc_dirty = 1;                                // (the file's meshes no object took)
     changed();
     return json_buf;
 }

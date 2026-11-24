@@ -808,6 +808,69 @@ void scene_mesh_changed(Scene *s, int mesh){
         }
 }
 
+int scene_remove_mesh(Scene *s, int mesh){
+    if (mesh < 0 || mesh >= s->nmeshes) return -1;
+    for (int i = 0; i < s->ninsts; i++) if (s->insts[i].mesh == mesh) return -2;
+    SceneMesh *m = &s->meshes[mesh];
+    if (m->bvh && m->bvh_free) m->bvh_free(m->bvh);
+    free(m->tris);
+    free(m->normals);
+    free(m->uvs);
+    free(m->tangents);
+    const int last = --s->nmeshes;
+    if (mesh == last) return -1;
+    s->meshes[mesh] = s->meshes[last];             // (its id, version and tree come with it)
+    for (int i = 0; i < s->ninsts; i++)
+        if (s->insts[i].mesh == last){
+            s->insts[i].mesh = mesh;
+            s->inst_version = ++inst_versions;     // (the copies' records say which mesh)
+            s->insts[i].version = s->inst_version;
+        }
+    return last;
+}
+
+int scene_remove_material(Scene *s, int mat){
+    if (mat < 0 || mat >= s->nmats) return -1;
+    const int last = --s->nmats;
+    if (mat == last) return -1;
+    s->mats[mat] = s->mats[last];
+    int world = 0;
+    for (int i = 0; i < s->nprims; i++) if (s->prims[i].material == last) s->prims[i].material = mat;
+    for (int i = 0; i < s->ntris; i++) if (s->tris[i].material == last){ s->tris[i].material = mat; world = 1; }
+    if (world) s->tris_version = ++tris_versions;
+    for (int k = 0; k < s->nmeshes; k++){
+        SceneMesh *m = &s->meshes[k];
+        int changed = 0;
+        for (int i = 0; i < m->ntris; i++) if (m->tris[i].material == last){ m->tris[i].material = mat; changed = 1; }
+        if (!changed) continue;
+        // a new version (the copies of its triangles hold their materials); its tree, when it
+        // was up to date, still is
+        const int tree = m->bvh && m->bvh_version == m->version;
+        m->version++;
+        if (tree) m->bvh_version = m->version;
+    }
+    for (int i = 0; i < s->ninsts; i++)
+        if (s->insts[i].material == last){
+            s->insts[i].material = mat;
+            s->inst_version = ++inst_versions;
+            s->insts[i].version = s->inst_version;
+        }
+    return last;
+}
+
+int scene_remove_texmap(Scene *s, int tex){
+    if (tex <= 0 || tex > s->ntexmaps) return 0;
+    texmap_free(&s->texmaps[tex - 1]);
+    const int last = s->ntexmaps--;                // (1 + the last one's index)
+    s->tex_version = next_tex_version();
+    if (tex != last) s->texmaps[tex - 1] = s->texmaps[last - 1];
+    for (int i = 0; i < s->nmats; i++){
+        int *t[5] = {&s->mats[i].tex_base, &s->mats[i].tex_mr, &s->mats[i].tex_normal, &s->mats[i].tex_emissive, &s->mats[i].tex_occlusion};
+        for (int k = 0; k < 5; k++) *t[k] = *t[k] == tex ? 0 : *t[k] == last ? tex : *t[k];
+    }
+    return tex != last ? last : 0;
+}
+
 void scene_free(Scene *s){
     for (int i = 0; i < s->nmeshes; i++){
         SceneMesh *m = &s->meshes[i];

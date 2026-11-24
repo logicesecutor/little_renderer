@@ -449,6 +449,12 @@
   // ---- files from the computer (6.4): .glb / .gltf as an object at its real size, .hdr as
   // the sky; written into the engine's file system (/drop) first ----
   let dropDir = false;
+  // a dropped file the engine has read is taken out of the page's file system again (they
+  // all stayed there, each a second copy of what the scene holds). Not a sky's .hdr: an undo
+  // back to that sky reads it again, and Play packs it.
+  function forgetDropped(names) {
+    for (const n of names) if (!/\.hdr$/i.test(n)) { try { Module.FS.unlink('/drop/' + n); } catch (e) { /* (not there) */ } }
+  }
   async function dropFiles(files, sx, sy) {
     const model = files.find((f) => /\.(glb|gltf|obj|ply)$/i.test(f.name)), hdr = files.find((f) => /\.hdr$/i.test(f.name));
     const imgs = files.filter((f) => /\.(png|jpe?g)$/i.test(f.name));
@@ -467,8 +473,8 @@
     if (model && /\.(glb|gltf)$/i.test(model.name)) {
       const r = JSON.parse(Module.ccall('lr_open_scene', 'string', ['string'], ['/drop/' + model.name]));
       log('lr_open_scene("/drop/' + model.name + '") -> ' + JSON.stringify(r));
-      if (r.opened === 1) { openedScene(r, model.name, hdr); return; }
-      if (r.opened < 0) { toast('Could not read ' + model.name); return; }
+      if (r.opened === 1) { openedScene(r, model.name, hdr); forgetDropped(files.map((f) => f.name)); return; }
+      if (r.opened < 0) { forgetDropped(files.map((f) => f.name)); toast('Could not read ' + model.name); return; }
     }
     if (model) {
       const pk = pick(sx, sy, 0);
@@ -480,6 +486,7 @@
       const id = Module.ccall(fn, 'number', ['string', 'number', 'number', 'number', 'number'],
                               ['/drop/' + model.name, pk.land[0], pk.land[1], pk.land[2], pk.id || 0]);
       log(fn + '("/drop/' + model.name + '", ' + where(pk.land) + (pk.id ? ', on ' + pk.id : '') + ') -> ' + id);
+      forgetDropped(files.map((f) => f.name));
       if (!id) { quiet('lr_forget_checkpoint'); toast('Could not read ' + model.name); refreshScene(); return; }
       if (fn === 'lr_import_mesh' && quiet('lr_last_import_fitted')) toast(model.name + ': its size made no sense in metres, so it was fitted to 1 m');
       refreshScene();
@@ -775,6 +782,7 @@
       Module.FS.writeFile('/drop/' + file.name, new Uint8Array(await file.arrayBuffer()));
       const r = Module.ccall('lr_set_look_map', 'number', ['number', 'number', 'string'], [id, slot, '/drop/' + file.name]);
       log('lr_set_look_map(' + id + ', ' + slot + ' /* ' + LOOK_SLOTS[slot][0] + ' */, "/drop/' + file.name + '") -> ' + r);
+      forgetDropped([file.name]);
       if (r === 1) toast('Could not read ' + file.name);
       else if (r) { lookResult(r); break; }
       else done++;

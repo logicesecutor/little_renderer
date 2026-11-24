@@ -384,6 +384,22 @@ void scene_move_instance(Scene *s, int inst, Xform xf);
 int scene_remove_instance(Scene *s, int inst);
 // after changing a dynamic mesh's triangles: its bounds, and a new version (its BVHs rebuild)
 void scene_mesh_changed(Scene *s, int mesh);
+// What an editor that removes things gives back (a scene only grew): each takes one out, the
+// LAST one of its kind taking its place, as scene_remove_instance does, and returns the index
+// the moved one had (now `index`), or -1 if the one removed was the last and nothing moved.
+// The scene changes its own references to the moved one; whoever keeps indices of its own
+// changes those. What holds a copy (the GPU) follows by the versions.
+// - a mesh, its triangles and its tree freed. No instance may be of it (-2, and nothing done,
+//   if one is); the moved mesh's instances are changed to `mesh`.
+// - a material. Nothing may use it; the moved one's users (the world's shapes, every mesh's
+//   triangles, the instances' own materials) are changed to `mat`, and the meshes changed get
+//   a new version (their trees stay: they do not depend on materials).
+// - a texture (tex: 1 + its index, as Material.tex_*), freed. A material that still used it
+//   has none there (0); the moved one's users are changed to `tex`. Returns 1 + the index the
+//   moved one had, 0 if nothing moved.
+int scene_remove_mesh(Scene *s, int mesh);
+int scene_remove_material(Scene *s, int mat);
+int scene_remove_texmap(Scene *s, int tex);
 // the material of an instance's triangle
 static inline int scene_instance_material(const Scene *s, int inst, int tri){
     const Instance *in = &s->insts[inst];
