@@ -259,10 +259,13 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
 // and with history > 0 the samples of the previous image reprojected (at most history each).
 // rguide: the rasterizer's guide (gpu_raster_guide's three views; NULL: the guide is traced).
 // history_max > 0: temporal gradients (trace_reproject.wgsl) judge each pixel's history, up to
-// history_max (history where they cannot say); index: the next sample's number.
+// history_max (history where they cannot say); edited = 1: the move is an edit's (colours may
+// have changed): the gradients judge only the surfaces, and only where their albedo is the
+// same (lamps, the sky and media keep history); index: the next sample's number.
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
-                           int history, int history_max, uint32_t index, int nvolumes,
+                           int history, int history_max, int edited, uint32_t index, int nvolumes,
                            const GpuMedia *m, const WGPUTextureView *rguide);
+int gpu_trace_gradients_ok(const GpuTrace *t);   // 1 = it can judge histories by temporal gradients
 WGPUBuffer gpu_trace_accum(GpuTrace *t);   // the image's samples (4 planes when guided)
 // Light-traced caustics (tp->photons > 0 and the scene has a mirror or glass): `passes` more
 // passes of light paths added into the caustic sums; clear them for a new image; resolve: the

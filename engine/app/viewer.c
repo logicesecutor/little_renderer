@@ -573,8 +573,11 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // compute BVH): the shadows of moving bodies lagged twice as long there.
 #define GPU_HISTORY_PHYSICS_S 0.28
 // An edit (viewer_scene_edited) changes light on surfaces that did not move, which the samples
-// carried over cannot tell: a pixel keeps one at most while edits come, and the image starts
-// over once none came for EDIT_SETTLE seconds (the old shadow gone at once, not fading out).
+// carried over cannot tell by themselves. With temporal gradients (-gradients, a GPU that has
+// them) each pixel's history is judged as for the physics, its colour compared too: what the
+// edit did not touch keeps its samples, and nothing starts over. Without them a pixel keeps one
+// at most while edits come, and the image starts over once none came for EDIT_SETTLE seconds
+// (the old shadow gone at once, not fading out).
 #define GPU_HISTORY_EDIT 1
 #define EDIT_SETTLE 0.12
 
@@ -595,7 +598,8 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
             V.rate_w0 = w;
         }
     }
-    if (V.edit_pending && clock_s() - V.edit_t >= EDIT_SETTLE){ V.edit_pending = 0; V.reset = 1; }
+    const int grads_on = V.o.gradients && gpu_view_trace_has_gradients(V.gview);
+    if (V.edit_pending && clock_s() - V.edit_t >= EDIT_SETTLE){ V.edit_pending = 0; if (!grads_on) V.reset = 1; }
     if (!V.gpu_tracing || V.reset || depth != V.gpu_depth){
         if (!gpu_trace_begin(cam, at, depth)) return 0;
         V.gpu_scene_moved = V.gpu_scene_edited = 0;
@@ -609,10 +613,12 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
             phys = k < 2 ? 2 : k < phys ? k : phys;
         }
         int keep = V.gpu_scene_moved && V.o.history > phys ? phys : V.o.history;
-        // the physics moved things: each pixel's history from how much its light changed
-        // (temporal gradients), up to all of it; the time-bound one where they cannot tell
-        V.last_grad = V.o.gradients && V.gpu_scene_moved && !V.gpu_scene_edited ? V.o.history : 0;
+        // the physics moved things, or an edit: each pixel's history from how much its light
+        // changed (temporal gradients), up to all of it; the time-bound one (an edit's: 1)
+        // where they cannot tell
+        V.last_grad = grads_on && V.gpu_scene_moved ? V.o.history : 0;
         gpu_view_trace_gradients(V.gview, V.last_grad);
+        gpu_view_trace_edited(V.gview, V.last_grad > 0 && V.gpu_scene_edited);
         // fewer samples kept: a firefly is a bigger share of each pixel's mean, so the clamp
         // while moving is lower by as much (the same share as it had with 12)
         if (keep < GPU_HISTORY_PHYSICS && keep == phys) tp.indirect_clamp_move *= (real)keep / GPU_HISTORY_PHYSICS;

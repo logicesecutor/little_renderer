@@ -130,6 +130,13 @@ void gpu_view_trace_raster_guide(GpuView *v, int mode);
 // samples by how much the light changed there (temporal gradients: the moves' own history
 // where they cannot tell), 0 = the moves' history for every pixel
 void gpu_view_trace_gradients(GpuView *v, int history_max);
+// ... and 1 = the next moves are edits' (colours, materials may have changed): the gradients
+// judge only the surfaces, and only where the albedo is the same; lamps, the sky and media
+// keep the moves' history (0, the default: the physics', where only things moved)
+void gpu_view_trace_edited(GpuView *v, int on);
+// 1 = this GPU's path tracer can judge histories by temporal gradients (a guide; not the
+// wavefront tracer): an edit then needs no start over once it stops
+int gpu_view_trace_has_gradients(const GpuView *v);
 int gpu_view_trace_raster_guided(const GpuView *v);   // the last image's guide was rasterized
 // The image's planes as they are now, read back (waits for the GPU): planes first .. first +
 // n - 1 of the path tracer's samples (trace.wgsl: 0 the samples, sum and count; 1 their

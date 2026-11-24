@@ -39,6 +39,8 @@ void gpu_view_aa(GpuView *v, int on){ (void)v; (void)on; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
 void gpu_view_trace_raster_guide(GpuView *v, int mode){ (void)v; (void)mode; }
 void gpu_view_trace_gradients(GpuView *v, int history_max){ (void)v; (void)history_max; }
+void gpu_view_trace_edited(GpuView *v, int on){ (void)v; (void)on; }
+int gpu_view_trace_has_gradients(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_raster_guided(const GpuView *v){ (void)v; return 0; }
 int gpu_view_trace_planes_read(GpuView *v, int first, int n, float *out){ (void)v; (void)first; (void)n; (void)out; return 0; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
@@ -145,6 +147,7 @@ struct GpuView {
     int t_prep;                 // the image is still to begin: 1 from nothing, 2 from the previous one (reprojected)
     int t_history;              // with 2: samples kept per pixel at most
     int t_hmax, grad_next;      // ... and up to how many the temporal gradients may keep (0: none; gpu_view_trace_gradients)
+    int t_hedit, grad_edit;     // ... and whether the move is an edit's (gpu_view_trace_edited)
     int t_hist;                 // a whole pass done since the image started: every later one
                                 // begins from it (reprojected), the raster under it not needed
     int t_moved, t_live;        // moved since the last band / the band running follows a move
@@ -909,7 +912,7 @@ int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, in
     if (v->trace_failed || !gpu_view_volumes_fit(v, s, NULL)) return 0;
     if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
     v->tparams = *tp;
-    if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; v->t_hmax = v->grad_next; }   // (an image not begun yet has nothing to keep)
+    if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; v->t_hmax = v->grad_next; v->t_hedit = v->grad_edit; }   // (an image not begun yet has nothing to keep)
     // the bands go on where they were: on a slow GPU (a band per frame) every row gets its turn
     v->t_passes = v->t_done = v->t_done_next = 0;
     v->t_bands = 0;
@@ -1054,7 +1057,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
         }
         v->t_rguided = rgp != NULL;
         gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0,
-                              v->t_prep == 2 ? v->t_hmax : 0, v->t_index, nvol,
+                              v->t_prep == 2 ? v->t_hmax : 0, v->t_prep == 2 && v->t_hedit, v->t_index, nvol,
                               &media, rgp);
         gpu_trace_caustics_clear(v->trace, enc);
         if (v->t_prep == 1) gpu_trace_photons_clear(v->trace, enc);   // a new scene or view: the cache too
@@ -1198,6 +1201,8 @@ void gpu_view_trace_band(const GpuView *v, int *rows, int *reps, double *budget_
 
 void gpu_view_trace_raster_guide(GpuView *v, int mode){ if (v) v->rguide = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
 void gpu_view_trace_gradients(GpuView *v, int history_max){ if (v) v->grad_next = history_max > 0 ? history_max : 0; }
+void gpu_view_trace_edited(GpuView *v, int on){ if (v) v->grad_edit = on != 0; }
+int gpu_view_trace_has_gradients(const GpuView *v){ return v && v->trace && gpu_trace_gradients_ok(v->trace); }
 int gpu_view_trace_raster_guided(const GpuView *v){ return v && v->t_rguided; }
 
 static void on_guide_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){

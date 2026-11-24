@@ -138,8 +138,8 @@ typedef struct {
 #define MAX_REPS 16
 // temporal gradients: one gradient sample per tile of GRAD_TILE x GRAD_TILE pixels
 // (trace_reproject.wgsl TILE, trace.wgsl GTILE): 4 x 4 cost the page's Play 7% of the GPU's
-// time against 8.3 for A-SVGF's 3 x 3, the shadow's error as it moved 0.0072 against 0.0066
-// (out of 0.0080 at best with a fixed history)
+// time against 8.3 for A-SVGF's 3 x 3; a box sliding under the lamp, one sample a frame, RMS
+// where the light changed 0.029 either way, elsewhere 0.014 against 0.016 (WEB.md 2.5)
 #define GRAD_TILE 4
 #define GTP_STRIDE ((sizeof(GTP) + 255) / 256 * 256)
 
@@ -1965,7 +1965,7 @@ static void reproject_pass(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipel
 }
 
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
-                           int history, int history_max, uint32_t index, int nvolumes,
+                           int history, int history_max, int edited, uint32_t index, int nvolumes,
                            const GpuMedia *m, const WGPUTextureView *rguide){
     Gpu *g = t->g;
     gpu_trace_build(t, enc);         // the top level over the instances (they may have moved)
@@ -2023,6 +2023,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
         R.dims[2] = (uint32_t)(grads ? history_max : history);
         R.dims[3] = grads ? 1u : 0u;
         R.ext[0] = index;
+        R.ext[2] = grads && edited ? 1u : 0u;
         R.ext[3] = (uint32_t)history;
         wgpuQueueWriteBuffer(g->queue, t->rp_params, 0, &R, sizeof(R));
         if (grads){
@@ -2049,6 +2050,9 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
 GpuTimer *gpu_trace_timer(GpuTrace *t){ return t ? t->timer : NULL; }
 int gpu_trace_guide_stage(void){ return TS_RGUIDE; }
 int gpu_trace_traced_guide_stage(void){ return TS_GUIDE; }
+int gpu_trace_gradients_ok(const GpuTrace *t){
+    return t && t->planes == 5 && t->gm_pipe && t->gf_pipe && !t->wavefront;
+}
 int gpu_trace_hw(const GpuTrace *t){
 #ifdef LR_VK
     return t && t->hw;

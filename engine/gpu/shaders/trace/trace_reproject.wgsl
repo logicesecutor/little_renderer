@@ -12,18 +12,26 @@
 //            surfaces' distance and normal; the last into every pixel of its tile (plane 0's x)
 //   main     a pixel keeps (1 - lambda) / lambda samples, at most history: all where nothing
 //            changed, none where a shadow moved; history_fallback where no tile near had a lambda
+// An edit's move (ext.z = 1) may have changed colours, which lambda does not see (it compares
+// the light over the albedo): a surface's samples are kept only where its albedo is the same,
+// and lamps, the sky and media (no gradient sample of their own) keep history_fallback.
 struct RP {
     oo: vec4f, oul: vec4f, oh: vec4f, ov: vec4f,     /* the old camera */
     no: vec4f, nul: vec4f, nh: vec4f, nv: vec4f,     /* the new one */
     dims: vec4u,                                     /* width, height, history, 1 = gradients */
     ext: vec4u,                                      /* the next sample's number (gmatch), gfilter's
-                                                        pass (0, 1, 2), history_fallback */
+                                                        pass (0, 1, 2), 1 = an edit's, history_fallback */
 };
 @group(0) @binding(0) var<uniform> R: RP;
 @group(0) @binding(1) var<storage, read> old: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> cur: array<vec4f>;
 
 const TILE = 4u;   /* (trace.wgsl GTILE, trace_gpu.c GRAD_TILE) */
+/* An edit's lambda counts 4 times: a drag's steps come faster than the gradients, a sixteenth of
+   the pixels, can follow (edtest22, a box dragged for half a second: the old look left 0.25 and
+   0.5 s after it began 0.008 and 0.004 of the change, against 0.027 and 0.013 as the physics'
+   and 0.017 and 0.010 with a start over once the edits stop) */
+const EDIT_LAMBDA = 4.0;
 
 /* where the new pixel k's surface was in the old image (continuous, pixel centres at
    integers; z: its distance from the new eye, w: 1 if in front of the old eye) */
@@ -70,6 +78,10 @@ fn same_surface(o: u32, g2: vec4f, g3: vec4f, dist: f32) -> bool {
         if (abs(o2.w - dist) > select(0.02, 0.25, gk == 2.0) * dist + grad) { return false; }
     }
     if (gk == 0.0 && dot(o2.xyz, g2.xyz) < 0.9) { return false; }
+    if (R.ext.z != 0u && gk == 0.0) {                     /* an edit's: the same colour too */
+        let d = abs(old[3u * N + o].xyz - g3.xyz);
+        if (max(d.x, max(d.y, d.z)) > 0.02 + 0.1 * max(g3.x, max(g3.y, g3.z))) { return false; }
+    }
     return true;
 }
 
@@ -80,20 +92,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let N = W * H;
     let k = gid.x + gid.y * nw.x * 64u;
     if (k >= N) { return; }
+    let g2 = cur[2u * N + k];
+    let g3 = cur[3u * N + k];
     /* the history this pixel keeps: with gradients its tile's lambda (gfilter put it here) */
     var hist = f32(R.dims.z);
     if (R.dims.w != 0u) {
         let lam = cur[k].x;
-        if (lam >= 0.0) {
+        if (R.ext.z != 0u && g3.w - 4.0 * floor(g3.w * 0.25) != 0.0) {
+            hist = f32(R.ext.w);                  /* an edit's: not a surface */
+        } else if (lam >= 0.0) {
             /* what was there weighs 1 - lambda against the new sample (A-SVGF's blend): (1 -
                lambda) / lambda samples' worth */
-            hist = min(floor((1.0 - min(lam, 1.0)) / max(lam, 1e-3) + 0.5), f32(R.dims.z));
+            let l = select(lam, lam * EDIT_LAMBDA, R.ext.z != 0u);
+            hist = min(floor((1.0 - min(l, 1.0)) / max(l, 1e-3) + 0.5), f32(R.dims.z));
         } else {
             hist = f32(R.ext.w);
         }
     }
-    let g2 = cur[2u * N + k];
-    let g3 = cur[3u * N + k];
     let at = old_place(k, g2);
     var acc0 = vec4f(0.0);
     var acc1 = vec4f(0.0);

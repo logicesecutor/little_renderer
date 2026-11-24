@@ -379,6 +379,59 @@ static void gradients(void){
     scene_free(&s);
 }
 
+// An edit's move (gpu_view_trace_edited): the box's colour changed, grey to red, its light the
+// same over its albedo (what the gradients compare): its pixels must not keep their grey
+// samples, as they would with the physics' move; the walls keep theirs.
+static void edit_colour(void){
+    static Scene s;
+    memset(&s, 0, sizeof(s));
+    SceneOptions empty = {.kind = SCENE_EMPTY};
+    if (scene_cornell_box(&s, &empty) != 0){ check("an edit's colour: the scene", 0); return; }
+    Vec3 lc = scene_light_center(&s);
+    int m = scene_add_material(&s, material_diffuse(vec3(0.7f, 0.7f, 0.7f)));
+    int box = scene_add_instance(&s, INST_BOX, xform_rot_y(vec3(lc.x, 90, lc.z), 0, 70), m);
+    AccelParams ap = accel_default_params();
+    scene_set_accel(&s, ACCEL_BVH, &ap);
+    Camera cam = camera_make(s.cam_from, s.cam_at, s.cam_up, s.cam_vfov_deg, (real)W / H);
+    GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+    float *p = malloc(sizeof(float) * 16 * W * H);
+    double red[2] = {0, 0}, wall[2] = {0, 0};
+    int ok = p != NULL;
+    for (int edit = 0; ok && edit < 2; edit++){
+        Gpu *g;
+        GpuView *v;
+        s.mats[m] = material_diffuse(vec3(0.7f, 0.7f, 0.7f));
+        if (gpu_frame_open(W, H, &g, &v)){ ok = 0; break; }
+        gpu_view_trace_prepare(v);
+        ok = gpu_view_trace_start(v, &s, &tp) && passes_more(g, v, &s, 48);
+        s.mats[m] = material_diffuse(vec3(0.7f, 0.1f, 0.1f));
+        gpu_view_trace_limit(v, 1);
+        gpu_view_trace_gradients(v, 32);
+        gpu_view_trace_edited(v, edit);
+        ok = ok && gpu_view_trace_move(v, &s, &tp, 1) && passes_more(g, v, &s, 1);
+        ok = ok && gpu_view_trace_planes_read(v, 0, 4, p);
+        // the box's pixels: how red (red over green, 7 for the new colour, 1 for the old); the
+        // walls': the samples they kept
+        double r = 0, gr = 0, nk = 0;
+        int nw = 0;
+        for (int i = 0; ok && i < W * H; i++){
+            const float *a = p + 4 * i, *gd = p + 4 * (3 * W * H + i);
+            if (gd[3] == 4.0f * (box + 1)){ r += a[0]; gr += a[1]; }
+            else if (gd[3] == 0.0f && (i % W < W / 6 || i % W > 5 * W / 6)){ nk += a[3]; nw++; }
+        }
+        red[edit] = gr > 0 ? r / gr : 0;
+        wall[edit] = nw ? nk / nw : 0;
+        gpu_frame_close(g, v);
+    }
+    char what[200];
+    snprintf(what, sizeof(what), "an edit's colour: the box red over green %.1f one pass after it turned red (%.1f as the physics' move): over 4", red[1], red[0]);
+    check(what, ok && red[1] > 4);
+    snprintf(what, sizeof(what), "... and the walls kept %.1f samples a pixel: over 16", wall[1]);
+    check(what, ok && wall[1] > 16);
+    free(p);
+    scene_free(&s);
+}
+
 static void raster_guide(void){
     static Scene s;
     AccelParams ap = accel_default_params();
@@ -426,6 +479,7 @@ int main(void){
     pbr_plate();
     raster_guide();
     gradients();
+    edit_colour();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;
 }
