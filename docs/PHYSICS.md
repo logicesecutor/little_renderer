@@ -325,7 +325,8 @@ where it started, its speed kept, every step. The ball thrown in the editor's Pl
 on the ground while still "moving" at 10 m/s; one rolling on a box's top did the same. Now it
 rolls on (`test_fast_rolling`: thrown level at 15 m/s from 1.36 m, 23.7 m in 2 s instead of
 8.1; rolling on a box, 4.9 m in 0.5 s instead of 0.2), and a ball falling fast onto the floor
-from a little above is still stopped at it.
+from a little above is still stopped at it. The GPU's sweep (`K_CCD`) had the same flaw and
+the same fix: the same distances there (`test_gpu_rigid`).
 On the GPU (`K_CCD`) each fast body goes through the others 64 at a time, read once per
 workgroup into shared memory.
 

@@ -119,6 +119,41 @@ static void test_basics(void){
     world_free(&w);
 }
 
+// as test_physics.c's test_fast_rolling: a ball thrown level along the floor, and one rolling
+// on a fixed box's top, roll on (the sweep stopped them at what they touched at once)
+static void test_fast_rolling(void){
+    printf("on the GPU: fast and touching (a ball thrown along the floor, one rolling on a box)\n");
+    real thrown = 0, box_run = 0;
+    for (int k = 0; k < 2; k++){
+        World w;
+        world_init(&w, 1);
+        rigid_set_room(&w.pw.rigid, (Aabb){vec3(-5000, 0, -5000), vec3(5000, 1e6f, 5000)});
+        Vec3 at = vec3(0, 136 + 15, -600), v = vec3(0, 0, 1500), spin = vec3(0, 0, 0);
+        if (k == 1){
+            int top = rigid_add_box(&w.pw.rigid, vec3(0, 50, 0), vec3(100, 50, 2000), quat_identity(), 1);
+            w.pw.rigid.bodies[top].inv_mass = 0;
+            w.pw.rigid.bodies[top].inv_inertia = vec3(0, 0, 0);
+            at = vec3(0, 115.2f, -1000);
+            v = vec3(0, 0, 1000);
+            spin = vec3(1000.0f / 15, 0, 0);
+        }
+        int b = rigid_add_sphere(&w.pw.rigid, at, 15, 1);
+        w.pw.rigid.bodies[b].vel = v;
+        w.pw.rigid.bodies[b].angvel = spin;
+        w.pw.substeps = 4;
+        world_start(&w, 1);
+        // the editor's steps: 1/120 s
+        for (int s = 0; s < (k ? 60 : 240); s++) phys_step(&w.pw, 1.0f / 120);
+        gpu_rigid_sync(w.gr);
+        if (k == 0) thrown = w.pw.rigid.bodies[b].pos.z - at.z;
+        else box_run = w.pw.rigid.bodies[b].pos.z - at.z;
+        world_free(&w);
+    }
+    check_near("the thrown ball after 2 s: farther than 20 m (units)", thrown > 2000 ? 1 : 0, 1, 0);
+    check_near("rolled on the box in 0.5 s (units)", box_run, 500, 40);
+    printf("  (thrown %.0f)\n", thrown);
+}
+
 static void test_meshes(void){
     printf("on the GPU: hulls landing and stacking, a ball, a hull and a box on a fixed mesh\n");
     static Triangle tri[4096];
@@ -348,6 +383,7 @@ int main(void){
     if (!g || gpu_state(g) != GPU_READY){ printf("test_gpu_rigid: no GPU (%s): skipped\n", g ? gpu_message(g) : "none"); return 0; }
     printf("GPU: %s\n", gpu_message(g));
     test_basics();
+    test_fast_rolling();
     test_meshes();
     test_pile();
     test_sleep();

@@ -37,6 +37,7 @@ fn sweep_sphere(p: vec3f, d: vec3f, c: vec3f, rad: f32, tmax: f32) -> f32 {
     let b = dot(m, d);
     let cc = dot(m, m) - rad * rad;
     if (cc <= 0.0 || a <= 0.0 || b >= 0.0) { return tmax; }
+    if (sqrt(dot(m, m)) - rad <= P.h.y + P.d.z) { return tmax; }   /* touching it already: the contacts' job (rigid.c, CCD_TOUCH) */
     let disc = b * b - a * cc;
     if (disc < 0.0) { return tmax; }
     let t = (-b - sqrt(disc)) / a;
@@ -57,17 +58,20 @@ fn sweep_body(o: Body, opos: vec3f, p: vec3f, d: vec3f, rad: f32, tmax: f32) -> 
     var tin = 0.0;
     var tout = 1.0;
     var outside = false;
+    var far = -1e30;
     for (var f = 0u; f < nf; f++) {
         let n = G[f0 + 2u * f].xyz;
         let off = select(G[f0 + 2u * f].w, dot(abs(n), o.half.xyz), box);
         let dist = dot(n, lp) - off - rad;
         let den = dot(n, ld);
+        far = max(far, dist);
         if (dist > 0.0) { outside = true; }
         if (den == 0.0) { if (dist > 0.0) { return tmax; } continue; }
         let tk = -dist / den;
         if (den < 0.0) { tin = max(tin, tk); } else { tout = min(tout, tk); }
         if (tin > tout) { return tmax; }
     }
+    if (far <= P.h.y + P.d.z) { return tmax; }   /* touching it already (no face farther): the contacts' job */
     return select(tmax, tin, outside && tin < tmax);
 }
 
@@ -148,7 +152,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
         for (var k = 0u; k < 6u; k++) {
             let d0 = offs[k] - rad - dot(ns[k], p);
             let dn = dot(ns[k], d);
-            if (d0 > 0.0 && dn > 0.0) { t = min(t, d0 / dn); }
+            if (d0 > P.h.y + P.d.z && dn > 0.0) { t = min(t, d0 / dn); }   /* (touching: the contacts' job) */
         }
     }
     if (t >= 1.0) { return; }
