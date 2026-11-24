@@ -163,6 +163,45 @@ static void test_fast(void){
     check_near("head-on pairs that passed each other (of 3)", missed, 0, 0);
 }
 
+// Fast and touching (rigid_ccd): a ball thrown level at 15 m/s from 1.36 m (the editor's
+// Play) bounces and rolls on along the floor, and one rolling at 10 m/s along a fixed box's
+// top rolls on too. The sweep stopped such a ball at what it touched at once (a hit at t ~ 0,
+// its speed kept) and it stood still every step: the thrown ball halted on the ground at
+// 5.9 m. A ball falling fast onto the floor from a little above still never goes through it.
+static void test_fast_rolling(void){
+    printf("fast and touching (a ball thrown along the floor, one rolling on a box, a fast fall)\n");
+    real thrown = 0, box_run = 0, lowest = 1e30f;
+    for (int k = 0; k < 3; k++){
+        RigidWorld w;
+        rigid_init(&w);
+        rigid_set_room(&w, (Aabb){vec3(-5000, 0, -5000), vec3(5000, 1e6f, 5000)});
+        Vec3 at = vec3(0, 136 + 15, -600), v = vec3(0, 0, 1500), spin = vec3(0, 0, 0);
+        if (k == 1){                                     // rolling along a long fixed box, 100 high
+            int top = rigid_add_box(&w, vec3(0, 50, 0), vec3(100, 50, 2000), quat_identity(), 1);
+            w.bodies[top].inv_mass = 0;
+            w.bodies[top].inv_inertia = vec3(0, 0, 0);
+            at = vec3(0, 115.2f, -1000);
+            v = vec3(0, 0, 1000);
+            spin = vec3(1000.0f / 15, 0, 0);
+        }
+        if (k == 2){ at = vec3(0, 15 + 2, 0); v = vec3(0, -3000, 0); }   // 2 above the floor
+        int b = rigid_add_sphere(&w, at, 15, 1);
+        w.bodies[b].vel = v;
+        w.bodies[b].angvel = spin;
+        for (int s = 0; s < 240; s++){
+            rigid_steps(&w, 1.0 / 120, 4, NULL);
+            if (k == 2) lowest = r_fmin(lowest, w.bodies[b].pos.y - 15);
+            if (k == 1 && s == 59) box_run = w.bodies[b].pos.z - at.z;
+        }
+        if (k == 0) thrown = w.bodies[b].pos.z - at.z;
+        rigid_free(&w);
+    }
+    check_near("the thrown ball after 2 s: farther than 20 m (units)", thrown > 2000 ? 1 : 0, 1, 0);
+    check_near("rolled on the box in 0.5 s (units)", box_run, 500, 40);
+    check_near("a fast fall from 2 above: its lowest, not through the floor", lowest > -2 ? 1 : 0, 1, 0);
+    printf("  (thrown %.0f, lowest %.2f)\n", thrown, lowest);
+}
+
 // A pile three times as tall as it is wide (400 balls, boxes and tori dropped into a room
 // 180 wide): every body asleep within 30 s (16 s in float, 22 in double)
 static void test_tall_pile(void){
@@ -388,6 +427,7 @@ int main(void){
     test_box_lands_flat();
     test_sleep();
     test_fast();
+    test_fast_rolling();
     test_tall_pile();
     test_hulls();
     test_fluid();

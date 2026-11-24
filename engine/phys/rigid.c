@@ -19,6 +19,7 @@
 #define SLEEP_TIME 0.5f          // still this long (s): asleep
 #define WAKE_SPEED 20.0f         // a body faster than this wakes the sleeping ones it comes near
 #define CCD_FRACTION 0.5f        // moving more than this times its inner radius in a step: swept (rigid_ccd)
+#define CCD_TOUCH (CONTACT_SLOP + SPECULATIVE_MIN)   // nearer than this at the start: touching (the contacts' job)
 #define SLOW_SPEED 60.0f         // slower than this, and staying near one place and turn...
 #define ANCHOR_MOVE 2.5f         // ... no farther than this (units, the outermost point too) ...
 #define ANCHOR_TIME 1.5f         // ... this long (s): asleep too (a rocking body in a pile)
@@ -1232,6 +1233,7 @@ static int sweep_sphere(Vec3 p, Vec3 d, Vec3 c, real rad, real *t){
     Vec3 m = v_sub(p, c);
     real a = v_dot(d, d), b = v_dot(m, d), cc = v_dot(m, m) - rad * rad;
     if (cc <= 0 || a <= 0 || b >= 0) return 0;
+    if (r_sqrt(v_dot(m, m)) - rad <= CCD_TOUCH) return 0;   // touching it already: the contacts' job
     real disc = b * b - a * cc;
     if (disc < 0) return 0;
     real tt = (-b - r_sqrt(disc)) / a;
@@ -1253,6 +1255,12 @@ static int sweep_planes(Vec3 p, Vec3 d, const Vec3 *n, const real *off, int nf, 
         if (tin > tout) return 0;
     }
     if (!outside || tin >= *t) return 0;
+    // touching it already (no face farther than CCD_TOUCH: its distance is at least the
+    // largest): the contacts' job. A ball rolling fast along a box's top was swept into its
+    // face at once (tin ~ 0) and stood still, its speed kept, every step
+    real far = -1e30f;
+    for (int k = 0; k < nf; k++) far = r_fmax(far, v_dot(n[k], p) - off[k] - grow);
+    if (far <= CCD_TOUCH) return 0;
     *t = tin;
     return 1;
 }
@@ -1329,7 +1337,10 @@ static void rigid_ccd(RigidWorld *w, const Vec3 *start){
             real off[6] = {-w->room.lo.x, w->room.hi.x, -w->room.lo.y, w->room.hi.y, -w->room.lo.z, w->room.hi.z};
             for (int k = 0; k < 6; k++){                 // (each wall alone: the room is not a solid)
                 real d0 = off[k] - rad - v_dot(n[k], p), dn = v_dot(n[k], d);
-                if (d0 <= 0 || dn <= 0) continue;        // already at it, or moving away
+                // already at it (touching: the contacts' job), or moving away. A ball rolling
+                // fast on the floor, a hair above it and pulled down a hair each step, was
+                // stopped at the floor at once (t ~ 0) and stood still, its speed kept
+                if (d0 <= CCD_TOUCH || dn <= 0) continue;
                 real tt = d0 / dn;
                 if (tt < t){ t = tt; hit = 1; }
             }
