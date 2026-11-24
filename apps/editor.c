@@ -1561,7 +1561,11 @@ EXPORT const char *lr_status(void){
             "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f",
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
             st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
-    jprintf(",\"displayHz\":%.1f,\"frameCap\":%d", viewer_display_hz(), frame_cap_ms > 0 ? (int)(1000.0 / frame_cap_ms + 0.5) : 0);
+    int threads = 1;
+#ifdef _OPENMP
+    threads = omp_get_max_threads();
+#endif
+    jprintf(",\"displayHz\":%.1f,\"frameCap\":%d,\"threads\":%d", viewer_display_hz(), frame_cap_ms > 0 ? (int)(1000.0 / frame_cap_ms + 0.5) : 0, threads);
     jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f,\"compiling\":%d}",
             st.trace_starts, st.trace_moves, st.trace_pass_ms, st.trace_rows, st.trace_reps, st.trace_budget_ms, st.trace_work,
             st.trace_history, st.trace_rate, st.trace_compiling);

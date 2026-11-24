@@ -341,6 +341,22 @@
 </div>
 
 <script src="editor.js"></script>
-<script async src="engine.js"></script>
+<script>
+  // the engine: its threaded build (engine_mt.js: the CPU's loops on all the machine's threads)
+  // when the page is cross-origin isolated (SharedArrayBuffer: a server that sends COOP/COEP,
+  // as make serve does) and the file is there, unless ?threads=1; else engine.js, one thread
+  (() => {
+    const one = new URLSearchParams(location.search).get('threads') === '1';
+    const load = (src, fallback) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      if (fallback) s.onerror = () => { s.remove(); load(fallback, null); };
+      document.body.appendChild(s);
+    };
+    window.KILN_THREADS = !!(self.crossOriginIsolated && !one);
+    if (window.KILN_THREADS) load('engine_mt.js', 'engine.js'); else load('engine.js', null);
+  })();
+</script>
 </body>
 </html>

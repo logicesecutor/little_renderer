@@ -104,7 +104,7 @@
   const query = new URLSearchParams(location.search);
   ui.sample = SAMPLES[query.get('sample')] || null;
   if (ui.sample) { args.push(...ui.sample.args); ui.mode = 'simulate'; }   // (the address's own options after: they can change it)
-  for (const [k, v] of query) { if (k === 'sample') continue; args.push('-' + k); if (v !== '') args.push(v); }
+  for (const [k, v] of query) { if (k === 'sample' || k === 'threads') continue; args.push('-' + k); if (v !== '') args.push(v); }   // (?threads=1: the loader's)
   ui.res = windowRes();
   { const q = new URLSearchParams(location.search); if (q.has('width') || q.has('height')) ui.follow = false; }   // (a size in the address: fixed)
 
@@ -1435,6 +1435,7 @@
       ['emitters', st ? String(st.emitters) : ''],
       ['frames/s', st ? st.fps.toFixed(0) : ''],
       ['device', st ? (st.gpu ? 'GPU (WebGPU)' : st.gpuStarting ? 'GPU starting' : 'CPU') : ''],
+      ['CPU threads', st ? String(st.threads || 1) + (st.threads > 1 ? '' : window.crossOriginIsolated ? ' (?threads=1)' : ' (the page is not cross-origin isolated: COOP/COEP)') : ''],
     ];
     if (st && st.sim) lines.push(['simulation', st.sim.line]);
     const box = $('internal-lines');
@@ -1644,9 +1645,9 @@
       try { const name = sc.skyPath.slice(sc.skyPath.lastIndexOf('/') + 1); files.push([name, Module.FS.readFile(sc.skyPath)]); play.sky = name; } catch (e) { /* (not there: the default sky) */ }
     }
     // the page's own files, as this page has them
-    for (const f of ['editor.css', 'editor.js', 'engine.js', 'engine.wasm']) {
+    for (const f of ['editor.css', 'editor.js', 'engine.js', 'engine.wasm', 'engine_mt.js', 'engine_mt.wasm']) {
       const r = await fetch(new URL(f, location.href));
-      if (!r.ok) throw new Error(f + ' could not be read');
+      if (!r.ok) { if (/_mt\./.test(f)) continue; throw new Error(f + ' could not be read'); }   // (the threaded build: if there)
       files.push([f, new Uint8Array(await r.arrayBuffer())]);
     }
     const r = await fetch(new URL('index.html', location.href));
@@ -1658,7 +1659,8 @@
     files.push(['index.html', new TextEncoder().encode(html)]);
     files.push(['README.txt', new TextEncoder().encode(title + '\r\n\r\nA game made in Kiln (little_renderer\'s editor). Open index.html from a web server, not as a file:\r\n' +
       'put this folder on a static host (itch.io as an HTML game, GitHub Pages, Netlify), or serve it\r\nyourself (in the folder: python -m http.server, then http://localhost:8000).\r\n' +
-      'It runs in the browser, on WebGPU (Chrome, Edge; Firefox and Safari with WebGPU on).\r\n\r\nClick to look around, WASD to move, Shift to run, Space to jump, B to throw a ball, Esc to free the mouse.\r\n')]);
+      'It runs in the browser, on WebGPU (Chrome, Edge; Firefox and Safari with WebGPU on).\r\n\r\nClick to look around, WASD to move, Shift to run, Space to jump, B to throw a ball, Esc to free the mouse.\r\n\r\n' +
+      'Served with the headers Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp,\r\nit uses all the CPU\'s threads (engine_mt.js); without them, one.\r\n')]);
     return makeZip(files);
   }
   $('pub-game').addEventListener('click', async () => {
