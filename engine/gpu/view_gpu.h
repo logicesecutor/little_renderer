@@ -126,11 +126,16 @@ void gpu_view_trace_wavefront(GpuView *v, int on);
 // media), 0 = traced everywhere, 1 (the default; LR_GPU_RGUIDE=0/1/2) = whichever has cost
 // less GPU time per image here, measured in turns
 void gpu_view_trace_raster_guide(GpuView *v, int mode);
+// The next moves (gpu_view_trace_move): history_max > 0 = each pixel keeps up to history_max
+// samples by how much the light changed there (temporal gradients: the moves' own history
+// where they cannot tell), 0 = the moves' history for every pixel
+void gpu_view_trace_gradients(GpuView *v, int history_max);
 int gpu_view_trace_raster_guided(const GpuView *v);   // the last image's guide was rasterized
-// The image's guide as it is now, read back (waits for the GPU): planes 2-4 of the path
-// tracer's samples (trace.wgsl: normal and distance; albedo and what the pixel sees; where
-// caustics are looked up), 3 x w x h vec4. 0 = none (no guide on this GPU). For the tests.
-int gpu_view_trace_guide_read(GpuView *v, float *out);
+// The image's planes as they are now, read back (waits for the GPU): planes first .. first +
+// n - 1 of the path tracer's samples (trace.wgsl: 0 the samples, sum and count; 1 their
+// luminances; 2-4 the guide: normal and distance, albedo and what the pixel sees, where
+// caustics are looked up), n x w x h vec4. 0 = none (no guide on this GPU). For the tests.
+int gpu_view_trace_planes_read(GpuView *v, int first, int n, float *out);
 // The denoiser (gpu/denoise_gpu.c): on = 1 shows and reads back the image denoised (the
 // count of each pixel is then 1), 0 the samples as they are. Off by default. Returns 1 if it
 // will be used: 0 when this GPU's buffers are too small for its guide at this image size.
@@ -148,9 +153,9 @@ void gpu_view_destroy(GpuView *v);
 // builds of a frame that had some; 0 when not timed.
 double gpu_view_gpu_ms(GpuView *v, int what);
 // the GPU time summed since the start (its timers, as read back so far), ms: [0] path tracer,
-// 1 light tracer, 2 BVH builds, 3 guide traced, 4 reprojection, 5 denoiser, 6 guide rasterized
-// (0 where not timed)
-void gpu_view_gpu_totals(GpuView *v, double ms[7]);
+// 1 light tracer, 2 BVH builds, 3 guide traced, 4 reprojection, 5 denoiser, 6 guide rasterized,
+// 7 temporal gradients (0 where not timed)
+void gpu_view_gpu_totals(GpuView *v, double ms[8]);
 void gpu_view_gpu_ms_reset(GpuView *v);
 // The denoiser run n times on the samples there are now (gpu_view_trace_denoise on, a pass
 // made), waited for: the milliseconds per run on the CPU's clock; < 0 if it cannot run.

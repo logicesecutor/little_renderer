@@ -306,6 +306,7 @@ typedef struct {
     double pass_rate, rate_t0, rate_w0;   // the GPU path tracer's passes a second (and since when, its work then)
     double max_hz;             // viewer_set_max_hz: frames a second at most (0: the display's)
     int last_keep;             // the history the last move kept (viewer_status)
+    int last_grad;             // ... and with temporal gradients, up to how much
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
     RenderParams last_rp;      // the camera of the last raster frame, for the GPU march
@@ -608,6 +609,10 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
             phys = k < 2 ? 2 : k < phys ? k : phys;
         }
         int keep = V.gpu_scene_moved && V.o.history > phys ? phys : V.o.history;
+        // the physics moved things: each pixel's history from how much its light changed
+        // (temporal gradients), up to all of it; the time-bound one where they cannot tell
+        V.last_grad = V.o.gradients && V.gpu_scene_moved && !V.gpu_scene_edited ? V.o.history : 0;
+        gpu_view_trace_gradients(V.gview, V.last_grad);
         // fewer samples kept: a firefly is a bigger share of each pixel's mean, so the clamp
         // while moving is lower by as much (the same share as it had with 12)
         if (keep < GPU_HISTORY_PHYSICS && keep == phys) tp.indirect_clamp_move *= (real)keep / GPU_HISTORY_PHYSICS;
@@ -1370,7 +1375,7 @@ void viewer_set_settle(double seconds){ V.settle = seconds; }
 void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
 void viewer_set_max_hz(double hz){ V.max_hz = hz > 0 ? hz : 0; V.budget_t = 0; if (V.gview) trace_budget(); }
 double viewer_display_hz(void){ return V.win ? window_refresh_hz(V.win) : 0; }
-long viewer_profile(double cpu[8], double gpu[7]){
+long viewer_profile(double cpu[8], double gpu[8]){
     for (int k = 0; k < 8; k++) cpu[k] = k < PROF_N ? V.prof[k] * 1000.0 : 0;
     gpu_view_gpu_totals(V.gview, gpu);
     return V.prof_frames;
@@ -1489,7 +1494,8 @@ void viewer_status(ViewerStatus *st){
     st->trace_moves = V.trace_moves;
     st->trace_pass_ms = V.gview ? gpu_view_trace_pass_ms(V.gview) : V.pass_ms;
     st->trace_work = V.gview ? gpu_view_trace_work(V.gview) : 0;
-    st->trace_history = V.last_keep;
+    st->trace_history = V.last_grad > 0 ? V.last_grad : V.last_keep;
+    st->trace_gradients = V.last_grad > 0;
     st->trace_compiling = V.gview && gpu_view_trace_compiling(V.gview);
     st->trace_rguide = V.gview && gpu_view_trace_raster_guided(V.gview);
     st->trace_rate = V.pass_rate;

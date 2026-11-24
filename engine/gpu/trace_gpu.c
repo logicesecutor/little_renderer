@@ -136,6 +136,11 @@ typedef struct {
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
 // aligned (WebGPU's minimum offset alignment for uniform bindings)
 #define MAX_REPS 16
+// temporal gradients: one gradient sample per tile of GRAD_TILE x GRAD_TILE pixels
+// (trace_reproject.wgsl TILE, trace.wgsl GTILE): 4 x 4 cost the page's Play 7% of the GPU's
+// time against 8.3 for A-SVGF's 3 x 3, the shadow's error as it moved 0.0072 against 0.0066
+// (out of 0.0080 at best with a fixed history)
+#define GRAD_TILE 4
 #define GTP_STRIDE ((sizeof(GTP) + 255) / 256 * 256)
 
 // where an instanced mesh is on the GPU (and what it was made from)
@@ -162,7 +167,9 @@ struct GpuTrace {
     Gpu *g;
     int w, h;
     WGPUBindGroupLayout bgl, rp_bgl, gc_bgl;
-    WGPUComputePipeline pipe, gbuf_pipe, rp_pipe, gc_pipe;
+    WGPUComputePipeline pipe, gbuf_pipe, rp_pipe, gc_pipe, gm_pipe, gf_pipe;
+    WGPUBuffer gf_params[3];  // temporal gradients (trace_reproject.wgsl gmatch, gfilter): the filter's passes
+    GpuBindCache bc_gmatch, bc_gfilter[3];
     WGPUBuffer gc_params;    // the guide from the rasterizer's G-buffer (trace_guide.wgsl): its camera
     GpuBindCache bc_gcopy;
     int guide_skip;          // T.em.z: gbuf traces only the pixels the rasterizer's guide left to it
@@ -296,10 +303,10 @@ struct GpuTrace {
 // (the guide: an image's first hits for the denoiser and the reprojection, once per image;
 // timed apart, or every band that begins an image counts it as path tracing: while things
 // move, a pass seemed 2.7x cheaper than it was, and the bands were sized from that)
-enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_WF0, TS_REPROJECT = TS_WF0 + 6, TS_RGUIDE, NTS };
+enum { TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_WF0, TS_REPROJECT = TS_WF0 + 6, TS_RGUIDE, TS_GRADIENT, NTS };
 static const char *const TS_NAMES[NTS] = {"path tracer", "light tracer (caustics)", "BVH builds", "guide",
     "  wavefront: camera rays", "  wavefront: extend", "  wavefront: shade", "  wavefront: sizes", "  wavefront: shadow rays",
-    "  wavefront: into the image", "reprojection", "guide rasterized"};
+    "  wavefront: into the image", "reprojection", "guide rasterized", "temporal gradients"};
 
 // a compute pass, timed under `stage` when timing is on; `units`: the work it does
 static WGPUComputePassEncoder timed_pass(GpuTrace *t, WGPUCommandEncoder enc, int stage, double units){
@@ -432,7 +439,11 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     if (t->planes == 5){
         t->rp_bgl = gpu_layout(g, WGPUShaderStage_Compute, "URW");
         t->rp_pipe = gpu_compute(g, "path tracer: reprojection", REPROJECT, "main", t->rp_bgl);
-        t->rp_params = gpu_buffer(g, "reprojection parameters", 9 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+        t->rp_params = gpu_buffer(g, "reprojection parameters", 10 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+        t->gm_pipe = gpu_compute(g, "path tracer: temporal gradients, the samples", REPROJECT, "gmatch", t->rp_bgl);
+        t->gf_pipe = gpu_compute(g, "path tracer: temporal gradients, the filter", REPROJECT, "gfilter", t->rp_bgl);
+        for (int k = 0; k < 3; k++)
+            t->gf_params[k] = gpu_buffer(g, "temporal gradients: filter parameters", 10 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
         t->gc_bgl = gpu_layout(g, WGPUShaderStage_Compute, "UTTTW");
         t->gc_pipe = gpu_compute(g, "path tracer: guide from the rasterizer", GUIDE_COPY, "main", t->gc_bgl);
         t->gc_params = gpu_buffer(g, "guide copy parameters", 5 * 16, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
@@ -483,7 +494,8 @@ GpuTrace *gpu_trace_create(Gpu *g, int width, int height, const char *types_wgsl
     t->final = gpu_buffer(g, "path traced image with caustics", (size_t)width * height * 16,
                           WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
     free(src);
-    t->params = gpu_buffer(g, "path tracer parameters", GTP_STRIDE * MAX_REPS, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    // (one more copy, the last: the gradient samples', gpu_trace_begin_image)
+    t->params = gpu_buffer(g, "path tracer parameters", GTP_STRIDE * (MAX_REPS + 1), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     {
         // the blue-noise mask (base/sampler.c), 2 ranks per 32 bits, then the BSDF's tables
         const uint16_t *m = blue_noise_mask();
@@ -1597,12 +1609,12 @@ static void write_params(GpuTrace *t, WGPUBuffer dst, const Scene *s, const GpuT
 
 // `repeats` dispatches, the r-th with the r-th copy of the parameters (light = 1: the light
 // tracer, whose binding 11 takes the place of 9; 3: the path tracer's bindings, timed as the
-// guide): one bind group, the copy chosen by its dynamic offset (it was a bind group per
+// guide; 4: ... with the gradient samples' copy, timed as those): one bind group, the copy chosen by its dynamic offset (it was a bind group per
 // dispatch, each several us of the CPU's time)
 static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, size_t threads, int repeats,
                         const GpuMedia *m, int light){
-    const int guide = light == 3;
-    if (guide) light = 0;
+    const int guide = light == 3, grad = light == 4;
+    if (guide || grad) light = 0;
     WGPUBuffer b[11] = {m->frame_u, m->dens, m->bricks, m->vstat, light == 2 ? t->pc_params : light ? t->lt_params : t->params,
                         t->nodes, t->aux, t->prims, t->tris,
                         light == 2 ? t->grid : light ? t->caus : t->acc[t->cur], t->blue};
@@ -1632,6 +1644,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
     // the guide per image
     WGPUComputePassEncoder pass = light == 2 ? wgpuCommandEncoderBeginComputePass(enc, NULL)
                                 : guide ? timed_pass(t, enc, TS_GUIDE, 1)
+                                : grad ? timed_pass(t, enc, TS_GRADIENT, 1)
                                 : timed_pass(t, enc, light ? TS_LIGHT : TS_TRACE,
                                              light ? repeats : (double)threads * repeats / ((double)t->w * t->h));
     wgpuComputePassEncoderSetPipeline(pass, pipe);
@@ -1641,7 +1654,7 @@ static void dispatch_ex(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline
 #endif
     WGPUBindGroup bg = gpu_bind_cached(t->g, &t->bc_trace[light], light ? t->lt_bgl : t->bgl, e, nent, chain);
     for (int r = 0; r < repeats; r++){
-        uint32_t off = (uint32_t)(r * GTP_STRIDE);
+        uint32_t off = (uint32_t)((grad ? MAX_REPS : r) * GTP_STRIDE);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 1, &off);
         gpu_dispatch(pass, threads);
     }
@@ -1938,8 +1951,21 @@ static void put_cam(float *d, const Camera *c){
     put(d, c->origin, 0); put(d + 4, c->upper_left, 0); put(d + 8, c->horizontal, 0); put(d + 12, c->vertical, 0);
 }
 
+// a pass of trace_reproject.wgsl (R: its parameters) over n threads, timed under stage
+static void reproject_pass(GpuTrace *t, WGPUCommandEncoder enc, WGPUComputePipeline pipe, WGPUBuffer params,
+                           GpuBindCache *bc, size_t n, int stage){
+    WGPUBuffer b[3] = {params, t->acc[1 - t->cur], t->acc[t->cur]};
+    WGPUBindGroup bg = gpu_bind_cached_buffers(t->g, bc, t->rp_bgl, b, 3);
+    WGPUComputePassEncoder pass = timed_pass(t, enc, stage, stage == TS_REPROJECT ? 1 : 0);
+    wgpuComputePassEncoderSetPipeline(pass, pipe);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
+    gpu_dispatch(pass, n);
+    wgpuComputePassEncoderEnd(pass);
+    wgpuComputePassEncoderRelease(pass);
+}
+
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
-                           int history, int nvolumes,
+                           int history, int history_max, uint32_t index, int nvolumes,
                            const GpuMedia *m, const WGPUTextureView *rguide){
     Gpu *g = t->g;
     gpu_trace_build(t, enc);         // the top level over the instances (they may have moved)
@@ -1979,25 +2005,42 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
     }
     // (moving: the reprojection writes every pixel's samples, so the guide does not clear them:
     // 32 of the 80 bytes a pixel it wrote)
+    // (kept for the bands' parameters too: in the same submission the guide reads the last
+    // ones written to its copy)
     t->guide_keep = reproject;
     write_params(t, t->params, s, tp, 0, t->h, nvolumes, 0, 1, 0);
     dispatch_ex(t, enc, t->gbuf_pipe, (size_t)t->w * t->h, 1, m, 3);
-    t->guide_keep = 0;
     if (reproject){
-        struct { float cams[8][4]; uint32_t dims[4]; } R;
+        // temporal gradients (trace_reproject.wgsl): each pixel's history from how much the
+        // light changed there, at most history_max (else history, where nothing says)
+        WGPUComputePipeline gp = sky_kernels(t, s) ? t->pipe_sky : t->pipe;
+        const int grads = history_max > 0 && t->gm_pipe && t->gf_pipe && gp && !t->wavefront;
+        struct { float cams[8][4]; uint32_t dims[4], ext[4]; } R;
         memset(&R, 0, sizeof(R));
         put_cam(R.cams[0], &t->cam);
         put_cam(R.cams[4], &tp->cam);
-        R.dims[0] = (uint32_t)t->w; R.dims[1] = (uint32_t)t->h; R.dims[2] = (uint32_t)history;
+        R.dims[0] = (uint32_t)t->w; R.dims[1] = (uint32_t)t->h;
+        R.dims[2] = (uint32_t)(grads ? history_max : history);
+        R.dims[3] = grads ? 1u : 0u;
+        R.ext[0] = index;
+        R.ext[3] = (uint32_t)history;
         wgpuQueueWriteBuffer(g->queue, t->rp_params, 0, &R, sizeof(R));
-        WGPUBuffer b[3] = {t->rp_params, t->acc[1 - t->cur], t->acc[t->cur]};
-        WGPUBindGroup bg = gpu_bind_cached_buffers(g, &t->bc_reproject, t->rp_bgl, b, 3);
-        WGPUComputePassEncoder pass = timed_pass(t, enc, TS_REPROJECT, 1);
-        wgpuComputePassEncoderSetPipeline(pass, t->rp_pipe);
-        wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
-        gpu_dispatch(pass, (size_t)t->w * t->h);
-        wgpuComputePassEncoderEnd(pass);
-        wgpuComputePassEncoderRelease(pass);
+        if (grads){
+            const size_t tiles = (size_t)((t->w + GRAD_TILE - 1) / GRAD_TILE) * ((t->h + GRAD_TILE - 1) / GRAD_TILE);
+            reproject_pass(t, enc, t->gm_pipe, t->rp_params, &t->bc_gmatch, tiles, TS_GRADIENT);
+            GTP P;
+            fill_params(t, &P, s, tp, 0, t->h, nvolumes, 0);
+            P.cnt[2] = index;
+            P.txl[3] = 1;                    // (main: the tiles' gradient samples)
+            wgpuQueueWriteBuffer(g->queue, t->params, (uint64_t)MAX_REPS * GTP_STRIDE, &P, sizeof(P));
+            dispatch_ex(t, enc, gp, tiles, 1, m, 4);
+            for (int k = 0; k < 3; k++){
+                R.ext[1] = (uint32_t)k;
+                wgpuQueueWriteBuffer(g->queue, t->gf_params[k], 0, &R, sizeof(R));
+                reproject_pass(t, enc, t->gf_pipe, t->gf_params[k], &t->bc_gfilter[k], tiles, TS_GRADIENT);
+            }
+        }
+        reproject_pass(t, enc, t->rp_pipe, t->rp_params, &t->bc_reproject, (size_t)t->w * t->h, TS_REPROJECT);
     }
     t->cam = tp->cam;
     t->has_image = 1;
@@ -2014,9 +2057,9 @@ int gpu_trace_hw(const GpuTrace *t){
     return 0;
 #endif
 }
-void gpu_trace_gpu_totals(GpuTrace *t, double ms[7]){
-    static const int st[7] = {TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_REPROJECT, -1, TS_RGUIDE};
-    for (int k = 0; k < 7; k++) ms[k] = t && st[k] >= 0 ? gpu_timer_total_ms(t->timer, st[k]) : 0;
+void gpu_trace_gpu_totals(GpuTrace *t, double ms[8]){
+    static const int st[8] = {TS_TRACE, TS_LIGHT, TS_BUILD, TS_GUIDE, TS_REPROJECT, -1, TS_RGUIDE, TS_GRADIENT};
+    for (int k = 0; k < 8; k++) ms[k] = t && st[k] >= 0 ? gpu_timer_total_ms(t->timer, st[k]) : 0;
     if (t && t->wavefront) for (int k = TS_WF0; k < TS_WF0 + 6; k++) ms[0] += gpu_timer_total_ms(t->timer, k);
 }
 
@@ -2032,8 +2075,8 @@ void gpu_trace_destroy(GpuTrace *t){
         for (int k = 0; k < NTS; k++){
             double ms = gpu_timer_ms_per_unit(t->timer, k);
             if (ms > 0) printf("GPU time, %s: %.3f ms per %s\n", TS_NAMES[k], ms,
-                               k == TS_TRACE || (k >= TS_WF0 && k != TS_RGUIDE) ? "pass (1 sample per pixel, the whole image)" : k == TS_LIGHT ? "pass" :
-                               k == TS_GUIDE || k == TS_RGUIDE ? "image" : "frame with builds");
+                               k == TS_TRACE || (k >= TS_WF0 && k < TS_RGUIDE) ? "pass (1 sample per pixel, the whole image)" : k == TS_LIGHT ? "pass" :
+                               k == TS_GUIDE || k == TS_RGUIDE || k == TS_GRADIENT ? "image" : "frame with builds");
         }
         gpu_timer_destroy(t->timer);
     }
@@ -2044,7 +2087,12 @@ void gpu_trace_destroy(GpuTrace *t){
     for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);
     for (int k = 0; k < 8; k++){ gpu_bind_cache_clear(&t->bc_build[k]); gpu_bind_cache_clear(&t->bc_ploc[k]); }
     for (int k = 0; k < 6; k++) gpu_bind_cache_clear(&t->bc_wf[k]);
-    gpu_bind_cache_clear(&t->bc_resolve); gpu_bind_cache_clear(&t->bc_reproject); gpu_bind_cache_clear(&t->bc_gcopy); gpu_bind_cache_clear(&t->bc_decay);
+    gpu_bind_cache_clear(&t->bc_resolve); gpu_bind_cache_clear(&t->bc_reproject); gpu_bind_cache_clear(&t->bc_gcopy);
+    gpu_bind_cache_clear(&t->bc_gmatch);
+    for (int k = 0; k < 3; k++){
+        gpu_bind_cache_clear(&t->bc_gfilter[k]);
+        if (t->gf_params[k]){ wgpuBufferDestroy(t->gf_params[k]); wgpuBufferRelease(t->gf_params[k]); }
+    } gpu_bind_cache_clear(&t->bc_decay);
     WGPUBuffer wfb[] = {t->wf, t->wfc, t->wfa, t->wf_params};
     for (int i = 0; i < 4; i++) if (wfb[i]){ wgpuBufferDestroy(wfb[i]); wgpuBufferRelease(wfb[i]); }
     if (t->ck_buf){ wgpuBufferDestroy(t->ck_buf); wgpuBufferRelease(t->ck_buf); }
@@ -2052,7 +2100,7 @@ void gpu_trace_destroy(GpuTrace *t){
                          t->caus, t->rs_params, t->final, t->lt_params, t->grid, t->dc_params, t->pc_params,
                          t->bd_keys, t->bd_flags, t->bd_boxes, t->bd_par, t->pl_buf, t->pl_args};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) if (bufs[i]){ wgpuBufferDestroy(bufs[i]); wgpuBufferRelease(bufs[i]); }
-    WGPUComputePipeline pipes[] = {t->pipe, t->pipe_sky, t->wf_shade_sky, t->gbuf_pipe, t->rp_pipe, t->gc_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
+    WGPUComputePipeline pipes[] = {t->pipe, t->pipe_sky, t->wf_shade_sky, t->gbuf_pipe, t->rp_pipe, t->gc_pipe, t->gm_pipe, t->gf_pipe, t->lt_pipe, t->rs_pipe, t->dc_pipe,
                                    t->bd_morton, t->bd_sort, t->bd_hier, t->bd_leaves, t->bd_up,
                                    t->pl_init, t->pl_nn, t->pl_mark, t->pl_top, t->pl_scatter, t->pl_small};
     for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) if (pipes[i]) wgpuComputePipelineRelease(pipes[i]);

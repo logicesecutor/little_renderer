@@ -1437,6 +1437,7 @@
       ['device', st ? (st.gpu ? 'GPU (WebGPU)' : st.gpuStarting ? 'GPU starting' : 'CPU') : ''],
       ['CPU threads', st ? String(st.threads || 1) + (st.threads > 1 ? '' : window.crossOriginIsolated ? ' (?threads=1)' : ' (the page is not cross-origin isolated: COOP/COEP)') : ''],
       ['Path tracer guide', st && st.trace && st.backend !== BACKEND.RASTER ? (st.trace.rguide ? 'rasterized' : 'traced') : ''],
+      ['Temporal gradients', st && st.trace && st.backend !== BACKEND.RASTER ? (st.trace.gradients ? 'on (history up to ' + st.trace.history + ')' : 'off (history ' + st.trace.history + ')') : ''],
     ];
     if (st && st.sim) lines.push(['simulation', st.sim.line]);
     const box = $('internal-lines');

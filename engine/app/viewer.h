@@ -49,7 +49,7 @@ void viewer_set_max_hz(double hz);
 // of a frame (cpu: [0] physics, 1 scene trees, 2 GPU scene update, 3 trace submit, 4 waiting
 // for the GPU, 5 raster, 6 present, 7 the whole frame) and the GPU's (gpu: gpu_view_gpu_totals);
 // the frames counted. For the page's profile (lr_profile).
-long viewer_profile(double cpu[8], double gpu[7]);
+long viewer_profile(double cpu[8], double gpu[8]);
 double viewer_display_hz(void);
 void viewer_set_backend(Backend b);   // (to path tracing: its image starts over)
 Backend viewer_backend(void);
@@ -99,7 +99,8 @@ typedef struct {
     long trace_starts, trace_moves;
     double trace_pass_ms, trace_budget_ms;
     double trace_work;   // passes' worth of work the GPU has done, all images
-    int trace_history;   // samples a pixel kept at the last move
+    int trace_history;   // samples a pixel kept at the last move (at most, with gradients)
+    int trace_gradients; // ... the temporal gradients judged each pixel's
     int trace_compiling; // the path tracer's pipelines are still being compiled (a browser, the first time)
     int trace_rguide;    // the last image's guide was rasterized (gpu_view_trace_raster_guide)
     double trace_rate;   // passes a second, lately

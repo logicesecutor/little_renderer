@@ -167,6 +167,7 @@ static const Opt OPTS[] = {
     DBL("-iclampmove", iclamp_move, "max", "view, path tracing on the GPU: the indirect clamp while things move\n(when lower than -iclamp; 0 = as -iclamp; default 1): what moves\nkeeps 12 samples a pixel, and a firefly the denoiser spreads stays\na blotch for as long"),
     ONOFF("-denoise", denoise, "path tracing on the GPU: denoise the image"),
     ONOFF("-wavefront", wavefront, "path tracing on the GPU: small kernels, one step of all paths at a time"),
+    ONOFF("-gradients", gradients, "view, path tracing on the GPU while the physics runs: each pixel keeps\nas many samples as its light allows (temporal gradients: all of\n-history where nothing changed, none where a shadow moved) (on)"),
     ONOFF("-rguide", rguide, "path tracing on the GPU: a new image's guide (each pixel's first surface)\nrasterized when that costs less GPU time than tracing it, as measured\n(on; off: always traced)"),
     INT("-threads", threads, "n", "CPU threads, 0 = all cores"),
     ONOFF("-mis", mis, "multiple importance sampling of the lamp"),
@@ -330,6 +331,7 @@ static void defaults(Options *o, Program prog){
     o->sim_hz = 60;
     o->denoise_move = 3;
     o->rguide = 1;
+    o->gradients = 1;
     o->aa = 1;
     o->march = march_default_params();
     if (prog == PROG_VIEW) o->march.scale = 2;   // real time: half resolution

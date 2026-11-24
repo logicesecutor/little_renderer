@@ -19,6 +19,11 @@
 // object), its normal (within 10 degrees), distance (1%) and albedo (0.02) agree in all but a
 // few pixels (the spheres' outlines: the rasterizer's spheres are triangles).
 //
+// Temporal gradients (A-SVGF): a box under the lamp is moved, and one pass later the floor
+// where its shadow was is as bright as it now is (its pixels kept none of their samples: the
+// gradient samples saw the light change), while the walls far from it kept most of theirs;
+// without the gradients the old shadow stays (the same history everywhere).
+//
 // Part of make test. Without a GPU it says so and passes.
 #include <stdio.h>
 #include <string.h>
@@ -249,7 +254,7 @@ static int guide_of(Scene *s, int raster, float *out){
         ok = gpu_view_trace_more(v, s, &rp, &mp);
         gpu_wait(g);
     }
-    ok = ok && gpu_view_trace_guide_read(v, out);
+    ok = ok && gpu_view_trace_planes_read(v, 2, 3, out);
     gpu_frame_close(g, v);
     return ok;
 }
@@ -278,6 +283,100 @@ static void guide_agrees(const char *name, Scene *s){
     check(what, ok && differ * 25 < W * H && surfaces > W * H / 4);
     free(a);
     free(b);
+}
+
+// passes more passes (moving: one image each) into the view
+static int passes_more(Gpu *g, GpuView *v, const Scene *s, int passes){
+    RenderParams rp = render_params_camera(s->cam_from, s->cam_at, s->cam_up, s->cam_vfov_deg, W, H);
+    MarchParams mp = march_default_params();
+    int want = gpu_view_trace_passes(v) + passes, ok = 1;
+    for (int k = 0; ok && k < 4000 && gpu_view_trace_passes(v) < want; k++){
+        ok = gpu_view_trace_more(v, s, &rp, &mp);
+        gpu_wait(g);
+    }
+    for (int k = 0; k < 100000 && gpu_view_trace_busy(v); k++) gpu_wait(g);
+    return ok;
+}
+// the box at x (its shadow under the lamp), and the image: 48 passes (fresh = 1), else one
+// pass after moving it there from where it was (grads: with temporal gradients); per pixel the
+// mean, the samples kept and what it sees (the guide's plane 3 w: the kind and the object)
+static int shadow_image(Scene *s, int box, real x, int fresh, int grads, Gpu **gp, GpuView **vp, float *mean, float *count, float *seen){
+    AccelParams ap = accel_default_params();
+    Xform xf = s->insts[box].xf;
+    xf.m[0][3] = x;
+    scene_move_instance(s, box, xf);
+    scene_update_instances(s, &ap);
+    Camera cam = camera_make(s->cam_from, s->cam_at, s->cam_up, s->cam_vfov_deg, (real)W / H);
+    GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+    int ok = 1;
+    if (fresh){
+        if (gpu_frame_open(W, H, gp, vp)) return 0;
+        gpu_view_trace_prepare(*vp);
+        ok = gpu_view_trace_start(*vp, s, &tp) && passes_more(*gp, *vp, s, 48);
+    } else {
+        gpu_view_trace_gradients(*vp, grads ? 32 : 0);
+        ok = gpu_view_trace_move(*vp, s, &tp, 32) && passes_more(*gp, *vp, s, 1);
+    }
+    float *p = malloc(sizeof(float) * 16 * W * H);
+    ok = ok && p && gpu_view_trace_planes_read(*vp, 0, 4, p);
+    for (int i = 0; ok && i < W * H; i++){
+        float n = p[4 * i + 3];
+        mean[i] = n > 0 ? (p[4 * i] + p[4 * i + 1] + p[4 * i + 2]) / (3 * n) : -1;
+        count[i] = n;
+        seen[i] = p[4 * (3 * W * H + i) + 3];
+    }
+    free(p);
+    return ok;
+}
+
+static void gradients(void){
+    static Scene s;
+    memset(&s, 0, sizeof(s));
+    SceneOptions empty = {.kind = SCENE_EMPTY};
+    if (scene_cornell_box(&s, &empty) != 0){ check("gradients: the scene", 0); return; }
+    Vec3 lc = scene_light_center(&s);
+    int m = scene_add_material(&s, material_diffuse(vec3(0.7f, 0.7f, 0.7f)));
+    int box = scene_add_instance(&s, INST_BOX, xform_rot_y(vec3(lc.x, 90, lc.z), 0, 70), m);
+    AccelParams ap = accel_default_params();
+    scene_set_accel(&s, ACCEL_BVH, &ap);
+    const real x0 = lc.x, x1 = lc.x + 190;
+    float *a = malloc(sizeof(float) * W * H * 9), *ca = a + W * H, *b = ca + W * H, *cb = b + W * H, *c = cb + W * H, *cc = c + W * H;
+    float *sa = cc + W * H, *sb_ = sa + W * H, *sc_ = sb_ + W * H;
+    double moved[2] = {1, 1}, kept[2] = {0, 0};
+    int ok = a != NULL;
+    for (int grads = 0; ok && grads < 2; grads++){
+        Gpu *g, *g2;
+        GpuView *v, *v2;
+        ok = shadow_image(&s, box, x0, 1, 0, &g, &v, a, ca, sa) && shadow_image(&s, box, x1, 0, grads, &g, &v, b, cb, sb_);
+        if (ok) gpu_frame_close(g, v);
+        ok = ok && shadow_image(&s, box, x1, 1, 0, &g2, &v2, c, cc, sc_);   // the truth: the box there from the start
+        if (ok) gpu_frame_close(g2, v2);
+        // where the old shadow was (the same surface as before, now twice as bright and more),
+        // and where nothing changed
+        double sb = 0, sc = 0, nk = 0, nu = 0;
+        int n1 = 0;
+        for (int i = 0; ok && i < W * H; i++){
+            if (a[i] < 0 || b[i] < 0 || c[i] <= 0) continue;
+            if (sa[i] == sc_[i] && c[i] > 2 * a[i] && c[i] > 0.05f){ sb += b[i]; sc += c[i]; n1++; }
+            if (fabsf(c[i] - a[i]) < 0.05f * c[i] && (i % W < W / 6 || i % W > 5 * W / 6)){ nk += cb[i]; nu += 1; }
+        }
+        moved[grads] = n1 > 0 ? fabs(sb - sc) / sc : 1;
+        kept[grads] = nu > 0 ? nk / nu : 0;
+        (void)ca; (void)cc;
+        if (n1 < 20) ok = 0;
+        // reset the box for the next run
+        Xform xf = s.insts[box].xf;
+        xf.m[0][3] = x0;
+        scene_move_instance(&s, box, xf);
+    }
+    char what[200];
+    snprintf(what, sizeof(what), "gradients: where the shadow was, one pass after the box moved, off the truth by %.0f%% (%.0f%% without them): under a third of it",
+             100 * moved[1], 100 * moved[0]);
+    check(what, ok && moved[1] < moved[0] / 3 && moved[1] < 0.15);
+    snprintf(what, sizeof(what), "... and the walls far from it kept %.1f samples a pixel (%.1f without them): over 16", kept[1], kept[0]);
+    check(what, ok && kept[1] > 16);
+    free(a);
+    scene_free(&s);
 }
 
 static void raster_guide(void){
@@ -326,6 +425,7 @@ int main(void){
     glowing_ball();
     pbr_plate();
     raster_guide();
+    gradients();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;
 }

@@ -118,6 +118,7 @@ typedef struct {
     int sim_fixed;         // view -sim on, -simfixed on: steps of exactly 1 / sim_hz (the same motion at any frame rate)
     int denoise_move;      // view, GPU denoiser while things move: a-trous passes, 1-5 (3); 0 = all 5
     int rguide;            // GPU path tracing: a new image's guide rasterized when cheaper (1), or always traced (0)
+    int gradients;         // view, GPU path tracing: temporal gradients judge each pixel's history while the physics runs (1)
     int aa;                // view, GPU: anti-aliasing of rasterized frames, 1 = FXAA (default), 0 = off
 
     // physics (sim, and view -sim on)

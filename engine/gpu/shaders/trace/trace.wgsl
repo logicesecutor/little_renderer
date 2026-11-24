@@ -25,7 +25,8 @@ struct TP {
                       the world BVH's root */
     sky: vec4f,    /* the sky (SKY, SKYC): its scale, cos and sin of its turn, 1 = there is one */
     txl: vec4u,    /* the triangles' texture coordinates in aux: where their indices start (3 per
-                      triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
+                      triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are;
+                      w: 1 = main traces the tiles' gradient samples (its gradient branch), not a band */
     mats: array<TMat, 64>,
     em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many; y: the
                       indirect clamp's bits (indirect_cap); z: 1 = gbuf traces only the pixels
@@ -1214,28 +1215,68 @@ fn trace(ray0: Ray, sm: Smp, rng: ptr<function, u32>) -> vec3f {
     return radiance;
 }
 
+/* With T.txl.w = 1, a tile's gradient sample instead (trace_reproject.wgsl gmatch found it,
+   into its anchor pixel a): the old pixel's last sample traced again in the new scene, with
+   the same random numbers (the old pixel's, its count then and the sample's number) through
+   the same point of the surface (the new pixel, moved by how far off its centre the old one
+   was), and lambda = |new - old| / max(new, old) of their values over the albedo into
+   cur[N + a].x (-1: none). (One call of trace for both: each call is the whole path tracer
+   again for the shader compiler, twice the time before the page's first image.) */
+const GTILE = 4u;   /* (trace_reproject.wgsl TILE, trace_gpu.c GRAD_TILE) */
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
     tlid = li;
     let id = gid.x + gid.y * nw.x * 64u;
     let W = T.dims.x;
-    if (id >= W * T.dims.w) { return; }
-    let x = id % W;
-    let y = T.dims.z + id / W;
-    if (y >= T.dims.y) { return; }
-    let k = y * W + x;
-    let acc = accum[k];
-    /* seeded from (pixel, sample number): every sample of every pixel is different */
+    let H = T.dims.y;
+    let N = W * H;
+    let grad = T.txl.w != 0u;
+    var k: u32;                                   /* the pixel the sample is for */
+    var a = 0u;                                   /* (a gradient's: its tile's anchor) */
+    var o: u32;                                   /* the pixel its random numbers are from */
+    var cnt: u32;                                 /* ... and its sample number */
+    var d = vec2f(0.0);                           /* (a gradient's: the old sample's offset) */
+    var acc: vec4f;
+    var p1: vec4f;
+    if (grad) {
+        let tw = (W + GTILE - 1u) / GTILE;
+        if (id >= tw * ((H + GTILE - 1u) / GTILE)) { return; }
+        a = (id / tw) * GTILE * W + (id % tw) * GTILE;
+        p1 = accum[N + a];
+        if (p1.y < 0.0) { return; }
+        acc = accum[a];
+        k = u32(p1.x);
+        o = u32(p1.y);
+        cnt = u32(acc.y) | (u32(acc.z) << 16u);
+        d = p1.zw;
+    } else {
+        if (id >= W * T.dims.w) { return; }
+        let y = T.dims.z + id / W;
+        if (y >= H) { return; }
+        k = y * W + id % W;
+        o = k;
+        cnt = T.cnt.z;
+        acc = accum[k];
+    }
     /* the plain random numbers: from (pixel, sample number), every sample of every pixel differs;
-       the sequence's: sample T.cnt.z of the image (all pixels alike, shifted by blue noise) */
-    var rng = hash32(k ^ hash32(T.cnt.z * 0x9e3779b9u + u32(acc.w)));
-    let sm = Smp(x, y, T.cnt.z, T.ext.x);
+       the sequence's: sample cnt of the image (all pixels alike, shifted by blue noise) */
+    var rng = hash32(o ^ hash32(cnt * 0x9e3779b9u + u32(acc.w)));
+    let sm = Smp(o % W, o / W, cnt, T.ext.x);
     let j = s2(sm, 0u, &rng);
-    let u = (f32(x) + j.x) / f32(W);
-    let v = (f32(y) + j.y) / f32(T.dims.y);
+    let u = (f32(k % W) + d.x + j.x) / f32(W);
+    let v = (f32(k / W) + d.y + j.y) / f32(H);
     let through = T.upper_left.xyz + T.horizontal.xyz * u - T.vertical.xyz * v;
     var c = trace(Ray(T.origin.xyz, normalize(through - T.origin.xyz)), sm, &rng);
     let mx = max(c.x, max(c.y, c.z));
+    if (grad) {
+        if (!(mx >= 0.0 && mx < 1e30) || cam_glow) { accum[N + a].x = -1.0; return; }
+        if (T.f.x > 0.0 && mx > T.f.x) { c *= T.f.x / mx; }
+        let ga = accum[3u * N + k];
+        let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), gkind(ga.w) == 0.0));
+        accum[N + a].x = abs(l - acc.x) / max(max(l, acc.x), 1e-3);
+        return;
+    }
     if (!(mx >= 0.0 && mx < 1e30)) {
         c = vec3f(0.0);
     } else if (T.f.x > 0.0 && mx > T.f.x) {
@@ -1243,10 +1284,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     }
     accum[k] = acc + vec4f(c, 1.0);
     if (T.f.w > 0.5) {
-        let N = W * T.dims.y;
         let ga = accum[3u * N + k];           /* the guide, made by gbuf before the first sample */
         let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), gkind(ga.w) == 0.0));
-        if (!(cam_glow && gkind(ga.w) == 0.0)) { accum[N + k] += vec4f(l, l * l, 0.0, 0.0); }
+        /* (z, w: this sample, the pixel's last: its value and its number + 1, the low 24 bits,
+           for a gradient sample in the next image: the gradient branch above) */
+        p1 = accum[N + k];
+        if (!(cam_glow && gkind(ga.w) == 0.0)) { p1 += vec4f(l, l * l, 0.0, 0.0); }
+        accum[N + k] = vec4f(p1.xy, l, f32((T.cnt.z & 0xffffffu) + 1u));
     }
 }
 
