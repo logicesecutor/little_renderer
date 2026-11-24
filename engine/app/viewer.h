@@ -45,6 +45,10 @@ void viewer_set_keep_trace(int on);
 // display's): the path tracer sizes its work per frame by it. And the display's rate as
 // measured (window_refresh_hz).
 void viewer_set_max_hz(double hz);
+// The GPU path tracer's denoiser on (1) or off (0: the samples as they are, noisy until they
+// add up); the X key's. As -denoise said at the start.
+void viewer_set_denoise(int on);
+int viewer_denoise(void);
 // Where the time went since the start (ms, summed; after the first second): the CPU's parts
 // of a frame (cpu: [0] physics, 1 scene trees, 2 GPU scene update, 3 trace submit, 4 waiting
 // for the GPU, 5 raster, 6 present, 7 the whole frame) and the GPU's (gpu: gpu_view_gpu_totals);
@@ -103,6 +107,7 @@ typedef struct {
     int trace_gradients; // ... the temporal gradients judged each pixel's
     int trace_compiling; // the path tracer's pipelines are still being compiled (a browser, the first time)
     int trace_rguide;    // the last image's guide was rasterized (gpu_view_trace_raster_guide)
+    int trace_denoise;   // the denoiser is on (viewer_set_denoise)
     double trace_rate;   // passes a second, lately
     int trace_rows, trace_reps;
 } ViewerStatus;

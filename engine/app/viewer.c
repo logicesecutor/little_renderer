@@ -868,11 +868,9 @@ static int viewer_input(Frame *fr){
             }
             case 'x':
                 if (!V.gview) break;
-                V.o.denoise = !V.o.denoise;
-                printf("denoiser: %s\n", gpu_view_trace_denoise(V.gview, V.o.denoise) ? "on" : "off");
+                viewer_set_denoise(!V.o.denoise);
+                printf("denoiser: %s\n", V.o.denoise && gpu_view_trace_denoise(V.gview, 1) ? "on" : "off");
                 fflush(stdout);
-                V.gpu_shown_passes = -1;
-                V.force_present = 1;
                 break;
             case 'l':
                 scene_trees();                     // the bake traces the scene
@@ -1379,6 +1377,14 @@ void viewer_set_hud(int on){
 }
 void viewer_set_settle(double seconds){ V.settle = seconds; }
 void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
+void viewer_set_denoise(int on){
+    V.o.denoise = on != 0;
+    if (!V.gview) return;                      // (set when the GPU's view is made)
+    gpu_view_trace_denoise(V.gview, V.o.denoise);
+    V.gpu_shown_passes = -1;                   // the image shown again, as it is now
+    V.force_present = 1;
+}
+int viewer_denoise(void){ return V.o.denoise; }
 void viewer_set_max_hz(double hz){ V.max_hz = hz > 0 ? hz : 0; V.budget_t = 0; if (V.gview) trace_budget(); }
 double viewer_display_hz(void){ return V.win ? window_refresh_hz(V.win) : 0; }
 long viewer_profile(double cpu[8], double gpu[8]){
@@ -1504,6 +1510,7 @@ void viewer_status(ViewerStatus *st){
     st->trace_gradients = V.last_grad > 0;
     st->trace_compiling = V.gview && gpu_view_trace_compiling(V.gview);
     st->trace_rguide = V.gview && gpu_view_trace_raster_guided(V.gview);
+    st->trace_denoise = V.o.denoise;
     st->trace_rate = V.pass_rate;
     if (V.gview) gpu_view_trace_band(V.gview, &st->trace_rows, &st->trace_reps, &st->trace_budget_ms);
 }

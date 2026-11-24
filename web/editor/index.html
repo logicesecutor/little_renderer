@@ -68,6 +68,9 @@
     <button type="button" data-backend="1" aria-pressed="false" title="Raster: instant, one light, hard shadows">Raster</button>
     <button type="button" data-backend="0" aria-pressed="true" title="Path traced: all light, refines over time">Path traced</button>
   </div>
+  <button type="button" id="denoise" class="switch" aria-pressed="true" title="The path traced image smoothed while its samples add up; off: the samples as they are, grainy at first">
+    <span class="track" aria-hidden="true"><span class="knob"></span></span>Denoise
+  </button>
   <button type="button" id="internals" class="switch" aria-pressed="false">
     <span class="track" aria-hidden="true"><span class="knob"></span></span>Internals
   </button>

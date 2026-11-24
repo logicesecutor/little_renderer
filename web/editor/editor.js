@@ -149,6 +149,7 @@
     // move, is not offered: an address's ?backend=hybrid gets Path traced)
     if (ui.backend === BACKEND.HYBRID) { ui.backend = BACKEND.RT; quiet('lr_set_backend', BACKEND.RT); }
     if (ui.fpsCap) quiet('lr_set_frame_cap', ui.fpsCap);   // (as chosen last time)
+    if (!ui.denoise) quiet('lr_set_denoise', 0);
     renderAll();
     fitCanvas();
     if (window.KILN_PLAY) startPlayer();             // (a published game: Play, from its files)
@@ -1144,6 +1145,24 @@
   });
   function renderRenderer() {
     for (const b of $('renderer').querySelectorAll('button')) b.setAttribute('aria-pressed', Number(b.dataset.backend) === ui.backend ? 'true' : 'false');
+    renderDenoise();
+  }
+
+  // ---- the denoiser switch: the path traced image smoothed, or its samples as they are (kept
+  // for the next visit; the rasterizer has nothing to denoise) ----
+  ui.denoise = true;
+  try { ui.denoise = localStorage.getItem('kiln.denoise') !== '0'; } catch (e) { /* (no storage: on) */ }
+  function setDenoise(on) {
+    ui.denoise = on;
+    try { localStorage.setItem('kiln.denoise', on ? '1' : '0'); } catch (e) { /* (not kept) */ }
+    if (ui.ready) call('lr_set_denoise', [on ? 1 : 0], 'lr_set_denoise(' + (on ? 'on' : 'off') + ')');
+    renderDenoise();
+  }
+  $('denoise').addEventListener('click', () => setDenoise(!ui.denoise));
+  function renderDenoise() {
+    const b = $('denoise');
+    b.setAttribute('aria-pressed', ui.denoise ? 'true' : 'false');
+    b.disabled = ui.backend === BACKEND.RASTER;
   }
 
   // ---- the resolution popover (5.6) ----
@@ -1438,6 +1457,7 @@
       ['CPU threads', st ? String(st.threads || 1) + (st.threads > 1 ? '' : window.crossOriginIsolated ? ' (?threads=1)' : ' (the page is not cross-origin isolated: COOP/COEP)') : ''],
       ['Path tracer guide', st && st.trace && st.backend !== BACKEND.RASTER ? (st.trace.rguide ? 'rasterized' : 'traced') : ''],
       ['Temporal gradients', st && st.trace && st.backend !== BACKEND.RASTER ? (st.trace.gradients ? 'on (history up to ' + st.trace.history + ')' : 'off (history ' + st.trace.history + ')') : ''],
+      ['Denoiser', st && st.backend !== BACKEND.RASTER ? (st.denoise ? 'on' : 'off') : ''],
     ];
     if (st && st.sim) lines.push(['simulation', st.sim.line]);
     const box = $('internal-lines');
@@ -1831,6 +1851,8 @@
       if (ui.scene && ui.scene.redo) add({ g: 'Commands', label: 'Redo', kw: 'redo again', kbd: 'Ctrl Shift Z', icon: PAL_IC.redo, desc: 'Does the change you took back again.', action: 'run', run: redo });
       add({ g: 'Commands', label: 'Open the Sky rain sample', sub: 'new tab', kw: 'sample demo sky rain physics', icon: PAL_IC.sample, desc: '2000 bodies rain onto brick paving under an HDR sky: the engine\'s physics demo, in a new tab.', action: 'run', run: () => $('open-sample').click() });
     }
+    if (ui.backend !== BACKEND.RASTER) add({ g: 'Commands', label: ui.denoise ? 'Turn the denoiser off' : 'Turn the denoiser on', kw: 'denoise denoiser noise grain smooth', icon: PAL_IC.ray,
+      desc: ui.denoise ? 'Shows the path traced samples as they are: grainy at first, never smoothed.' : 'Smooths the path traced image while its samples add up.', action: 'run', run: () => $('denoise').click() });
     add({ g: 'Internals', label: ui.internals ? 'Hide the internals' : 'Show the internals', kw: 'internals debug calls timings gpu', icon: PAL_IC.gauge,
       desc: 'The engine\'s calls, the renderer, the frame time and what the GPU is doing, beside the view.', action: 'run', run: () => $('internals').click() });
     return items;

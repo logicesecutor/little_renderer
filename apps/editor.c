@@ -686,6 +686,7 @@ EXPORT void lr_set_frame_cap(int fps){
     frame_cap_ms = fps > 0 ? 1000.0 / fps : 0;
     viewer_set_max_hz(fps);
 }
+EXPORT void lr_set_denoise(int on){ viewer_set_denoise(on); }   // the path traced image denoised (1) or as it is (0)
 EXPORT void lr_set_backend(int b){                   // 0 path traced, 1 raster, 2 auto (Backend)
     if (b >= BACKEND_RT && b <= BACKEND_HYBRID) viewer_set_backend((Backend)b);
 }
@@ -1558,9 +1559,9 @@ EXPORT const char *lr_status(void){
     for (int i = 0; i < E.nobjs; i++) emitters += E.objs[i].mat >= 0 && MATERIALS[E.objs[i].mat].glow > 0;
     jlen = 0;
     jprintf("{\"backend\":%d,\"tracing\":%d,\"gpu\":%d,\"gpuStarting\":%d,\"gpuTracing\":%d,\"spp\":%d,\"target\":%d,"
-            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f",
+            "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f,\"denoise\":%d",
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
-            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
+            st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done, st.trace_denoise);
     int threads = 1;
 #ifdef _OPENMP
     threads = omp_get_max_threads();
