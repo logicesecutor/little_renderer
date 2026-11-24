@@ -155,6 +155,11 @@ typedef struct {
 // time against 8.3 for A-SVGF's 3 x 3; a box sliding under the lamp, one sample a frame, RMS
 // where the light changed 0.029 either way, elsewhere 0.014 against 0.016 (WEB.md 2.5)
 #define GRAD_TILE 4
+// ... and only in images of up to 2^24 pixels: a gradient sample's two pixels (the one it is
+// for, the one its random numbers are from) travel between the kernels as f32 (planes of
+// vec4f), exact up to there. Larger (5120 x 3277 and up), the samples would be traced for
+// the wrong pixels: no gradients then (the time-bound history, as without them).
+#define GRAD_PIXELS_MAX (1u << 24)
 #define GTP_STRIDE ((sizeof(GTP) + 255) / 256 * 256)
 
 // where an instanced mesh is on the GPU (and what it was made from)
@@ -2062,7 +2067,7 @@ void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, 
         // temporal gradients (trace_reproject.wgsl): each pixel's history from how much the
         // light changed there, at most history_max (else history, where nothing says)
         WGPUComputePipeline gp = sky_kernels(t, s) ? t->pipe_sky : t->pipe;
-        const int grads = history_max > 0 && t->gm_pipe && t->gf_pipe && gp && !t->wavefront;
+        const int grads = history_max > 0 && gp && gpu_trace_gradients_ok(t);
         struct { float cams[8][4]; uint32_t dims[4], ext[4]; } R;
         memset(&R, 0, sizeof(R));
         put_cam(R.cams[0], &t->cam);
@@ -2099,7 +2104,8 @@ GpuTimer *gpu_trace_timer(GpuTrace *t){ return t ? t->timer : NULL; }
 int gpu_trace_guide_stage(void){ return TS_RGUIDE; }
 int gpu_trace_traced_guide_stage(void){ return TS_GUIDE; }
 int gpu_trace_gradients_ok(const GpuTrace *t){
-    return t && t->planes == 5 && t->gm_pipe && t->gf_pipe && !t->wavefront;
+    return t && t->planes == 5 && t->gm_pipe && t->gf_pipe && !t->wavefront &&
+           (uint64_t)t->w * (uint64_t)t->h <= GRAD_PIXELS_MAX;
 }
 int gpu_trace_hw(const GpuTrace *t){
 #ifdef LR_VK

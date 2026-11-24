@@ -193,6 +193,8 @@ fn gmatch(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw
         var cnt = (R.ext.x & 0xff000000u) | lo;
         if (cnt > R.ext.x) { cnt -= 0x1000000u; }
         cur[a] = vec4f(last.z, f32(cnt & 0xffffu), f32(cnt >> 16u), old[o].w - 1.0);
+        /* (k and o as f32: exact in images of up to 2^24 pixels; trace_gpu.c makes no gradients
+           in larger ones, GRAD_PIXELS_MAX) */
         cur[N + a] = vec4f(f32(k), f32(o), ox - at.x, oy - at.y);
         return;
     }
