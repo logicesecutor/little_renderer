@@ -670,6 +670,19 @@ EXPORT void lr_camera_restore(void){
 
 // ---- what the page sets ---------------------------------------------------------------------
 
+// at most fps frames a second (0: the display's). A page cannot turn vsync off (the browser
+// shows its frames in step with the display); fewer frames give the path tracer more of the
+// GPU each: at 60 on a 165 Hz screen a frame has time for a whole pass, and the image follows
+// the camera in every frame shown. The frames in between are skipped (nothing drawn).
+static double frame_cap_ms;
+#ifdef __EMSCRIPTEN__
+static double frame_last_ms;
+#endif
+EXPORT void lr_set_frame_cap(int fps){
+    fps = fps < 0 ? 0 : fps > 360 ? 360 : fps;
+    frame_cap_ms = fps > 0 ? 1000.0 / fps : 0;
+    viewer_set_max_hz(fps);
+}
 EXPORT void lr_set_backend(int b){                   // 0 path traced, 1 raster, 2 auto (Backend)
     if (b >= BACKEND_RT && b <= BACKEND_HYBRID) viewer_set_backend((Backend)b);
 }
@@ -1539,6 +1552,7 @@ EXPORT const char *lr_status(void){
             "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f",
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
             st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
+    jprintf(",\"displayHz\":%.1f,\"frameCap\":%d", viewer_display_hz(), frame_cap_ms > 0 ? (int)(1000.0 / frame_cap_ms + 0.5) : 0);
     jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f}",
             st.trace_starts, st.trace_moves, st.trace_pass_ms, st.trace_rows, st.trace_reps, st.trace_budget_ms, st.trace_work,
             st.trace_history, st.trace_rate);
@@ -2323,6 +2337,13 @@ static int editor_frame(void){
 
 #ifdef __EMSCRIPTEN__
 static void frame_web(void){
+    // (a cap: this animation frame skipped when the last one shown is too recent; a tenth of
+    // a display frame early is on time)
+    if (frame_cap_ms > 0){
+        double now = emscripten_get_now(), hz = viewer_display_hz();
+        if (now - frame_last_ms < frame_cap_ms - (hz > 0 ? 100.0 / hz : 1)) return;
+        frame_last_ms = now;
+    }
     if (!editor_frame()){ viewer_close(); emscripten_cancel_main_loop(); }
 }
 #endif

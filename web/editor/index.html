@@ -51,6 +51,9 @@
     <button type="submit" class="primary">Apply</button>
   </form>
   <span class="caption">By default the frame is the whole window, at the screen's real pixels. Another size is shown whole, with dark bars where its shape differs.</span>
+  <h2>Frame rate</h2>
+  <div role="radiogroup" aria-label="Frame rate" id="fps-caps" class="segmented quiet fps-caps"></div>
+  <span class="caption" id="fps-note">A browser always shows frames in step with the display (it has no vsync switch). Fewer frames give the path tracer more time in each: the image follows the camera in every frame shown.</span>
 </section>
 
 <nav class="pill modes" aria-label="Mode">

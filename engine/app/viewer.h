@@ -40,6 +40,12 @@ void viewer_set_settle(double seconds);   // hybrid: path tracing after this lon
 // hybrid: the GPU's path traced image carried over a move (its samples reprojected, as in rt
 // mode), not started over each time the rasterizer takes over
 void viewer_set_keep_trace(int on);
+// The frames a second the program lets through at most (a browser's page, which cannot turn
+// vsync off: fewer frames than the display's, each with more of the GPU's time; 0 = the
+// display's): the path tracer sizes its work per frame by it. And the display's rate as
+// measured (window_refresh_hz).
+void viewer_set_max_hz(double hz);
+double viewer_display_hz(void);
 void viewer_set_backend(Backend b);   // (to path tracing: its image starts over)
 Backend viewer_backend(void);
 View viewer_view(void);

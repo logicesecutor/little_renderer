@@ -303,6 +303,7 @@ typedef struct {
     long trace_starts, trace_moves;   // (viewer_status: images begun, and carried over a move)
     double budget_t;           // (a browser: when the path tracer's budget was last set)
     double pass_rate, rate_t0, rate_w0;   // the GPU path tracer's passes a second (and since when, its work then)
+    double max_hz;             // viewer_set_max_hz: frames a second at most (0: the display's)
     int last_keep;             // the history the last move kept (viewer_status)
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
@@ -696,10 +697,14 @@ typedef struct {
 // frame of three.
 static void trace_budget(void){
     const double share = trace_overlaps() ? 0.85 : 0.6;
-    gpu_view_trace_budget(V.gview, V.o.band_ms > 0 ? V.o.band_ms : !V.o.maxfps ? 0 : share * 1000.0 / window_refresh_hz(V.win));
+    double hz = window_refresh_hz(V.win);
+    if (V.max_hz > 0 && V.max_hz < hz) hz = V.max_hz;    // (fewer frames: more time each)
+    gpu_view_trace_budget(V.gview, V.o.band_ms > 0 ? V.o.band_ms : !V.o.maxfps ? 0 : share * 1000.0 / hz);
 #ifdef __EMSCRIPTEN__
-    if (V.o.band_ms <= 0 && V.o.maxfps) gpu_view_trace_budget(V.gview, share * 1000.0 / 60);
-    gpu_view_trace_budget_live(V.gview, V.o.band_ms > 0 || !V.o.maxfps ? 0 : share * 1000.0 / window_refresh_hz(V.win));
+    if (V.o.band_ms <= 0 && V.o.maxfps) gpu_view_trace_budget(V.gview, share * 1000.0 / (hz < 60 ? hz : 60));
+    // (capped: 60% of the frame, the rest for the guide, reprojection, denoiser and composite a
+    // new image costs, ~6 ms at 2560 x 1440: so the image follows in every frame shown)
+    gpu_view_trace_budget_live(V.gview, V.o.band_ms > 0 || !V.o.maxfps ? 0 : (V.max_hz > 0 && V.max_hz < window_refresh_hz(V.win) ? 0.6 : share) * 1000.0 / hz);
 #endif
 }
 
@@ -1361,6 +1366,8 @@ void viewer_set_hud(int on){
 }
 void viewer_set_settle(double seconds){ V.settle = seconds; }
 void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
+void viewer_set_max_hz(double hz){ V.max_hz = hz > 0 ? hz : 0; V.budget_t = 0; if (V.gview) trace_budget(); }
+double viewer_display_hz(void){ return V.win ? window_refresh_hz(V.win) : 0; }
 
 void viewer_set_backend(Backend b){
     if (b == V.mode) return;

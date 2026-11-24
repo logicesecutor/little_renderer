@@ -148,6 +148,7 @@
     // the page has two renderers, Raster and Path traced (the engine's Auto, raster while things
     // move, is not offered: an address's ?backend=hybrid gets Path traced)
     if (ui.backend === BACKEND.HYBRID) { ui.backend = BACKEND.RT; quiet('lr_set_backend', BACKEND.RT); }
+    if (ui.fpsCap) quiet('lr_set_frame_cap', ui.fpsCap);   // (as chosen last time)
     renderAll();
     fitCanvas();
     if (window.KILN_PLAY) startPlayer();             // (a published game: Play, from its files)
@@ -1157,11 +1158,37 @@
       $('res-w').removeAttribute('aria-invalid');
       $('res-h').removeAttribute('aria-invalid');
       renderPresets();
+      renderFpsCaps();
       const checked = resPop.querySelector('[aria-checked="true"]') || resPop.querySelector('button');
       checked.focus();
     }
   }
   resBtn.addEventListener('click', () => openRes(resPop.hidden));
+  // the frame rate: the display's, or at most 60 or 30 a second (kept for the next visit)
+  ui.fpsCap = 0;
+  try { const v = Number(localStorage.getItem('kiln.fpsCap')); if (v === 60 || v === 30) ui.fpsCap = v; } catch (e) { /* (no storage: the display's) */ }
+  function setFpsCap(v) {
+    ui.fpsCap = v;
+    try { localStorage.setItem('kiln.fpsCap', String(v)); } catch (e) { /* (not kept) */ }
+    if (ui.ready) call('lr_set_frame_cap', [v], 'lr_set_frame_cap(' + v + ')');
+    renderFpsCaps();
+  }
+  function renderFpsCaps() {
+    const box = $('fps-caps'), hz = ui.status && ui.status.displayHz ? Math.round(ui.status.displayHz) : 0;
+    box.textContent = '';
+    for (const [v, label] of [[0, 'Display' + (hz ? ' · ' + hz : '')], [60, '60'], [30, '30']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', ui.fpsCap === v ? 'true' : 'false');
+      b.setAttribute('aria-pressed', ui.fpsCap === v ? 'true' : 'false');
+      b.dataset.fps = String(v);
+      b.textContent = label;
+      b.title = v ? 'At most ' + v + ' frames a second' : 'As many frames as the display shows';
+      b.addEventListener('click', () => setFpsCap(v));
+      box.appendChild(b);
+    }
+  }
   function renderPresets() {
     const box = $('res-presets');
     box.textContent = '';

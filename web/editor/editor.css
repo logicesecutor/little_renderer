@@ -103,6 +103,8 @@ a { color: var(--accent-amber); }
 .res-custom input[aria-invalid="true"] { border-color: var(--axis-x); }
 .res-custom .times { padding-bottom: 9px; color: var(--text-muted); }
 .res-custom .primary { border-radius: 8px; padding: 0 14px; }
+.fps-caps { align-self: flex-start; }
+.fps-caps button { height: 30px; padding: 0 12px; font-size: 12px; }
 .caption { font-size: 12px; line-height: 1.4; color: var(--text-muted); }
 
 /* mode tabs (5.4) */
