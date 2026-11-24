@@ -417,6 +417,7 @@ int vk_memory_type(WGPUAdapter ad, uint32_t bits, VkFlags want, VkFlags avoid){
 }
 
 // ---- device ----
+static void staging_destroy(WGPUDevice dev, Staging *s);
 static void device_free(Obj *o){
     WGPUDevice d = (WGPUDevice)o;
     if (d->vk){
@@ -431,11 +432,10 @@ static void device_free(Obj *o){
         }
         for (Staging *s = d->stage_free; s;){
             Staging *n = s->next;
-            vk.vkDestroyBuffer(d->vk, s->buf, NULL);
-            vk.vkFreeMemory(d->vk, s->mem, NULL);
-            free(s);
+            staging_destroy(d, s);
             s = n;
         }
+        d->stage_free = NULL;
         for (int i = 0; i < d->ndpools; i++) vk.vkDestroyDescriptorPool(d->vk, d->dpools[i], NULL);
         for (int k = 0; k < d->nqueues; k++){
             if (d->queues[k].pool) vk.vkDestroyCommandPool(d->vk, d->queues[k].pool, NULL);
@@ -758,23 +758,43 @@ void wgpuBufferRelease(WGPUBuffer buffer){ if (buffer) obj_unref(&buffer->o); }
 void wgpuBufferAddRef(WGPUBuffer buffer){ if (buffer) obj_ref(&buffer->o); }
 
 // ---- uploads ----
+static void staging_destroy(WGPUDevice dev, Staging *s){
+    vk.vkDestroyBuffer(dev->vk, s->buf, NULL);
+    vk.vkFreeMemory(dev->vk, s->mem, NULL);
+    free(s);
+}
+
+// its submission is done: back on the device's free list, ready again, while the list holds
+// less than VK_STAGING_KEEP with it; else freed
 static void staging_free(Obj *o){
     Staging *s = (Staging *)o;
+    WGPUDevice dev = s->dev;
+    if (dev->stage_kept + s->size > VK_STAGING_KEEP){ staging_destroy(dev, s); return; }
     s->used = 0;
-    s->o.refs = 1;                    // back on the device's free list, ready again
-    s->next = s->dev->stage_free;
-    s->dev->stage_free = s;
+    s->o.refs = 1;
+    s->next = dev->stage_free;
+    dev->stage_free = s;
+    dev->stage_kept += s->size;
 }
 
 static Staging *staging_get(WGPUDevice dev, VkDeviceSize need){
-    Staging **p = &dev->stage_free;
-    for (; *p; p = &(*p)->next)
-        if ((*p)->size >= need){ Staging *s = *p; *p = s->next; s->next = NULL; return s; }
+    // the smallest kept chunk that holds it (the first that did was taken: a small upload
+    // could take a large chunk, and the large upload after it had to make another)
+    Staging **best = NULL;
+    for (Staging **p = &dev->stage_free; *p; p = &(*p)->next)
+        if ((*p)->size >= need && (!best || (*p)->size < (*best)->size)) best = p;
+    if (best){
+        Staging *s = *best;
+        *best = s->next;
+        s->next = NULL;
+        dev->stage_kept -= s->size;
+        return s;
+    }
     Staging *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     obj_init(&s->o, staging_free);
     s->dev = dev;
-    s->size = need > (4u << 20) ? need : (4u << 20);
+    s->size = need > VK_STAGING_CHUNK ? need : VK_STAGING_CHUNK;
     void *ptr = NULL;
     if (!vk_alloc_buffer(dev, s->size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &s->buf, &s->mem, &ptr) || !ptr){

@@ -76,7 +76,11 @@ typedef struct { Obj **v; int n, cap; } Refs;
 void refs_add(Refs *r, Obj *o);      // takes a reference
 void refs_release(Refs *r);          // gives them all back
 
-// staging memory for uploads: chunks of host-visible memory, used once per submission
+// staging memory for uploads: chunks of host-visible memory, used once per submission, then
+// kept to be used again: up to VK_STAGING_KEEP bytes of them; what comes back beyond that is
+// freed (a scene's upload goes through hundreds of MB of chunks once: they were all kept)
+#define VK_STAGING_CHUNK (4u << 20)
+#define VK_STAGING_KEEP (32u << 20)
 typedef struct Staging {
     Obj o;
     WGPUDevice dev;
@@ -155,6 +159,7 @@ struct WGPUDeviceImpl {
     VkDescriptorPool *dpools; int ndpools;
     Pending *pend; int npend, cap_pend;
     Staging *stage_free;             // staging memory to use again
+    VkDeviceSize stage_kept;         // ... how many bytes of it
     Dying *dying; int ndying, cap_dying;   // let go, still in use by what was submitted (vk_free_later)
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
