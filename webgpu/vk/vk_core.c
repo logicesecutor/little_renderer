@@ -22,7 +22,10 @@ void refs_add(Refs *r, Obj *o){
     if (r->n == r->cap){
         int cap = r->cap ? 2 * r->cap : 16;
         Obj **v = realloc(r->v, (size_t)cap * sizeof(*v));
-        if (!v) return;
+        // no memory to remember it: the reference is taken all the same and never given
+        // back. The object is then never freed (a leak), where not holding it would let it
+        // be freed under the commands that use it.
+        if (!v){ obj_ref(o); return; }
         r->v = v; r->cap = cap;
     }
     obj_ref(o);
@@ -66,6 +69,23 @@ VkResult vk_check_lost(WGPUDevice dev, const char *what, VkResult r){
 }
 
 // ---- the loader ----
+// The loader's library is opened by every instance and closed by it (it was never closed).
+// When the last instance closes it, the one table of functions (vk) is cleared with it:
+// the library may be loaded elsewhere next time, and a device then takes its functions
+// again (it takes those the table lacks).
+static int instances_open;
+
+static void unload_loader(WGPUInstance in){
+    if (!in->lib) return;
+    if (--instances_open == 0) memset(&vk, 0, sizeof(vk));
+#ifdef _WIN32
+    FreeLibrary((HMODULE)in->lib);
+#else
+    dlclose(in->lib);
+#endif
+    in->lib = NULL;
+}
+
 static int load_loader(WGPUInstance in){
 #ifdef _WIN32
     HMODULE h = LoadLibraryA("vulkan-1.dll");
@@ -78,6 +98,7 @@ static int load_loader(WGPUInstance in){
     *(void **)&vk.vkGetInstanceProcAddr = dlsym(h, "vkGetInstanceProcAddr");
 #endif
     in->lib = (void *)h;
+    instances_open++;
     if (!vk.vkGetInstanceProcAddr) return 0;
 #define X(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(NULL, #f); if (!vk.f) return 0;
     VK_GLOBAL_FNS(X)
@@ -112,6 +133,7 @@ static int has_instance_ext(const char *name){
 static void instance_free(Obj *o){
     WGPUInstance in = (WGPUInstance)o;
     if (in->vk && vk.vkDestroyInstance) vk.vkDestroyInstance(in->vk, NULL);
+    unload_loader(in);
     free(in);
 }
 
@@ -120,7 +142,7 @@ WGPUInstance wgpuCreateInstance(WGPUInstanceDescriptor const *descriptor){
     WGPUInstance in = calloc(1, sizeof(*in));
     if (!in) return NULL;
     obj_init(&in->o, instance_free);
-    if (!load_loader(in)){ fprintf(stderr, "Vulkan layer: no Vulkan loader (vulkan-1.dll / libvulkan.so.1)\n"); free(in); return NULL; }
+    if (!load_loader(in)){ fprintf(stderr, "Vulkan layer: no Vulkan loader (vulkan-1.dll / libvulkan.so.1)\n"); instance_free(&in->o); return NULL; }
     VkApplicationInfo app;
     memset(&app, 0, sizeof(app));
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -165,7 +187,7 @@ WGPUInstance wgpuCreateInstance(WGPUInstanceDescriptor const *descriptor){
     ci.ppEnabledExtensionNames = exts;
     if (vf.sType) ci.pNext = &vf;
     VkResult r = vk.vkCreateInstance(&ci, NULL, &in->vk);
-    if (r != VK_SUCCESS){ fprintf(stderr, "Vulkan layer: vkCreateInstance failed (%d)\n", r); free(in); return NULL; }
+    if (r != VK_SUCCESS){ fprintf(stderr, "Vulkan layer: vkCreateInstance failed (%d)\n", r); in->vk = NULL; instance_free(&in->o); return NULL; }
 #define X(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(in->vk, #f); \
              if (!vk.f){ fprintf(stderr, "Vulkan layer: no %s\n", #f); instance_free(&in->o); return NULL; }
     VK_INSTANCE_FNS(X)
@@ -274,7 +296,10 @@ WGPUFuture wgpuInstanceRequestAdapter(WGPUInstance instance, WGPURequestAdapterO
         return fut;
     }
     WGPUAdapter ad = calloc(1, sizeof(*ad));
-    if (!ad) return fut;
+    if (!ad){      // (the callback is always called: whoever asked waits for it)
+        callbackInfo.callback(WGPURequestAdapterStatus_Error, NULL, sv("out of memory"), callbackInfo.userdata1, callbackInfo.userdata2);
+        return fut;
+    }
     obj_init(&ad->o, adapter_free);
     ad->inst = instance;
     ad->pd = pds[best];
@@ -453,7 +478,10 @@ WGPUFuture wgpuAdapterRequestDevice(WGPUAdapter adapter, WGPUDeviceDescriptor co
                                     WGPURequestDeviceCallbackInfo callbackInfo){
     WGPUFuture fut = {2};
     WGPUDevice d = calloc(1, sizeof(*d));
-    if (!d) return fut;
+    if (!d){
+        callbackInfo.callback(WGPURequestDeviceStatus_Error, NULL, sv("out of memory"), callbackInfo.userdata1, callbackInfo.userdata2);
+        return fut;
+    }
     obj_init(&d->o, device_free);
     d->ad = adapter;
     if (descriptor){
@@ -943,7 +971,21 @@ static uint64_t submit_ex(WGPUQueue q, size_t n, WGPUCommandBuffer const *cbs, V
         vk_device_lost(dev, "vkQueueSubmit failed", r);
     }
     s.value = value;
-    sub_push(q, &s);
+    if (!sub_push(q, &s)){
+        // no memory to remember the submission (its command buffers and what they hold were
+        // then never given back): it is waited for here, and they are given back now
+        if (r == VK_SUCCESS && !dev->lost){
+            VkSemaphoreWaitInfo wi;
+            memset(&wi, 0, sizeof(wi));
+            wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+            wi.semaphoreCount = 1;
+            wi.pSemaphores = &q->tl;
+            wi.pValues = &value;
+            vk_check_lost(dev, "vkWaitSemaphores", vk.vkWaitSemaphores(dev->vk, &wi, ~0ull));
+        }
+        for (int i = 0; i < s.ncb; i++) vk_cb_put(q, s.cbs[i]);
+        refs_release(&s.refs);
+    }
     return value;
 }
 
@@ -960,14 +1002,17 @@ LRSubmissionIndex lrQueueSubmitForIndex(WGPUQueue queue, size_t commandCount, WG
     return (LRSubmissionIndex)(submit(queue, commandCount, commands) | (uint64_t)queue->index << SUB_QUEUE_SHIFT);
 }
 
-static void pend_push(WGPUDevice dev, Pending *p){
+// 0 = no memory to remember it (the caller then answers its callback at once: it was dropped,
+// and whoever waited for it waited for good)
+static int pend_push(WGPUDevice dev, Pending *p){
     if (dev->npend == dev->cap_pend){
         int cap = dev->cap_pend ? 2 * dev->cap_pend : 16;
         Pending *v = realloc(dev->pend, (size_t)cap * sizeof(*v));
-        if (!v) return;
+        if (!v) return 0;
         dev->pend = v; dev->cap_pend = cap;
     }
     dev->pend[dev->npend++] = *p;
+    return 1;
 }
 
 // a queue's work up to now (its uploads included: submitted if waiting)
@@ -982,7 +1027,8 @@ WGPUFuture wgpuQueueOnSubmittedWorkDone(WGPUQueue queue, WGPUQueueWorkDoneCallba
     p.at[queue->index] = current(queue);
     p.kind = 0;
     p.wd = callbackInfo;
-    pend_push(queue->dev, &p);
+    if (!pend_push(queue->dev, &p) && callbackInfo.callback)
+        callbackInfo.callback(WGPUQueueWorkDoneStatus_Error, sv("out of memory"), callbackInfo.userdata1, callbackInfo.userdata2);
     WGPUFuture f = {3};
     return f;
 }
@@ -997,7 +1043,10 @@ WGPUFuture wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t offset
     p.map = callbackInfo;
     p.buf = buffer;
     obj_ref(&buffer->o);
-    pend_push(dev, &p);
+    if (!pend_push(dev, &p)){
+        obj_unref(&buffer->o);
+        if (callbackInfo.callback) callbackInfo.callback(WGPUMapAsyncStatus_Error, sv("out of memory"), callbackInfo.userdata1, callbackInfo.userdata2);
+    }
     WGPUFuture f = {4};
     return f;
 }
