@@ -24,6 +24,10 @@
 // gradient samples saw the light change), while the walls far from it kept most of theirs;
 // without the gradients the old shadow stays (the same history everywhere).
 //
+// Views come and go (a window resized makes its view again): 300 made and destroyed on one
+// GPU, some with their path tracer, leave nothing in the list of the objects alive (the path
+// tracer's timer was left there: after 250 no view could be made), and the last one traces.
+//
 // Part of make test. Without a GPU it says so and passes.
 #include <stdio.h>
 #include <string.h>
@@ -34,6 +38,9 @@
 #include "app/gpu_frame.h"
 #include "rt/tracer.h"
 #include "scene/pbr_maps.h"
+#ifdef LR_GPU
+#include "gpu/gpu_internal.h"     // gpu_live_count
+#endif
 
 #define W 96
 #define H 96
@@ -462,6 +469,45 @@ static void raster_guide(void){
     } else check("instances: the scene", 0);
 }
 
+// views made and destroyed, every 30th with its path tracer: the objects alive are as many
+// after as before, and a view made then still traces
+static void views_come_and_go(void){
+    Gpu *g;
+    GpuView *v;
+    if (gpu_frame_open(W, H, &g, &v)){ check("views come and go: the GPU", 0); return; }
+#ifdef LR_GPU
+    const int n0 = gpu_live_count();
+#endif
+    int made = 0;
+    for (int k = 0; k < 300; k++){
+        GpuView *w = gpu_view_create(g, W, H);
+        if (!w) break;
+        if (k % 30 == 0) gpu_view_trace_prepare(w);
+        gpu_view_destroy(w);
+        made++;
+    }
+    check("300 views made and destroyed on one GPU", made == 300);
+#ifdef LR_GPU
+    check("... leave no object in the list of those alive", gpu_live_count() == n0);
+#endif
+    static Scene s;
+    memset(&s, 0, sizeof(s));
+    SceneOptions boxes = {.kind = SCENE_BOXES};
+    int ok = scene_cornell_box(&s, &boxes) == 0;
+    GpuView *w = ok ? gpu_view_create(g, W, H) : NULL;
+    if (w){
+        AccelParams ap = accel_default_params();
+        scene_set_accel(&s, ACCEL_BVH, &ap);
+        Camera cam = camera_make(s.cam_from, s.cam_at, s.cam_up, s.cam_vfov_deg, (real)W / H);
+        GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+        ok = gpu_view_trace_start(w, &s, &tp) && passes_more(g, w, &s, 2) && gpu_view_trace_passes(w) >= 2;
+        gpu_view_destroy(w);
+    }
+    check("... and the next one traces", ok && w != NULL);
+    if (ok) scene_free(&s);
+    gpu_frame_close(g, v);
+}
+
 int main(void){
     printf("test_gpu_trace\n");
     Gpu *g;
@@ -480,6 +526,7 @@ int main(void){
     raster_guide();
     gradients();
     edit_colour();
+    views_come_and_go();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;
 }

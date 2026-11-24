@@ -87,6 +87,7 @@ enum { GPU_LIVE_GPU, GPU_LIVE_VIEW, GPU_LIVE_FLUID, GPU_LIVE_RIGID, GPU_LIVE_TIM
 int gpu_live_add(int kind, const void *p);   // 0 if the list is full (said on stderr): then do not make it
 void gpu_live_remove(int kind, const void *p);
 int gpu_live_has(int kind, const void *p);
+int gpu_live_count(void);                    // how many are alive (the tests: nothing is left behind)
 
 // (re)creates *buf if it is missing or smaller than size; returns 1 if it was recreated
 int gpu_buffer_reserve(Gpu *g, WGPUBuffer *buf, size_t *cap, size_t size, WGPUBufferUsage usage, const char *label);
@@ -149,14 +150,15 @@ void gpu_bind_cache_clear(GpuBindCache *c);
 // and y (at most 65535 per axis); the kernel's index is gid.x + gid.y * num_workgroups.x * 64
 void gpu_dispatch(WGPUComputePassEncoder pass, size_t threads);
 
-// ---- GPU time per stage (timestamp queries; natively with LR_GPU_TIMING=1) ----
+// ---- GPU time per stage (timestamp queries: whenever the adapter has them; the times are
+// printed with LR_GPU_TIMING=1 or gpu_set_timing) ----
 // Each timed compute pass gets the timestamps gpu_timer_next gives for its descriptor
 // (NULL: not timed, run it as usual), counted under `stage`; gpu_timer_finish resolves those
 // used since the last call and reads them back (asynchronously; a round is skipped while the
 // last one is still on its way); gpu_timer_print shows the mean GPU time per stage and round,
 // and from the round's first pass's start to its last one's end (copies between them included).
 typedef struct GpuTimer GpuTimer;
-GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages);   // NULL when timing is off
+GpuTimer *gpu_timer_create(Gpu *g, int passes, int stages);   // NULL when the GPU has no timestamp queries
 const WGPUPassTimestampWrites *gpu_timer_next(GpuTimer *t, int stage);
 void gpu_timer_finish(GpuTimer *t, WGPUCommandEncoder enc);
 void gpu_timer_submitted(GpuTimer *t);   // after submitting the encoder gpu_timer_finish wrote into

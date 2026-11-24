@@ -271,7 +271,8 @@ struct GpuTrace {
     int valid;
     Bvh own;                 // built here when the scene has no BVH of its own
     int own_built;
-    GpuTimer *timer;         // LR_GPU_TIMING=1 (natively): the GPU time of the passes, by stage
+    GpuTimer *timer;         // the GPU time of the passes, by stage: whenever the GPU has timestamps (the
+                             // bands are sized by it); NULL without them. Printed with LR_GPU_TIMING=1
     // the wavefront tracer (WAVE; gpu_trace_set_wavefront): its kernels and their layouts,
     // the paths' state (WF), the counters (WC), the indirect dispatches' sizes (WA), and the
     // parameters of each wave (a band of more paths than WF holds goes in several waves)
@@ -2082,8 +2083,8 @@ void gpu_trace_destroy(GpuTrace *t){
                                k == TS_TRACE || (k >= TS_WF0 && k < TS_RGUIDE) ? "pass (1 sample per pixel, the whole image)" : k == TS_LIGHT ? "pass" :
                                k == TS_GUIDE || k == TS_RGUIDE || k == TS_GRADIENT ? "image" : "frame with builds");
         }
-        gpu_timer_destroy(t->timer);
     }
+    gpu_timer_destroy(t->timer);       // (it exists whenever the GPU has timestamps, reported or not)
     for (int k = 0; k < NWF; k++){
         if (t->wf_pipe[k]) wgpuComputePipelineRelease(t->wf_pipe[k]);
         if (t->wf_bgl[k]) wgpuBindGroupLayoutRelease(t->wf_bgl[k]);

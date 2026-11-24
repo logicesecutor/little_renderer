@@ -111,6 +111,11 @@ int gpu_live_has(int kind, const void *p){
     for (int i = 0; i < GPU_LIVE_MAX; i++) if (live[i].p == p && live[i].kind == kind) return 1;
     return 0;
 }
+int gpu_live_count(void){
+    int n = 0;
+    for (int i = 0; i < GPU_LIVE_MAX; i++) n += live[i].p != NULL;
+    return n;
+}
 static int is_live(const Gpu *g){ return gpu_live_has(GPU_LIVE_GPU, g); }
 
 char *gpu_wgsl_join(const char *const *parts, int n){
