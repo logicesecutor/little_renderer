@@ -59,7 +59,8 @@ GPU_WGSL(GUIDE_COPY, trace_guide);
 // point and the transmittance up to it), bilinearly between the cells along the surface.
 GPU_WGSL(RESOLVE, trace_resolve);
 
-// the photon cache fades: every sum times a factor
+// the photon cache fades: every sum times a factor, and the cells with no light left give
+// their slots back
 GPU_WGSL(DECAY, trace_decay);
 
 // ---- the BVH builder: a linear BVH (Karras 2012, "Maximizing Parallelism in the
@@ -1922,14 +1923,14 @@ void gpu_trace_photons(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, cons
         t->pc_paths = 0;
     }
     if (fade < 1 && t->pc_paths > 0){
-        struct { float k[4]; uint32_t n[4]; } D = {{(float)fade, 0, 0, 0}, {PC_CELLS * 4, 0, 0, 0}};
+        struct { float k[4]; uint32_t n[4]; } D = {{(float)fade, 0, 0, 0}, {PC_CELLS, 0, 0, 0}};   // (a thread per slot)
         wgpuQueueWriteBuffer(g->queue, t->dc_params, 0, &D, sizeof(D));
         WGPUBuffer b[2] = {t->dc_params, t->grid};
         WGPUBindGroup bg = gpu_bind_cached_buffers(g, &t->bc_decay, t->dc_bgl, b, 2);
         WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
         wgpuComputePassEncoderSetPipeline(pass, t->dc_pipe);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, NULL);
-        gpu_dispatch(pass, (size_t)PC_CELLS * 4);
+        gpu_dispatch(pass, (size_t)PC_CELLS);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
         t->pc_paths *= fade;

@@ -1347,7 +1347,8 @@ const PC_SCALE = 256.0;
 /* 3 sizes of cells (x1, x4, x16) in one table: the lookup takes the finest that holds enough
    photons (adaptive density estimation). A slot: 3 x (low, high) sums, the photon count, the
    cell's key (0 = free). A cell takes the first slot from its hash on that is free or its own
-   (up to 8 on): two cells never share a slot (that would light one with the other's photons). */
+   (up to 8 on): two cells never share a slot (that would light one with the other's photons).
+   A cell whose light has faded away gives its slot back (trace_decay.wgsl). */
 fn pc_claim(c: vec3i, axis: u32, level: u32) -> u32 {
     let h = pc_key(c, axis, level);
     let key = hash32(h ^ 0x68e31da4u) | 1u;
