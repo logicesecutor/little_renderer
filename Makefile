@@ -405,11 +405,18 @@ WEB_EDITOR_PAGE = $(patsubst web/editor/%,$(WEB_EDITOR)/%,$(wildcard web/editor/
 # models dragon-download skies-download first), and their pictures
 EDITOR_SAMPLE_FILES = models/dragon_recon/dragon_vrip_res4.ply models/torus.obj models/skies/kloofendal_48d_partly_cloudy_2k.hdr
 WEB_EDITOR_SAMPLES = $(patsubst %,$(WEB_EDITOR)/samples/%,$(wildcard $(EDITOR_SAMPLE_FILES))) $(WEB_EDITOR)/samples/sky_rain.jpg
-web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR_PAGE) $(WEB_EDITOR_SAMPLES)
+# Two builds of the engine: engine_mt.js, the CPU's loops (the engine's OpenMP pragmas) on
+# WebAssembly threads, which the page loads when it is cross-origin isolated (make serve sends
+# the headers: section "THREADS=1" above), and engine.js, one thread, for a static host that
+# cannot send them (the page falls back to it, and ?threads=1 asks for it)
+EDITOR_RUNTIME = -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,ccall,FS,addRunDependency,removeRunDependency
+web-editor: $(WEB_EDITOR)/engine.js $(WEB_EDITOR)/engine_mt.js $(WEB_EDITOR_PAGE) $(WEB_EDITOR_SAMPLES)
 $(WEB_EDITOR)/engine.js: $(SRC) $(WGSL_C) apps/editor.c $(HDR) $(WEB_STAMP)
 	@mkdir -p $(WEB_EDITOR)
-	$(EMCC) $(WEBBASE) -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=UTF8ToString,ccall,FS,addRunDependency,removeRunDependency \
-	    $(SRC) $(WGSL_C) apps/editor.c -o $@
+	$(EMCC) $(WEBBASE) $(EDITOR_RUNTIME) $(SRC) $(WGSL_C) apps/editor.c -o $@
+$(WEB_EDITOR)/engine_mt.js: $(SRC) $(WGSL_C) apps/editor.c $(HDR) web/include/omp.h $(WEB_STAMP)
+	@mkdir -p $(WEB_EDITOR)
+	$(EMCC) $(WEBBASE) $(WEBMT) $(EDITOR_RUNTIME) $(SRC) $(WGSL_C) apps/editor.c -o $@
 $(WEB_EDITOR)/samples/models/%: models/%
 	@mkdir -p $(dir $@)
 	cp $< $@
