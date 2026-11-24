@@ -66,7 +66,7 @@
   };
 
   const ui = {
-    ready: false, backend: BACKEND.HYBRID, res: [1920, 1080], internals: false, calls: [],
+    ready: false, backend: BACKEND.RT, res: [1920, 1080], internals: false, calls: [],
     scene: null, sel: null, tray: 'shapes', status: null, flying: false, flyKeys: 0,
     boxes: {}, dragging: null, adds: 0,
     follow: true,                  // the resolution: the window's, in the screen's real pixels (else fixed)
@@ -145,6 +145,9 @@
     ui.scene = engineJSON('lr_scene');
     ui.res = [st.width, st.height];
     ui.backend = st.backend;
+    // the page has two renderers, Raster and Path traced (the engine's Auto, raster while things
+    // move, is not offered: an address's ?backend=hybrid gets Path traced)
+    if (ui.backend === BACKEND.HYBRID) { ui.backend = BACKEND.RT; quiet('lr_set_backend', BACKEND.RT); }
     renderAll();
     fitCanvas();
     if (window.KILN_PLAY) startPlayer();             // (a published game: Play, from its files)
@@ -495,7 +498,7 @@
       log('lr_load_sky("/drop/' + hdr.name + '")');
       if (k) note = ' Could not read ' + hdr.name + '.';
     } else if (r.skyFile) note = ' Its sky was ' + r.skyFile + ': drop that .hdr to bring it back.';
-    const b = { 'path traced': 0, raster: 1, auto: 2 }[r.renderer];
+    const b = { 'path traced': 0, raster: 1, auto: 0 }[r.renderer];   // (a file saved in Auto: Path traced)
     if (b !== undefined && b !== ui.backend) { ui.backend = b; call('lr_set_backend', [b], 'lr_set_backend(' + BACKEND_NAME[b] + ')'); renderRenderer(); }
     ui.sceneFile = name;
     document.querySelector('.scene-name').textContent = name.replace(/\.(glb|gltf)$/i, '');
@@ -1663,7 +1666,7 @@
       const r = JSON.parse(Module.ccall('lr_open_scene', 'string', ['string'], ['/drop/' + P.scene]));
       if (r.opened !== 1) throw new Error(P.scene);
       if (P.sky) Module.ccall('lr_load_sky', 'number', ['string', 'string'], ['/drop/' + P.sky, P.sky]);
-      const b = { 'path traced': 0, raster: 1, auto: 2 }[r.renderer];
+      const b = { 'path traced': 0, raster: 1, auto: 0 }[r.renderer];
       if (b !== undefined && b !== ui.backend) { ui.backend = b; quiet('lr_set_backend', b); renderRenderer(); }
       ui.sceneFile = P.scene;
       document.querySelector('.scene-name').textContent = P.title || 'Kiln';
@@ -1775,7 +1778,7 @@
       desc: 'Throws a rubber ball from where you are looking into the running simulation: the quickest way to poke the scene.', action: 'run', run: throwBall });
     if (ui.mode === 'simulate' && sim) add({ g: 'Commands', label: sim.paused ? 'Play the simulation' : 'Pause the simulation', kw: 'simulate play pause run', kbd: 'Space', icon: PAL_IC.play,
       desc: sim.paused ? 'Runs the physics from where it is.' : 'Holds the physics where it is; the path traced image refines.', action: 'run', run: simPlay });
-    for (const [b, label, kw] of [[0, 'Switch to path tracing', 'path trace render'], [1, 'Switch to raster', 'raster render fast'], [2, 'Switch to Auto', 'auto hybrid render']])
+    for (const [b, label, kw] of [[0, 'Switch to path tracing', 'path trace render'], [1, 'Switch to raster', 'raster render fast']])
       if (b !== ui.backend) add({ g: 'Commands', label, kw, icon: PAL_IC.ray,
         desc: ['The path tracer: every light, shadow and reflection, refining as you wait.', 'The rasterizer: quick, approximate light, never noisy.', 'Raster while you move, path traced once still.'][b],
         action: 'run', run: () => document.querySelector('#renderer button[data-backend="' + b + '"]').click() });

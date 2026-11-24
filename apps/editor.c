@@ -2328,8 +2328,9 @@ static void frame_web(void){
 
 int main(int argc, char **argv){
     // the editor's defaults before the page's own options (the address: ?n=...): Full HD,
-    // auto (hybrid), 64 samples per pixel shown as converged
-    const char *pre[] = {"-width", "1920", "-height", "1080", "-backend", "hybrid", "-s", "64"};
+    // path traced, 64 samples per pixel shown as converged (the page offers Raster and Path
+    // traced; the engine's Auto, raster while things move, is left to the address)
+    const char *pre[] = {"-width", "1920", "-height", "1080", "-backend", "rt", "-s", "64"};
     int npre = (int)(sizeof(pre) / sizeof(pre[0]));
     char **args = malloc((size_t)(argc + npre + 1) * sizeof(char *));
     if (!args) return 1;
