@@ -229,7 +229,9 @@ Measured natively (512×512, RTX 3070; RMSE in 8-bit levels against 4096 spp):
 The 5 passes cost well under a millisecond at 640×640 on that GPU, and run only when a band
 of samples has finished. `view` and `sim` denoise by default, `render` does not (a final
 image stays unbiased unless `-denoise on`); `gpu_view_trace_denoise` turns it on in your
-own program.
+own program, `viewer_set_denoise` in a viewer's (the editor's Denoise switch, beside the
+renderer: off shows the samples as they are; greyed out with the rasterizer, kept for the next
+visit; `lr_set_denoise`, `denoise` in `lr_status`, a row in Internals).
 
 ### 2.5 Real-time path tracing (`-backend rt`, `-history`)
 
@@ -262,8 +264,8 @@ no outside denoiser is used.
   and the noise lines up in streaks; it measured worse.
 - **Temporal gradients** (`-gradients`, on; A-SVGF, Schied et al. 2018): one cap for every
   pixel is a compromise, the shadows lag a little and the rest of the image is noisier than
-  it could be. While the physics runs, each pixel now keeps as many samples as its own light
-  allows, up to `-history`. Per tile of 4 × 4 pixels, one pixel that saw the same surface
+  it could be. While the physics runs, and when the scene is edited, each pixel now keeps as
+  many samples as its own light allows, up to `-history`. Per tile of 4 × 4 pixels, one pixel that saw the same surface
   before has its old pixel's last sample traced again in the new scene, with the same random
   numbers (each pixel keeps its last sample's value and number in plane 1, the samples'
   second plane) through the same point of the surface; their difference, λ = |new − old| /
@@ -271,13 +273,39 @@ no outside denoiser is used.
   normal), and a pixel keeps (1 − λ) / λ samples' worth, the weight A-SVGF's blend gives what
   was there: all of them where nothing changed, none where a shadow moved; the time-bound cap
   above where no tile near could tell (`trace_reproject.wgsl` gmatch, gfilter;
-  `trace.wgsl` main with `txl.w` = 1). A box sliding under the lamp, one pass a frame, 320 × 240, the
-  raw image against the truth (RMS): where the light changed 0.0072 (a fixed history of 8,
-  the page's: 0.0080; 12, native: 0.0082; 32: 0.0117), where it did not 0.0081 (8: 0.0148,
-  12: 0.0128, 32: 0.0080): the shadows follow as fast as with the shortest history, the rest
-  is as quiet as with the longest. It costs a sixteenth of a pass per image: 7% of the GPU's
-  time in the editor's Play, the path tracer's share 25.1 -> 23.0%. Edits keep their history
-  of 1 and the restart once they stop; the camera alone moving keeps `-history` everywhere.
+  `trace.wgsl` main with `txl.w` = 1). A box sliding under the lamp, one sample a frame (as
+  in the page; `gpu_view_trace_limit`), 320 × 240, the raw image against the truth (RMS):
+  where the light changed 0.029 (a fixed history of 8, the page's: 0.030; 12, native: 0.033;
+  32: 0.040), where it did not 0.014 (8: 0.036, 12: 0.027, 32: 0.013): the shadows follow as
+  fast as with the shortest history, the rest is as quiet as with the longest. (The figures
+  first given here, 0.0072 against 0.0080, were measured with several samples a frame.) Tiles
+  of 3 × 3, as in A-SVGF: 0.029 and 0.016, for 8.3% of the GPU against 7%. It costs a
+  sixteenth of a pass per image: 7% of the GPU's time in the editor's Play, the path
+  tracer's share 25.1 -> 23.0%. The camera alone moving keeps `-history` everywhere.
+- **An edit** (a shape added, removed, moved or dragged, its material changed) changes light
+  on surfaces that did not move, which the samples carried over cannot tell by themselves:
+  each pixel kept one at most while edits came, and the image started over 0.12 s after the
+  last (`EDIT_SETTLE`), throwing away the samples of everything the edit did not touch. With
+  the gradients an edit's move is judged as the physics' are, and nothing starts over. Two
+  things differ: λ only sees the light over the albedo, so a surface keeps its samples only
+  where its albedo is the same too (a box turned red would stay grey for its samples' worth:
+  `test_gpu_trace`, red over green 6.3 one pass after, 1.1 as the physics' move), and lamps,
+  the sky and media, which have no gradient sample of their own, keep one; and an edit's λ
+  counts 4 times, a drag's steps coming faster than a sixteenth of the pixels can follow.
+  edtest22 (the editor's scene at 1400 × 800; the old look left as a share of the change, 0.25
+  / 0.5 / 1 s after the edit; the noise where it changed nothing, RMS in luminance against the
+  converged picture, at 0.25 / 0.5 s), before → now: a box removed, 0.003 / 0.001 / 0 → 0.002 /
+  0 / 0, noise 0.0030 / 0.0012 → 0.0019 / 0.0002; a box dragged for half a second, 0.017 /
+  0.010 / 0.004 → 0.008 / 0.004 / 0.002 (0.027 / 0.013 / 0.002 with λ as the physics'), noise
+  0.0050 / 0.0040 → 0.0034 / 0.0021; a colour changed, 0.007 / 0.003 / 0 → 0.004 / 0 / 0,
+  noise 0.0037 / 0.0013 → 0.0017 / 0.0002. Without the gradients (`-gradients off`, the
+  wavefront tracer) edits start over as before.
+- **The denoiser and λ:** A-SVGF also restarts its variance estimate where λ is large; this
+  denoiser needs nothing of it, its variance being each pixel's own, from the samples it
+  kept (under 4 of them, its neighbours'). Measured on the sliding box, one sample a frame,
+  denoised against the denoised truth: making the spatial estimate 4 or 16 times larger, or
+  using it up to 8 samples, changed the error where the light changed by 0.0001 (0.0228):
+  what is left there is the shadow's lag, which no denoiser setting takes away.
 - **Then** the frame's new samples are added (as many passes as fit in ~10 ms) and the
   denoiser smooths the result. A band of samples never waits for another: on a GPU too slow
   for a whole pass per frame, the bands go on round the image, and a move waits until the
