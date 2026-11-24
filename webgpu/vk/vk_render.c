@@ -259,6 +259,20 @@ WGPURenderPassEncoder wgpuCommandEncoderBeginRenderPass(WGPUCommandEncoder e, WG
         if (!w){ w = dsa->view->tex->w; h = dsa->view->tex->h; }
     }
     vk_before(e, VK_CMD_RENDER);
+    // its time (timestampWrites): the start once the work before has finished, the end after
+    // its own (the queries reset here: not allowed inside the rendering)
+    if (d->timestampWrites && d->timestampWrites->querySet && e->queue->ts){
+        const WGPUPassTimestampWrites *tw = d->timestampWrites;
+        p->ts = tw->querySet;
+        p->ts_end = tw->endOfPassWriteIndex;
+        refs_add(&e->refs, &tw->querySet->o);
+        if (tw->endOfPassWriteIndex != WGPU_QUERY_SET_INDEX_UNDEFINED)
+            vk.vkCmdResetQueryPool(e->cb, tw->querySet->vk, tw->endOfPassWriteIndex, 1);
+        if (tw->beginningOfPassWriteIndex != WGPU_QUERY_SET_INDEX_UNDEFINED){
+            vk.vkCmdResetQueryPool(e->cb, tw->querySet->vk, tw->beginningOfPassWriteIndex, 1);
+            vk.vkCmdWriteTimestamp(e->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, tw->querySet->vk, tw->beginningOfPassWriteIndex);
+        }
+    }
     VkRenderingInfo ri;
     memset(&ri, 0, sizeof(ri));
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -314,6 +328,8 @@ void wgpuRenderPassEncoderDraw(WGPURenderPassEncoder p, uint32_t nverts, uint32_
 
 void wgpuRenderPassEncoderEnd(WGPURenderPassEncoder p){
     vk.vkCmdEndRendering(p->enc->cb);
+    if (p->ts && p->ts_end != WGPU_QUERY_SET_INDEX_UNDEFINED)
+        vk.vkCmdWriteTimestamp(p->enc->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, p->ts->vk, p->ts_end);
 }
 
 void wgpuRenderPassEncoderRelease(WGPURenderPassEncoder p){ if (p) obj_unref(&p->o); }

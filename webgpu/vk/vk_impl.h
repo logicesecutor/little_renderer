@@ -268,6 +268,7 @@ struct WGPURenderPassEncoderImpl {
     WGPUBindGroup bg[4];
     uint32_t dyn[4][8]; uint32_t ndyn[4];
     int bg_dirty;
+    WGPUQuerySet ts; uint32_t ts_end;
 };
 
 struct WGPUComputePassEncoderImpl {
