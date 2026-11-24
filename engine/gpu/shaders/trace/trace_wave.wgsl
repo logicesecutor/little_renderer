@@ -361,8 +361,9 @@ fn wf_resolve(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups
     let st = wf_st(id);
     let k = WF[st + 1u].w;
     var c = bitcast<vec3f>(WF[st + 3u].xyz);
+    let sane = all(c > vec3f(-1e30)) && all(c < vec3f(1e30));   /* (every channel: trace.wgsl main) */
     let mx = max(c.x, max(c.y, c.z));
-    if (!(mx >= 0.0 && mx < 1e30)) {
+    if (!sane || !(mx >= 0.0)) {
         c = vec3f(0.0);
     } else if (T.f.x > 0.0 && mx > T.f.x) {
         c *= T.f.x / mx;

@@ -1269,16 +1269,20 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let v = (f32(k / W) + d.y + j.y) / f32(H);
     let through = T.upper_left.xyz + T.horizontal.xyz * u - T.vertical.xyz * v;
     var c = trace(Ray(T.origin.xyz, normalize(through - T.origin.xyz)), sm, &rng);
+    /* a sample that is not a number is left out: each channel asked (the largest alone was:
+       what max() gives for a NaN is the implementation's choice, so a NaN in one channel could
+       pass, enter the sums and stay there, the reprojection spreading it) */
+    let sane = all(c > vec3f(-1e30)) && all(c < vec3f(1e30));
     let mx = max(c.x, max(c.y, c.z));
     if (grad) {
-        if (!(mx >= 0.0 && mx < 1e30) || cam_glow) { accum[N + a].x = -1.0; return; }
+        if (!sane || !(mx >= 0.0) || cam_glow) { accum[N + a].x = -1.0; return; }
         if (T.f.x > 0.0 && mx > T.f.x) { c *= T.f.x / mx; }
         let ga = accum[3u * N + k];
         let l = luma(select(c, c / max(ga.xyz, vec3f(1e-3)), gkind(ga.w) == 0.0));
         accum[N + a].x = abs(l - acc.x) / max(max(l, acc.x), 1e-3);
         return;
     }
-    if (!(mx >= 0.0 && mx < 1e30)) {
+    if (!sane || !(mx >= 0.0)) {
         c = vec3f(0.0);
     } else if (T.f.x > 0.0 && mx > T.f.x) {
         c *= T.f.x / mx;
