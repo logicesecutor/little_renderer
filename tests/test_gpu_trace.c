@@ -47,6 +47,7 @@
 #include "app/gpu_frame.h"
 #include "rt/tracer.h"
 #include "scene/pbr_maps.h"
+#include "scene/env.h"
 #ifdef LR_GPU
 #include "gpu/gpu_internal.h"     // gpu_live_count
 #endif
@@ -559,6 +560,23 @@ static void unfit_then_fits(void){
     scene_set_accel(&s, ACCEL_BVH, &ap);
     int ok = gpu_view_trace_start(v, &s, &tp) && passes_more(g, v, &s, 2) && gpu_view_trace_passes(v) >= 2;
     check("... and once the scene is one it can hold, it path traces", ok);
+    // a sky taller than it is wide: the GPU's layout of its distributions has no room for it
+    // (it was written past its end): refused; a wide one in its place is traced
+    float *tall = malloc(sizeof(float) * 3 * 8 * 16), *wide = malloc(sizeof(float) * 3 * 16 * 8);
+    for (int i = 0; tall && wide && i < 3 * 8 * 16; i++) tall[i] = wide[i] = 0.5f;
+    Env *et = tall ? env_from_rgb(tall, 8, 16) : NULL, *ew = wide ? env_from_rgb(wide, 16, 8) : NULL;
+    if (et && ew){
+        Env *own = s.env;
+        s.env = et;
+        printf("  (a message about a sky taller than wide is expected here, once)\n");
+        int refused = !gpu_view_trace_start(v, &s, &tp) && !gpu_view_trace_start(v, &s, &tp) && !gpu_view_trace_failed(v);
+        s.env = ew;
+        int traced = gpu_view_trace_start(v, &s, &tp) && passes_more(g, v, &s, 2);
+        check("a sky taller than wide is refused, a wide one traced", refused && traced);
+        s.env = own;
+    } else check("a sky taller than wide: the skies", 0);
+    if (et) env_free(et);
+    if (ew) env_free(ew);
     gpu_frame_close(g, v);
     scene_free(&s);
 }

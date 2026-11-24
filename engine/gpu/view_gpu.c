@@ -58,6 +58,7 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 #include "base/clock.h"
 #include "base/envvar.h"
 #include "scene/volume.h"
+#include "scene/env.h"
 #include "gpu/gpu_internal.h"
 
 // ---- the shaders -----------------------------------------------------------------------------
@@ -216,14 +217,14 @@ struct GpuView {
 static int view_is_live(const GpuView *v, void *u2){ return gpu_live_has(GPU_LIVE_VIEW, v, (uintptr_t)u2); }
 
 // What a scene is, for "the scene that did not fit": a number that changes when its geometry,
-// instances, textures or media do (their versions and counts; not the camera, not what the
+// instances, textures, media or sky do (their versions and counts; not the camera, not what the
 // physics moves without adding anything)
 static uint64_t scene_sig(const Scene *s){
     uint64_t h = 1469598103934665603ull;
 #define SIG(x) h = (h ^ (uint64_t)(x)) * 1099511628211ull
     SIG(s->tris_version); SIG(s->ntris); SIG(s->nnormals); SIG(s->nprims);
     SIG(s->inst_version); SIG(s->ninsts); SIG(s->tex_version); SIG(s->ntexmaps);
-    SIG(s->nmeshes); SIG(s->nvolumes);
+    SIG(s->nmeshes); SIG(s->nvolumes); SIG(s->env ? s->env->id : 0);
     for (int m = 0; m < s->nmeshes; m++){ SIG(s->meshes[m].id); SIG(s->meshes[m].version); SIG(s->meshes[m].ntris); }
     for (int k = 0; k < s->nvolumes; k++){ SIG(s->volumes[k]->id); SIG(s->volumes[k]->nx); SIG(s->volumes[k]->ny); SIG(s->volumes[k]->nz); }
 #undef SIG

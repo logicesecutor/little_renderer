@@ -1514,11 +1514,20 @@ static int upload_instances(GpuTrace *t, const Scene *s){
     return 1;
 }
 
-// the sky's textures, again when the scene's sky changed (a 1 x 1 pair without one)
-static void upload_sky(GpuTrace *t, const Scene *s){
+// the sky's textures, again when the scene's sky changed (a 1 x 1 pair without one). 0 = this
+// sky cannot be put on the GPU as they are laid out
+static int upload_sky(GpuTrace *t, const Scene *s){
     const Env *e = s->env;
     unsigned id = e ? e->id : 0;
-    if (t->sky_tex && id == t->sky_id) return;
+    if (t->sky_tex && id == t->sky_id) return 1;
+    // The distributions' texture is as wide as the map and has one more row than it, the
+    // rows' own distribution: h entries in a row of w. A map taller than wide does not fit it
+    // (h entries were written into the w allocated: past the end). Maps are 2 : 1; one that
+    // is not is path traced on the CPU, which has no such limit.
+    if (e && e->h > e->w){
+        fprintf(stderr, "GPU path tracer: a sky taller than it is wide (%d x %d) is not supported: the CPU path traces\n", e->w, e->h);
+        return 0;
+    }
     if (t->sky_view) wgpuTextureViewRelease(t->sky_view);
     if (t->skyc_view) wgpuTextureViewRelease(t->skyc_view);
     if (t->sky_tex){ wgpuTextureDestroy(t->sky_tex); wgpuTextureRelease(t->sky_tex); }
@@ -1551,12 +1560,13 @@ static void upload_sky(GpuTrace *t, const Scene *s){
     t->sky_id = id;
     free(rgba);
     free(cdf);
+    return 1;
 }
 
 int gpu_trace_reads_tlas(const GpuTrace *t, const Scene *s){ return tlas_cpu(t, s->ninsts) && !hw_on(t); }
 
 int gpu_trace_sync(GpuTrace *t, const Scene *s){
-    upload_sky(t, s);
+    if (!upload_sky(t, s)) return 0;
     if (!t->txt) t->txt = gpu_buffer(t->g, "path tracer: the textures' table", sizeof(t->gt.table), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     if (gpu_textures_sync(t->g, &t->gt, s)) wgpuQueueWriteBuffer(t->g->queue, t->txt, 0, t->gt.table, sizeof(t->gt.table));
     if (t->laid_out && t->textured != (s->ntexmaps > 0)) t->laid_out = 0;   // the layout without its texture coordinates
