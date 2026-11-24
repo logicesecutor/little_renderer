@@ -83,6 +83,12 @@ typedef struct {
     int spp, spp_target; // its samples per pixel, and where it stops (-s)
     double fps;          // frames shown per second
     int width, height;
+    // the GPU path tracer's work: images begun and carried over a move (counts since the
+    // start), a pass's GPU time (ms), the band it runs (rows, passes) and its budget (ms)
+    long trace_starts, trace_moves;
+    double trace_pass_ms, trace_budget_ms;
+    double trace_work;   // passes' worth of work the GPU has done, all images
+    int trace_rows, trace_reps;
 } ViewerStatus;
 void viewer_status(ViewerStatus *st);
 

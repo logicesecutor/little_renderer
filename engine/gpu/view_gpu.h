@@ -108,6 +108,8 @@ int gpu_view_trace_busy(const GpuView *v);          // a band is still running o
 typedef void (*GpuTraceReadFn)(void *user, const float *sum_count, int w, int h);
 int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user);
 double gpu_view_trace_pass_ms(const GpuView *v);    // how long the last one took
+// the band the path tracer runs now (rows, passes at a time) and its budget per frame (ms)
+void gpu_view_trace_band(const GpuView *v, int *rows, int *reps, double *budget_ms);
 // 1 = the path tracer runs as small kernels, one step of every path at a time (wavefront;
 // docs/STATUS.md R1), 0 = as one kernel per path (the default)
 void gpu_view_trace_wavefront(GpuView *v, int on);

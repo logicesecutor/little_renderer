@@ -1539,6 +1539,8 @@ EXPORT const char *lr_status(void){
             "\"fps\":%.1f,\"width\":%d,\"height\":%d,\"instances\":%d,\"emitters\":%d,\"relighting\":%d,\"relight\":%.3f",
             (int)viewer_backend(), st.tracing, st.on_gpu, st.gpu_starting, st.gpu_tracing, st.spp, st.spp_target,
             st.fps, st.width, st.height, viewer_scene()->ninsts, emitters, E.relight != NULL, E.relight_done);
+    jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f}",
+            st.trace_starts, st.trace_moves, st.trace_pass_ms, st.trace_rows, st.trace_reps, st.trace_budget_ms, st.trace_work);
     if (viewer_sim_on()){                            // the simulation: its time, its bodies so far
         char line[200];
         viewer_sim_line(line, sizeof(line));

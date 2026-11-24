@@ -300,6 +300,7 @@ typedef struct {
     int edit_pending;          // edits came, the image is to start over once they stop
     double edit_t;             // (when the last one came)
     int gpu_shown_passes;      // its samples per pixel when it was last shown
+    long trace_starts, trace_moves;   // (viewer_status: images begun, and carried over a move)
     Framebuffer *gfb;          // -gpu offscreen: the GPU's frame, back on the CPU to be shown
     int gpu_frame_owed;        // offscreen: a frame was drawn but could not be read back yet
     RenderParams last_rp;      // the camera of the last raster frame, for the GPU march
@@ -547,6 +548,7 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
     // what shows through until every pixel has a sample: the rasterized scene, same camera
     V.last_rp = raster_params(at);
     V.gpu_tracing = 1;
+    V.trace_starts++;
     V.gpu_cam = *cam;
     V.gpu_depth = depth;
     V.gpu_shown_passes = -1;
@@ -585,6 +587,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
         int moved;
         if (gpu_view_trace_reads_tlas(V.gview, &V.scene)) scene_trees();
         PROF(PROF_MOVE, moved = gpu_view_trace_move(V.gview, &V.scene, &tp, keep));
+        V.trace_moves++;
         if (!moved){
             V.o.gpu_trace = 0;
             V.gpu_tracing = 0;
@@ -1406,4 +1409,9 @@ void viewer_status(ViewerStatus *st){
     st->fps = V.fps;
     st->width = V.W;
     st->height = V.H;
+    st->trace_starts = V.trace_starts;
+    st->trace_moves = V.trace_moves;
+    st->trace_pass_ms = V.gview ? gpu_view_trace_pass_ms(V.gview) : V.pass_ms;
+    st->trace_work = V.gview ? gpu_view_trace_work(V.gview) : 0;
+    if (V.gview) gpu_view_trace_band(V.gview, &st->trace_rows, &st->trace_reps, &st->trace_budget_ms);
 }

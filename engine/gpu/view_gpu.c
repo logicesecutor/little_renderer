@@ -28,6 +28,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
 int gpu_view_trace_passes(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_work(const GpuView *v){ (void)v; return 0; }
 double gpu_view_trace_pass_ms(const GpuView *v){ (void)v; return 0; }
+void gpu_view_trace_band(const GpuView *v, int *rows, int *reps, double *budget_ms){ (void)v; *rows = *reps = 0; *budget_ms = 0; }
 int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
 void gpu_view_aa(GpuView *v, int on){ (void)v; (void)on; }
@@ -1082,6 +1083,11 @@ int gpu_view_trace_read(GpuView *v, GpuTraceReadFn fn, void *user){
 // a whole pass, as the GPU took for the last band (submission to completion, scaled to the
 // whole image); before any band, the time between passes
 double gpu_view_trace_pass_ms(const GpuView *v){ return !v ? 0 : v->t_gpu_pass_ms > 0 ? v->t_gpu_pass_ms : v->t_pass_ms; }
+void gpu_view_trace_band(const GpuView *v, int *rows, int *reps, double *budget_ms){
+    *rows = v ? v->t_rows : 0;
+    *reps = v ? v->t_reps : 0;
+    *budget_ms = v ? frame_budget(v) : 0;
+}
 
 void gpu_view_trace_wavefront(GpuView *v, int on){
     if (!v) return;
