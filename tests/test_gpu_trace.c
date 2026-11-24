@@ -24,6 +24,11 @@
 // gradient samples saw the light change), while the walls far from it kept most of theirs;
 // without the gradients the old shadow stays (the same history everywhere).
 //
+// A mesh whose triangles change (SceneMesh.dynamic), traced by the BVH walk: its tree is built
+// again on the GPU. The view synchronised twice before a band is traced (the build queued by
+// the first was dropped by the second, the mesh already taken as built: its new triangles were
+// traced through the old tree) shows what a new view of the same scene shows.
+//
 // Views come and go (a window resized makes its view again): 300 made and destroyed on one
 // GPU, some with their path tracer, leave nothing in the list of the objects alive (the path
 // tracer's timer was left there: after 250 no view could be made), and the last one traces.
@@ -469,6 +474,63 @@ static void raster_guide(void){
     } else check("instances: the scene", 0);
 }
 
+// 24 passes of the scene from nothing into the view, each pixel's mean into mean
+static int image_of(Gpu *g, GpuView *v, Scene *s, int starts, float *mean){
+    Camera cam = camera_make(s->cam_from, s->cam_at, s->cam_up, s->cam_vfov_deg, (real)W / H);
+    GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+    int ok = 1;
+    for (int k = 0; ok && k < starts; k++) ok = gpu_view_trace_start(v, s, &tp);   // (each synchronises the scene)
+    float *p = malloc(sizeof(float) * 4 * W * H);
+    ok = ok && p && passes_more(g, v, s, 24) && gpu_view_trace_planes_read(v, 0, 1, p);
+    for (int i = 0; ok && i < W * H; i++) mean[i] = p[4 * i + 3] > 0 ? (p[4 * i] + p[4 * i + 1] + p[4 * i + 2]) / (3 * p[4 * i + 3]) : -1;
+    free(p);
+    return ok;
+}
+static int differing(const float *a, const float *b){
+    int n = 0;
+    for (int i = 0; i < W * H; i++) n += fabsf(a[i] - b[i]) > 0.1f * (1 + fabsf(b[i]));   // (more than the noise of 24 passes)
+    return n;
+}
+static void dynamic_mesh(void){
+    static Scene s;
+    memset(&s, 0, sizeof(s));
+    SceneOptions empty = {.kind = SCENE_EMPTY};
+    if (scene_cornell_box(&s, &empty) != 0){ check("a dynamic mesh: the scene", 0); return; }
+    int mesh = scene_load_mesh_object(&s, "models/torus.obj", scene_add_material(&s, s.mats[0]), 170);
+    if (mesh < 0){ check("a dynamic mesh: models/torus.obj", 0); scene_free(&s); return; }
+    s.meshes[mesh].dynamic = 1;
+    scene_add_instance(&s, mesh, xform_rot_y(vec3(150, 120, 278), 0, 1), -1);
+    AccelParams ap = accel_default_params();
+    scene_set_accel(&s, ACCEL_BVH, &ap);
+    // (the BVH walk, on a GPU with ray queries too: there the hardware's bottom level is built again instead)
+    static char walk[] = "LR_GPU_HWRT=0", unset[] = "LR_GPU_HWRT=";
+    putenv(walk);
+    static float before[W * H], after[W * H], fresh[W * H];
+    Gpu *g;
+    GpuView *v;
+    int ok = gpu_frame_open(W, H, &g, &v) == 0;
+    if (ok){
+        ok = image_of(g, v, &s, 1, before);
+        // the mesh's triangles moved across the room
+        for (int i = 0; i < s.meshes[mesh].ntris; i++) s.meshes[mesh].tris[i].q.x += 250;
+        scene_mesh_changed(&s, mesh);
+        scene_set_accel(&s, ACCEL_BVH, &ap);
+        ok = ok && image_of(g, v, &s, 2, after);       // (two starts: the first one's build is never encoded)
+        gpu_frame_close(g, v);
+    }
+    if (ok && (ok = gpu_frame_open(W, H, &g, &v) == 0)){
+        ok = image_of(g, v, &s, 1, fresh);
+        gpu_frame_close(g, v);
+    }
+    putenv(unset);
+    char what[160];
+    snprintf(what, sizeof(what), "a dynamic mesh moved: the picture changed (%d pixels of %d)", ok ? differing(after, before) : 0, W * H);
+    check(what, ok && differing(after, before) > W * H / 100);
+    snprintf(what, sizeof(what), "... and is a new view's of the same scene (%d pixels differ: under 1%%)", ok ? differing(after, fresh) : 0);
+    check(what, ok && differing(after, fresh) * 100 < W * H);
+    scene_free(&s);
+}
+
 // views made and destroyed, every 30th with its path tracer: the objects alive are as many
 // after as before, and a view made then still traces
 static void views_come_and_go(void){
@@ -526,6 +588,7 @@ int main(void){
     raster_guide();
     gradients();
     edit_colour();
+    dynamic_mesh();
     views_come_and_go();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;

@@ -136,6 +136,9 @@ typedef struct {
 // one copy of the parameters per pass of a submission (each its own sample index), 256-byte
 // aligned (WebGPU's minimum offset alignment for uniform bindings)
 #define MAX_REPS 16
+// the BVHs the GPU builds in one frame at most (the top level and dynamic meshes'): each has
+// its bind groups kept, and its place in the checks (LR_GPU_BVH_CHECK)
+#define GPU_MAX_BUILDS 8
 // temporal gradients: one gradient sample per tile of GRAD_TILE x GRAD_TILE pixels
 // (trace_reproject.wgsl TILE, trace.wgsl GTILE): 4 x 4 cost the page's Play 7% of the GPU's
 // time against 8.3 for A-SVGF's 3 x 3; a box sliding under the lamp, one sample a frame, RMS
@@ -161,6 +164,7 @@ typedef struct {
     uint32_t node0, ref0, ref_add;      // a leaf's shape id: its item + ref_add
     size_t box_at, par_at;              // its boxes and parameters, in the arena
     int ploc;                           // built by PLOC (else LBVH)
+    int mesh;                           // the mesh it is of (-1: the top level)
 } GpuBuild;
 
 struct GpuTrace {
@@ -193,7 +197,7 @@ struct GpuTrace {
     // the BVH builds' (one per build of a frame, and PLOC's two) and the wavefront kernels':
     // each pass's parameters are chosen by a dynamic offset, so a build or a kernel has one
     // bind group for all its dispatches, kept from frame to frame
-    GpuBindCache bc_build[8], bc_ploc[8], bc_wf[6];
+    GpuBindCache bc_build[GPU_MAX_BUILDS], bc_ploc[GPU_MAX_BUILDS], bc_wf[6];
     WGPUComputePipeline dc_pipe;
     WGPUBuffer grid, dc_params, pc_params;
     double pc_paths;         // light paths in the grid, faded as the grid is
@@ -247,14 +251,15 @@ struct GpuTrace {
     size_t pl_cap;
     // LR_GPU_BVH_CHECK=1: the builds read back, checked (one tree over all the items) and
     // their cost (bvh_cost) and depth summed, by their order in the frame
-    int check, ck_count, ck_pending, ck_n[8], ck_depth[8];
-    uint32_t ck_node0[8];
-    size_t ck_at[8], ck_cap;
+    int check, ck_count, ck_pending, ck_n[GPU_MAX_BUILDS], ck_depth[GPU_MAX_BUILDS];
+    uint32_t ck_node0[GPU_MAX_BUILDS];
+    size_t ck_at[GPU_MAX_BUILDS], ck_cap;
     WGPUBuffer ck_buf;
-    double ck_cost[8];
-    long ck_builds[8], ck_bad;
-    GpuBuild builds[8];
+    double ck_cost[GPU_MAX_BUILDS];
+    long ck_builds[GPU_MAX_BUILDS], ck_bad;
+    GpuBuild builds[GPU_MAX_BUILDS];
     int nbuild;
+    int builds_said;         // (said once: more builds in a frame than GPU_MAX_BUILDS)
     unsigned char *arena_boxes, *arena_par;
     size_t arena_nboxes, arena_npar, arena_boxes_cap, arena_par_cap;
     // what is on the GPU now
@@ -557,14 +562,23 @@ static void *arena_put(unsigned char **buf, size_t *len, size_t *cap, const void
 }
 
 // a BVH over n boxes (2 x vec4 each: lo, hi) to build on the GPU at the next gpu_trace_build
-// (`mesh`: a mesh's triangles, where the tree's quality pays: PLOC unless told otherwise)
-static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, uint32_t ref0, uint32_t ref_add, Aabb bounds, int mesh){
-    if (n <= 0 || t->nbuild >= (int)(sizeof(t->builds) / sizeof(t->builds[0]))) return;
+// (mesh_index >= 0: that mesh's triangles, where the tree's quality pays: PLOC unless told
+// otherwise; -1: the top level). 1 = it will be built; 0 = not (nothing to build, no room for
+// another build this frame, or no memory): the caller must not take it as built
+static int build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, uint32_t ref0, uint32_t ref_add, Aabb bounds, int mesh_index){
+    const int mesh = mesh_index >= 0;
+    if (n <= 0) return 0;
+    if (t->nbuild >= GPU_MAX_BUILDS){
+        if (!t->builds_said++)
+            fprintf(stderr, "GPU path tracer: more than %d BVHs to build in a frame: the rest are built in the next ones\n", GPU_MAX_BUILDS);
+        return 0;
+    }
     if (t->nbuild == 0) t->arena_nboxes = t->arena_npar = 0;
     GpuBuild *b = &t->builds[t->nbuild];
     b->n = n; b->node0 = node0; b->ref0 = ref0; b->ref_add = ref_add;
+    b->mesh = mesh_index;
     unsigned char *at = arena_put(&t->arena_boxes, &t->arena_nboxes, &t->arena_boxes_cap, boxes, (size_t)n * 32);
-    if (!at) return;
+    if (!at) return 0;
     b->box_at = (size_t)(at - t->arena_boxes);
     uint32_t p = pow2_at_least((uint32_t)n);
     BuildParams base;
@@ -585,7 +599,7 @@ static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, 
     int npar = 1 + sort_passes(p) + nlast;
     size_t first = (t->arena_npar + 255) / 256 * 256;
     unsigned char *par = arena_put(&t->arena_par, &t->arena_npar, &t->arena_par_cap, NULL, (size_t)npar * BP_STRIDE);
-    if (!par) return;
+    if (!par) return 0;
     memset(par, 0, (size_t)npar * BP_STRIDE);
     int k = 0;
     memcpy(par + (size_t)k++ * BP_STRIDE, &base, sizeof(base));
@@ -604,6 +618,7 @@ static void build_queue(GpuTrace *t, const float *boxes, int n, uint32_t node0, 
     }
     b->par_at = first;
     t->nbuild++;
+    return 1;
 }
 
 static void build_dispatch(GpuTrace *t, WGPUComputePassEncoder pass, WGPUComputePipeline pipe, const GpuBuild *b,
@@ -1361,6 +1376,16 @@ static int upload_instances(GpuTrace *t, const Scene *s){
     const int some = !same && t->inst_valid && t->nbuild == 0 && t->insts_id == s->insts_id && t->inst_count <= s->ninsts &&
                      t->inst_prim0 == s->nprims && t->inst_tl == (tl != NULL) && t->sc_rec && t->sc_rec_cap >= ni * 192 &&
                      (!bvh || (t->sc_box && t->sc_box_cap >= ni * 32));
+    // Builds queued by the last sync that no encode ran (a band was in flight; a view started
+    // twice): they go. The top level is queued again below (same and some are 0 then); a
+    // mesh's was already taken as built, so it is marked not built again, and queued below
+    // (a dynamic one by its version, which is made to differ)
+    for (int i = 0; i < t->nbuild; i++){
+        const int m = t->builds[i].mesh;
+        if (m < 0 || m >= t->nmc || m >= s->nmeshes) continue;
+        t->mc[m].built = 0;
+        if (s->meshes[m].dynamic) t->mc[m].version = s->meshes[m].version - 1;
+    }
     t->nbuild = 0;
     if (s->ninsts > 0 && !same){
         float *rec = some ? t->sc_rec : scratch(&t->sc_rec, &t->sc_rec_cap, ni * 192);
@@ -1407,7 +1432,8 @@ static int upload_instances(GpuTrace *t, const Scene *s){
                 wgpuQueueWriteBuffer(g->queue, t->aux, (uint64_t)t->tlas_ref0 * 4, ax, (size_t)tl->nrefs * 4);
             } else tl = NULL;
         }
-        if (!tl && bvh) build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, 0);   // the top level: instance ids
+        // the top level: instance ids. (It is the frame's first build: not queued means no memory)
+        if (!tl && bvh && !build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, -1)){ t->inst_valid = 0; return 0; }
     }
     const unsigned since = t->inst_version;     // (hw_records)
     (void)since; (void)prev_count;
@@ -1438,8 +1464,11 @@ static int upload_instances(GpuTrace *t, const Scene *s){
             put(box + 8 * (size_t)i, bb.lo, 0);
             put(box + 8 * (size_t)i + 4, bb.hi, 0);
         }
-        build_queue(t, box, sm->ntris, c->node0, c->ref0, c->tri0, sm->box, 1);
+        // (not queued, more builds than a frame holds: it stays as it was, its turn comes at
+        // the next sync; an empty mesh has no tree to build)
+        const int queued = sm->ntris <= 0 || build_queue(t, box, sm->ntris, c->node0, c->ref0, c->tri0, sm->box, m);
         free(box);
+        if (!queued) continue;
         c->version = sm->version;
         c->built = 1;
     }
@@ -2059,7 +2088,7 @@ void gpu_trace_destroy(GpuTrace *t){
     if (!t) return;
     for (int k = 0; k < 4; k++) gpu_compute_async_cancel(t->preq[k], &t->pst[k]);   // (still coming: dropped when they do)
     if (t->check){
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < GPU_MAX_BUILDS; i++)
             if (t->ck_builds[i]) printf("GPU BVH check, build %d: %d items, cost %.3f (mean of %ld), depth %d\n", i, t->ck_n[i], t->ck_cost[i] / t->ck_builds[i], t->ck_builds[i], t->ck_depth[i]);
         printf("GPU BVH check: %ld builds were not one tree over their items\n", t->ck_bad);
     }
@@ -2077,7 +2106,7 @@ void gpu_trace_destroy(GpuTrace *t){
         if (t->wf_bgl[k]) wgpuBindGroupLayoutRelease(t->wf_bgl[k]);
     }
     for (int k = 0; k < 3; k++) gpu_bind_cache_clear(&t->bc_trace[k]);
-    for (int k = 0; k < 8; k++){ gpu_bind_cache_clear(&t->bc_build[k]); gpu_bind_cache_clear(&t->bc_ploc[k]); }
+    for (int k = 0; k < GPU_MAX_BUILDS; k++){ gpu_bind_cache_clear(&t->bc_build[k]); gpu_bind_cache_clear(&t->bc_ploc[k]); }
     for (int k = 0; k < 6; k++) gpu_bind_cache_clear(&t->bc_wf[k]);
     gpu_bind_cache_clear(&t->bc_resolve); gpu_bind_cache_clear(&t->bc_reproject); gpu_bind_cache_clear(&t->bc_gcopy);
     gpu_bind_cache_clear(&t->bc_gmatch);
