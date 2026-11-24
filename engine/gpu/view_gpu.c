@@ -986,7 +986,13 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     }
     v->t_sub_rows = rows;
     v->t_sub_reps = reps;
-    gpu_trace_encode(v->trace, enc, s, &v->tparams, v->t_y, rows, reps, nvol, v->t_index, &media);
+    // while things move, the lower indirect clamp: in the editor's Play, turning, the red ball's
+    // light bounced off the floor made fireflies the denoiser spread into blotches all over it
+    // (763 red pixels at 1440p; 44 at 1, the still image 0.1% darker at 1 than at 4)
+    GpuTraceParams ptp = v->tparams;
+    if (v->t_live && ptp.indirect_clamp_move > 0 && (ptp.indirect_clamp <= 0 || ptp.indirect_clamp_move < ptp.indirect_clamp))
+        ptp.indirect_clamp = ptp.indirect_clamp_move;
+    gpu_trace_encode(v->trace, enc, s, &ptp, v->t_y, rows, reps, nvol, v->t_index, &media);
     // the caustics: while things move, one pass of light paths into the photon cache, which
     // fades a little each time (what moved fades out); still, a pass ending with this band
     // brings as many passes of the (exact) light tracer, and while that has few the cache

@@ -164,6 +164,7 @@ static const Opt OPTS[] = {
     INT("-d", max_depth, "bounces", "maximum bounces per light path"),
     DBL("-clamp", clamp, "max", "firefly clamp, 0 = off (biased if on)"),
     DBL("-iclamp", iclamp, "max", "indirect clamp: each light a path brings after its first rough\nbounce, at most this much (the sun's disc found by chance:\nfireflies), 0 = off (biased; default: 4 in the viewer, else off)"),
+    DBL("-iclampmove", iclamp_move, "max", "view, path tracing on the GPU: the indirect clamp while things move\n(when lower than -iclamp; 0 = as -iclamp; default 1): what moves\nkeeps 12 samples a pixel, and a firefly the denoiser spreads stays\na blotch for as long"),
     ONOFF("-denoise", denoise, "path tracing on the GPU: denoise the image"),
     ONOFF("-wavefront", wavefront, "path tracing on the GPU: small kernels, one step of all paths at a time"),
     INT("-threads", threads, "n", "CPU threads, 0 = all cores"),
@@ -311,6 +312,7 @@ static void defaults(Options *o, Program prog){
     o->max_depth = 50;
     o->mis = 1;
     o->iclamp = prog == PROG_VIEW ? 4 : 0;
+    o->iclamp_move = prog == PROG_VIEW ? 1 : 0;
     o->sampler = 1;
     o->caustics_lt = prog != PROG_SIM;     // (the CPU viewer path traces them whatever this says)
     o->photons = 1;
@@ -573,6 +575,7 @@ void options_parse(Options *o, Program prog, int argc, char **argv){
     if (o->max_depth <= 0) fail(prog, "bounces must be positive", "-d");
     if (o->clamp < 0) fail(prog, "clamp must be >= 0", "-clamp");
     if (o->iclamp < 0) fail(prog, "iclamp must be >= 0", "-iclamp");
+    if (o->iclamp_move < 0) fail(prog, "iclampmove must be >= 0", "-iclampmove");
     if (o->threads < 0) fail(prog, "threads must be >= 0 (0 = all cores)", "-threads");
     if (o->ap.oct_depth < 0) fail(prog, "octree depth must be >= 0 (0 = automatic)", "-octdepth");
     if (o->scene.instances < 0) fail(prog, "instances must be >= 0", "-instances");

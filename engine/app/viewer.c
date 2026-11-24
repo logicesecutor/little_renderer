@@ -525,7 +525,7 @@ static void print_view_command(void){
 // the GPU path tracer's parameters for this camera, from the options
 static GpuTraceParams trace_params(const Camera *cam, int depth){
     GpuTraceParams tp = {*cam, depth, V.o.mis, (real)V.o.clamp, !V.o.sampler, V.o.caustics_lt ? (real)V.o.photons : 0, V.o.photon_cache,
-                         (real)V.o.iclamp};
+                         (real)V.o.iclamp, (real)V.o.iclamp_move};
     return tp;
 }
 

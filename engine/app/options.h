@@ -59,6 +59,8 @@ typedef struct {
     int max_depth;         // maximum bounces per path
     double clamp;          // firefly clamp, 0 = off
     double iclamp;         // indirect clamp: each light a path brings after its first rough bounce, 0 = off
+    double iclamp_move;    // view, GPU path tracer: the indirect clamp while things move (a new image
+                           // every frame; 0 = as iclamp), when lower than iclamp
     int threads;           // 0 = all cores
     const char *out;       // render: output file; view: screenshot file prefix
 

@@ -56,6 +56,7 @@ typedef struct {
     int photon_cache;  // 1 = also a world-space photon cache, for real time (blurred a little;
                        // the light tracer's exact caustics take over as the view stands still)
     real indirect_clamp; // TraceParams.indirect_clamp (rt/tracer.h), 0 = off
+    real indirect_clamp_move;   // the viewer: the same while things move, when lower (0: as indirect_clamp)
 } GpuTraceParams;
 // Starts a new image: the scene's geometry and BVH go to the GPU if they changed (the scene's
 // own BVH is used when it has one, so call scene_set_accel after changing geometry). Returns 0
