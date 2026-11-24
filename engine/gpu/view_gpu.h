@@ -20,7 +20,10 @@
 
 typedef struct GpuView GpuView;
 
-GpuView *gpu_view_create(Gpu *g, int width, int height);   // NULL if the GPU is not ready
+GpuView *gpu_view_create(Gpu *g, int width, int height);
+// 1 = its pipelines are there (made at once, or asynchronously in a browser with
+// gpu_set_async_views: 0 until they are), -1 = they could not be made
+int gpu_view_ready(GpuView *v);   // NULL if the GPU is not ready
 void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const RenderParams *p,
                       const MarchParams *mp, int volumes);
 // The same without a CPU framebuffer: the scene's surfaces are drawn by the GPU rasterizer

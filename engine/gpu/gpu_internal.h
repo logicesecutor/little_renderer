@@ -112,6 +112,11 @@ typedef struct GpuPipeReq GpuPipeReq;
 GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const char *entry, WGPUBindGroupLayout bgl,
                               WGPUComputePipeline *slot, int *state);
 void gpu_compute_async_cancel(GpuPipeReq *r, const int *state);
+// The same from a whole descriptor, compute or render, when gpu_set_async_views asked for it
+// (in a browser; else made at once: *state 1 or -1, NULL returned). Cancelled the same way.
+int gpu_async_views(void);
+GpuPipeReq *gpu_compute_desc_async(Gpu *g, const WGPUComputePipelineDescriptor *cd, WGPUComputePipeline *slot, int *state);
+GpuPipeReq *gpu_render_async(Gpu *g, const WGPURenderPipelineDescriptor *rd, WGPURenderPipeline *slot, int *state);
 WGPUBindGroup gpu_bind(Gpu *g, WGPUBindGroupLayout bgl, const WGPUBuffer *bufs, int n);
 // A bind group that is asked for every frame, made once: the last few (GPU_BIND_WAYS) sets of
 // entries a call site used are kept with their groups (a tracer's two sample buffers taking
@@ -170,6 +175,7 @@ void gpu_timer_destroy(GpuTimer *t);
 // values in rgba8unorm) and depth (0 near .. 1 far, as the CPU's z-buffer) textures.
 typedef struct GpuRaster GpuRaster;
 GpuRaster *gpu_raster_create(Gpu *g, int width, int height);
+int gpu_raster_ready(const GpuRaster *r);   // its pipelines: 1 there, 0 being made (in a browser), -1 failed
 // encodes the pass; 0 if the scene cannot be drawn on this GPU
 int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p);
 WGPUTextureView gpu_raster_color(GpuRaster *r);

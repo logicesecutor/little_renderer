@@ -29,6 +29,7 @@ void gpu_destroy(Gpu *g){ free(g); }
 void gpu_set_timing(int on){ (void)on; }
 int gpu_timing(const Gpu *g){ (void)g; return 0; }
 void gpu_set_vsync(int on){ (void)on; }
+void gpu_set_async_views(int on){ (void)on; }
 void gpu_resize(Gpu *g, int width, int height){ (void)g; (void)width; (void)height; }
 
 #else
@@ -72,6 +73,9 @@ int gpu_timing_report(const Gpu *g){ return g && g->timing_report; }
 
 static int no_vsync;                   // gpu_set_vsync(0)
 void gpu_set_vsync(int on){ no_vsync = !on; }
+static int async_views;
+void gpu_set_async_views(int on){ async_views = on != 0; }
+int gpu_async_views(void){ return async_views; }
 
 static void fail(Gpu *g, const char *what, WGPUStringView msg){
     g->state = GPU_FAILED;
@@ -598,6 +602,7 @@ struct GpuPipeReq {
     WGPUComputePipeline *slot;   // NULL: cancelled (its owner went away)
     int *state;
     char label[64];
+    WGPURenderPipeline *rslot;   // (a render pipeline's: gpu_render_async)
 };
 
 #ifdef __EMSCRIPTEN__
@@ -648,7 +653,72 @@ GpuPipeReq *gpu_compute_async(Gpu *g, const char *label, const char *wgsl, const
 }
 
 void gpu_compute_async_cancel(GpuPipeReq *r, const int *state){
-    if (r && state && *state == 0){ r->slot = NULL; r->state = NULL; }   // (done ones are freed already)
+    if (r && state && *state == 0){ r->slot = NULL; r->rslot = NULL; r->state = NULL; }   // (done ones are freed already)
+}
+
+#ifdef __EMSCRIPTEN__
+static void on_render_pipeline(WGPUCreatePipelineAsyncStatus status, WGPURenderPipeline p, WGPUStringView msg, void *u1, void *u2){
+    (void)u2;
+    GpuPipeReq *r = u1;
+    if (status != WGPUCreatePipelineAsyncStatus_Success){
+        fprintf(stderr, "GPU error: pipeline %s: %.*s\n", r->label, gpu_sv_len(msg), msg.data ? msg.data : "");
+        if (r->rslot) *r->state = -1;
+        if (p) wgpuRenderPipelineRelease(p);
+    } else if (r->rslot){
+        *r->rslot = p;
+        *r->state = 1;
+    } else if (p) wgpuRenderPipelineRelease(p);
+    free(r);
+}
+static GpuPipeReq *req_new(const WGPUStringView label, int *state){
+    GpuPipeReq *r = calloc(1, sizeof(*r));
+    if (!r) return NULL;
+    r->state = state;
+    snprintf(r->label, sizeof(r->label), "%.*s", gpu_sv_len(label), label.data ? label.data : "");
+    return r;
+}
+#endif
+
+GpuPipeReq *gpu_compute_desc_async(Gpu *g, const WGPUComputePipelineDescriptor *cd, WGPUComputePipeline *slot, int *state){
+#ifdef __EMSCRIPTEN__
+    GpuPipeReq *r = async_views ? req_new(cd->label, state) : NULL;
+    if (r){
+        r->slot = slot;
+        WGPUCreateComputePipelineAsyncCallbackInfo ci;
+        memset(&ci, 0, sizeof(ci));
+        ci.mode = WGPUCallbackMode_AllowSpontaneous;
+        ci.callback = on_pipeline;
+        ci.userdata1 = r;
+        *slot = NULL;
+        *state = 0;
+        wgpuDeviceCreateComputePipelineAsync(g->device, cd, ci);
+        return r;
+    }
+#endif
+    *slot = wgpuDeviceCreateComputePipeline(g->device, cd);
+    *state = *slot ? 1 : -1;
+    return NULL;
+}
+
+GpuPipeReq *gpu_render_async(Gpu *g, const WGPURenderPipelineDescriptor *rd, WGPURenderPipeline *slot, int *state){
+#ifdef __EMSCRIPTEN__
+    GpuPipeReq *r = async_views ? req_new(rd->label, state) : NULL;
+    if (r){
+        r->rslot = slot;
+        WGPUCreateRenderPipelineAsyncCallbackInfo ci;
+        memset(&ci, 0, sizeof(ci));
+        ci.mode = WGPUCallbackMode_AllowSpontaneous;
+        ci.callback = on_render_pipeline;
+        ci.userdata1 = r;
+        *slot = NULL;
+        *state = 0;
+        wgpuDeviceCreateRenderPipelineAsync(g->device, rd, ci);
+        return r;
+    }
+#endif
+    *slot = wgpuDeviceCreateRenderPipeline(g->device, rd);
+    *state = *slot ? 1 : -1;
+    return NULL;
 }
 
 // ---- GPU time per stage ----

@@ -60,6 +60,12 @@ int gpu_timing(const Gpu *g);
 // as they are ready (0: Mailbox where the window system has it, else Immediate, which may
 // tear). Set before gpu_create_window. In a browser the page is always in step.
 void gpu_set_vsync(int on);
+// In a browser: the frame's own pipelines (the composite, the GPU rasterizer's) made
+// asynchronously, as the path tracer's are (gpu_view_ready says when they are there). Made at
+// once, a cold start compiled them in the browser's GPU process before it drew anything else,
+// for every tab: 4-5 s with the whole browser frozen. The viewer asks for it; bin/render, sim
+// and bench (which wait for their frames) do not. Natively it changes nothing.
+void gpu_set_async_views(int on);
 // The window's (or canvas's) new size: its surface made again at it (after window_resize).
 // What was made for the old size (a GpuView) is made again by its owner.
 void gpu_resize(Gpu *g, int width, int height);

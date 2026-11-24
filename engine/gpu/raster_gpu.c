@@ -77,6 +77,8 @@ struct GpuRaster {
     uint32_t lv_at[ENV_LEVELS];            // where each level starts in lv
     WGPUBindGroupLayout bgl;
     WGPURenderPipeline fill[2], wire, sky; // fill[1]: back faces culled
+    GpuPipeReq *preq[4];        // (made asynchronously: gpu_set_async_views)
+    int pst[4];
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
     WGPUBuffer ix;                         // the draws' transforms: the world, the instances
     size_t ix_cap;
@@ -103,7 +105,8 @@ struct GpuRaster {
 
 // wire: 0 the triangles, 1 the wireframe, 2 the sky (a screen-filling triangle at the far
 // depth, where the depth is still the far one)
-static WGPURenderPipeline make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGroupLayout bgl, int wire, int cull){
+static GpuPipeReq *make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGroupLayout bgl, int wire, int cull,
+                                 WGPURenderPipeline *slot, int *state){
     const int sky = wire == 2;
     WGPUPipelineLayoutDescriptor ld;
     memset(&ld, 0, sizeof(ld));
@@ -144,9 +147,9 @@ static WGPURenderPipeline make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGrou
     rd.multisample.count = 1;
     rd.multisample.mask = 0xFFFFFFFFu;
     rd.fragment = &fs;
-    WGPURenderPipeline p = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+    GpuPipeReq *q = gpu_render_async(g, &rd, slot, state);
     wgpuPipelineLayoutRelease(pl);
-    return p;
+    return q;
 }
 
 static WGPUTexture make_target(Gpu *g, const char *label, WGPUTextureFormat fmt, int w, int h){
@@ -191,12 +194,20 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     if (!src){ gpu_raster_destroy(r); return NULL; }
     WGPUShaderModule m = gpu_shader(g, "scene", src);
     free(src);
-    r->fill[0] = make_pipeline(g, m, r->bgl, 0, 0);
-    r->fill[1] = make_pipeline(g, m, r->bgl, 0, 1);
-    r->wire = make_pipeline(g, m, r->bgl, 1, 0);
-    r->sky = make_pipeline(g, m, r->bgl, 2, 0);
+    r->preq[0] = make_pipeline(g, m, r->bgl, 0, 0, &r->fill[0], &r->pst[0]);
+    r->preq[1] = make_pipeline(g, m, r->bgl, 0, 1, &r->fill[1], &r->pst[1]);
+    r->preq[2] = make_pipeline(g, m, r->bgl, 1, 0, &r->wire, &r->pst[2]);
+    r->preq[3] = make_pipeline(g, m, r->bgl, 2, 0, &r->sky, &r->pst[3]);
     wgpuShaderModuleRelease(m);
     return r;
+}
+
+int gpu_raster_ready(const GpuRaster *r){
+    for (int k = 0; k < 4; k++){
+        if (r->pst[k] < 0) return -1;
+        if (r->pst[k] == 0) return 0;
+    }
+    return 1;
 }
 
 WGPUTextureView gpu_raster_color(GpuRaster *r){ return r->color; }
@@ -703,6 +714,7 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
 
 void gpu_raster_destroy(GpuRaster *r){
     if (!r) return;
+    for (int k = 0; k < 4; k++) gpu_compute_async_cancel(r->preq[k], &r->pst[k]);
     int nsets = 4 + r->nmg * LODS;
     for (int k = 0; k < nsets; k++){
         int j = k - 4;

@@ -677,6 +677,23 @@ static void trace_budget(void){
 }
 
 static int viewer_gpu(void){
+    // its pipelines still being made (a browser, gpu_set_async_views): not yet
+    if (V.gview && V.gpu && gpu_state(V.gpu) != GPU_FAILED){
+        int r = gpu_view_ready(V.gview);
+        if (r == 0) return 1;
+        if (r < 0){
+            fprintf(stderr, "GPU not used (its pipelines could not be made): the CPU draws everything\n");
+            gpu_sim_stop();
+            V.gpu_scene = V.gpu_tracing = 0;
+            V.reset = 1;
+            gpu_view_destroy(V.gview);
+            V.gview = NULL;
+            gpu_destroy(V.gpu);
+            V.gpu = NULL;
+            V.force_present = V.raster_dirty = 1;
+            return 0;
+        }
+    }
 #ifdef __EMSCRIPTEN__
     if (V.gview && clock_s() - V.budget_t > 1.0){ trace_budget(); V.budget_t = clock_s(); }
 #endif
@@ -732,7 +749,8 @@ static int viewer_gpu(void){
         V.gpu_frame_owed = 0;
         V.force_present = V.raster_dirty = 1;
     }
-    return 0;
+    // (a view made just now, its pipelines still being made: not yet either)
+    return V.gview && gpu_view_ready(V.gview) == 0;
 }
 
 // 1. The window's events: the keys held for the camera (V.in), the keys pressed, the mouse.
@@ -1248,6 +1266,7 @@ int viewer_open(const char *title){
     V.win = window_open(V.W, V.H, title);
     if (V.o.gpu && V.win){
 #ifdef __EMSCRIPTEN__
+        gpu_set_async_views(1);                // (a cold start froze the browser 4-5 s: gpu.h)
         V.gpu = gpu_create(V.o.gpu == 2 ? NULL : "#canvas", V.W, V.H);
 #else
         // natively the GPU draws in the window itself (or, -gpu offscreen, hands the frames back)

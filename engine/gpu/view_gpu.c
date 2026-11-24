@@ -8,6 +8,7 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){ (void)g; (void)width; (
 void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const RenderParams *p,
                       const MarchParams *mp, int volumes){ (void)v; (void)fb; (void)s; (void)p; (void)mp; (void)volumes; }
 void gpu_view_destroy(GpuView *v){ (void)v; }
+int gpu_view_ready(GpuView *v){ (void)v; return -1; }
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){ (void)v; (void)argb; (void)w; (void)h; (void)x; (void)y; }
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
@@ -108,6 +109,8 @@ struct GpuView {
     size_t dens_cap, bricks_cap, light_cap;
     WGPUBuffer vstat, acc;      // per medium: active box and max (VStat), and the atomics that make it
     WGPUComputePipeline light_pipe, stats_pipe, finish_pipe;
+    GpuPipeReq *preq[7];        // the frame's pipelines when made asynchronously (gpu_set_async_views)
+    int pst[7];                 // and where each is: 0 being made, 1 made, -1 failed
     WGPURenderPipeline comp_pipe, comp_gpu_pipe;   // over a CPU framebuffer / over the GPU rasterizer's frame
     // the text over the image (gpu_view_hud): its pixels, where, and the pass that blends it
     WGPURenderPipeline hud_pipe;
@@ -271,17 +274,17 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     cd.layout = light_pl;
     cd.compute.module = ml;
     cd.compute.entryPoint = gpu_str("light_grid");
-    v->light_pipe = wgpuDeviceCreateComputePipeline(g->device, &cd);
+    v->preq[0] = gpu_compute_desc_async(g, &cd, &v->light_pipe, &v->pst[0]);
     cd.label = gpu_str("media stats");
     cd.layout = stats_pl;
     cd.compute.module = ms;
     cd.compute.entryPoint = gpu_str("brick_stats");
-    v->stats_pipe = wgpuDeviceCreateComputePipeline(g->device, &cd);
+    v->preq[1] = gpu_compute_desc_async(g, &cd, &v->stats_pipe, &v->pst[1]);
     cd.label = gpu_str("media boxes");
     cd.layout = finish_pl;
     cd.compute.module = mf;
     cd.compute.entryPoint = gpu_str("vol_finish");
-    v->finish_pipe = wgpuDeviceCreateComputePipeline(g->device, &cd);
+    v->preq[2] = gpu_compute_desc_async(g, &cd, &v->finish_pipe, &v->pst[2]);
 
     WGPUColorTargetState target;
     memset(&target, 0, sizeof(target));
@@ -303,12 +306,12 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     rd.multisample.count = 1;
     rd.multisample.mask = 0xFFFFFFFFu;
     rd.fragment = &fs;
-    v->comp_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+    v->preq[3] = gpu_render_async(g, &rd, &v->comp_pipe, &v->pst[3]);
     rd.label = gpu_str("composite (GPU frame)");
     rd.layout = comp_gpu_pl;
     rd.vertex.module = mcg;
     fs.module = mcg;
-    v->comp_gpu_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+    v->preq[4] = gpu_render_async(g, &rd, &v->comp_gpu_pipe, &v->pst[4]);
     {   // the text over the image: blended by its alpha
         WGPUShaderModule mh = gpu_shader(g, "text over the image", HUD);
         v->hud_bgl = gpu_layout(g, WGPUShaderStage_Vertex | WGPUShaderStage_Fragment, "UR");
@@ -325,7 +328,7 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         rd.layout = hud_pl;
         rd.vertex.module = mh;
         fs.module = mh;
-        v->hud_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+        v->preq[5] = gpu_render_async(g, &rd, &v->hud_pipe, &v->pst[5]);
         target.blend = NULL;
         v->hud_u = gpu_buffer(g, "text over the image: where", 32, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
         wgpuShaderModuleRelease(mh);
@@ -339,7 +342,7 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
         rd.layout = fxaa_pl;
         rd.vertex.module = mx;
         fs.module = mx;
-        v->fxaa_pipe = wgpuDeviceCreateRenderPipeline(g->device, &rd);
+        v->preq[6] = gpu_render_async(g, &rd, &v->fxaa_pipe, &v->pst[6]);
         wgpuShaderModuleRelease(mx);
         wgpuPipelineLayoutRelease(fxaa_pl);
     }
@@ -353,7 +356,23 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     wgpuPipelineLayoutRelease(comp_pl);
     wgpuPipelineLayoutRelease(stats_pl);
     wgpuPipelineLayoutRelease(finish_pl);
+    // made asynchronously: the GPU rasterizer too, now, so that gpu_view_ready waits for it
+    if (gpu_async_views() && !(v->raster = gpu_raster_create(g, v->w, v->h))) v->raster_failed = 1;
     return v;
+}
+
+int gpu_view_ready(GpuView *v){
+    if (!v) return -1;
+    for (int k = 0; k < 7; k++){
+        if (v->pst[k] < 0) return -1;
+        if (v->pst[k] == 0) return 0;
+    }
+    if (v->raster){
+        int r = gpu_raster_ready(v->raster);
+        if (r == 0) return 0;
+        if (r < 0){ gpu_raster_destroy(v->raster); v->raster = NULL; v->raster_failed = 1; }   // (the CPU rasterizes)
+    }
+    return 1;
 }
 
 static WGPUBindGroupEntry entry(uint32_t binding, WGPUBuffer b){
@@ -1161,6 +1180,7 @@ void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){
 
 void gpu_view_destroy(GpuView *v){
     if (!v) return;
+    for (int k = 0; k < 7; k++) gpu_compute_async_cancel(v->preq[k], &v->pst[k]);
     GpuBindCache *bcs[] = {&v->bc_comp, &v->bc_comp_gpu, &v->bc_hud, &v->bc_fxaa};
     for (size_t i = 0; i < sizeof(bcs) / sizeof(bcs[0]); i++) gpu_bind_cache_clear(bcs[i]);
     for (int k = 0; k < GPU_MAX_VOLUMES; k++){
