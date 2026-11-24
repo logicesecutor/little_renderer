@@ -28,7 +28,9 @@ struct TP {
                       triangle), where the coordinates start (6 floats each: u, v, tangent), 1 = there are */
     mats: array<TMat, 64>,
     em: vec4u,     /* the glowing shapes sampled as lights (Scene.emitters): how many; y: the
-                      indirect clamp's bits (indirect_cap) */
+                      indirect clamp's bits (indirect_cap); z: 1 = gbuf traces only the pixels
+                      the rasterizer's guide left to it; w: 1 = gbuf leaves the samples (planes
+                      0 and 1) to the reprojection that follows, which writes them all */
     emi: array<vec4u, 4>,   /* ... their instances, 4 to an entry */
 };
 @group(0) @binding(3) var<storage, read> VS: array<VStat, 2>;
@@ -1249,7 +1251,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
 }
 
 /* A new image's start (with T.f.w = 1): no samples, and each pixel's guide. The whole image
-   (dims z and w, the band, are not used). */
+   (dims z and w, the band, are not used). With T.em.z = 1 the rasterizer made the guide
+   already (trace_guide.wgsl): only the pixels it left to this (plane 3's w = -1: a mirror or
+   glass first) are traced here. */
 @compute @workgroup_size(64)
 fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
     tlid = li;
@@ -1257,14 +1261,17 @@ fn gbuf(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: 
     let W = T.dims.x;
     let N = W * T.dims.y;
     if (k >= N) { return; }
+    if (T.em.z != 0u && accum[3u * N + k].w >= 0.0) { return; }
     let x = k % W;
     let y = k / W;
     var rng = hash32(k ^ hash32(0x2545f491u + T.cnt.z));
     let pc = T.upper_left.xyz + T.horizontal.xyz * ((f32(x) + 0.5) / f32(W)) -
              T.vertical.xyz * ((f32(y) + 0.5) / f32(T.dims.y));
     let g = guide(Ray(T.origin.xyz, normalize(pc - T.origin.xyz)), &rng);
-    accum[k] = vec4f(0.0);
-    accum[N + k] = vec4f(0.0);
+    if (T.em.w == 0u) {
+        accum[k] = vec4f(0.0);
+        accum[N + k] = vec4f(0.0);
+    }
     accum[2u * N + k] = vec4f(g.n, g.z);
     accum[3u * N + k] = vec4f(g.a, gpack(g.kind, g.inst));
     accum[4u * N + k] = vec4f(g.pos, g.pt);

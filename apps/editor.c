@@ -1566,9 +1566,9 @@ EXPORT const char *lr_status(void){
     threads = omp_get_max_threads();
 #endif
     jprintf(",\"displayHz\":%.1f,\"frameCap\":%d,\"threads\":%d", viewer_display_hz(), frame_cap_ms > 0 ? (int)(1000.0 / frame_cap_ms + 0.5) : 0, threads);
-    jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f,\"compiling\":%d}",
+    jprintf(",\"trace\":{\"starts\":%ld,\"moves\":%ld,\"passMs\":%.2f,\"rows\":%d,\"reps\":%d,\"budgetMs\":%.2f,\"work\":%.2f,\"history\":%d,\"rate\":%.1f,\"compiling\":%d,\"rguide\":%d}",
             st.trace_starts, st.trace_moves, st.trace_pass_ms, st.trace_rows, st.trace_reps, st.trace_budget_ms, st.trace_work,
-            st.trace_history, st.trace_rate, st.trace_compiling);
+            st.trace_history, st.trace_rate, st.trace_compiling, st.trace_rguide);
     if (viewer_sim_on()){                            // the simulation: its time, its bodies so far
         char line[200];
         viewer_sim_line(line, sizeof(line));
@@ -2358,9 +2358,9 @@ static int editor_frame(void){
 // where the time goes, summed since the start (ms), for the page to take differences of:
 // the editor's own parts on the CPU (its simulation: steps and moving the objects; relighting;
 // the viewer's frame), the viewer's parts, and the GPU's (its timers: path tracer, light
-// tracer, BVH builds, guide, reprojection, denoiser)
+// tracer, BVH builds, guide traced, reprojection, denoiser, guide rasterized)
 EXPORT const char *lr_profile(void){
-    double cpu[8], gpu[6];
+    double cpu[8], gpu[7];
     long vf = viewer_profile(cpu, gpu);
     int threads = 1;
 #ifdef _OPENMP
@@ -2369,9 +2369,9 @@ EXPORT const char *lr_profile(void){
     jlen = 0;
     jprintf("{\"threads\":%d,\"frames\":%ld,\"steps\":%ld,\"cpu\":{\"frame\":%.3f,\"sim\":%.3f,\"simApply\":%.3f,\"relight\":%.3f,\"viewer\":%.3f},"
             "\"viewerFrames\":%ld,\"viewer\":{\"physics\":%.3f,\"trees\":%.3f,\"gpuScene\":%.3f,\"traceSubmit\":%.3f,\"waitGpu\":%.3f,\"raster\":%.3f,\"present\":%.3f,\"frame\":%.3f},"
-            "\"gpu\":{\"trace\":%.3f,\"light\":%.3f,\"builds\":%.3f,\"guide\":%.3f,\"reproject\":%.3f,\"denoise\":%.3f}}",
+            "\"gpu\":{\"trace\":%.3f,\"light\":%.3f,\"builds\":%.3f,\"guide\":%.3f,\"reproject\":%.3f,\"denoise\":%.3f,\"guideRaster\":%.3f}}",
             threads, P.frames, P.steps, P.frame, P.sim, P.apply, P.relight, P.viewer,
-            vf, cpu[0], cpu[1], cpu[2], cpu[3], cpu[4], cpu[5], cpu[6], cpu[7], gpu[0], gpu[1], gpu[2], gpu[3], gpu[4], gpu[5]);
+            vf, cpu[0], cpu[1], cpu[2], cpu[3], cpu[4], cpu[5], cpu[6], cpu[7], gpu[0], gpu[1], gpu[2], gpu[3], gpu[4], gpu[5], gpu[6]);
     return json_buf;
 }
 

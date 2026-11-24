@@ -455,3 +455,80 @@ fn vs_wire(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> 
 }
 @fragment
 fn fs_wire(i: WO) -> @location(0) vec4f { return vec4f(linear_to_srgb(U.mats[i.mat].base.rgb), 1.0); }
+
+/* ---- the path tracer's guide (raster_gpu.c gpu_raster_guide) ----
+   What the camera sees first, through each pixel's centre, as trace.wgsl's guide() finds it
+   with a ray: the normal (towards the eye, as the textures bend it) and the distance from the
+   eye; the albedo, and the kind (0 a surface the light scatters on, 1 a lamp or a surface
+   glowing as bright); the record drawn (0 the world, i + 1 instance i), or -2 where the
+   surface is a mirror or glass (its guide is traced through it; trace_guide.wgsl). The depth
+   reversed and without a far plane (z = near / w in a float buffer: the nearest wins over any
+   distance), so that nothing a ray would hit is left out. */
+const GUIDE_NEAR = 0.01;
+struct VG {
+    @builtin(position) pos: vec4f,
+    @location(0) wp: vec3f,
+    @location(1) n: vec3f,
+    @location(2) @interpolate(flat) mat: u32,
+    @location(3) uv: vec2f,
+    @location(4) tg: vec4f,
+    @location(5) @interpolate(flat) rec: u32,
+};
+@vertex
+fn vs_g(@builtin(vertex_index) vi: u32, @builtin(instance_index) di: u32) -> VG {
+    let k = ORD[di];
+    let code = u32(vpos[vi].w);
+    let p = to_world(k, vpos[vi].xyz);
+    var n: vec3f;
+    if ((code & 256u) != 0u) {
+        n = normal_to_world(k, vnrm[vi].xyz);
+    } else {
+        let t = (vi / 3u) * 3u;
+        let p0 = to_world(k, vpos[t].xyz);
+        n = normalize(cross(to_world(k, vpos[t + 1u].xyz) - p0, to_world(k, vpos[t + 2u].xyz) - p0));
+    }
+    let c = U.vp * vec4f(p, 1.0);
+    var o: VG;
+    o.pos = vec4f(c.x, c.y, GUIDE_NEAR, c.w);
+    o.wp = p;
+    o.n = n;
+    o.mat = mat_of(k, code);
+    let tx = vtex[vi];
+    o.uv = tx.xy;
+    o.tg = vec4f(dir_to_world(k, oct_decode(tx.zw)), vnrm[vi].w);
+    o.rec = k;
+    return o;
+}
+struct GO { @location(0) n: vec4f, @location(1) a: vec4f, @location(2) id: vec4f };
+@fragment
+fn fs_g(i: VG) -> GO {
+    let m = U.mats[i.mat];
+    let v = normalize(U.eye.xyz - i.wp);
+    var n = normalize(i.n);
+    if (dot(n, v) < 0.0) { n = -n; }
+    var base = m.base.rgb;
+    var metallic = m.pbr.x;
+    var rough = m.pbr.y;
+    var emis = m.emis.rgb;
+    /* the textures at their finest level, as the path tracer reads them (trace.wgsl shade_tex) */
+    if (any(m.tex.xyz != vec3u(0u))) {
+        let tm = tex_material(m.tex, base, metallic, rough, emis, i.uv, -1000.0);
+        base = tm.base; metallic = tm.metallic; rough = tm.rough; emis = tm.emission;
+        if ((m.tex.z & 255u) != 0u) {
+            n = tex_normal(m.tex, i.uv, -1000.0, n, i.tg);
+            let c = dot(n, v);
+            if (c < 1e-3) { n = normalize(n + v * (1e-3 - c)); }
+        }
+    }
+    var o: GO;
+    o.n = vec4f(n, length(i.wp - U.eye.xyz));
+    o.id = vec4f(f32(i.rec), 0.0, 0.0, 0.0);
+    if (m.base.w > 0.5 || max(emis.r, max(emis.g, emis.b)) >= 1.0) {
+        o.a = vec4f(1.0, 1.0, 1.0, 1.0);          /* a lamp (trace.wgsl: kind 3, or glow_bright) */
+    } else {
+        var b = bsdf_make(base, metallic, rough, m.pbr.z, m.pbr.w, true);
+        o.a = vec4f(base, 0.0);
+        if (!bsdf_rough_part(&b)) { o.id = vec4f(-2.0, 0.0, 0.0, 0.0); }
+    }
+    return o;
+}

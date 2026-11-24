@@ -181,6 +181,12 @@ int gpu_raster_ready(const GpuRaster *r);   // its pipelines: 1 there, 0 being m
 int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p);
 WGPUTextureView gpu_raster_color(GpuRaster *r);
 WGPUTextureView gpu_raster_depth(GpuRaster *r);
+// The path tracer's guide drawn by the rasterizer for the camera cam (what each pixel's
+// centre sees first, as trace.wgsl's guide traces it: normal and distance, albedo and kind,
+// the record drawn or that it is a mirror or glass), into three textures (views: their views),
+// the pass timed under stage. 0 = not drawn (not ready, or the scene not on the GPU).
+int gpu_raster_guide(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const Camera *cam, GpuTimer *timer, int stage);
+void gpu_raster_guide_views(GpuRaster *r, WGPUTextureView views[3]);
 void gpu_raster_destroy(GpuRaster *r);
 
 // The GPU path tracer (gpu/trace_gpu.c): samples added to an accumulation buffer, w * h
@@ -251,9 +257,10 @@ void gpu_trace_encode(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const
                       const GpuMedia *m);
 // Before the first band of an image: each pixel's guide for the denoiser (with no samples),
 // and with history > 0 the samples of the previous image reprojected (at most history each).
+// rguide: the rasterizer's guide (gpu_raster_guide's three views; NULL: the guide is traced)
 void gpu_trace_begin_image(GpuTrace *t, WGPUCommandEncoder enc, const Scene *s, const GpuTraceParams *tp,
                            int history, int nvolumes,
-                           const GpuMedia *m);
+                           const GpuMedia *m, const WGPUTextureView *rguide);
 WGPUBuffer gpu_trace_accum(GpuTrace *t);   // the image's samples (4 planes when guided)
 // Light-traced caustics (tp->photons > 0 and the scene has a mirror or glass): `passes` more
 // passes of light paths added into the caustic sums; clear them for a new image; resolve: the
@@ -294,8 +301,12 @@ void gpu_denoise_before_submit(GpuDenoise *d, WGPUCommandEncoder enc);
 void gpu_denoise_after_submit(GpuDenoise *d);
 double gpu_denoise_total_ms(const GpuDenoise *d);
 // the path tracer's GPU time summed so far (ms; 0 where not timed): [0] path tracer, 1 light
-// tracer, 2 BVH builds, 3 guide, 4 reprojection, 5 (left to the caller: the denoiser's)
-void gpu_trace_gpu_totals(GpuTrace *t, double ms[6]);
+// tracer, 2 BVH builds, 3 guide (traced), 4 reprojection, 5 (left to the caller: the
+// denoiser's), 6 the guide rasterized (gpu_raster_guide's pass and its copy)
+void gpu_trace_gpu_totals(GpuTrace *t, double ms[7]);
+int gpu_trace_guide_stage(void);   // the timer's stage of the guide rasterized (gpu_raster_guide's pass)
+int gpu_trace_traced_guide_stage(void);   // ... and of the guide traced (gbuf: all of it, or the rasterizer's remainder)
+int gpu_trace_hw(const GpuTrace *t);      // 1 = it traces with the hardware's ray queries
 WGPUBuffer gpu_denoise_output(GpuDenoise *d);
 void gpu_denoise_destroy(GpuDenoise *d);
 

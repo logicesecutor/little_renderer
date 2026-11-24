@@ -77,8 +77,11 @@ struct GpuRaster {
     uint32_t lv_at[ENV_LEVELS];            // where each level starts in lv
     WGPUBindGroupLayout bgl;
     WGPURenderPipeline fill[2], wire, sky; // fill[1]: back faces culled
-    GpuPipeReq *preq[4];        // (made asynchronously: gpu_set_async_views)
-    int pst[4];
+    GpuPipeReq *preq[5];        // (made asynchronously: gpu_set_async_views)
+    int pst[5];
+    WGPURenderPipeline guide;              // the path tracer's guide (gpu_raster_guide)
+    WGPUTexture gtex[4];                   // ... its G-buffer (normal and distance, albedo and kind, record) and depth
+    WGPUTextureView gview[4];
     Geo prims, mesh;                       // spheres and quads (they move); mesh triangles
     WGPUBuffer ix;                         // the draws' transforms: the world, the instances
     size_t ix_cap;
@@ -104,42 +107,48 @@ struct GpuRaster {
 #define CHUNK_TRIS 32768   // mesh triangles converted and uploaded at a time
 
 // wire: 0 the triangles, 1 the wireframe, 2 the sky (a screen-filling triangle at the far
-// depth, where the depth is still the far one)
+// depth, where the depth is still the far one), 3 the path tracer's guide (into its G-buffer,
+// the depth reversed: GUIDE_FORMATS)
+static const WGPUTextureFormat GUIDE_FORMATS[3] = {WGPUTextureFormat_RGBA32Float, WGPUTextureFormat_RGBA16Float, WGPUTextureFormat_R32Float};
 static GpuPipeReq *make_pipeline(Gpu *g, WGPUShaderModule m, WGPUBindGroupLayout bgl, int wire, int cull,
                                  WGPURenderPipeline *slot, int *state){
-    const int sky = wire == 2;
+    const int sky = wire == 2, guide = wire == 3;
+    if (guide) wire = 0;
     WGPUPipelineLayoutDescriptor ld;
     memset(&ld, 0, sizeof(ld));
     ld.bindGroupLayoutCount = 1;
     ld.bindGroupLayouts = &bgl;
     WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(g->device, &ld);
-    WGPUColorTargetState target;
-    memset(&target, 0, sizeof(target));
-    target.format = WGPUTextureFormat_RGBA8Unorm;
-    target.writeMask = WGPUColorWriteMask_All;
+    WGPUColorTargetState target[3];
+    memset(target, 0, sizeof(target));
+    for (int k = 0; k < 3; k++){
+        target[k].format = guide ? GUIDE_FORMATS[k] : WGPUTextureFormat_RGBA8Unorm;
+        target[k].writeMask = WGPUColorWriteMask_All;
+    }
     WGPUFragmentState fs;
     memset(&fs, 0, sizeof(fs));
     fs.module = m;
-    fs.entryPoint = gpu_str(sky ? "fs_sky" : wire ? "fs_wire" : "fs");
-    fs.targetCount = 1;
-    fs.targets = &target;
+    fs.entryPoint = gpu_str(guide ? "fs_g" : sky ? "fs_sky" : wire ? "fs_wire" : "fs");
+    fs.targetCount = guide ? 3 : 1;
+    fs.targets = target;
     // the CPU's z-buffer: the nearest wins, the first drawn wins a tie. Its wireframe draws
     // lines over everything and leaves the z-buffer alone.
     WGPUDepthStencilState ds;
     memset(&ds, 0, sizeof(ds));
     ds.format = WGPUTextureFormat_Depth32Float;
     ds.depthWriteEnabled = wire ? WGPUOptionalBool_False : WGPUOptionalBool_True;
-    ds.depthCompare = sky ? WGPUCompareFunction_LessEqual : wire ? WGPUCompareFunction_Always : WGPUCompareFunction_Less;
+    ds.depthCompare = guide ? WGPUCompareFunction_Greater : sky ? WGPUCompareFunction_LessEqual
+                    : wire ? WGPUCompareFunction_Always : WGPUCompareFunction_Less;
     ds.stencilFront.compare = ds.stencilBack.compare = WGPUCompareFunction_Always;
     ds.stencilFront.failOp = ds.stencilBack.failOp = WGPUStencilOperation_Keep;
     ds.stencilFront.depthFailOp = ds.stencilBack.depthFailOp = WGPUStencilOperation_Keep;
     ds.stencilFront.passOp = ds.stencilBack.passOp = WGPUStencilOperation_Keep;
     WGPURenderPipelineDescriptor rd;
     memset(&rd, 0, sizeof(rd));
-    rd.label = gpu_str(sky ? "scene: the sky" : wire ? "scene wireframe" : "scene");
+    rd.label = gpu_str(guide ? "scene: the path tracer's guide" : sky ? "scene: the sky" : wire ? "scene wireframe" : "scene");
     rd.layout = pl;
     rd.vertex.module = m;
-    rd.vertex.entryPoint = gpu_str(sky ? "vs_sky" : wire ? "vs_wire" : "vs");
+    rd.vertex.entryPoint = gpu_str(guide ? "vs_g" : sky ? "vs_sky" : wire ? "vs_wire" : "vs");
     rd.primitive.topology = wire == 1 ? WGPUPrimitiveTopology_LineList : WGPUPrimitiveTopology_TriangleList;
     rd.primitive.frontFace = WGPUFrontFace_CCW;     // counter-clockwise as seen: the CPU's rule
     rd.primitive.cullMode = cull ? WGPUCullMode_Back : WGPUCullMode_None;
@@ -198,12 +207,13 @@ GpuRaster *gpu_raster_create(Gpu *g, int width, int height){
     r->preq[1] = make_pipeline(g, m, r->bgl, 0, 1, &r->fill[1], &r->pst[1]);
     r->preq[2] = make_pipeline(g, m, r->bgl, 1, 0, &r->wire, &r->pst[2]);
     r->preq[3] = make_pipeline(g, m, r->bgl, 2, 0, &r->sky, &r->pst[3]);
+    r->preq[4] = make_pipeline(g, m, r->bgl, 3, 0, &r->guide, &r->pst[4]);
     wgpuShaderModuleRelease(m);
     return r;
 }
 
 int gpu_raster_ready(const GpuRaster *r){
-    for (int k = 0; k < 4; k++){
+    for (int k = 0; k < 4; k++){     // (the guide's pipeline is not waited for: gpu_raster_guide)
         if (r->pst[k] < 0) return -1;
         if (r->pst[k] == 0) return 0;
     }
@@ -476,7 +486,7 @@ static int upload_instances(GpuRaster *r, const Scene *s){
 // The instances' draw order (ORD: draw instance -> record; ORD[0] = 0, the world): those in
 // view only (their world box against the frustum's sides and the eye's plane), bucketed by
 // mesh and level of detail, so each bucket is one draw. Returns 0 when out of memory.
-static int order_instances(GpuRaster *r, const Scene *s, const RenderParams *p, Mat4 vp){
+static int order_instances(GpuRaster *r, const Scene *s, const RenderParams *p, Mat4 vp, int lods){
     const int nk = (s->nmeshes + 2) * LODS;
     const size_t n = 1 + (size_t)s->ninsts;
     if (r->ordv_cap < n){
@@ -501,7 +511,7 @@ static int order_instances(GpuRaster *r, const Scene *s, const RenderParams *p, 
         pl[4][k] = vp.m[3][k];
     }
     const int lod_env = lr_env_int("LR_GPU_LOD", -1);   // =0: never, =1: whatever the count
-    const int lod = lod_env >= 0 ? lod_env != 0 : s->ninsts >= LOD_MIN_INSTANCES;
+    const int lod = lods && (lod_env >= 0 ? lod_env != 0 : s->ninsts >= LOD_MIN_INSTANCES);
     const real px_per = r_fabs(p->proj.m[1][1]) * (real)r->h * (real)0.5;   // pixels per unit at depth 1
     int *cnt = r->bucket;
     memset(cnt, 0, ((size_t)nk + 1) * sizeof(int));
@@ -592,7 +602,9 @@ static int upload_irr(GpuRaster *r, const IrrGrid *ig){
     return 1;
 }
 
-int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p){
+// what a draw needs on the GPU: the scene's triangles and transforms, the draws' order (levels
+// of detail if lods), the uniforms for the camera p
+static int prepare(GpuRaster *r, const Scene *s, const RenderParams *p, int lods){
     Gpu *g = r->g;
     if (gpu_textures_sync(g, &r->gt, s)){
         wgpuQueueWriteBuffer(g->queue, r->txt, 0, r->gt.table, sizeof(r->gt.table));
@@ -607,7 +619,7 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     GRU U;
     memset(&U, 0, sizeof(U));
     Mat4 vp = mat4_mul(p->proj, p->view);
-    if (!order_instances(r, s, p, vp)) return 0;
+    if (!order_instances(r, s, p, vp, lods)) return 0;
     for (int c = 0; c < 4; c++)
         for (int k = 0; k < 4; k++) U.vp[c * 4 + k] = (float)vp.m[k][c];      // WGSL matrices are stored by columns
     put(U.eye, p->eye, mode == MODE_WIREFRAME ? 0.0f : (mode == MODE_FLAT ? 1.0f : (mode == MODE_GOURAUD ? 2.0f : 3.0f)));
@@ -659,6 +671,34 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
         put(U.mats[m] + 12, material_glows(mm) && !rm.constant ? mm->emission : vec3(0, 0, 0), 0);
     }
     wgpuQueueWriteBuffer(g->queue, r->uni, 0, &U, sizeof(U));
+    return 1;
+}
+
+// the scene's triangles: the world's (spheres and quads, the mesh), then the instances in view
+// (their mesh's triangles or a simpler copy's, moved by their record; one draw per bucket:
+// order_instances, draw instance 1 + j is ORD[1 + j]'s record)
+static void draw_sets(GpuRaster *r, WGPURenderPassEncoder pass, const Scene *s, int wire){
+    Geo *sets[2] = {&r->prims, &r->mesh};
+    for (int k = 0; k < 2; k++){
+        if (!sets[k]->nverts || !sets[k]->bg) continue;
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, sets[k]->bg, 0, NULL);
+        wgpuRenderPassEncoderDraw(pass, wire ? sets[k]->nverts * 2 : sets[k]->nverts, 1, 0, 0);
+    }
+    for (int k = 0, nk = (s->nmeshes + 2) * LODS; k < nk; k++){
+        int first = k ? r->bucket[k - 1] : 0, count = r->bucket[k] - first;
+        if (count <= 0) continue;
+        int mesh = k / LODS - 2, l = k % LODS;
+        Geo *geo = mesh >= 0 ? (l ? &r->mg[mesh].lod[l - 1] : &r->mg[mesh].geo) : &r->unit[mesh == INST_SPHERE ? 0 : 1];
+        if (!geo->nverts || !geo->bg) continue;
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
+        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, (uint32_t)count, 0, (uint32_t)first + 1);
+    }
+}
+
+int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const RenderParams *p){
+    if (!prepare(r, s, p, 1)) return 0;
+    const RenderMode mode = p->mode == MODE_TEXTURED ? MODE_PHONG : p->mode;
+    const Env *sky = p->mode == MODE_WIREFRAME ? NULL : s->env;
 
     WGPURenderPassColorAttachment ca;
     memset(&ca, 0, sizeof(ca));
@@ -681,23 +721,7 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
     const int wire = mode == MODE_WIREFRAME;
     wgpuRenderPassEncoderSetPipeline(pass, wire ? r->wire : r->fill[p->cull_backfaces != 0]);
-    Geo *sets[2] = {&r->prims, &r->mesh};
-    for (int k = 0; k < 2; k++){
-        if (!sets[k]->nverts || !sets[k]->bg) continue;
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, sets[k]->bg, 0, NULL);
-        wgpuRenderPassEncoderDraw(pass, wire ? sets[k]->nverts * 2 : sets[k]->nverts, 1, 0, 0);
-    }
-    // the instances in view: their mesh's triangles (or a simpler copy's), moved by their
-    // record; one draw per bucket (order_instances: draw instance 1 + j is ORD[1 + j]'s record)
-    for (int k = 0, nk = (s->nmeshes + 2) * LODS; k < nk; k++){
-        int first = k ? r->bucket[k - 1] : 0, count = r->bucket[k] - first;
-        if (count <= 0) continue;
-        int mesh = k / LODS - 2, l = k % LODS;
-        Geo *geo = mesh >= 0 ? (l ? &r->mg[mesh].lod[l - 1] : &r->mg[mesh].geo) : &r->unit[mesh == INST_SPHERE ? 0 : 1];
-        if (!geo->nverts || !geo->bg) continue;
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, geo->bg, 0, NULL);
-        wgpuRenderPassEncoderDraw(pass, wire ? geo->nverts * 2 : geo->nverts, (uint32_t)count, 0, (uint32_t)first + 1);
-    }
+    draw_sets(r, pass, s, wire);
     // the sky behind (any set's bind group: the uniforms and buffers are the same in all)
     if (sky){
         Geo *any = r->prims.bg ? &r->prims : (r->mesh.bg ? &r->mesh : &r->unit[0]);
@@ -712,9 +736,67 @@ int gpu_raster_draw(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const 
     return 1;
 }
 
+// The path tracer's guide for the camera cam: what each pixel's centre sees first, into the
+// G-buffer (gpu_raster_guide_views; raster_shader.wgsl fs_g), timed under the timer's stage.
+// The scene's own meshes, never their simpler copies. 0 = not drawn (its pipeline not made
+// yet, or the scene not on the GPU): the path tracer traces the guide.
+int gpu_raster_guide(GpuRaster *r, WGPUCommandEncoder enc, const Scene *s, const Camera *cam, GpuTimer *timer, int stage){
+    if (!r || r->pst[4] != 1 || gpu_raster_ready(r) != 1) return 0;
+    Gpu *g = r->g;
+    static const char *const labels[4] = {"guide: normal and distance", "guide: albedo and kind", "guide: what is seen", "guide: depth"};
+    for (int k = 0; k < 4; k++){
+        if (r->gtex[k]) continue;
+        r->gtex[k] = make_target(g, labels[k], k < 3 ? GUIDE_FORMATS[k] : WGPUTextureFormat_Depth32Float, r->w, r->h);
+        r->gview[k] = r->gtex[k] ? wgpuTextureCreateView(r->gtex[k], NULL) : NULL;
+        if (!r->gview[k]) return 0;
+    }
+    // the rasterizer's camera from the path tracer's (camera_make the other way round): the
+    // screen 1 unit in front of the eye, as high as 2 tan(fov / 2)
+    Vec3 center = v_add(cam->upper_left, v_sub(v_scale(cam->horizontal, 0.5), v_scale(cam->vertical, 0.5)));
+    Vec3 fw = v_sub(center, cam->origin);
+    real vh = v_len(cam->vertical);
+    RenderParams p = render_params_camera(cam->origin, v_add(cam->origin, fw), v_scale(cam->vertical, 1 / vh),
+                                          2 * r_atan2(vh / 2, v_len(fw)) * 180 / PI, r->w, r->h);
+    p.mode = MODE_PHONG;
+    if (!prepare(r, s, &p, 0)) return 0;
+    WGPURenderPassColorAttachment ca[3];
+    memset(ca, 0, sizeof(ca));
+    // nothing seen: the sky's guide (trace_guide.wgsl)
+    const WGPUColor clear[3] = {{0, 0, 0, 1e30}, {1, 1, 1, 1}, {-1, 0, 0, 0}};
+    for (int k = 0; k < 3; k++){
+        ca[k].view = r->gview[k];
+        ca[k].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        ca[k].loadOp = WGPULoadOp_Clear;
+        ca[k].storeOp = WGPUStoreOp_Store;
+        ca[k].clearValue = clear[k];
+    }
+    WGPURenderPassDepthStencilAttachment da;
+    memset(&da, 0, sizeof(da));
+    da.view = r->gview[3];
+    da.depthLoadOp = WGPULoadOp_Clear;
+    da.depthStoreOp = WGPUStoreOp_Discard;
+    da.depthClearValue = 0.0f;                  // (reversed: the far side is 0)
+    WGPURenderPassDescriptor rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.colorAttachmentCount = 3;
+    rp.colorAttachments = ca;
+    rp.depthStencilAttachment = &da;
+    rp.timestampWrites = gpu_timer_next(timer, stage);
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);   // (its time with the image's guide: no units of its own)
+    wgpuRenderPassEncoderSetPipeline(pass, r->guide);
+    draw_sets(r, pass, s, 0);
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
+    return 1;
+}
+
+void gpu_raster_guide_views(GpuRaster *r, WGPUTextureView views[3]){
+    for (int k = 0; k < 3; k++) views[k] = r ? r->gview[k] : NULL;
+}
+
 void gpu_raster_destroy(GpuRaster *r){
     if (!r) return;
-    for (int k = 0; k < 4; k++) gpu_compute_async_cancel(r->preq[k], &r->pst[k]);
+    for (int k = 0; k < 5; k++) gpu_compute_async_cancel(r->preq[k], &r->pst[k]);
     int nsets = 4 + r->nmg * LODS;
     for (int k = 0; k < nsets; k++){
         int j = k - 4;
@@ -735,6 +817,11 @@ void gpu_raster_destroy(GpuRaster *r){
     if (r->fill[1]) wgpuRenderPipelineRelease(r->fill[1]);
     if (r->wire) wgpuRenderPipelineRelease(r->wire);
     if (r->sky) wgpuRenderPipelineRelease(r->sky);
+    if (r->guide) wgpuRenderPipelineRelease(r->guide);
+    for (int k = 0; k < 4; k++){
+        if (r->gview[k]) wgpuTextureViewRelease(r->gview[k]);
+        if (r->gtex[k]){ wgpuTextureDestroy(r->gtex[k]); wgpuTextureRelease(r->gtex[k]); }
+    }
     if (r->lv){ wgpuBufferDestroy(r->lv); wgpuBufferRelease(r->lv); }
     if (r->ig){ wgpuBufferDestroy(r->ig); wgpuBufferRelease(r->ig); }
     if (r->txt){ wgpuBufferDestroy(r->txt); wgpuBufferRelease(r->txt); }

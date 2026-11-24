@@ -13,6 +13,12 @@
 // metallic apart, occlusion, a glow) under a lamp: the GPU's image (both kernels) has the CPU's
 // mean within 2%, and over the floor the CPU's pattern (the images correlate).
 //
+// The guide (each pixel's first surface, for the denoiser and the reprojection) drawn by the
+// rasterizer is the traced one: in a room of spheres (a mirror, glass), on a textured floor
+// under a sky, and with instances (a mesh's, shapes'), what each pixel sees (the kind and the
+// object), its normal (within 10 degrees), distance (1%) and albedo (0.02) agree in all but a
+// few pixels (the spheres' outlines: the rasterizer's spheres are triangles).
+//
 // Part of make test. Without a GPU it says so and passes.
 #include <stdio.h>
 #include <string.h>
@@ -227,6 +233,83 @@ static void pbr_plate(void){
     scene_free(&s);
 }
 
+// one new image's guide, rasterized (raster = 1) or traced, into out (3 x W x H vec4)
+static int guide_of(Scene *s, int raster, float *out){
+    Gpu *g;
+    GpuView *v;
+    if (gpu_frame_open(W, H, &g, &v)) return 0;
+    Camera cam = camera_make(s->cam_from, s->cam_at, s->cam_up, s->cam_vfov_deg, (real)W / H);
+    RenderParams rp = render_params_camera(s->cam_from, s->cam_at, s->cam_up, s->cam_vfov_deg, W, H);
+    MarchParams mp = march_default_params();
+    GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+    gpu_view_trace_raster_guide(v, raster ? 2 : 0);
+    gpu_view_trace_prepare(v);
+    int ok = gpu_view_trace_start(v, s, &tp);
+    for (int k = 0; ok && k < 1000 && gpu_view_trace_passes(v) < 1; k++){
+        ok = gpu_view_trace_more(v, s, &rp, &mp);
+        gpu_wait(g);
+    }
+    ok = ok && gpu_view_trace_guide_read(v, out);
+    gpu_frame_close(g, v);
+    return ok;
+}
+
+static void guide_agrees(const char *name, Scene *s){
+    float *a = malloc(sizeof(float) * 12 * W * H), *b = malloc(sizeof(float) * 12 * W * H);
+    int ok = a && b && guide_of(s, 0, a) && guide_of(s, 1, b);
+    char what[160];
+    int differ = 0, surfaces = 0, objects = 0;
+    for (int i = 0; ok && i < W * H; i++){
+        const float *na = a + 4 * i, *ca = a + 4 * (W * H + i), *nb = b + 4 * i, *cb = b + 4 * (W * H + i);
+        int ka = (int)(ca[3] - 4 * floorf(ca[3] / 4)), kb = (int)(cb[3] - 4 * floorf(cb[3] / 4));
+        int oa = (int)floorf(ca[3] / 4), ob = (int)floorf(cb[3] / 4);
+        int same = ka == kb && oa == ob;
+        if (same && ka == 0){
+            surfaces++;
+            objects += oa > 0;
+            float c = na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2];
+            same = c > 0.985f && fabsf(na[3] - nb[3]) <= 0.01f * na[3] &&
+                   fabsf(ca[0] - cb[0]) < 0.02f && fabsf(ca[1] - cb[1]) < 0.02f && fabsf(ca[2] - cb[2]) < 0.02f;
+        }
+        differ += !same;
+    }
+    snprintf(what, sizeof(what), "%s: the rasterized guide is the traced one but in %d of %d pixels (%d surfaces, %d of instances): under 4%%",
+             name, differ, W * H, surfaces, objects);
+    check(what, ok && differ * 25 < W * H && surfaces > W * H / 4);
+    free(a);
+    free(b);
+}
+
+static void raster_guide(void){
+    static Scene s;
+    AccelParams ap = accel_default_params();
+    SceneOptions sph = {.kind = SCENE_SPHERES};
+    memset(&s, 0, sizeof(s));
+    if (scene_cornell_box(&s, &sph) == 0){
+        scene_set_accel(&s, ACCEL_BVH, &ap);
+        guide_agrees("spheres, a mirror and glass", &s);
+        scene_free(&s);
+    } else check("spheres: the scene", 0);
+    SceneOptions sky = {.kind = SCENE_SKY};
+    memset(&s, 0, sizeof(s));
+    if (scene_cornell_box(&s, &sky) == 0){
+        scene_set_accel(&s, ACCEL_BVH, &ap);
+        guide_agrees("a textured floor under the sky", &s);
+        scene_free(&s);
+    } else check("sky: the scene", 0);
+    SceneOptions tor = {.kind = SCENE_MESH, .obj_path = "models/torus.obj", .instances = 3, .mesh_tex = "bricks"};
+    memset(&s, 0, sizeof(s));
+    if (scene_cornell_box(&s, &tor) == 0){
+        Vec3 c = v_scale(v_add(s.cam_at, s.cam_from), 0.5);
+        int m = scene_add_material(&s, s.mats[0]);
+        scene_add_instance(&s, INST_SPHERE, xform_rot_y(v_add(c, vec3(-60, -40, 0)), 0, 40), m);
+        scene_add_instance(&s, INST_BOX, xform_rot_y(v_add(c, vec3(60, -40, 40)), 30, 35), m);
+        scene_set_accel(&s, ACCEL_BVH, &ap);
+        guide_agrees("instances (a mesh's, a ball, a box), bricks", &s);
+        scene_free(&s);
+    } else check("instances: the scene", 0);
+}
+
 int main(void){
     printf("test_gpu_trace\n");
     Gpu *g;
@@ -242,6 +325,7 @@ int main(void){
     for (int k = 0; k < 3; k++) same_twice("a model in the box", &mesh, 5);
     glowing_ball();
     pbr_plate();
+    raster_guide();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;
 }

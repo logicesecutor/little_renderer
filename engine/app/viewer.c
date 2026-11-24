@@ -37,6 +37,7 @@
 #include "lr.h"
 #include "gpu/gpu.h"
 #include "gpu/view_gpu.h"
+#include "base/envvar.h"
 #include "gpu/fluid_gpu.h"
 #include "gpu/rigid_gpu.h"
 #ifdef __EMSCRIPTEN__
@@ -749,6 +750,7 @@ static int viewer_gpu(void){
             gpu_view_trace_denoise_moving(V.gview, V.o.denoise_move);
             gpu_view_aa(V.gview, V.o.aa);
             gpu_view_trace_wavefront(V.gview, V.o.wavefront);
+            gpu_view_trace_raster_guide(V.gview, V.o.rguide ? lr_env_int("LR_GPU_RGUIDE", 1) : 0);
             gpu_view_trace_limit(V.gview, V.o.spp);
             if (V.o.gpu_trace < 0){
                 V.o.gpu_trace = !gpu_software(V.gpu);
@@ -1368,7 +1370,7 @@ void viewer_set_settle(double seconds){ V.settle = seconds; }
 void viewer_set_keep_trace(int on){ V.keep_trace = on != 0; }
 void viewer_set_max_hz(double hz){ V.max_hz = hz > 0 ? hz : 0; V.budget_t = 0; if (V.gview) trace_budget(); }
 double viewer_display_hz(void){ return V.win ? window_refresh_hz(V.win) : 0; }
-long viewer_profile(double cpu[8], double gpu[6]){
+long viewer_profile(double cpu[8], double gpu[7]){
     for (int k = 0; k < 8; k++) cpu[k] = k < PROF_N ? V.prof[k] * 1000.0 : 0;
     gpu_view_gpu_totals(V.gview, gpu);
     return V.prof_frames;
@@ -1489,6 +1491,7 @@ void viewer_status(ViewerStatus *st){
     st->trace_work = V.gview ? gpu_view_trace_work(V.gview) : 0;
     st->trace_history = V.last_keep;
     st->trace_compiling = V.gview && gpu_view_trace_compiling(V.gview);
+    st->trace_rguide = V.gview && gpu_view_trace_raster_guided(V.gview);
     st->trace_rate = V.pass_rate;
     if (V.gview) gpu_view_trace_band(V.gview, &st->trace_rows, &st->trace_reps, &st->trace_budget_ms);
 }

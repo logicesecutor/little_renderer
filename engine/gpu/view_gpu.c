@@ -10,7 +10,7 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 void gpu_view_destroy(GpuView *v){ (void)v; }
 int gpu_view_ready(GpuView *v){ (void)v; return -1; }
 int gpu_view_trace_compiling(const GpuView *v){ (void)v; return 0; }
-void gpu_view_gpu_totals(GpuView *v, double ms[6]){ (void)v; for (int k = 0; k < 6; k++) ms[k] = 0; }
+void gpu_view_gpu_totals(GpuView *v, double ms[7]){ (void)v; for (int k = 0; k < 7; k++) ms[k] = 0; }
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y){ (void)v; (void)argb; (void)w; (void)h; (void)x; (void)y; }
 int gpu_view_capture(GpuView *v, GpuCaptureFn fn, void *user){ (void)v; (void)fn; (void)user; return 0; }
 int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp, int volumes){
@@ -37,6 +37,9 @@ int gpu_view_trace_denoise(GpuView *v, int on){ (void)v; (void)on; return 0; }
 void gpu_view_trace_denoise_moving(GpuView *v, int passes){ (void)v; (void)passes; }
 void gpu_view_aa(GpuView *v, int on){ (void)v; (void)on; }
 void gpu_view_trace_wavefront(GpuView *v, int on){ (void)v; (void)on; }
+void gpu_view_trace_raster_guide(GpuView *v, int mode){ (void)v; (void)mode; }
+int gpu_view_trace_raster_guided(const GpuView *v){ (void)v; return 0; }
+int gpu_view_trace_guide_read(GpuView *v, float *out){ (void)v; (void)out; return 0; }
 double gpu_view_gpu_ms(GpuView *v, int what){ (void)v; (void)what; return 0; }
 void gpu_view_gpu_ms_reset(GpuView *v){ (void)v; }
 double gpu_view_bench_denoise(GpuView *v, int n){ (void)v; (void)n; return -1; }
@@ -49,6 +52,7 @@ int gpu_view_present_traced(GpuView *v, const Scene *s, const RenderParams *p, c
 #include <stdio.h>
 #include <string.h>
 #include "base/clock.h"
+#include "base/envvar.h"
 #include "scene/volume.h"
 #include "gpu/gpu_internal.h"
 
@@ -151,6 +155,12 @@ struct GpuView {
     double t_pass_max;          // gpu_view_trace_budget_pass: at least a whole pass a frame, up to this (0: no)
     double t_live_ms;           // gpu_view_trace_budget_live: the budget while things move (0: t_budget_ms)
     int t_ready_seen;           // its pipelines were ready once (before: still compiling, in a browser)
+    int rguide;                 // a new image's guide: 0 traced, 1 the cheaper of the two, 2 rasterized where it can
+    int t_rguided;              // ... and the last one's was rasterized
+    // rguide 1: each way's GPU time per image (its timers), measured in turns; the way chosen
+    int rg_way, rg_phase, rg_images;
+    double rg_sum[2];
+    int rg_n[2];
     int t_gpu_timed;            // t_gpu_pass_ms comes from the GPU's timer
     int t_passes;               // samples per pixel submitted
     double t_work;              // passes' worth of work done, all images (gpu_view_trace_work)
@@ -210,6 +220,8 @@ GpuView *gpu_view_create(Gpu *g, int width, int height){
     v->g = g;
     v->w = width;
     v->h = height;
+    v->rguide = lr_env_int("LR_GPU_RGUIDE", 1);
+    v->rg_way = 1;
     const WGPUBufferUsage st = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
     v->frame_u = gpu_buffer(g, "frame", sizeof(GFrame), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     for (int k = 0; k < GPU_MAX_VOLUMES; k++){
@@ -971,6 +983,46 @@ static void on_band_done(WGPUQueueWorkDoneStatus status, WGPUStringView msg, voi
     }
 }
 
+// Which guide a new image gets (1 rasterized, 0 traced): with rguide 1, the one that has cost
+// less GPU time per image, as measured: rasterized is the cheaper with a software walk of the
+// trees (natively 2.2 -> 1.0 ms at 2560 x 1440), traced often with the hardware's ray queries
+// and in a browser's simple scenes (its walk there reaches a pixel's first hit about as fast
+// as the copy of the G-buffer). Each way for RG_IMAGES images in turn (after RG_SETTLE: the
+// timers read back late), then the cheaper for RG_HOLD images, then both again (the scene
+// changes). Without timers: rasterized unless the hardware's ray queries trace.
+#define RG_SETTLE 6
+#define RG_IMAGES 24
+#define RG_HOLD 900
+static int rguide_way(GpuView *v){
+    if (v->rguide != 1) return v->rguide == 2;
+    GpuTimer *t = gpu_trace_timer(v->trace);
+    if (!t) return !gpu_trace_hw(v->trace);
+    double traced = gpu_timer_recent_ms_per_unit(t, gpu_trace_traced_guide_stage());
+    double rast = gpu_timer_recent_ms_per_unit(t, gpu_trace_guide_stage());
+    v->rg_images++;
+    if (v->rg_phase < 2 && v->rg_images > RG_SETTLE && traced > 0 && (rast > 0 || !v->rg_way)){
+        v->rg_sum[v->rg_way] += traced + (v->rg_way ? rast : 0);
+        v->rg_n[v->rg_way]++;
+    }
+    if (v->rg_phase < 2 && v->rg_n[v->rg_way] >= RG_IMAGES){
+        v->rg_phase++;
+        v->rg_images = 0;
+        if (v->rg_phase == 1) v->rg_way = !v->rg_way;           // now the other one
+        else {
+            v->rg_way = v->rg_sum[1] / v->rg_n[1] <= v->rg_sum[0] / v->rg_n[0];
+            if (gpu_timing_report(v->g))
+                printf("GPU: the guide %s (%.3f ms an image rasterized, %.3f traced)\n", v->rg_way ? "rasterized" : "traced",
+                       v->rg_sum[1] / v->rg_n[1], v->rg_sum[0] / v->rg_n[0]);
+        }
+    } else if (v->rg_phase == 2 && v->rg_images >= RG_HOLD){
+        v->rg_phase = 0;                                         // measured again, from the one chosen
+        v->rg_images = 0;
+        v->rg_sum[0] = v->rg_sum[1] = 0;
+        v->rg_n[0] = v->rg_n[1] = 0;
+    }
+    return v->rg_way;
+}
+
 int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const MarchParams *mp){
     // one band in flight at most (also for a new image's start: on a slow GPU, frames go on
     // showing the last image until the band ends, rather than piling work up on the queue)
@@ -988,8 +1040,19 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
     const int nvol = s->nvolumes < GPU_MAX_VOLUMES ? s->nvolumes : GPU_MAX_VOLUMES;
     v->t_sub_prep = v->t_prep != 0;
     if (v->t_prep){
+        // the guide (each pixel's first surface) rasterized, where there are no media: it was a
+        // fifth to a third of the GPU's time traced, and is made for every image, every frame
+        // while things move (the pixels behind a mirror or glass are traced still)
+        WGPUTextureView rg[3];
+        const WGPUTextureView *rgp = NULL;
+        if (nvol == 0 && rguide_way(v) && v->raster && !v->raster_failed &&
+            gpu_raster_guide(v->raster, enc, s, &v->tparams.cam, gpu_trace_timer(v->trace), gpu_trace_guide_stage())){
+            gpu_raster_guide_views(v->raster, rg);
+            rgp = rg;
+        }
+        v->t_rguided = rgp != NULL;
         gpu_trace_begin_image(v->trace, enc, s, &v->tparams, v->t_prep == 2 ? v->t_history : 0, nvol,
-                              &media);
+                              &media, rgp);
         gpu_trace_caustics_clear(v->trace, enc);
         if (v->t_prep == 1) gpu_trace_photons_clear(v->trace, enc);   // a new scene or view: the cache too
         v->t_prep = 0;
@@ -1070,7 +1133,7 @@ int gpu_view_trace_passes(const GpuView *v){ return v ? v->t_done : 0; }
 double gpu_view_trace_work(const GpuView *v){ return v ? v->t_work : 0; }
 int gpu_view_trace_busy(const GpuView *v){ return v && v->t_inflight; }
 int gpu_view_trace_compiling(const GpuView *v){ return v && v->trace && !v->trace_failed && !v->t_ready_seen; }
-void gpu_view_gpu_totals(GpuView *v, double ms[6]){
+void gpu_view_gpu_totals(GpuView *v, double ms[7]){
     gpu_trace_gpu_totals(v ? v->trace : NULL, ms);
     ms[5] = v ? gpu_denoise_total_ms(v->den) : 0;
 }
@@ -1130,6 +1193,45 @@ void gpu_view_trace_band(const GpuView *v, int *rows, int *reps, double *budget_
     *budget_ms = v ? frame_budget(v) : 0;
 }
 
+void gpu_view_trace_raster_guide(GpuView *v, int mode){ if (v) v->rguide = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
+int gpu_view_trace_raster_guided(const GpuView *v){ return v && v->t_rguided; }
+
+static void on_guide_mapped(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void *u2){
+    (void)msg; (void)u2;
+    *(int *)u1 = status == WGPUMapAsyncStatus_Success ? 1 : -1;
+}
+int gpu_view_trace_guide_read(GpuView *v, float *out){
+    if (!v || !v->trace || !gpu_trace_guided(v->trace)) return 0;
+    Gpu *g = v->g;
+    for (int k = 0; k < 100000 && v->t_inflight; k++) gpu_wait(g);
+    const size_t n = (size_t)v->w * v->h * 16;
+    WGPUBuffer rb = gpu_buffer(g, "guide readback", 3 * n, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    if (!rb) return 0;
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, gpu_trace_accum(v->trace), 2 * n, rb, 0, 3 * n);
+    WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, NULL);
+    wgpuQueueSubmit(g->queue, 1, &cb);
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(enc);
+    int done = 0;
+    WGPUBufferMapCallbackInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.mode = WGPUCallbackMode_AllowProcessEvents;
+    mi.callback = on_guide_mapped;
+    mi.userdata1 = &done;
+    wgpuBufferMapAsync(rb, WGPUMapMode_Read, 0, 3 * n, mi);
+    for (int k = 0; k < 100000 && !done; k++) gpu_wait(g);
+    int ok = done == 1;
+    if (ok){
+        const void *p = wgpuBufferGetConstMappedRange(rb, 0, 3 * n);
+        ok = p != NULL;
+        if (p) memcpy(out, p, 3 * n);
+        wgpuBufferUnmap(rb);
+    }
+    wgpuBufferDestroy(rb);
+    wgpuBufferRelease(rb);
+    return ok;
+}
 void gpu_view_trace_wavefront(GpuView *v, int on){
     if (!v) return;
     v->wavefront = on;
