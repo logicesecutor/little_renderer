@@ -2352,9 +2352,12 @@ int main(int argc, char **argv){
     } else {
         if (build_scene(s)) return 1;
         scene_set_accel(s, options_resolve_accel(o, s), &o->ap);
-        options_bake_probe(o, s);
     }
     if (viewer_open("Kiln") != 0) return 1;
+    // the rasterizer's light probe: made in steps between the frames, as after a change (the
+    // sky lights the raster until it is done). Baked at once, before the first frame, it held
+    // the page 3 s at every start (the browser has one thread for it)
+    if (!E.sample) relight_start();
 
     E.pivot = s->cam_at;
     E.dist = v_len(v_sub(s->cam_at, s->cam_from));
