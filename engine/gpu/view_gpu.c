@@ -19,6 +19,7 @@ int gpu_view_present_scene(GpuView *v, const Scene *s, const RenderParams *p, co
 }
 int gpu_view_volumes_fit(GpuView *v, const Scene *s, const MarchParams *mp){ (void)v; (void)s; (void)mp; return 0; }
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){ (void)v; (void)s; (void)tp; return 0; }
+int gpu_view_trace_failed(const GpuView *v){ (void)v; return 1; }
 void gpu_view_trace_prepare(GpuView *v){ (void)v; }
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){ (void)v; (void)s; (void)tp; (void)history; return 0; }
 int gpu_view_trace_busy(const GpuView *v){ (void)v; return 0; }
@@ -139,11 +140,15 @@ struct GpuView {
     // explicit: "auto" would drop the bindings a shader does not read
     WGPUBindGroupLayout light_bgl, comp_bgl, comp_gpu_bgl, stats_bgl, finish_bgl;
     GpuRaster *raster;          // the scene's surfaces drawn on the GPU (created when first used)
-    int raster_failed;
+    int raster_failed;          // it cannot be made on this GPU (its pipelines): for good
+    // ... or it could not draw this scene (a mesh too big for a buffer): not asked again until
+    // the scene is another (scene_sig); the same for the path tracer (t_unfit)
+    int r_unfit, t_unfit;
+    uint64_t r_unfit_sig, t_unfit_sig;
     int vol_warned;             // gpu_view_volumes_fit said the media do not fit
     // the path tracer (created when first used) and the image it is making
     GpuTrace *trace;
-    int trace_failed, show_traced;
+    int trace_failed, show_traced;   // (trace_failed: its kernels cannot be made on this GPU: for good)
     GpuTraceParams tparams;
     int t_prep;                 // the image is still to begin: 1 from nothing, 2 from the previous one (reprojected)
     int t_history;              // with 2: samples kept per pixel at most
@@ -209,6 +214,21 @@ struct GpuView {
 // (u2: the ticket the callback was given with the view; the address alone could be a later
 // view's, made where this one was: a window resized)
 static int view_is_live(const GpuView *v, void *u2){ return gpu_live_has(GPU_LIVE_VIEW, v, (uintptr_t)u2); }
+
+// What a scene is, for "the scene that did not fit": a number that changes when its geometry,
+// instances, textures or media do (their versions and counts; not the camera, not what the
+// physics moves without adding anything)
+static uint64_t scene_sig(const Scene *s){
+    uint64_t h = 1469598103934665603ull;
+#define SIG(x) h = (h ^ (uint64_t)(x)) * 1099511628211ull
+    SIG(s->tris_version); SIG(s->ntris); SIG(s->nnormals); SIG(s->nprims);
+    SIG(s->inst_version); SIG(s->ninsts); SIG(s->tex_version); SIG(s->ntexmaps);
+    SIG(s->nmeshes); SIG(s->nvolumes);
+    for (int m = 0; m < s->nmeshes; m++){ SIG(s->meshes[m].id); SIG(s->meshes[m].version); SIG(s->meshes[m].ntris); }
+    for (int k = 0; k < s->nvolumes; k++){ SIG(s->volumes[k]->id); SIG(s->volumes[k]->nx); SIG(s->volumes[k]->ny); SIG(s->volumes[k]->nz); }
+#undef SIG
+    return h;
+}
 
 static void v4(float *d, Vec3 a, float w){ d[0] = (float)a.x; d[1] = (float)a.y; d[2] = (float)a.z; d[3] = w; }
 
@@ -848,12 +868,19 @@ static int present_gpu_frame(GpuView *v, const Scene *s, const RenderParams *p, 
     if (volumes && s->nvolumes > 0 && !gpu_view_volumes_fit(v, s, mp)) return 0;   // the CPU marches them
     Gpu *g = v->g;
     if (!v->raster && !(v->raster = gpu_raster_create(g, v->w, v->h))){ v->raster_failed = 1; return 0; }
+    // a scene the rasterizer could not draw (a mesh too big for this GPU): the CPU draws it, and
+    // the GPU is asked again when the scene has changed (it was given up for good: one model too
+    // big, dropped and removed again, left the CPU drawing until the page was loaded again)
+    const uint64_t sig = draw_scene ? scene_sig(s) : 0;
+    if (draw_scene && v->r_unfit && v->r_unfit_sig == sig) return 0;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
-    if (draw_scene && !gpu_raster_draw(v->raster, enc, s, p)){   // e.g. a mesh too big for this GPU
+    if (draw_scene && !gpu_raster_draw(v->raster, enc, s, p)){
         wgpuCommandEncoderRelease(enc);
-        v->raster_failed = 1;
+        v->r_unfit = 1;
+        v->r_unfit_sig = sig;
         return 0;
     }
+    if (draw_scene) v->r_unfit = 0;
     if (traced && v->t_prep == 1) gpu_trace_clear(v->trace, enc);   // nothing to show yet
     v->show_traced = traced ? (draw_scene ? 1 : 2) : 0;   // (2: holes filled from neighbours)
     frame_begin(v, enc, s, p, mp, volumes);
@@ -883,15 +910,30 @@ void gpu_view_trace_prepare(GpuView *v){
     if (!(v->trace = gpu_trace_create(v->g, v->w, v->h, GPU_WGSL_TYPES, GPU_WGSL_MEDIA))) v->trace_failed = 1;
 }
 
+// The scene onto the GPU for the path tracer; 0 = it does not fit (its media or a buffer too
+// big for this GPU, a mesh without its tree, no memory). That is the scene's, not the GPU's:
+// remembered with what the scene was (scene_sig), so that the same one is not tried again
+// (and its message said again) every frame, and another one is.
+static int trace_sync(GpuView *v, const Scene *s){
+    const uint64_t sig = scene_sig(s);
+    if (v->t_unfit && v->t_unfit_sig == sig) return 0;
+    v->t_unfit = 0;
+    if (gpu_view_volumes_fit(v, s, NULL) && gpu_trace_sync(v->trace, s)) return 1;
+    v->t_unfit = 1;
+    v->t_unfit_sig = sig;
+    return 0;
+}
+
+int gpu_view_trace_failed(const GpuView *v){ return !v || v->trace_failed; }
+
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
     if (!v || v->trace_failed) return 0;
-    if (!gpu_view_volumes_fit(v, s, NULL)) return 0;   // media too big for this GPU: on the CPU
     if (!v->trace && !(v->trace = gpu_trace_create(v->g, v->w, v->h, GPU_WGSL_TYPES, GPU_WGSL_MEDIA))){
         v->trace_failed = 1;
         return 0;
     }
     gpu_trace_set_wavefront(v->trace, v->wavefront);
-    if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
+    if (!trace_sync(v, s)) return 0;
     v->tparams = *tp;
     v->t_prep = 1;
     v->t_hist = 0;
@@ -912,8 +954,7 @@ int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp){
 
 int gpu_view_trace_move(GpuView *v, const Scene *s, const GpuTraceParams *tp, int history){
     if (!v || !v->trace || history < 1) return gpu_view_trace_start(v, s, tp);
-    if (v->trace_failed || !gpu_view_volumes_fit(v, s, NULL)) return 0;
-    if (!gpu_trace_sync(v->trace, s)){ v->trace_failed = 1; return 0; }
+    if (v->trace_failed || !trace_sync(v, s)) return 0;
     v->tparams = *tp;
     if (v->t_prep != 1){ v->t_prep = 2; v->t_history = history; v->t_hmax = v->grad_next; v->t_hedit = v->grad_edit; }   // (an image not begun yet has nothing to keep)
     // the bands go on where they were: on a slow GPU (a band per frame) every row gets its turn
@@ -1053,7 +1094,7 @@ int gpu_view_trace_more(GpuView *v, const Scene *s, const RenderParams *p, const
         // while things move (the pixels behind a mirror or glass are traced still)
         WGPUTextureView rg[3];
         const WGPUTextureView *rgp = NULL;
-        if (nvol == 0 && rguide_way(v) && v->raster && !v->raster_failed &&
+        if (nvol == 0 && rguide_way(v) && v->raster && !v->raster_failed && !(v->r_unfit && v->r_unfit_sig == scene_sig(s)) &&
             gpu_raster_guide(v->raster, enc, s, &v->tparams.cam, gpu_trace_timer(v->trace), gpu_trace_guide_stage())){
             gpu_raster_guide_views(v->raster, rg);
             rgp = rg;

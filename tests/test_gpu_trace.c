@@ -29,6 +29,10 @@
 // the first was dropped by the second, the mesh already taken as built: its new triangles were
 // traced through the old tree) shows what a new view of the same scene shows.
 //
+// A scene the GPU cannot hold (here: a mesh whose tree was not built) is refused, and the view
+// goes on path tracing once the scene is one it can hold: the refusal is the scene's, not the
+// GPU's for good.
+//
 // Views come and go (a window resized makes its view again): 300 made and destroyed on one
 // GPU, some with their path tracer, leave nothing in the list of the objects alive (the path
 // tracer's timer was left there: after 250 no view could be made), and the last one traces.
@@ -531,6 +535,34 @@ static void dynamic_mesh(void){
     scene_free(&s);
 }
 
+static void unfit_then_fits(void){
+    static Scene s;
+    memset(&s, 0, sizeof(s));
+    SceneOptions empty = {.kind = SCENE_EMPTY};
+    if (scene_cornell_box(&s, &empty) != 0){ check("a scene that does not fit: the scene", 0); return; }
+    AccelParams ap = accel_default_params();
+    scene_set_accel(&s, ACCEL_BVH, &ap);
+    // a mesh added after the trees were built: it has none, the GPU path tracer cannot take it
+    int mesh = scene_load_mesh_object(&s, "models/torus.obj", scene_add_material(&s, s.mats[0]), 170);
+    if (mesh < 0){ check("a scene that does not fit: models/torus.obj", 0); scene_free(&s); return; }
+    scene_add_instance(&s, mesh, xform_rot_y(vec3(150, 120, 278), 0, 1), -1);
+    Gpu *g;
+    GpuView *v;
+    if (gpu_frame_open(W, H, &g, &v)){ check("a scene that does not fit: the GPU", 0); scene_free(&s); return; }
+    Camera cam = camera_make(s.cam_from, s.cam_at, s.cam_up, s.cam_vfov_deg, (real)W / H);
+    GpuTraceParams tp = {cam, 8, 1, 0, 0, 0, 0, 4, 1};
+    printf("  (a message that mesh 0 has no BVH is expected here, once)\n");
+    int first = gpu_view_trace_start(v, &s, &tp), again = gpu_view_trace_start(v, &s, &tp);
+    check("a mesh without its tree: the scene is refused, the GPU not given up", !first && !again && !gpu_view_trace_failed(v));
+    // the trees built, and the scene another (one more instance): it is tried again
+    scene_add_instance(&s, mesh, xform_rot_y(vec3(400, 120, 278), 0, 1), -1);
+    scene_set_accel(&s, ACCEL_BVH, &ap);
+    int ok = gpu_view_trace_start(v, &s, &tp) && passes_more(g, v, &s, 2) && gpu_view_trace_passes(v) >= 2;
+    check("... and once the scene is one it can hold, it path traces", ok);
+    gpu_frame_close(g, v);
+    scene_free(&s);
+}
+
 // views made and destroyed, every 30th with its path tracer: the objects alive are as many
 // after as before, and a view made then still traces
 static void views_come_and_go(void){
@@ -589,6 +621,7 @@ int main(void){
     gradients();
     edit_colour();
     dynamic_mesh();
+    unfit_then_fits();
     views_come_and_go();
     printf(failures ? "test_gpu_trace: %d FAILED\n" : "all GPU path tracer tests passed\n", failures);
     return failures ? 1 : 0;

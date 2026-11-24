@@ -294,6 +294,7 @@ typedef struct {
     GpuRigid *grigid;          // -sim on: the balls and boxes stepped on the GPU
     int gpu_scene;             // the raster frame being shown is drawn by the GPU rasterizer (fb is not)
     int gpu_tracing;           // the path traced image being made is the GPU's (acc is not used)
+    int gpu_unfit;             // the GPU could not hold the scene as it last was: the CPU path traces meanwhile
     Camera gpu_cam;            // and its camera, and bounces
     int gpu_depth;
     int gpu_scene_moved;       // the physics moved the scene since that image began
@@ -541,16 +542,26 @@ static RenderParams raster_params(Vec3 at){
     return p;
 }
 
+// The GPU did not path trace this frame: for good when it cannot at all (its kernels could
+// not be made: the CPU path traces from now on), else because this scene does not fit it (a
+// model too big for its buffers): the CPU path traces meanwhile and the GPU is asked again
+// every frame (the same scene is refused at once), so it takes over when the scene fits again.
+static void gpu_trace_gave_up(void){
+    if (gpu_view_trace_failed(V.gview)) V.o.gpu_trace = 0;
+    else V.gpu_unfit = 1;
+    V.gpu_tracing = 0;
+}
+
 // A new path traced image on the GPU, for the camera as it is now. 0 = this GPU cannot hold
-// the scene: the CPU path traces from now on.
+// the scene: the CPU path traces (gpu_trace_gave_up).
 static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
     GpuTraceParams tp = trace_params(cam, depth);
     scene_trees();               // (the meshes' own trees are copied when the scene is new)
     if (!gpu_view_trace_start(V.gview, &V.scene, &tp)){
-        V.o.gpu_trace = 0;
-        V.gpu_tracing = 0;
+        gpu_trace_gave_up();
         return 0;
     }
+    V.gpu_unfit = 0;
     // what shows through until every pixel has a sample: the rasterized scene, same camera
     V.last_rp = raster_params(at);
     V.gpu_tracing = 1;
@@ -584,7 +595,7 @@ static int gpu_trace_begin(const Camera *cam, Vec3 at, int depth){
 // rt mode with the GPU: path traced every frame, whatever moves. A new camera or the
 // physics' new state carry the image over (each pixel keeps the samples of its surface,
 // then the denoiser smooths what is new); other changes (bounces, a reset) start over.
-// 0 = this GPU cannot hold the scene: the CPU path traces from now on.
+// 0 = this GPU cannot hold the scene: the CPU path traces (gpu_trace_gave_up).
 static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
     V.gpu_scene_moved |= V.sim_moved;
     // the passes it makes a second (measured every half second): how much history is how long
@@ -630,8 +641,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
         PROF(PROF_MOVE, moved = gpu_view_trace_move(V.gview, &V.scene, &tp, keep));
         V.trace_moves++;
         if (!moved){
-            V.o.gpu_trace = 0;
-            V.gpu_tracing = 0;
+            gpu_trace_gave_up();
             return 0;
         }
         // under the pixels that were hidden until now (no sample yet): the scene rasterized
@@ -644,8 +654,7 @@ static int gpu_trace_frame(const Camera *cam, Vec3 at, int depth){
     if (gpu_view_trace_passes(V.gview) < V.o.spp) PROF(PROF_MORE, more = gpu_view_trace_more(V.gview, &V.scene, &V.last_rp, &V.o.march));
     else if (!V.o.maxfps) idle(10);             // (-maxfps on: the image shown again, as many times as can be)
     if (!more){                               // its pipelines failed: the CPU path traces
-        V.o.gpu_trace = 0;
-        V.gpu_tracing = 0;
+        gpu_trace_gave_up();
         return 0;
     }
     // natively: sleep until the band is done (bands are sized to take < ~45 ms). A timed
@@ -1013,7 +1022,7 @@ static void viewer_render(Frame *fr){
                                                  (V.o.sim.on && !V.sim_paused)));
     // the CPU path tracer reads the cloud on the CPU: bring the GPU's back (it lands a frame later)
     // (the GPU path tracer takes it straight from the GPU)
-    if (V.gfluid && !fr->use_raster && !(V.gview && V.o.gpu_trace > 0)) gpu_fluid_sync_cloud(V.gfluid);
+    if (V.gfluid && !fr->use_raster && !(V.gview && V.o.gpu_trace > 0 && !V.gpu_unfit)) gpu_fluid_sync_cloud(V.gfluid);
     if (fr->use_raster){
         if (V.raster_dirty || V.o.maxfps){            // (-maxfps on: drawn again, changed or not)
             double r0 = clock_s();

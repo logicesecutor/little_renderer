@@ -30,7 +30,8 @@ void gpu_view_present(GpuView *v, const Framebuffer *fb, const Scene *s, const R
 // (gpu/raster_gpu.c: the triangles, the lamp and the shading of render_scene; uses p->view,
 // p->proj, p->eye, p->mode, p->cull_backfaces), then the media over them. Returns 0 if this
 // GPU cannot draw the scene (a mesh too big for one buffer): then draw it on the CPU and
-// show it with gpu_view_present.
+// show it with gpu_view_present. Asked again with the same scene it returns 0 at once; with
+// another, it tries again.
 // A rectangle of text drawn over every frame shown on the canvas (not in screenshots):
 // w x h pixels 0xAARRGGBB (app/hud.h makes them) at (x, y); argb = NULL removes it.
 void gpu_view_hud(GpuView *v, const uint32_t *argb, int w, int h, int x, int y);
@@ -63,8 +64,14 @@ typedef struct {
 } GpuTraceParams;
 // Starts a new image: the scene's geometry and BVH go to the GPU if they changed (the scene's
 // own BVH is used when it has one, so call scene_set_accel after changing geometry). Returns 0
-// if this GPU cannot hold the scene: then path trace on the CPU.
+// if this GPU cannot hold the scene: then path trace on the CPU. That is either for good
+// (gpu_view_trace_failed: its kernels cannot be made here) or this scene's (a buffer or its
+// media too big for the GPU, a mesh without its tree): then ask again when the scene has
+// changed, or simply every frame (the same scene is refused at once, without a message).
 int gpu_view_trace_start(GpuView *v, const Scene *s, const GpuTraceParams *tp);
+// 1 = this GPU cannot path trace at all (the path tracer's kernels could not be made): not
+// worth asking again
+int gpu_view_trace_failed(const GpuView *v);
 // The path tracer's kernels asked for now, before the first image (a viewer that will path
 // trace calls it once its view is made): in a browser they compile asynchronously, side by
 // side, while frames go on (rasterized); natively they are made at once. Until they are ready
