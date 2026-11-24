@@ -43,7 +43,10 @@ typedef struct {
 } LRBlasDescriptor;
 
 // Sized at creation; built by lrCommandEncoderBuildBlas (again whenever the geometry changes,
-// with the same counts).
+// with the same counts). A top level means its bottom levels by their addresses: one may be
+// released while submissions that trace through it are still running (it is freed when they
+// are done), but a top level whose bottom level was released must be built again, without
+// it, before the next commands that trace through it are encoded.
 LRBlas lrDeviceCreateBlas(WGPUDevice device, LRBlasDescriptor const *descriptor);
 void lrCommandEncoderBuildBlas(WGPUCommandEncoder encoder, LRBlas blas);
 uint64_t lrBlasGetAddress(LRBlas blas);           // for LRTlasInstance.blas

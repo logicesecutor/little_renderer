@@ -422,6 +422,7 @@ static void device_free(Obj *o){
     if (d->vk){
         vk.vkDeviceWaitIdle(d->vk);
         lrDevicePoll(d, 1, NULL);
+        while (d->ndying > 0) obj_unref(d->dying[--d->ndying].o);   // (none left after the poll, unless a wait failed)
         for (int k = 0; k < d->nqueues; k++){
             WGPUQueue q = &d->queues[k];
             refs_release(&q->up_refs);
@@ -444,7 +445,7 @@ static void device_free(Obj *o){
     }
     if (d->ad && d->ad->inst && d->ad->inst->device == d) d->ad->inst->device = NULL;
     for (int k = 0; k < 2; k++){ free(d->queues[k].subs); free(d->queues[k].free_cbs); }
-    free(d->dpools); free(d->pend);
+    free(d->dpools); free(d->pend); free(d->dying);
     free(d);
 }
 
@@ -827,6 +828,29 @@ void wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t off, void
     vk.vkCmdCopyBuffer(cb, sb, buffer->vk, 1, &c);
 }
 
+// ---- let go, still in use ----
+void vk_free_later(WGPUDevice dev, Obj *o){
+    if (!o) return;
+    int flying = 0;
+    for (int k = 0; k < dev->nqueues; k++) flying += dev->queues[k].nsubs;
+    if (!flying || dev->lost){ obj_unref(o); return; }
+    if (dev->ndying == dev->cap_dying){
+        int cap = dev->cap_dying ? 2 * dev->cap_dying : 16;
+        Dying *v = realloc(dev->dying, (size_t)cap * sizeof(*v));
+        if (!v){
+            // no memory to remember it: the queues waited for here instead
+            for (int k = 0; k < dev->nqueues; k++) vk.vkQueueWaitIdle(dev->queues[k].q);
+            obj_unref(o);
+            return;
+        }
+        dev->dying = v; dev->cap_dying = cap;
+    }
+    Dying *d = &dev->dying[dev->ndying++];
+    d->o = o;
+    d->at[0] = dev->queues[0].submitted;
+    d->at[1] = dev->nqueues > 1 ? dev->queues[1].submitted : 0;
+}
+
 // ---- submissions ----
 static int sub_push(WGPUQueue q, Sub *s){
     if (q->nsubs == q->cap_subs){
@@ -995,6 +1019,14 @@ static WGPUBool poll(WGPUDevice dev, int wait, const uint64_t until[2]){
         }
         if (k){ memmove(Q->subs, Q->subs + k, (size_t)(Q->nsubs - k) * sizeof(Sub)); Q->nsubs -= k; }
         busy += Q->nsubs;
+    }
+    // what was let go while these ran (vk_free_later)
+    for (int i = 0; i < dev->ndying;){
+        Dying *d = &dev->dying[i];
+        if (d->at[0] > done[0] || d->at[1] > done[1]){ i++; continue; }
+        Obj *o = d->o;
+        *d = dev->dying[--dev->ndying];
+        obj_unref(o);
     }
     // the callbacks (taken off the list first: one may ask for another)
     for (int i = 0; i < dev->npend;){

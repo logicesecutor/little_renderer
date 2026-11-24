@@ -87,6 +87,9 @@ typedef struct Staging {
 } Staging;
 
 typedef struct { uint64_t value; VkCommandBuffer cbs[16]; int ncb; Refs refs; } Sub;
+// an object let go that the GPU may still be using (vk_free_later): its last reference, given
+// back once each queue has reached at[]
+typedef struct { Obj *o; uint64_t at[2]; } Dying;
 typedef struct {
     uint64_t at[2];                  // done when each queue has reached its value (0: any)
     int kind;                        // 0 work done, 1 buffer mapped
@@ -152,6 +155,7 @@ struct WGPUDeviceImpl {
     VkDescriptorPool *dpools; int ndpools;
     Pending *pend; int npend, cap_pend;
     Staging *stage_free;             // staging memory to use again
+    Dying *dying; int ndying, cap_dying;   // let go, still in use by what was submitted (vk_free_later)
     WGPUUncapturedErrorCallbackInfo on_error;
     int timestamps;
     int rt;                          // ray queries asked for (LRFeatureName_RayQuery) and on
@@ -349,6 +353,10 @@ void vk_before(WGPUCommandEncoder e, int kind);              // a command of thi
 // a submission of cb (ended; given back when done) after the uploads, signalling `signal` too
 uint64_t vk_submit_cb(WGPUDevice dev, VkCommandBuffer cb, VkSemaphore signal);
 VkDeviceAddress vk_buffer_address(WGPUBuffer b);
+// o's reference (the caller's) given back when everything submitted so far is done: for what
+// the GPU uses without any command buffer holding it (a bottom level: a top level means it
+// by its address only). At once when nothing is in flight.
+void vk_free_later(WGPUDevice dev, Obj *o);
 // WGSL -> SPIR-V (webgpu/wgsl): 0 and the words (free them) or 1 and a message
 int wgsl_to_spirv(const char *src, size_t len, uint32_t **words, size_t *nwords, char *err, size_t errlen);
 

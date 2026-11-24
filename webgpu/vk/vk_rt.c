@@ -161,7 +161,15 @@ void lrCommandEncoderBuildBlas(WGPUCommandEncoder e, LRBlas b){
 }
 
 uint64_t lrBlasGetAddress(LRBlas b){ return b ? b->a.addr : 0; }
-void lrBlasRelease(LRBlas b){ if (b) obj_unref(&b->o); }
+// A top level means its bottom levels by their addresses (in the instance records): no command
+// buffer that traces through it holds them. So the last reference to one is given back only
+// when what was submitted so far is done; let go at once, the GPU could still be tracing a
+// submission through memory just freed.
+void lrBlasRelease(LRBlas b){
+    if (!b) return;
+    if (b->o.refs > 1) obj_unref(&b->o);
+    else vk_free_later(b->dev, &b->o);
+}
 
 // ---- top level ----
 static void tlas_info(VkAccelerationStructureBuildGeometryInfoKHR *info, VkAccelerationStructureGeometryKHR *g, VkDeviceAddress at){

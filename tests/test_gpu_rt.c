@@ -76,8 +76,9 @@ static void records(const Inst *in, int n, LRBlas tri, LRBlas box, LRTlasInstanc
 }
 
 // cast the rays, compare with what they should hit; the number of rays checked
+// (drop: bottom levels released as soon as the rays are submitted, the GPU still tracing)
 static int cast(Gpu *g, const Inst *in, int n, WGPUComputePipeline pipe, WGPUBindGroup bg, WGPUBuffer out,
-                LRTlas tlas, WGPUBuffer inst_buf, const char *what){
+                LRTlas tlas, WGPUBuffer inst_buf, const char *what, LRBlas *drop, int ndrop){
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g->device, NULL);
     lrCommandEncoderBuildTlas(enc, tlas, inst_buf, 0, (uint32_t)n);
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, NULL);
@@ -90,6 +91,7 @@ static int cast(Gpu *g, const Inst *in, int n, WGPUComputePipeline pipe, WGPUBin
     wgpuQueueSubmit(g->queue, 1, &cb);
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(enc);
+    for (int k = 0; k < ndrop; k++){ lrBlasRelease(drop[k]); drop[k] = NULL; }
     float *o = malloc(NX * NY * 8 * sizeof(float));
     int ok = o && read_back(g, out, NX * NY * 8 * sizeof(float), o), checked = 0, hits = 0, bad = 0;
     for (int i = 0; ok && i < NX * NY; i++){
@@ -180,13 +182,18 @@ int main(void){
     bd.entries = e;
     WGPUBindGroup bg = wgpuDeviceCreateBindGroup(g->device, &bd);
     if (pipe && bg && bt && bx && tlas){
-        cast(g, in, 3, pipe, bg, out, tlas, ib, "squares and a sphere, moved and scaled");
+        cast(g, in, 3, pipe, bg, out, tlas, ib, "squares and a sphere, moved and scaled", NULL, 0);
         // move the first square behind the sphere's plane: the top level built again
         in[0].z = 8;
         in[0].x = 4;
         records(in, 3, bt, bx, rec);
         wgpuQueueWriteBuffer(g->queue, ib, 0, rec, sizeof(rec));
-        cast(g, in, 3, pipe, bg, out, tlas, ib, "one moved, the top level built again");
+        cast(g, in, 3, pipe, bg, out, tlas, ib, "one moved, the top level built again", NULL, 0);
+        // the bottom levels released while the rays are in flight: they are freed when the
+        // submission is done, and the rays hit what they should
+        LRBlas both[2] = {bt, bx};
+        cast(g, in, 3, pipe, bg, out, tlas, ib, "the bottom levels released as the rays are submitted", both, 2);
+        bt = bx = NULL;
     }
     if (bg) wgpuBindGroupRelease(bg);
     if (pipe) wgpuComputePipelineRelease(pipe);
