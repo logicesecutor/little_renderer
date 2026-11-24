@@ -249,8 +249,9 @@ fn normal_to_world(i: u32, n: vec3f) -> vec3f {
    Entries are not culled by distance when they come off the stack (no distance is kept):
    their children's boxes are tested against the closest hit so far anyway. Measured on an
    RTX 3070 (docs/STATUS.md): 24 to 64 entries cost about the same, 40 leaves room for
-   a mesh's tree under the top level's; a full stack drops what does not fit. */
-const STACK = 40;
+   a mesh's tree under the top level's; a full stack drops what does not fit.
+   STACK, its entries, is a constant trace_gpu.c puts in front of this module (GPU_STACK: the
+   one number, which it also checks the trees' depths against when it uploads them). */
 const INST: u32 = 0x40000000u;
 const EXIT: u32 = 0xfffffffeu;
 fn traverse(r: Ray, tmin: f32, tmax: f32, stop_at_first: bool) -> Found {

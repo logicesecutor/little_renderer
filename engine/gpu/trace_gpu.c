@@ -117,6 +117,16 @@ GPU_WGSL(HW_TRAVERSE, trace_hw_traverse);
 #define HW_BINDING 20
 #endif
 
+// The BVH walk's stack (trace.wgsl traverse): its entries, given to the shader as its STACK
+// (trace_source), and how many of them the trees' depths must leave free (the top level's
+// root waiting under the world's tree, a leaf's instances waiting under a mesh's): a tree
+// deeper than GPU_STACK - GPU_STACK_SPARE is said to be (upload_world, upload_instances), for
+// the walk drops what its stack cannot hold, and the hits behind it are missed without a word
+#define GPU_STACK 40
+#define GPU_STACK_SPARE 4
+#define GPU_STR2(x) #x
+#define GPU_STR(x) GPU_STR2(x)
+
 #define RT_EPS_F 2e-3f           // rt/tracer.c, float build: minimum ray distance
 #define RT_SHADOW_MARGIN_F 2e-2f // shadow rays stop this far before the lamp
 #define CHUNK_TRIS 32768
@@ -275,6 +285,8 @@ struct GpuTrace {
     unsigned mesh_version;   // the world's triangles and normals it holds: Scene.tris_version
     int mesh_ntris, mesh_nnormals;
     int valid;
+    int mesh_depth;          // the deepest of the meshes' trees (upload_layout)
+    int stack_said;          // the depth (top level + a mesh's) last said to be too much for the walk's stack
     Bvh own;                 // built here when the scene has no BVH of its own
     int own_built;
     GpuTimer *timer;         // the GPU time of the passes, by stage: whenever the GPU has timestamps (the
@@ -354,11 +366,12 @@ static const char *const STACK_WG = "var<private> tlid: u32;\nvar<workgroup> sta
 // the path tracer's module: types, media, the BSDF, TRACE (with the sky's code or without),
 // and the wavefront's kernels (wave); free() it
 static char *trace_source(GpuTrace *t, int sky, int wave){
-    const char *parts[12] = {sky ? "const SKY_ON: bool = true;" : "const SKY_ON: bool = false;",
+    const char *parts[13] = {sky ? "const SKY_ON: bool = true;" : "const SKY_ON: bool = false;",
                              t->wide_ok ? "const WIDE_ON: bool = true;" : "const WIDE_ON: bool = false;",
+                             "const STACK = " GPU_STR(GPU_STACK) ";",
                              stack_in_workgroup() ? STACK_WG : STACK_PRIVATE, GPU_WGSL_UTIL,
                              t->types_wgsl, t->media_wgsl, GPU_WGSL_BSDF, GPU_WGSL_TEX, TRACE, wave ? WAVE : ""};
-    int n = 10;
+    int n = 11;
 #ifdef LR_VK
     if (t->hw) parts[n++] = HW_TRAVERSE;
 #endif
@@ -937,6 +950,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
     uint32_t nodes = 0, refs = 0, tris = (uint32_t)s->ntris, nrm = (uint32_t)s->nnormals, nuv = (uint32_t)s->nuvs;
     t->textured = s->ntexmaps > 0;
     size_t most_nodes = 1, most_refs = 1;
+    t->mesh_depth = 0;
     for (int m = 0; m < s->nmeshes; m++){
         const SceneMesh *sm = &s->meshes[m];
         const Bvh *mb = scene_mesh_bvh(s, m);
@@ -945,6 +959,7 @@ static int upload_layout(GpuTrace *t, const Scene *s){
             return 0;
         }
         GpuMeshCopy *c = &mc[m];
+        if (mb->depth > t->mesh_depth) t->mesh_depth = mb->depth;
         c->id = sm->id; c->ntris = sm->ntris; c->nnormals = sm->nnormals;
         c->dynamic = sm->dynamic; c->version = sm->version; c->built = 0;
         c->node0 = nodes; c->ref0 = refs; c->tri0 = tris; c->nrm0 = nrm; c->uv0 = nuv;
@@ -1090,7 +1105,8 @@ static int upload_world(GpuTrace *t, const Scene *s){
         t->own_built = 1;
         b = &t->own;
     }
-    if (b->depth > 36) fprintf(stderr, "GPU path tracer: the BVH is %d levels deep, its stack holds 40: some hits may be missed\n", b->depth);
+    if (b->depth > GPU_STACK - GPU_STACK_SPARE)
+        fprintf(stderr, "GPU path tracer: the BVH is %d levels deep, its stack holds %d: some hits may be missed\n", b->depth, GPU_STACK);
     const int wide = t->wide_ok && b->wide != NULL;
     const uint32_t slots = gpu_slots(b, wide);
     size_t bytes_nodes = ((size_t)t->layout_nodes + (size_t)slots + 1) * 32;
@@ -1435,6 +1451,20 @@ static int upload_instances(GpuTrace *t, const Scene *s){
         }
         // the top level: instance ids. (It is the frame's first build: not queued means no memory)
         if (!tl && bvh && !build_queue(t, box, s->ninsts, t->tlas_node0, t->tlas_ref0, 0, all, -1)){ t->inst_valid = 0; return 0; }
+    }
+    // The walk's one stack holds the top level's entries, then EXIT and a mesh's under them
+    // (upload_world checks the world's tree alone): said when the two trees together are too
+    // deep for it, once for each depth. The CPU's top level has its depth; the one built here
+    // is at least a balanced tree's.
+    if (bvh && s->ninsts > 0 && s->nmeshes > 0 && !same){
+        int top = tl ? tl->depth : 1;
+        for (int k = s->ninsts; !tl && k > 1; k = (k + 1) / 2) top++;
+        const int deep = top + 1 + t->mesh_depth;
+        if (deep > GPU_STACK - GPU_STACK_SPARE && deep != t->stack_said){
+            t->stack_said = deep;
+            fprintf(stderr, "GPU path tracer: the top level (%d levels%s) over a mesh's tree (%d) is too deep for the walk's stack of %d: "
+                            "some hits on instances may be missed\n", top, tl ? "" : " at least", t->mesh_depth, GPU_STACK);
+        }
     }
     const unsigned since = t->inst_version;     // (hw_records)
     (void)since; (void)prev_count;
